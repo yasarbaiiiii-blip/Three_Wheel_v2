@@ -91,6 +91,10 @@ export function abortMission(apiBaseUrl: string): Promise<Response> {
   return postJson(apiBaseUrl, "/api/mission/abort");
 }
 
+export function clearMission(apiBaseUrl: string): Promise<Response> {
+  return postJson(apiBaseUrl, "/api/mission/clear");
+}
+
 export async function getMissionStatus(apiBaseUrl: string, init?: RequestInit): Promise<MissionStatus> {
   const res = await fetch(apiUrl(apiBaseUrl, "/api/mission/status"), init);
   if (!res.ok) {

@@ -72,6 +72,7 @@ export interface MapViewProps {
   boundaryHeight?: number;
   indentSpacing?: number;
   sketchMode?: boolean;
+  showRefPointLabels?: boolean;
   onUpdatePlacedItem?: (id: string, updates: Partial<PlacedItem>) => void;
   onUpdatePlacedItems?: (items: PlacedItem[]) => void;
   onSelectionChange?: (ids: string[]) => void;
@@ -164,7 +165,7 @@ const LEAFLET_HTML = `
   <script>
     // ── Leaflet Setup ──
     var osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 22,
+      maxZoom: 25,
       maxNativeZoom: 19,
       attribution: '© OpenStreetMap'
     });
@@ -226,6 +227,9 @@ const LEAFLET_HTML = `
     
     var nextTargetLine = null;
     var nextTargetCircle = null;
+    var currentRefPoints = [];
+    var activeRefPointMarker = null;
+    var refPointLabelsVisible = false;
 
     var hasAutocentered = false;
     var statusEl = document.getElementById('status');
@@ -399,6 +403,8 @@ const LEAFLET_HTML = `
     // ── Reference Points ──
     function updateRefPoints(points) {
       refPointsGroup.clearLayers();
+      currentRefPoints = points || [];
+      activeRefPointMarker = null;
 
       if (!points || points.length === 0) return;
 
@@ -410,14 +416,29 @@ const LEAFLET_HTML = `
           iconSize: [14, 14],
           iconAnchor: [7, 7]
         });
-        L.marker([pt.lat, pt.lon], { icon: icon })
-          .bindTooltip('Ref #' + (i + 1) + ' (' + pt.lat.toFixed(6) + ', ' + pt.lon.toFixed(6) + ')', { 
-            permanent: true, 
+        (function(markerIndex) {
+          var marker = L.marker([pt.lat, pt.lon], { icon: icon }).addTo(refPointsGroup);
+          marker._refPointIndex = markerIndex;
+          marker.bindTooltip('Ref #' + (markerIndex + 1) + ' (' + pt.lat.toFixed(6) + ', ' + pt.lon.toFixed(6) + ')', {
+            permanent: false,
             direction: 'right',
             className: 'ref-tooltip',
             offset: [10, 0]
-          })
-          .addTo(refPointsGroup);
+          });
+          marker.on('click', function() {
+            if (!refPointLabelsVisible) return;
+            if (activeRefPointMarker && activeRefPointMarker !== marker) {
+              activeRefPointMarker.closeTooltip();
+            }
+            if (activeRefPointMarker === marker && marker.isTooltipOpen && marker.isTooltipOpen()) {
+              marker.closeTooltip();
+              activeRefPointMarker = null;
+              return;
+            }
+            marker.openTooltip();
+            activeRefPointMarker = marker;
+          });
+        })(i);
       }
     }
 
@@ -434,7 +455,7 @@ const LEAFLET_HTML = `
             [line.to.lat, line.to.lon]
           ], {
             color: '#16a34a',
-            weight: item.selected ? 3 : 2,
+            weight: 2,
             opacity: sketchMode && !item.selected ? 0.2 : (item.selected ? 1.0 : 0.8),
             lineCap: 'round',
             lineJoin: 'round'
@@ -466,7 +487,7 @@ const LEAFLET_HTML = `
       if (boundary.outer && boundary.outer.length > 0) {
         var outerPoly = L.polyline(boundary.outer, {
           color: '#0f172a',
-          weight: 3,
+          weight: 2,
           opacity: 0.9,
           lineCap: 'round',
           lineJoin: 'round'
@@ -477,7 +498,7 @@ const LEAFLET_HTML = `
       if (boundary.indent && boundary.indent.length > 0) {
         var indentPoly = L.polyline(boundary.indent, {
           color: '#94a3b8',
-          weight: 1.8,
+          weight: 2,
           opacity: 0.7,
           dashArray: '5 5',
           lineCap: 'round',
@@ -833,6 +854,13 @@ const LEAFLET_HTML = `
           updatePlanLines(data.lines);
         } else if (data.type === 'updateRefPoints') {
           updateRefPoints(data.points);
+        } else if (data.type === 'updateRefPointLabels') {
+          refPointLabelsVisible = !!data.visible;
+          if (!refPointLabelsVisible && activeRefPointMarker) {
+            activeRefPointMarker.closeTooltip();
+            activeRefPointMarker = null;
+          }
+          updateRefPoints(currentRefPoints);
         } else if (data.type === 'recenter') {
           if (roverMarker) {
             map.setView(roverMarker.getLatLng(), map.getZoom());
@@ -920,6 +948,7 @@ export function MapView({
   boundaryHeight,
   indentSpacing,
   sketchMode = false,
+  showRefPointLabels = false,
   onUpdatePlacedItem,
   onUpdatePlacedItems,
   onSelectionChange,
@@ -1263,7 +1292,7 @@ export function MapView({
     const heading = telemetrySnapshot?.heading_ned_deg;
     
     let nextTargetGps = null;
-    if (telemetrySnapshot?.pos_n && telemetrySnapshot?.pos_e && lines.length > 0 && origin.originLat) {
+    if (telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null && lines.length > 0 && origin.originLat) {
       const realN = telemetrySnapshot.pos_n;
       const realE = telemetrySnapshot.pos_e;
       let nextDist = Infinity;
@@ -1281,22 +1310,13 @@ export function MapView({
         if (segLen2 === 0) continue;
 
         const t = ((realN - segStart.x) * segDx + (realE - segStart.y) * segDy) / segLen2;
-
-        if (t < 0.5) {
-          const targetDist = Math.hypot(segEnd.x - realN, segEnd.y - realE);
-          if (targetDist < nextDist) {
-            nextDist = targetDist;
-            nextTarget = { x: segEnd.x, y: segEnd.y };
-          }
-          break;
-        }
-        if (i === lines.length - 1) {
-          const targetDist = Math.hypot(segEnd.x - realN, segEnd.y - realE);
-          if (targetDist < nextDist) {
-            nextDist = targetDist;
-            nextTarget = { x: segEnd.x, y: segEnd.y };
-          }
-        }
+        const targetPt = t <= 0.5
+          ? { x: segEnd.x, y: segEnd.y }
+          : (i < lines.length - 1 ? { x: lines[i + 1].from.x, y: lines[i + 1].from.y } : { x: segEnd.x, y: segEnd.y });
+        const targetDist = Math.hypot(targetPt.x - realN, targetPt.y - realE);
+        nextDist = targetDist;
+        nextTarget = targetPt;
+        break;
       }
       
       if (nextTarget && nextDist < 100) {
@@ -1323,6 +1343,7 @@ export function MapView({
     telemetrySnapshot?.heading_ned_deg,
     telemetrySnapshot?.pos_n,
     telemetrySnapshot?.pos_e,
+    showRefPointLabels,
     lines,
     origin,
     projectLocalMetersToGps,
@@ -1358,6 +1379,14 @@ export function MapView({
       points: alignedRefPoints,
     });
   }, [visible, alignedRefPoints, sendToWebView]);
+
+  useEffect(() => {
+    if (!visible) return;
+    sendToWebView({
+      type: "updateRefPointLabels",
+      visible: showRefPointLabels,
+    });
+  }, [visible, showRefPointLabels, sendToWebView]);
 
   // Sync mode to WebView
   useEffect(() => {
@@ -1476,6 +1505,15 @@ export function MapView({
         .join(",")}`;
     }
 
+    try {
+      webViewRef.current?.postMessage(
+        JSON.stringify({
+          type: "updateRefPointLabels",
+          visible: showRefPointLabels,
+        })
+      );
+    } catch (e) {}
+
     if (mode === "fields") {
       const selectedLine = lines.find((l) => l.id === selectedLineId);
       if (selectedLine) {
@@ -1549,7 +1587,8 @@ export function MapView({
     lockZoom,
     multiTouchMode,
     sketchMode,
-  ]);
+    showRefPointLabels,
+  ]); 
 
   const handleWebViewMessage = useCallback(
     (event: any) => {

@@ -69,6 +69,13 @@ test("GPS surveyed metadata requires staged protected identity", () => {
   );
 });
 
+test("completed staged mission can still restart", () => {
+  assert.equal(
+    verifyStagedLoadedMission({ ...surveyed, loaded: false, state: "completed" }, "mission-42").verified,
+    true
+  );
+});
+
 test("protected resident blocks legacy start", () => {
   assert.equal(isProtectedMissionResident(surveyed), true);
   assert.equal(

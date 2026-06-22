@@ -42,7 +42,7 @@ function normalizedId(value: unknown): string | null {
 }
 
 export function getLoadedMissionId(loaded: LoadedPathResponse | null): string | null {
-  return loaded?.loaded ? normalizedId(loaded.mission_id) : null;
+  return normalizedId(loaded?.mission_id);
 }
 
 export function isProtectedMissionResident(loaded: LoadedPathResponse | null): boolean {
@@ -59,9 +59,11 @@ export function verifyStagedLoadedMission(
 ): { verified: boolean; message: string | null } {
   const expected = normalizedId(expectedMissionId);
   const actual = getLoadedMissionId(loaded);
+  const missionState = typeof loaded.state === "string" ? loaded.state.toLowerCase() : "";
+  const isCompleted = missionState === "completed";
   const mismatch = `Staged mission ${expected ?? "<missing>"} does not match loaded mission ${actual ?? "<none>"}.`;
 
-  if (!expected || !loaded.loaded || !actual || actual !== expected) {
+  if (!expected || (!loaded.loaded && !isCompleted) || !actual || actual !== expected) {
     return { verified: false, message: mismatch };
   }
   if (!loaded.is_staged || !loaded.protected) {

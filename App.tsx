@@ -557,6 +557,13 @@ export default function App() {
     extension: true,
   });
   const [showRefPointLabels, setShowRefPointLabels] = useState(false);
+  const [activeRefPointLabelIndex, setActiveRefPointLabelIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!showRefPointLabels) {
+      setActiveRefPointLabelIndex(null);
+    }
+  }, [showRefPointLabels]);
   const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
   const [telemetrySnapshot, setTelemetrySnapshot] = useState<TelemetrySnapshot | null>(null);
   const [activityFeed, setActivityFeed] = useState<ActivityEntry[]>([]);
@@ -2059,6 +2066,64 @@ export default function App() {
     }
   }
 
+  async function clearResidentMissionOnBackend() {
+    if (!apiBaseUrl) {
+      Alert.alert("No backend", "Connect to a backend before clearing a mission.");
+      return;
+    }
+
+    logAction("CLEAR_REQUEST", {
+      apiBaseUrl,
+      selectedPathName,
+      missionRunning,
+      missionLoaded,
+      missionState: telemetrySnapshot?.mission_state ?? null,
+    });
+    setMissionActionBusy(true);
+    try {
+      showToast("Clear", "Clearing resident mission...", "warning");
+      const res = await missionApi.clearMission(apiBaseUrl);
+      if (!res.ok) {
+        const errMsg = await parseFetchError(res, "Clear failed");
+        const error = new Error(errMsg) as Error & { status?: number };
+        error.status = res.status;
+        throw error;
+      }
+
+      setImportedPlan(null);
+      setLines([]);
+      setSelectedLineId(null);
+      setSelectedPathName(null);
+      setMissionFileReady(false);
+      setMissionLoaded(false);
+      setMissionRunning(false);
+      setOriginShift(null);
+      setStagedWorkflow((prev) => ({
+        ...prev,
+        loaded: "pending",
+        started: "pending",
+      }));
+
+      void refreshMissionIdentity();
+      void refreshTelemetryPanel();
+      logAction("CLEAR_SUCCESS");
+      Alert.alert("Cleared", "Resident mission unloaded successfully.");
+      showToast("Mission cleared", "Resident mission has been unloaded.", "success");
+    } catch (error) {
+      logAction("CLEAR_FAILED", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      const message = error instanceof Error ? error.message : "Could not clear the mission.";
+      Alert.alert("Clear failed", message);
+      showToast("Clear failed", message, "error");
+      if (typeof error === "object" && error && "status" in error && (error as { status?: number }).status === 409) {
+        void refreshMissionIdentity();
+      }
+    } finally {
+      setMissionActionBusy(false);
+    }
+  }
+
   async function pauseMissionOnBackend() {
     if (!apiBaseUrl) return;
     setMissionActionBusy(true);
@@ -2437,6 +2502,7 @@ export default function App() {
                   layerVisibility={layerVisibility}
                   setLayerVisibility={setLayerVisibility}
                   onStopPlan={stopMissionOnBackend}
+                  onClearMission={clearResidentMissionOnBackend}
                   onStartPlan={startLoadedMission}
                   onPausePlan={pauseMissionOnBackend}
                   onArmVehicle={armVehicle}
@@ -2489,6 +2555,8 @@ export default function App() {
                   setMapViewEnabled={setMapViewEnabled}
                   showRefPointLabels={showRefPointLabels}
                   setShowRefPointLabels={setShowRefPointLabels}
+                  activeRefPointLabelIndex={activeRefPointLabelIndex}
+                  setActiveRefPointLabelIndex={setActiveRefPointLabelIndex}
                 />
               ) : (
                 <SectionScreen
@@ -2511,6 +2579,8 @@ export default function App() {
                   onBack={() => setPage("home")}
                   showRefPointLabels={showRefPointLabels}
                   setShowRefPointLabels={setShowRefPointLabels}
+                  activeRefPointLabelIndex={activeRefPointLabelIndex}
+                  setActiveRefPointLabelIndex={setActiveRefPointLabelIndex}
                   onNav={(p) => setPage(p)}
                   onSelectLine={setSelectedLineId}
                   onGenerateTemplate={(name, generatedLines) => {
@@ -2747,6 +2817,7 @@ function HomeView({
   layerVisibility,
   setLayerVisibility,
   onStopPlan,
+  onClearMission,
   onStartPlan,
   onPausePlan,
   onArmVehicle,
@@ -2797,6 +2868,8 @@ function HomeView({
   setMapViewEnabled,
   showRefPointLabels = false,
   setShowRefPointLabels,
+  activeRefPointLabelIndex = null,
+  setActiveRefPointLabelIndex,
 }: {
   autoOrigin: boolean;
   setAutoOrigin: React.Dispatch<React.SetStateAction<boolean>>;
@@ -2815,6 +2888,7 @@ function HomeView({
   layerVisibility: LayerVisibility;
   setLayerVisibility: React.Dispatch<React.SetStateAction<LayerVisibility>>;
   onStopPlan: () => Promise<void>;
+  onClearMission: () => Promise<void>;
   onStartPlan: () => Promise<void>;
   onPausePlan: () => Promise<void>;
   onArmVehicle: (arm: boolean) => Promise<void>;
@@ -2864,6 +2938,8 @@ function HomeView({
   setMapViewEnabled?: React.Dispatch<React.SetStateAction<boolean>>;
   showRefPointLabels?: boolean;
   setShowRefPointLabels: React.Dispatch<React.SetStateAction<boolean>>;
+  activeRefPointLabelIndex?: number | null;
+  setActiveRefPointLabelIndex?: React.Dispatch<React.SetStateAction<number | null>>;
 }) {
   const stagedStartGate = useMemo(
     () => evaluateStagedStartGate(stagedWorkflow, loadedPathInspection, stagedMissionId),
@@ -3183,6 +3259,8 @@ function HomeView({
                   telemetryPosAlt={telemetrySnapshot?.alt ?? null}
                   mapViewEnabled={mapViewEnabled}
                   showRefPointLabels={showRefPointLabels}
+                  activeRefPointLabelIndex={activeRefPointLabelIndex}
+                  onToggleRefPointLabel={setActiveRefPointLabelIndex}
                 />
               </View>
             </View>
@@ -3526,6 +3604,24 @@ function HomeView({
                         </Text>
                       </Pressable>
                     </View>
+
+                    <Pressable
+                      onPress={onClearMission}
+                      disabled={missionActionBusy}
+                      style={{
+                        height: 38,
+                        borderRadius: 8,
+                        backgroundColor: missionActionBusy ? "#1e293b" : "#f97316",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        marginBottom: 12,
+                        opacity: missionActionBusy ? 0.7 : 1,
+                      }}
+                    >
+                      <Text style={{ color: missionActionBusy ? "#64748b" : "#ffffff", fontSize: 12, fontWeight: "800", textTransform: "uppercase" }}>
+                        {missionActionBusy ? "Clearing..." : "Clear"}
+                      </Text>
+                    </Pressable>
 
                     {startBlocked && stagedStartGate.message ? (
                       <Text style={{ color: "#fbbf24", fontSize: 10, lineHeight: 14, marginBottom: 8 }}>
@@ -5157,6 +5253,8 @@ function SectionScreen(props: {
   setMapViewEnabled?: React.Dispatch<React.SetStateAction<boolean>>;
   showRefPointLabels: boolean;
   setShowRefPointLabels?: React.Dispatch<React.SetStateAction<boolean>>;
+  activeRefPointLabelIndex?: number | null;
+  setActiveRefPointLabelIndex?: React.Dispatch<React.SetStateAction<number | null>>;
 }) {
   const { title, page, onBack, mapViewEnabled, setMapViewEnabled } = props;
 
@@ -5184,6 +5282,8 @@ function SectionScreen(props: {
               telemetryPosAlt={props.telemetrySnapshot?.alt ?? null}
               mapViewEnabled={mapViewEnabled}
               showRefPointLabels={props.showRefPointLabels}
+              activeRefPointLabelIndex={props.activeRefPointLabelIndex}
+              onToggleRefPointLabel={props.setActiveRefPointLabelIndex}
             />
           )}
         />
@@ -5689,6 +5789,8 @@ function FieldsPage({
   alignedRefPoints = [],
   setAlignedRefPoints,
   mapViewEnabled = false,
+  activeRefPointLabelIndex = null,
+  setActiveRefPointLabelIndex,
 }: {
   importedPlan: ImportedPlan | null;
   setImportedPlan: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
@@ -5733,6 +5835,8 @@ function FieldsPage({
   alignedRefPoints?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
   setAlignedRefPoints?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>>;
   mapViewEnabled?: boolean;
+  activeRefPointLabelIndex?: number | null;
+  setActiveRefPointLabelIndex?: React.Dispatch<React.SetStateAction<number | null>>;
   showRefPointLabels?: boolean;
 }) {
   const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
@@ -6359,13 +6463,19 @@ function FieldsPage({
               telemetryPosAlt={telemetrySnapshot?.alt ?? null}
               mapViewEnabled={mapViewEnabled}
               showRefPointLabels={showRefPointLabels}
+              activeRefPointLabelIndex={activeRefPointLabelIndex}
+              onToggleRefPointLabel={setActiveRefPointLabelIndex}
             />
           </View>
         </View>
       </View>
       
       {isPathPlanningMode ? (
-        <View style={{ width: "42%", height: "100%", padding: 14, paddingLeft: 0, gap: 12 }}>
+        <ScrollView
+          style={{ width: "42%", height: "100%" }}
+          contentContainerStyle={{ padding: 14, paddingLeft: 0, gap: 12, paddingBottom: 24 }}
+          showsVerticalScrollIndicator={false}
+        >
           {/* Path Planning Header */}
           <View style={{ borderRadius: 14, padding: 14, backgroundColor: "#0f172a" }}>
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
@@ -6826,7 +6936,7 @@ function FieldsPage({
             </View>
           </Modal>
 
-        </View>
+        </ScrollView>
       ) : (
       <View style={{ width: "42%", height: "100%", padding: 14, paddingLeft: 0, gap: 12 }}>
         <View style={{ borderRadius: 14, padding: 14, backgroundColor: "#0f172a" }}>
@@ -7797,6 +7907,8 @@ function PlanPreview({
   telemetryPosAlt = null,
   mapViewEnabled = false,
   showRefPointLabels = false,
+  activeRefPointLabelIndex = null,
+  onToggleRefPointLabel,
 }: {
   lines: PlanLine[];
   visibility: LayerVisibility;
@@ -7816,6 +7928,8 @@ function PlanPreview({
   telemetryPosAlt?: number | null;
   mapViewEnabled?: boolean;
   showRefPointLabels?: boolean;
+  activeRefPointLabelIndex?: number | null;
+  onToggleRefPointLabel?: (index: number | null) => void;
 }) {
   const filtered = useMemo(
     () =>
@@ -8191,6 +8305,32 @@ function PlanPreview({
         if (Math.abs(gestureState.dx) < 5 && Math.abs(gestureState.dy) < 5 && evt.nativeEvent.touches.length === 0) {
           const tapX = evt.nativeEvent.locationX;
           const tapY = evt.nativeEvent.locationY;
+
+          if (showRefPointLabels && alignedRefPoints.length > 0 && onToggleRefPointLabel) {
+            let hitIndex: number | null = null;
+            let hitDist = 20;
+            for (let i = 0; i < alignedRefPoints.length; i++) {
+              const pt = alignedRefPoints[i];
+              const rawSX = pt.dxf_y * viewportRef.current.zoom + viewportRef.current.panX;
+              const rawSY = -pt.dxf_x * viewportRef.current.zoom + viewportRef.current.panY;
+              let sx = rawSX;
+              let sy = rawSY;
+              if (rotationRef.current !== 0 && layoutSizeRef.current.width > 0 && layoutSizeRef.current.height > 0) {
+                const rotated = rotatePoint(rawSX, rawSY, layoutSizeRef.current.width / 2, layoutSizeRef.current.height / 2, rotationRef.current);
+                sx = rotated.x;
+                sy = rotated.y;
+              }
+              const dist = Math.hypot(tapX - sx, tapY - sy);
+              if (dist <= hitDist) {
+                hitDist = dist;
+                hitIndex = i;
+              }
+            }
+            if (hitIndex != null) {
+              onToggleRefPointLabel(activeRefPointLabelIndex === hitIndex ? null : hitIndex);
+              return;
+            }
+          }
           
           const tap = { x: tapX, y: tapY };
           if (onSelectPointRef.current) {
@@ -8474,22 +8614,13 @@ function PlanPreview({
               if (segLen2 === 0) continue;
 
               const t = ((realN - segStart.x) * segDx + (realE - segStart.y) * segDy) / segLen2;
-
-              if (t < 0.5) {
-                const targetDist = Math.hypot(segEnd.x - realN, segEnd.y - realE);
-                if (targetDist < nextDist) {
-                  nextDist = targetDist;
-                  nextTarget = { x: segEnd.x, y: segEnd.y };
-                }
-                break;
-              }
-              if (i === filtered.length - 1) {
-                const targetDist = Math.hypot(segEnd.x - realN, segEnd.y - realE);
-                if (targetDist < nextDist) {
-                  nextDist = targetDist;
-                  nextTarget = { x: segEnd.x, y: segEnd.y };
-                }
-              }
+              const targetPt = t <= 0.5
+                ? { x: segEnd.x, y: segEnd.y }
+                : (i < filtered.length - 1 ? { x: filtered[i + 1].from.x, y: filtered[i + 1].from.y } : { x: segEnd.x, y: segEnd.y });
+              const targetDist = Math.hypot(targetPt.x - realN, targetPt.y - realE);
+              nextDist = targetDist;
+              nextTarget = targetPt;
+              break;
             }
             if (nextTarget && nextDist < 100) {
               const planScreenX = nextTarget.y * viewport.zoom + viewport.panX;
@@ -8567,7 +8698,7 @@ function PlanPreview({
                   strokeWidth={2}
                   strokeDasharray="3 2"
                 />
-                {showRefPointLabels && (
+                {showRefPointLabels && activeRefPointLabelIndex === i && (
                   <>
                     <SvgText
                       x={sx + 12}
