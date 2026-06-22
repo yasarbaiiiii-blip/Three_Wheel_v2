@@ -300,17 +300,14 @@ export function GeometryViewport({
     [safeLines, selectedLineId]
   );
 
-  /* ── Path chunks via ref + async effect (Step 2) ── */
-  const pathChunksRef = useRef<Record<string, string[]>>({ boundary: [], marking: [], center: [] });
-  const [pathVersion, setPathVersion] = useState(0);
-  useEffect(() => {
-    pathChunksRef.current = {
+  const pathChunksByLayer = useMemo<Record<RenderedPlanLayer, string[]>>(
+    () => ({
       boundary: buildSvgPathChunks(culledLines.filter(line => line.layer === "boundary")),
       marking:  buildSvgPathChunks(culledLines.filter(line => line.layer === "marking")),
       center:   buildSvgPathChunks(culledLines.filter(line => line.layer === "center")),
-    };
-    setPathVersion(v => v + 1);
-  }, [culledLines]);
+    }),
+    [culledLines]
+  );
 
   const arrowheadsByLayer = useMemo(
     () => {
