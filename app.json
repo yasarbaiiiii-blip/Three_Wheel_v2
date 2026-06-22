@@ -30,6 +30,9 @@
           }
         }
       ]
-    ]
+    ],
+    "ios": {
+      "bundleIdentifier": "com.yasarrrrr.roverthreewheelnative"
+    }
   }
 }

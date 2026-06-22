@@ -2488,6 +2488,7 @@ export default function App() {
                   mapViewEnabled={mapViewEnabled}
                   setMapViewEnabled={setMapViewEnabled}
                   showRefPointLabels={showRefPointLabels}
+                  setShowRefPointLabels={setShowRefPointLabels}
                 />
               ) : (
                 <SectionScreen
@@ -2795,6 +2796,7 @@ function HomeView({
   mapViewEnabled = false,
   setMapViewEnabled,
   showRefPointLabels = false,
+  setShowRefPointLabels,
 }: {
   autoOrigin: boolean;
   setAutoOrigin: React.Dispatch<React.SetStateAction<boolean>>;
@@ -2861,6 +2863,7 @@ function HomeView({
   mapViewEnabled?: boolean;
   setMapViewEnabled?: React.Dispatch<React.SetStateAction<boolean>>;
   showRefPointLabels?: boolean;
+  setShowRefPointLabels: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
   const stagedStartGate = useMemo(
     () => evaluateStagedStartGate(stagedWorkflow, loadedPathInspection, stagedMissionId),
@@ -5730,6 +5733,7 @@ function FieldsPage({
   alignedRefPoints?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
   setAlignedRefPoints?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>>;
   mapViewEnabled?: boolean;
+  showRefPointLabels?: boolean;
 }) {
   const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -6354,7 +6358,7 @@ function FieldsPage({
               telemetryPosLon={telemetrySnapshot?.lon ?? null}
               telemetryPosAlt={telemetrySnapshot?.alt ?? null}
               mapViewEnabled={mapViewEnabled}
-              showRefPointLabels={props.showRefPointLabels}
+              showRefPointLabels={showRefPointLabels}
             />
           </View>
         </View>
