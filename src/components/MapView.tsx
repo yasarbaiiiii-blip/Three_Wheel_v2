@@ -1,0 +1,1836 @@
+import React, { useCallback, useEffect, useRef, useMemo, useState } from "react";
+import { View, StyleSheet, ActivityIndicator, Text } from "react-native";
+import { WebView } from "react-native-webview";
+
+import type { TelemetrySnapshot, PlanLine } from "../types/plan";
+import type { PlacedItem } from "./BoundaryEditor";
+
+const EARTH_RADIUS = 6378137.0;
+
+/**
+ * Project local DXF meters (north/east relative to an origin) back to GPS lat/lon.
+ */
+function projectLocalMetersToGps(
+  north: number,
+  east: number,
+  originLat: number,
+  originLon: number
+): { lat: number; lon: number } {
+  const originLatRad = (originLat * Math.PI) / 180;
+  const lat = originLat + (north / EARTH_RADIUS) * (180 / Math.PI);
+  const lon =
+    originLon + (east / (EARTH_RADIUS * Math.cos(originLatRad))) * (180 / Math.PI);
+  return { lat, lon };
+}
+
+function projectGpsToLocalMeters(
+  lat: number,
+  lon: number,
+  originLat: number,
+  originLon: number
+): { north: number; east: number } {
+  const originLatRad = (originLat * Math.PI) / 180;
+  const north = (lat - originLat) * (EARTH_RADIUS * Math.PI / 180);
+  const east = (lon - originLon) * (EARTH_RADIUS * Math.cos(originLatRad) * Math.PI / 180);
+  return { north, east };
+}
+
+function distToSegment(
+  px: number,
+  py: number,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number
+): number {
+  const l2 = (x1 - x2) ** 2 + (y1 - y2) ** 2;
+  if (l2 === 0) return Math.hypot(px - x1, py - y1);
+  let t = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (x1 + t * (x2 - x1)), py - (y1 + t * (y2 - y1)));
+}
+
+export interface MapViewProps {
+  telemetrySnapshot: TelemetrySnapshot | null;
+  lines: PlanLine[];
+  alignedRefPoints: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
+  visible: boolean;
+  recenterRoverTrigger?: number;
+  recenterPlanTrigger?: number;
+  onSelectPoint?: (pt: { x: number; y: number }) => void;
+  onSelectLine?: (id: string | null) => void;
+  selectedLineId?: string | null;
+  showCornerPoints?: boolean;
+
+  // Interactive templates mode support
+  mode?: "fields" | "templates";
+  placedItems?: PlacedItem[];
+  selectedItemIds?: string[];
+  lockPanDrag?: boolean;
+  lockZoom?: boolean;
+  boundaryWidth?: number;
+  boundaryHeight?: number;
+  indentSpacing?: number;
+  sketchMode?: boolean;
+  onUpdatePlacedItem?: (id: string, updates: Partial<PlacedItem>) => void;
+  onUpdatePlacedItems?: (items: PlacedItem[]) => void;
+  onSelectionChange?: (ids: string[]) => void;
+  multiTouchMode?: "both" | "scale" | "rotate";
+}
+
+/**
+ * Self-contained HTML string that boots Leaflet from CDN and listens for
+ * postMessage commands from React Native.
+ */
+const LEAFLET_HTML = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; }
+    #map { width: 100%; height: 100%; }
+
+    /* Premium reference point tooltip */
+    .leaflet-tooltip.ref-tooltip {
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid #10b981;
+      color: #ffffff;
+      font-size: 10px;
+      font-weight: 700;
+      border-radius: 4px;
+      padding: 2px 6px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    }
+    .leaflet-tooltip-right.ref-tooltip::before {
+      border-right-color: rgba(15, 23, 42, 0.85);
+    }
+
+    .ref-marker {
+      width: 14px; height: 14px;
+      background: #10b981;
+      border: 2.5px solid #ffffff;
+      border-radius: 50%;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    }
+
+    /* Loading overlay */
+    .loading-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(255,255,255,0.92);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 10000; font-family: -apple-system, sans-serif;
+      flex-direction: column; gap: 12px;
+    }
+    .loading-overlay .spinner {
+      width: 36px; height: 36px;
+      border: 3px solid #e2e8f0; border-top-color: #3b82f6;
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-overlay .label { color: #64748b; font-size: 13px; font-weight: 600; }
+
+    /* Status badge */
+    .status-badge {
+      position: fixed; bottom: 12px; left: 12px; z-index: 9999;
+      background: rgba(15,23,42,0.85); color: #e2e8f0;
+      font-size: 11px; font-weight: 600; font-family: -apple-system, monospace;
+      padding: 6px 12px; border-radius: 8px;
+      backdrop-filter: blur(8px);
+      pointer-events: none;
+    }
+
+    @keyframes pulse-circle {
+      0% { opacity: 0.8; stroke-width: 0; }
+      100% { opacity: 0; stroke-width: 15px; }
+    }
+    .pulsing-circle {
+      animation: pulse-circle 1.5s infinite;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading" class="loading-overlay">
+    <div class="spinner"></div>
+    <div class="label">Loading Map…</div>
+  </div>
+  <div id="map"></div>
+  <div id="status" class="status-badge">Waiting for data…</div>
+
+  <script>
+    // ── Leaflet Setup ──
+    var osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 22,
+      maxNativeZoom: 19,
+      attribution: '© OpenStreetMap'
+    });
+
+    var satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 22,
+      maxNativeZoom: 18,
+      attribution: '© Esri'
+    });
+
+    var map = L.map('map', {
+      center: [0, 0],
+      zoom: 18,
+      layers: [osm],
+      zoomControl: true,
+      attributionControl: false
+    });
+
+    L.control.attribution({ position: 'bottomright', prefix: false }).addTo(map);
+
+    // Listen for map clicks and send back to React Native
+    map.on('click', function(e) {
+      if (mode !== 'templates') {
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'mapClick',
+            lat: e.latlng.lat,
+            lon: e.latlng.lng
+          }));
+        }
+      }
+    });
+
+    // Remove loading overlay after tiles load
+    map.whenReady(function() {
+      setTimeout(function() {
+        var el = document.getElementById('loading');
+        if (el) el.style.display = 'none';
+      }, 600);
+    });
+
+    // ── State ──
+    var mode = 'fields';
+    var currentItems = [];
+    var lockPanDrag = false;
+    var lockZoom = false;
+    var multiTouchMode = 'both';
+    var sketchMode = false;
+
+    var roverMarker = null;
+    var roverCircle = null;
+    var startArrowMarker = null;
+    var planLinesGroup = L.layerGroup().addTo(map);
+    var refPointsGroup = L.layerGroup().addTo(map);
+    var itemLayersGroup = L.layerGroup().addTo(map);
+    var boundaryLayersGroup = L.layerGroup().addTo(map);
+    var selectedLineLayer = null;
+    var cornerMarkers = L.layerGroup().addTo(map);
+    
+    var nextTargetLine = null;
+    var nextTargetCircle = null;
+
+    var hasAutocentered = false;
+    var statusEl = document.getElementById('status');
+
+    function updateStatus(text) {
+      if (statusEl) statusEl.textContent = text;
+    }
+
+    function postMessage(msg) {
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify(msg));
+      }
+    }
+
+    // Helper: Distance from point to line segment
+    function distToSegment(p, p1, p2) {
+      var x = p.x, y = p.y;
+      var x1 = p1.x, y1 = p1.y;
+      var x2 = p2.x, y2 = p2.y;
+      var l2 = (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2);
+      if (l2 === 0) return Math.hypot(x - x1, y - y1);
+      var t = ((x - x1) * (x2 - x1) + (y - y1) * (y2 - y1)) / l2;
+      t = Math.max(0, Math.min(1, t));
+      return Math.hypot(x - (x1 + t * (x2 - x1)), y - (y1 + t * (y2 - y1)));
+    }
+
+    // ── Rover Marker ──
+    function updateRover(lat, lon, heading, nextTarget) {
+      if (lat == null || lon == null) return;
+
+      var latlng = [lat, lon];
+
+      if (!roverMarker) {
+        var headingAngle = heading != null ? heading : 0;
+        var icon = L.divIcon({
+          className: 'rover-marker-wrapper',
+          html: '<div id="rover-vehicle" style="transform: rotate(' + headingAngle + 'deg); transition: transform 0.2s ease; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;">' +
+                '<svg width="40" height="40" viewBox="-20 -20 40 40" style="display: block;">' +
+                '<circle cx="0" cy="0" r="18.7" fill="rgba(14,165,233,0.12)" />' +
+                '<polygon points="-6.5,11 6.5,11 6.5,-4 0,-7.5 -6.5,-4" fill="#0ea5e9" stroke="#ffffff" stroke-width="1.8" stroke-linejoin="round" />' +
+                '<polygon points="-9.5,5 -6.5,5 -6.5,11 -9.5,11" fill="#0f172a" />' +
+                '<polygon points="9.5,5 6.5,5 6.5,11 9.5,11" fill="#0f172a" />' +
+                '<polygon points="-2.5,3 2.5,3 2.5,-3 -2.5,-3" fill="#0f172a" />' +
+                '<polygon points="-4.5,-2 4.5,-2 3.5,2 -3.5,2" fill="rgba(186,230,253,0.85)" />' +
+                '<circle cx="0" cy="-7.5" r="2.5" fill="#fbbf24" stroke="#fff" stroke-width="1" />' +
+                '</svg>' +
+                '</div>',
+          iconSize: [40, 40],
+          iconAnchor: [20, 20]
+        });
+        roverMarker = L.marker(latlng, { icon: icon, zIndexOffset: 1000 }).addTo(map);
+
+        roverCircle = L.circle(latlng, {
+          radius: 1.5,
+          color: '#3b82f6',
+          fillColor: '#3b82f6',
+          fillOpacity: 0.12,
+          weight: 1.5,
+          dashArray: '4 4'
+        }).addTo(map);
+      } else {
+        roverMarker.setLatLng(latlng);
+        roverCircle.setLatLng(latlng);
+      }
+
+      // Rotate vehicle
+      var el = document.getElementById('rover-vehicle');
+      if (el && heading != null) {
+        el.style.transform = 'rotate(' + heading + 'deg)';
+      }
+
+      if (nextTarget) {
+        var tl = L.latLng(nextTarget.lat, nextTarget.lon);
+        if (!nextTargetLine) {
+          nextTargetLine = L.polyline([latlng, tl], {
+            color: '#f59e0b',
+            weight: 2,
+            dashArray: '4 4'
+          }).addTo(map);
+          nextTargetCircle = L.circleMarker(tl, {
+            radius: 5,
+            color: '#f59e0b',
+            fillColor: '#f59e0b',
+            fillOpacity: 0.5,
+            className: 'pulsing-circle'
+          }).addTo(map);
+        } else {
+          nextTargetLine.setLatLngs([latlng, tl]);
+          nextTargetCircle.setLatLng(tl);
+        }
+      } else {
+        if (nextTargetLine) {
+          map.removeLayer(nextTargetLine);
+          map.removeLayer(nextTargetCircle);
+          nextTargetLine = null;
+          nextTargetCircle = null;
+        }
+      }
+
+      if (!hasAutocentered) {
+        map.setView(latlng, 19, { animate: false });
+        hasAutocentered = true;
+      }
+      updateStatus('Rover: ' + lat.toFixed(6) + ', ' + lon.toFixed(6));
+    }
+
+    // ── Plan Lines ──
+    function updatePlanLines(linesData) {
+      planLinesGroup.clearLayers();
+      if (startArrowMarker) {
+        map.removeLayer(startArrowMarker);
+        startArrowMarker = null;
+      }
+
+      if (!linesData || linesData.length === 0) return;
+
+      var allLatLngs = [];
+
+      for (var i = 0; i < linesData.length; i++) {
+        var seg = linesData[i];
+        var coords = seg.coords;
+        var color = seg.color || '#0f172a';
+        var weight = seg.weight || 2;
+
+        if (coords && coords.length >= 2) {
+          var polyline = L.polyline(coords, {
+            color: color,
+            weight: weight,
+            opacity: 0.85,
+            lineCap: 'round',
+            lineJoin: 'round'
+          });
+          planLinesGroup.addLayer(polyline);
+
+          for (var j = 0; j < coords.length; j++) {
+            allLatLngs.push(coords[j]);
+          }
+        }
+      }
+
+      // Add Start Direction Arrow at the start of the first segment of the plan
+      if (linesData[0] && linesData[0].coords && linesData[0].coords.length >= 2) {
+        var p1 = linesData[0].coords[0];
+        var p2 = linesData[0].coords[1];
+        
+        // dy = Lat, dx = Lon adjusted for latitude
+        var dy = p2[0] - p1[0];
+        var dx = (p2[1] - p1[1]) * Math.cos(p1[0] * Math.PI / 180);
+        var angle = Math.atan2(dx, dy) * 180 / Math.PI; // degrees clockwise from North
+        
+        var arrowHtml = '<div style="transform: rotate(' + angle + 'deg); width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 14px solid #ef4444; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.3));"></div>';
+        
+        var arrowIcon = L.divIcon({
+          className: '',
+          html: arrowHtml,
+          iconSize: [12, 14],
+          iconAnchor: [6, 7]
+        });
+        
+        startArrowMarker = L.marker(p1, { icon: arrowIcon }).addTo(map);
+      }
+
+      // If no rover, fit to plan bounds
+      if (!hasAutocentered && allLatLngs.length > 0) {
+        var bounds = L.latLngBounds(allLatLngs);
+        map.fitBounds(bounds, { padding: [40, 40] });
+        hasAutocentered = true;
+      }
+    }
+
+    // ── Reference Points ──
+    function updateRefPoints(points) {
+      refPointsGroup.clearLayers();
+
+      if (!points || points.length === 0) return;
+
+      for (var i = 0; i < points.length; i++) {
+        var pt = points[i];
+        var icon = L.divIcon({
+          className: '',
+          html: '<div class="ref-marker"></div>',
+          iconSize: [14, 14],
+          iconAnchor: [7, 7]
+        });
+        L.marker([pt.lat, pt.lon], { icon: icon })
+          .bindTooltip('Ref #' + (i + 1) + ' (' + pt.lat.toFixed(6) + ', ' + pt.lon.toFixed(6) + ')', { 
+            permanent: true, 
+            direction: 'right',
+            className: 'ref-tooltip',
+            offset: [10, 0]
+          })
+          .addTo(refPointsGroup);
+      }
+    }
+
+    // ── Render Placed Items (Templates Mode) ──
+    function renderPlacedItems(items) {
+      itemLayersGroup.clearLayers();
+      currentItems = items;
+
+      items.forEach(function(item) {
+        // Draw template lines
+        item.lines.forEach(function(line) {
+          var poly = L.polyline([
+            [line.from.lat, line.from.lon],
+            [line.to.lat, line.to.lon]
+          ], {
+            color: '#16a34a',
+            weight: item.selected ? 3 : 2,
+            opacity: sketchMode && !item.selected ? 0.2 : (item.selected ? 1.0 : 0.8),
+            lineCap: 'round',
+            lineJoin: 'round'
+          });
+          poly._itemId = item.id;
+          itemLayersGroup.addLayer(poly);
+        });
+
+        // Draw bounding box polygon
+        if (item.box && item.box.length >= 4) {
+          var boxPoly = L.polygon(item.box, {
+            color: item.selected ? '#ef4444' : '#3b82f6',
+            weight: 1.5,
+            fillColor: item.selected ? '#ef4444' : '#3b82f6',
+            fillOpacity: item.selected ? 0.05 : 0.02,
+            dashArray: item.selected ? '' : '4 4'
+          });
+          boxPoly._itemId = item.id;
+          itemLayersGroup.addLayer(boxPoly);
+        }
+      });
+    }
+
+    // ── Render Boundary Box (Templates Mode) ──
+    function renderBoundary(boundary) {
+      boundaryLayersGroup.clearLayers();
+      if (!boundary) return;
+
+      if (boundary.outer && boundary.outer.length > 0) {
+        var outerPoly = L.polyline(boundary.outer, {
+          color: '#0f172a',
+          weight: 3,
+          opacity: 0.9,
+          lineCap: 'round',
+          lineJoin: 'round'
+        });
+        boundaryLayersGroup.addLayer(outerPoly);
+      }
+
+      if (boundary.indent && boundary.indent.length > 0) {
+        var indentPoly = L.polyline(boundary.indent, {
+          color: '#94a3b8',
+          weight: 1.8,
+          opacity: 0.7,
+          dashArray: '5 5',
+          lineCap: 'round',
+          lineJoin: 'round'
+        });
+        boundaryLayersGroup.addLayer(indentPoly);
+      }
+    }
+
+    // ── Update Selection Highlights (Fields Mode) ──
+    function updateSelection(data) {
+      if (selectedLineLayer) {
+        map.removeLayer(selectedLineLayer);
+        selectedLineLayer = null;
+      }
+      cornerMarkers.clearLayers();
+
+      if (!data) return;
+
+      if (data.line && data.line.coords && data.line.coords.length >= 2) {
+        selectedLineLayer = L.polyline(data.line.coords, {
+          color: '#ef4444',
+          weight: 4,
+          opacity: 1,
+          lineCap: 'round',
+          lineJoin: 'round'
+        }).addTo(map);
+      }
+
+      if (data.cornerPoints && data.cornerPoints.length > 0) {
+        data.cornerPoints.forEach(function(pt) {
+          L.circleMarker([pt.lat, pt.lon], {
+            radius: 5,
+            color: '#3b82f6',
+            fillColor: '#3b82f6',
+            fillOpacity: 0.9,
+            weight: 2
+          }).addTo(cornerMarkers);
+        });
+      }
+    }
+
+    function clearSelection() {
+      if (selectedLineLayer) {
+        map.removeLayer(selectedLineLayer);
+        selectedLineLayer = null;
+      }
+      cornerMarkers.clearLayers();
+    }
+
+    // ── Hit Testing ──
+    function hitTest(latlng) {
+      var minDistance = Infinity;
+      var hitId = null;
+      var thresholdPx = 18; // pixels
+
+      var clickPoint = map.latLngToContainerPoint(latlng);
+
+      currentItems.forEach(function(item) {
+        // Test lines
+        item.lines.forEach(function(line) {
+          var p1 = map.latLngToContainerPoint([line.from.lat, line.from.lon]);
+          var p2 = map.latLngToContainerPoint([line.to.lat, line.to.lon]);
+          var d = distToSegment(clickPoint, p1, p2);
+          if (d < minDistance) {
+            minDistance = d;
+            hitId = item.id;
+          }
+        });
+
+        // Test bounding box lines
+        if (item.box && item.box.length >= 4) {
+          for (var i = 0; i < item.box.length; i++) {
+            var nextIdx = (i + 1) % item.box.length;
+            var p1 = map.latLngToContainerPoint(item.box[i]);
+            var p2 = map.latLngToContainerPoint(item.box[nextIdx]);
+            var d = distToSegment(clickPoint, p1, p2);
+            if (d < minDistance) {
+              minDistance = d;
+              hitId = item.id;
+            }
+          }
+        }
+      });
+
+      if (minDistance <= thresholdPx) {
+        return hitId;
+      }
+      return null;
+    }
+
+    // ── Dragging & Multi-Touch Gestures ──
+    var activeDrag = null; // { type: 'items'|'background', ids: [], startLatlng: L.LatLng, itemsStart: [] }
+    var touchState = null; // { initialDist, initialAngle, itemsStart, lastScale, lastRotation }
+
+    function onMouseDown(e) {
+      if (mode !== 'templates') return;
+
+      var hitId = hitTest(e.latlng);
+      if (hitId) {
+        var selectedIds = currentItems.filter(function(it) { return it.selected; }).map(function(it) { return it.id; });
+        if (!selectedIds.includes(hitId)) {
+          selectedIds = [hitId];
+          postMessage({ type: 'selectItems', ids: selectedIds });
+        }
+
+        if (lockPanDrag) return;
+
+        var starts = selectedIds.map(function(id) {
+          var item = currentItems.find(function(it) { return it.id === id; });
+          return { id: id, x: item.x, y: item.y, rotation: item.rotation, scale: item.scale };
+        });
+
+        activeDrag = {
+          type: 'items',
+          ids: selectedIds,
+          startLatlng: e.latlng,
+          itemsStart: starts
+        };
+        map.dragging.disable();
+      } else {
+        activeDrag = {
+          type: 'background',
+          startLatlng: e.latlng
+        };
+      }
+    }
+
+    function onMouseMove(e) {
+      if (!activeDrag || lockPanDrag) return;
+
+      if (activeDrag.type === 'items') {
+        var latDelta = e.latlng.lat - activeDrag.startLatlng.lat;
+        var lonDelta = e.latlng.lng - activeDrag.startLatlng.lng;
+
+        // Move layers locally in Leaflet at 60fps
+        itemLayersGroup.eachLayer(function(layer) {
+          if (activeDrag.ids.includes(layer._itemId)) {
+            if (layer.getLatLngs) {
+              var lls = layer.getLatLngs();
+              if (Array.isArray(lls[0])) {
+                var newLls = lls[0].map(function(ll) {
+                  return L.latLng(ll.lat + latDelta, ll.lng + lonDelta);
+                });
+                layer.setLatLngs([newLls]);
+              } else {
+                var newLls = lls.map(function(ll) {
+                  return L.latLng(ll.lat + latDelta, ll.lng + lonDelta);
+                });
+                layer.setLatLngs(newLls);
+              }
+            }
+          }
+        });
+      }
+    }
+
+    function onMouseUp(e) {
+      if (!activeDrag) return;
+
+      if (activeDrag.type === 'items') {
+        var latDelta = e.latlng.lat - activeDrag.startLatlng.lat;
+        var lonDelta = e.latlng.lng - activeDrag.startLatlng.lng;
+
+        var originLatRad = (activeDrag.startLatlng.lat * Math.PI) / 180;
+        var dy = latDelta * (6378137.0 * Math.PI / 180);
+        var dx = lonDelta * (6378137.0 * Math.cos(originLatRad) * Math.PI / 180);
+
+        var updates = activeDrag.itemsStart.map(function(start) {
+          return {
+            id: start.id,
+            x: start.x + dx,
+            y: start.y + dy
+          };
+        });
+
+        postMessage({ type: 'itemsMoved', updates: updates });
+      } else if (activeDrag.type === 'background') {
+        var p1 = map.latLngToContainerPoint(e.latlng);
+        var p2 = map.latLngToContainerPoint(activeDrag.startLatlng);
+        var dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+        if (dist < 5) {
+          postMessage({ type: 'selectItems', ids: [] });
+        }
+      }
+
+      activeDrag = null;
+      if (!lockPanDrag) {
+        map.dragging.enable();
+      }
+    }
+
+    // Touch handlers
+    function onTouchStart(e) {
+      if (mode !== 'templates') return;
+
+      var touches = e.touches || e.originalEvent.touches;
+      if (touches.length === 1) {
+        var latlng = map.mouseEventToLatLng(touches[0]);
+        onMouseDown({ latlng: latlng });
+      } else if (touches.length === 2 && !lockPanDrag) {
+        var p1 = map.mouseEventToContainerPoint(touches[0]);
+        var p2 = map.mouseEventToContainerPoint(touches[1]);
+        var dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+        var angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+
+        var selectedIds = currentItems.filter(function(it) { return it.selected; }).map(function(it) { return it.id; });
+        if (selectedIds.length > 0) {
+          var starts = selectedIds.map(function(id) {
+            var item = currentItems.find(function(it) { return it.id === id; });
+            return { id: id, x: item.x, y: item.y, rotation: item.rotation, scale: item.scale };
+          });
+
+          touchState = {
+            initialDist: dist,
+            initialAngle: angle,
+            itemsStart: starts,
+            lastScale: 1.0,
+            lastRotation: 0.0
+          };
+
+          map.dragging.disable();
+          map.touchZoom.disable();
+        }
+      }
+    }
+
+    function updatePinchVisuals(scaleMult, angleDelta) {
+      var cos = Math.cos(angleDelta * Math.PI / 180);
+      var sin = Math.sin(angleDelta * Math.PI / 180);
+
+      itemLayersGroup.eachLayer(function(layer) {
+        if (touchState.itemsStart.some(function(it) { return it.id === layer._itemId; })) {
+          var item = currentItems.find(function(it) { return it.id === layer._itemId; });
+          var center = item.center;
+
+          if (layer.getLatLngs) {
+            var lls = layer.getLatLngs();
+            var rotatePoint = function(ll) {
+              var latOffset = ll.lat - center.lat;
+              var lonOffset = ll.lng - center.lon;
+
+              var newLatOffset = (latOffset * cos - lonOffset * sin) * scaleMult;
+              var newLonOffset = (latOffset * sin + lonOffset * cos) * scaleMult;
+
+              return L.latLng(center.lat + newLatOffset, center.lng + newLonOffset);
+            };
+
+            if (Array.isArray(lls[0])) {
+              var newLls = lls[0].map(rotatePoint);
+              layer.setLatLngs([newLls]);
+            } else {
+              var newLls = lls.map(rotatePoint);
+              layer.setLatLngs(newLls);
+            }
+          }
+        }
+      });
+    }
+
+    function onTouchMove(e) {
+      if (mode !== 'templates') return;
+
+      var touches = e.touches || e.originalEvent.touches;
+      if (touches.length === 1 && activeDrag) {
+        var latlng = map.mouseEventToLatLng(touches[0]);
+        onMouseMove({ latlng: latlng });
+      } else if (touches.length === 2 && touchState && !lockPanDrag) {
+        var p1 = map.mouseEventToContainerPoint(touches[0]);
+        var p2 = map.mouseEventToContainerPoint(touches[1]);
+        var dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+        var angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+
+        var scaleMult = dist / touchState.initialDist;
+        var angleDelta = (angle - touchState.initialAngle) * 180 / Math.PI;
+
+        var modeSetting = multiTouchMode;
+        var appliedScale = modeSetting === 'rotate' ? 1 : scaleMult;
+        var appliedRot = modeSetting === 'scale' ? 0 : angleDelta;
+
+        touchState.lastScale = appliedScale;
+        touchState.lastRotation = appliedRot;
+
+        updatePinchVisuals(appliedScale, appliedRot);
+      }
+    }
+
+    function onTouchEnd(e) {
+      if (touchState) {
+        var updates = touchState.itemsStart.map(function(start) {
+          return {
+            id: start.id,
+            scale: start.scale * touchState.lastScale,
+            rotation: (start.rotation + touchState.lastRotation) % 360
+          };
+        });
+
+        postMessage({ type: 'itemsPinched', updates: updates });
+
+        touchState = null;
+        if (!lockPanDrag) {
+          map.dragging.enable();
+        }
+        if (!lockZoom) {
+          map.touchZoom.enable();
+        }
+      } else if (activeDrag) {
+        var touches = e.touches || e.originalEvent.touches;
+        if (touches.length === 0) {
+          onMouseUp({ latlng: map.mouseEventToLatLng(e.changedTouches[0]) });
+        }
+      }
+    }
+
+    // Hook listeners
+    map.on('mousedown', onMouseDown);
+    map.on('mousemove', onMouseMove);
+    map.on('mouseup', onMouseUp);
+
+    map.on('touchstart', onTouchStart);
+    map.on('touchmove', onTouchMove);
+    map.on('touchend', onTouchEnd);
+
+    // Lock Helper setters
+    function setLockPanDrag(locked) {
+      if (locked) {
+        map.dragging.disable();
+      } else {
+        map.dragging.enable();
+      }
+    }
+
+    function setLockZoom(locked) {
+      if (locked) {
+        map.doubleClickZoom.disable();
+        map.scrollWheelZoom.disable();
+        map.touchZoom.disable();
+      } else {
+        map.doubleClickZoom.enable();
+        map.scrollWheelZoom.enable();
+        map.touchZoom.enable();
+      }
+    }
+
+    // ── Message Handler ──
+    function handleMessage(event) {
+      try {
+        var data = JSON.parse(event.data);
+
+        if (data.type === 'updateRover') {
+          updateRover(data.lat, data.lon, data.heading, data.nextTarget);
+        } else if (data.type === 'updatePlanLines') {
+          updatePlanLines(data.lines);
+        } else if (data.type === 'updateRefPoints') {
+          updateRefPoints(data.points);
+        } else if (data.type === 'recenter') {
+          if (roverMarker) {
+            map.setView(roverMarker.getLatLng(), map.getZoom());
+          }
+        } else if (data.type === 'fitPlan') {
+          var allLatLngs = [];
+          planLinesGroup.eachLayer(function(layer) {
+            if (layer.getLatLngs) {
+              var latlngs = layer.getLatLngs();
+              if (Array.isArray(latlngs[0])) {
+                for (var i = 0; i < latlngs.length; i++) {
+                  allLatLngs = allLatLngs.concat(latlngs[i]);
+                }
+              } else {
+                allLatLngs = allLatLngs.concat(latlngs);
+              }
+            }
+          });
+          if (allLatLngs.length > 0) {
+            var bounds = L.latLngBounds(allLatLngs);
+            map.fitBounds(bounds, { padding: [40, 40] });
+          }
+        } else if (data.type === 'updatePlacedItems') {
+          renderPlacedItems(data.items);
+        } else if (data.type === 'updateBoundary') {
+          renderBoundary(data.boundary);
+        } else if (data.type === 'updateSketchMode') {
+          sketchMode = data.sketchMode;
+          if (mode === 'templates') {
+            renderPlacedItems(currentItems);
+          }
+        } else if (data.type === 'updateLocks') {
+          lockPanDrag = data.lockPanDrag;
+          lockZoom = data.lockZoom;
+          setLockPanDrag(lockPanDrag);
+          setLockZoom(lockZoom);
+        } else if (data.type === 'updateMultiTouchMode') {
+          multiTouchMode = data.multiTouchMode;
+        } else if (data.type === 'updateSelection') {
+          updateSelection(data);
+        } else if (data.type === 'clearSelection') {
+          clearSelection();
+        } else if (data.type === 'setMode') {
+          mode = data.mode;
+        }
+      } catch (e) {
+        console.error('MapView message error:', e);
+      }
+    }
+
+    // Listen for RN WebView messages
+    document.addEventListener('message', handleMessage);
+    window.addEventListener('message', handleMessage);
+  </script>
+</body>
+</html>
+`;
+
+const LAYER_COLORS: Record<string, string> = {
+  boundary: "#0f172a",
+  marking: "#16a34a",
+  marking_false: "#86efac",
+  center: "#f59e0b",
+  transit: "#94a3b8",
+  extension: "#8b5cf6",
+};
+
+export function MapView({
+  telemetrySnapshot,
+  lines,
+  alignedRefPoints,
+  visible,
+  recenterRoverTrigger,
+  recenterPlanTrigger,
+  onSelectPoint,
+  onSelectLine,
+  selectedLineId = null,
+  showCornerPoints = false,
+  mode = "fields",
+  placedItems = [],
+  selectedItemIds = [],
+  lockPanDrag = false,
+  lockZoom = false,
+  boundaryWidth,
+  boundaryHeight,
+  indentSpacing,
+  sketchMode = false,
+  onUpdatePlacedItem,
+  onUpdatePlacedItems,
+  onSelectionChange,
+  multiTouchMode = "both",
+}: MapViewProps) {
+  const webViewRef = useRef<WebView | null>(null);
+  const lastRoverMsgRef = useRef("");
+  const lastLinesMsgRef = useRef("");
+  const lastRefMsgRef = useRef("");
+  const webViewReadyRef = useRef(false);
+
+  // Helper to resolve origin coordinates
+  const origin = useMemo(() => {
+    let originLat = 28.6139;
+    let originLon = 77.2090;
+    let originDxfX = 0;
+    let originDxfY = 0;
+
+    if (alignedRefPoints && alignedRefPoints.length > 0) {
+      originLat = alignedRefPoints[0].lat;
+      originLon = alignedRefPoints[0].lon;
+      originDxfX = alignedRefPoints[0].dxf_x;
+      originDxfY = alignedRefPoints[0].dxf_y;
+    } else if (telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null) {
+      originLat = telemetrySnapshot.lat;
+      originLon = telemetrySnapshot.lon;
+      originDxfX = 0;
+      originDxfY = 0;
+    }
+    return { originLat, originLon, originDxfX, originDxfY };
+  }, [alignedRefPoints, telemetrySnapshot?.lat, telemetrySnapshot?.lon]);
+
+  // Helper to project a single PlanLine to GPS
+  const projectLineToGps = useCallback((line: PlanLine) => {
+    const coords: [number, number][] = [];
+    if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
+      for (const pt of line.entity.preview_points) {
+        const gps = projectLocalMetersToGps(
+          pt.north - origin.originDxfX,
+          pt.east - origin.originDxfY,
+          origin.originLat,
+          origin.originLon
+        );
+        coords.push([gps.lat, gps.lon]);
+      }
+    } else if (
+      line.from &&
+      line.to &&
+      Number.isFinite(line.from.x) &&
+      Number.isFinite(line.from.y) &&
+      Number.isFinite(line.to.x) &&
+      Number.isFinite(line.to.y)
+    ) {
+      const fromGps = projectLocalMetersToGps(
+        line.from.x - origin.originDxfX,
+        line.from.y - origin.originDxfY,
+        origin.originLat,
+        origin.originLon
+      );
+      const toGps = projectLocalMetersToGps(
+        line.to.x - origin.originDxfX,
+        line.to.y - origin.originDxfY,
+        origin.originLat,
+        origin.originLon
+      );
+      coords.push([fromGps.lat, fromGps.lon]);
+      coords.push([toGps.lat, toGps.lon]);
+    }
+    return { coords, color: "#ef4444", weight: 4 };
+  }, [origin]);
+
+  // Helper to extract GPS vertices for corner point indicators of a line
+  const getCornerPointsForLine = useCallback((line: PlanLine) => {
+    const points: { lat: number; lon: number }[] = [];
+    if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
+      for (const pt of line.entity.preview_points) {
+        const gps = projectLocalMetersToGps(
+          pt.north - origin.originDxfX,
+          pt.east - origin.originDxfY,
+          origin.originLat,
+          origin.originLon
+        );
+        points.push({ lat: gps.lat, lon: gps.lon });
+      }
+    } else if (
+      line.from &&
+      line.to &&
+      Number.isFinite(line.from.x) &&
+      Number.isFinite(line.from.y) &&
+      Number.isFinite(line.to.x) &&
+      Number.isFinite(line.to.y)
+    ) {
+      const fromGps = projectLocalMetersToGps(
+        line.from.x - origin.originDxfX,
+        line.from.y - origin.originDxfY,
+        origin.originLat,
+        origin.originLon
+      );
+      const toGps = projectLocalMetersToGps(
+        line.to.x - origin.originDxfX,
+        line.to.y - origin.originDxfY,
+        origin.originLat,
+        origin.originLon
+      );
+      points.push({ lat: fromGps.lat, lon: fromGps.lon });
+      points.push({ lat: toGps.lat, lon: toGps.lon });
+    }
+    return points;
+  }, [origin]);
+
+  // ── Projected plan lines (DXF → GPS) ──
+  const projectedPlanLines = useMemo(() => {
+    if (lines.length === 0) {
+      return [];
+    }
+
+    const result: { coords: [number, number][]; color: string; weight: number }[] = [];
+
+    for (const line of lines) {
+      const color = LAYER_COLORS[line.layer] || "#0f172a";
+      const weight = 2;
+
+      // If entity has preview_points, use those for curved paths
+      if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
+        const coords: [number, number][] = [];
+        for (const pt of line.entity.preview_points) {
+          const gps = projectLocalMetersToGps(
+            pt.north - origin.originDxfX,
+            pt.east - origin.originDxfY,
+            origin.originLat,
+            origin.originLon
+          );
+          coords.push([gps.lat, gps.lon]);
+        }
+        result.push({ coords, color, weight });
+      } else if (
+        line.from &&
+        line.to &&
+        Number.isFinite(line.from.x) &&
+        Number.isFinite(line.from.y) &&
+        Number.isFinite(line.to.x) &&
+        Number.isFinite(line.to.y)
+      ) {
+        const fromGps = projectLocalMetersToGps(
+          line.from.x - origin.originDxfX,
+          line.from.y - origin.originDxfY,
+          origin.originLat,
+          origin.originLon
+        );
+        const toGps = projectLocalMetersToGps(
+          line.to.x - origin.originDxfX,
+          line.to.y - origin.originDxfY,
+          origin.originLat,
+          origin.originLon
+        );
+        result.push({
+          coords: [
+            [fromGps.lat, fromGps.lon],
+            [toGps.lat, toGps.lon],
+          ],
+          color,
+          weight,
+        });
+      }
+    }
+
+    return result;
+  }, [lines, origin]);
+
+  // ── Projected boundary box (Templates Mode) ──
+  const projectedBoundary = useMemo(() => {
+    if (!boundaryWidth || !boundaryHeight) return null;
+
+    const halfW = boundaryWidth / 2;
+    const halfH = boundaryHeight / 2;
+
+    const outerDxfPoints = [
+      { north: -halfH, east: -halfW },
+      { north: -halfH, east: halfW },
+      { north: halfH, east: halfW },
+      { north: halfH, east: -halfW },
+      { north: -halfH, east: -halfW },
+    ];
+
+    const outerGps = outerDxfPoints.map((pt) => {
+      const gps = projectLocalMetersToGps(
+        pt.north - origin.originDxfX,
+        pt.east - origin.originDxfY,
+        origin.originLat,
+        origin.originLon
+      );
+      return [gps.lat, gps.lon] as [number, number];
+    });
+
+    let indentGps: [number, number][] = [];
+    if (indentSpacing && indentSpacing > 0) {
+      const indW = halfW - indentSpacing;
+      const indH = halfH - indentSpacing;
+      if (indW > 0 && indH > 0) {
+        const indentDxfPoints = [
+          { north: -indH, east: -indW },
+          { north: -indH, east: indW },
+          { north: indH, east: indW },
+          { north: indH, east: -indW },
+          { north: -indH, east: -indW },
+        ];
+        indentGps = indentDxfPoints.map((pt) => {
+          const gps = projectLocalMetersToGps(
+            pt.north - origin.originDxfX,
+            pt.east - origin.originDxfY,
+            origin.originLat,
+            origin.originLon
+          );
+          return [gps.lat, gps.lon] as [number, number];
+        });
+      }
+    }
+
+    return {
+      outer: outerGps,
+      indent: indentGps.length > 0 ? indentGps : null,
+    };
+  }, [boundaryWidth, boundaryHeight, indentSpacing, origin]);
+
+  // ── Projected placed items (Templates Mode) ──
+  const projectedPlacedItems = useMemo(() => {
+    if (!placedItems || placedItems.length === 0) return [];
+
+    return placedItems.map((item) => {
+      const cos = Math.cos((item.rotation || 0) * Math.PI / 180);
+      const sin = Math.sin((item.rotation || 0) * Math.PI / 180);
+
+      // Project each line's endpoints to GPS
+      const linesGps = item.lines.map((l) => {
+        const fromNorth = (l.from.x * cos - l.from.y * sin) * item.scale + item.y;
+        const fromEast = (l.from.x * sin + l.from.y * cos) * item.scale + item.x;
+
+        const toNorth = (l.to.x * cos - l.to.y * sin) * item.scale + item.y;
+        const toEast = (l.to.x * sin + l.to.y * cos) * item.scale + item.x;
+
+        const fromGps = projectLocalMetersToGps(
+          fromNorth - origin.originDxfX,
+          fromEast - origin.originDxfY,
+          origin.originLat,
+          origin.originLon
+        );
+        const toGps = projectLocalMetersToGps(
+          toNorth - origin.originDxfX,
+          toEast - origin.originDxfY,
+          origin.originLat,
+          origin.originLon
+        );
+
+        return {
+          from: { lat: fromGps.lat, lon: fromGps.lon },
+          to: { lat: toGps.lat, lon: toGps.lon },
+        };
+      });
+
+      // Bounding box corners: centered at item.y (North), item.x (East)
+      const halfLocalNorth = item.height / 2; // North-South
+      const halfLocalEast = item.width / 2; // East-West
+
+      const cornersLocal = [
+        { n: -halfLocalNorth, e: -halfLocalEast },
+        { n: -halfLocalNorth, e: halfLocalEast },
+        { n: halfLocalNorth, e: halfLocalEast },
+        { n: halfLocalNorth, e: -halfLocalEast },
+      ];
+
+      const boxGps = cornersLocal.map((c) => {
+        const n = (c.n * cos - c.e * sin) * item.scale + item.y;
+        const e = (c.n * sin + c.e * cos) * item.scale + item.x;
+        const gps = projectLocalMetersToGps(
+          n - origin.originDxfX,
+          e - origin.originDxfY,
+          origin.originLat,
+          origin.originLon
+        );
+        return [gps.lat, gps.lon] as [number, number];
+      });
+
+      // Center in GPS for rotation anchors
+      const centerGps = projectLocalMetersToGps(
+        item.y - origin.originDxfX,
+        item.x - origin.originDxfY,
+        origin.originLat,
+        origin.originLon
+      );
+
+      return {
+        id: item.id,
+        x: item.x,
+        y: item.y,
+        rotation: item.rotation,
+        scale: item.scale,
+        width: item.width,
+        height: item.height,
+        lines: linesGps,
+        box: boxGps,
+        center: { lat: centerGps.lat, lon: centerGps.lon },
+        selected: selectedItemIds?.includes(item.id) ?? false,
+      };
+    });
+  }, [placedItems, selectedItemIds, origin]);
+
+  // ── Send data to WebView ──
+  const sendToWebView = useCallback(
+    (msg: object) => {
+      if (!webViewReadyRef.current || !webViewRef.current) return;
+      try {
+        webViewRef.current.postMessage(JSON.stringify(msg));
+      } catch {
+        // WebView may have been unmounted
+      }
+    },
+    []
+  );
+
+  // Send recenter commands
+  useEffect(() => {
+    if (!visible) return;
+    if (recenterRoverTrigger && recenterRoverTrigger > 0) {
+      sendToWebView({ type: "recenter" });
+    }
+  }, [recenterRoverTrigger, visible, sendToWebView]);
+
+  useEffect(() => {
+    if (!visible) return;
+    if (recenterPlanTrigger && recenterPlanTrigger > 0) {
+      sendToWebView({ type: "fitPlan" });
+    }
+  }, [recenterPlanTrigger, visible, sendToWebView]);
+
+  // Send rover position updates
+  useEffect(() => {
+    if (!visible) return;
+
+    const lat = telemetrySnapshot?.lat;
+    const lon = telemetrySnapshot?.lon;
+    const heading = telemetrySnapshot?.heading_ned_deg;
+    
+    let nextTargetGps = null;
+    if (telemetrySnapshot?.pos_n && telemetrySnapshot?.pos_e && lines.length > 0 && origin.originLat) {
+      const realN = telemetrySnapshot.pos_n;
+      const realE = telemetrySnapshot.pos_e;
+      let nextDist = Infinity;
+      let nextTarget = null;
+      
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line.from || !line.to) continue;
+        const segStart = { x: line.from.x, y: line.from.y };
+        const segEnd = { x: line.to.x, y: line.to.y };
+
+        const segDx = segEnd.x - segStart.x;
+        const segDy = segEnd.y - segStart.y;
+        const segLen2 = segDx * segDx + segDy * segDy;
+        if (segLen2 === 0) continue;
+
+        const t = ((realN - segStart.x) * segDx + (realE - segStart.y) * segDy) / segLen2;
+
+        if (t < 0.5) {
+          const targetDist = Math.hypot(segEnd.x - realN, segEnd.y - realE);
+          if (targetDist < nextDist) {
+            nextDist = targetDist;
+            nextTarget = { x: segEnd.x, y: segEnd.y };
+          }
+          break;
+        }
+        if (i === lines.length - 1) {
+          const targetDist = Math.hypot(segEnd.x - realN, segEnd.y - realE);
+          if (targetDist < nextDist) {
+            nextDist = targetDist;
+            nextTarget = { x: segEnd.x, y: segEnd.y };
+          }
+        }
+      }
+      
+      if (nextTarget && nextDist < 100) {
+        nextTargetGps = projectLocalMetersToGps(
+          nextTarget.x - origin.originDxfX,
+          nextTarget.y - origin.originDxfY,
+          origin.originLat,
+          origin.originLon
+        );
+      }
+    }
+
+    sendToWebView({
+      type: "updateRover",
+      lat: lat ?? null,
+      lon: lon ?? null,
+      heading: heading ?? null,
+      nextTarget: nextTargetGps,
+    });
+  }, [
+    visible,
+    telemetrySnapshot?.lat,
+    telemetrySnapshot?.lon,
+    telemetrySnapshot?.heading_ned_deg,
+    telemetrySnapshot?.pos_n,
+    telemetrySnapshot?.pos_e,
+    lines,
+    origin,
+    projectLocalMetersToGps,
+    sendToWebView,
+  ]);
+
+  // Send projected plan lines
+  useEffect(() => {
+    if (!visible) return;
+
+    const msgKey = `${projectedPlanLines.length}:${lines.length}`;
+    if (msgKey === lastLinesMsgRef.current) return;
+    lastLinesMsgRef.current = msgKey;
+
+    sendToWebView({
+      type: "updatePlanLines",
+      lines: projectedPlanLines,
+    });
+  }, [visible, projectedPlanLines, lines.length, sendToWebView]);
+
+  // Send reference points
+  useEffect(() => {
+    if (!visible) return;
+
+    const msgKey = `${alignedRefPoints.length}:${alignedRefPoints
+      .map((p) => `${p.lat}:${p.lon}`)
+      .join(",")}`;
+    if (msgKey === lastRefMsgRef.current) return;
+    lastRefMsgRef.current = msgKey;
+
+    sendToWebView({
+      type: "updateRefPoints",
+      points: alignedRefPoints,
+    });
+  }, [visible, alignedRefPoints, sendToWebView]);
+
+  // Sync mode to WebView
+  useEffect(() => {
+    if (!visible) return;
+    sendToWebView({ type: "setMode", mode });
+  }, [mode, visible, sendToWebView]);
+
+  // Sync Fields mode selection to WebView
+  useEffect(() => {
+    if (!visible || mode !== "fields") return;
+    const selectedLine = lines.find((l) => l.id === selectedLineId);
+    if (selectedLine) {
+      const projected = projectLineToGps(selectedLine);
+      const cornerPts = getCornerPointsForLine(selectedLine);
+      sendToWebView({
+        type: "updateSelection",
+        line: projected,
+        cornerPoints: cornerPts,
+      });
+    } else {
+      sendToWebView({ type: "clearSelection" });
+    }
+  }, [selectedLineId, lines, visible, mode, projectLineToGps, getCornerPointsForLine, sendToWebView]);
+
+  // Sync Templates mode placed items to WebView
+  useEffect(() => {
+    if (!visible || mode !== "templates") return;
+    sendToWebView({
+      type: "updatePlacedItems",
+      items: projectedPlacedItems,
+    });
+  }, [projectedPlacedItems, visible, mode, sendToWebView]);
+
+  // Sync Templates mode boundary box to WebView
+  useEffect(() => {
+    if (!visible || mode !== "templates") return;
+    sendToWebView({
+      type: "updateBoundary",
+      boundary: projectedBoundary,
+    });
+  }, [projectedBoundary, visible, mode, sendToWebView]);
+
+  // Sync Templates mode lock states to WebView
+  useEffect(() => {
+    if (!visible || mode !== "templates") return;
+    sendToWebView({
+      type: "updateLocks",
+      lockPanDrag,
+      lockZoom,
+    });
+  }, [lockPanDrag, lockZoom, visible, mode, sendToWebView]);
+
+  // Sync Templates mode multiTouchMode state to WebView
+  useEffect(() => {
+    if (!visible || mode !== "templates") return;
+    sendToWebView({
+      type: "updateMultiTouchMode",
+      multiTouchMode,
+    });
+  }, [multiTouchMode, visible, mode, sendToWebView]);
+
+  const handleWebViewLoad = useCallback(() => {
+    webViewReadyRef.current = true;
+    
+    // Capture state at load time and send immediately
+    const lat = telemetrySnapshot?.lat;
+    const lon = telemetrySnapshot?.lon;
+    const heading = telemetrySnapshot?.heading_ned_deg;
+
+    try {
+      webViewRef.current?.postMessage(
+        JSON.stringify({
+          type: "setMode",
+          mode,
+        })
+      );
+    } catch (e) {}
+
+    if (lat != null && lon != null) {
+      try {
+        webViewRef.current?.postMessage(
+          JSON.stringify({
+            type: "updateRover",
+            lat,
+            lon,
+            heading: heading ?? null,
+          })
+        );
+      } catch (e) {}
+      lastRoverMsgRef.current = `${lat}:${lon}:${heading}`;
+    }
+
+    if (projectedPlanLines.length > 0) {
+      try {
+        webViewRef.current?.postMessage(
+          JSON.stringify({
+            type: "updatePlanLines",
+            lines: projectedPlanLines,
+          })
+        );
+      } catch (e) {}
+      lastLinesMsgRef.current = `${projectedPlanLines.length}:${lines.length}`;
+    }
+
+    if (alignedRefPoints.length > 0) {
+      try {
+        webViewRef.current?.postMessage(
+          JSON.stringify({
+            type: "updateRefPoints",
+            points: alignedRefPoints,
+          })
+        );
+      } catch (e) {}
+      lastRefMsgRef.current = `${alignedRefPoints.length}:${alignedRefPoints
+        .map((p) => `${p.lat}:${p.lon}`)
+        .join(",")}`;
+    }
+
+    if (mode === "fields") {
+      const selectedLine = lines.find((l) => l.id === selectedLineId);
+      if (selectedLine) {
+        try {
+          webViewRef.current?.postMessage(
+            JSON.stringify({
+              type: "updateSelection",
+              line: projectLineToGps(selectedLine),
+              cornerPoints: getCornerPointsForLine(selectedLine),
+            })
+          );
+        } catch (e) {}
+      }
+    } else if (mode === "templates") {
+      if (projectedBoundary) {
+        try {
+          webViewRef.current?.postMessage(
+            JSON.stringify({
+              type: "updateBoundary",
+              boundary: projectedBoundary,
+            })
+          );
+        } catch (e) {}
+      }
+      if (projectedPlacedItems.length > 0) {
+        try {
+          webViewRef.current?.postMessage(
+            JSON.stringify({
+              type: "updatePlacedItems",
+              items: projectedPlacedItems,
+            })
+          );
+        } catch (e) {}
+      }
+      try {
+        webViewRef.current?.postMessage(
+          JSON.stringify({
+            type: "updateLocks",
+            lockPanDrag,
+            lockZoom,
+          })
+        );
+        webViewRef.current?.postMessage(
+          JSON.stringify({
+            type: "updateMultiTouchMode",
+            multiTouchMode,
+          })
+        );
+      } catch (e) {}
+      try {
+        webViewRef.current?.postMessage(
+          JSON.stringify({
+            type: "updateSketchMode",
+            sketchMode,
+          })
+        );
+      } catch (e) {}
+    }
+  }, [
+    telemetrySnapshot,
+    projectedPlanLines,
+    alignedRefPoints,
+    lines,
+    mode,
+    selectedLineId,
+    projectLineToGps,
+    getCornerPointsForLine,
+    projectedBoundary,
+    projectedPlacedItems,
+    lockPanDrag,
+    lockZoom,
+    multiTouchMode,
+    sketchMode,
+  ]);
+
+  const handleWebViewMessage = useCallback(
+    (event: any) => {
+      try {
+        const data = JSON.parse(event.nativeEvent.data);
+        if (data.type === "mapClick") {
+          if (mode === "templates") {
+            onSelectionChange?.([]);
+            return;
+          }
+
+          const { lat, lon } = data;
+
+          let originLat = 0;
+          let originLon = 0;
+          let originDxfX = 0;
+          let originDxfY = 0;
+
+          if (alignedRefPoints && alignedRefPoints.length > 0) {
+            originLat = alignedRefPoints[0].lat;
+            originLon = alignedRefPoints[0].lon;
+            originDxfX = alignedRefPoints[0].dxf_x;
+            originDxfY = alignedRefPoints[0].dxf_y;
+          } else if (telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null) {
+            originLat = telemetrySnapshot.lat;
+            originLon = telemetrySnapshot.lon;
+            originDxfX = 0;
+            originDxfY = 0;
+          } else {
+            originLat = 28.6139;
+            originLon = 77.2090;
+            originDxfX = 0;
+            originDxfY = 0;
+          }
+
+          const local = projectGpsToLocalMeters(lat, lon, originLat, originLon);
+          const clickedDxfX = local.north + originDxfX;
+          const clickedDxfY = local.east + originDxfY;
+
+          // 1. Try to find the nearest point/vertex
+          let bestPt: { x: number; y: number } | null = null;
+          let bestPtDist = Infinity;
+          const ptThreshold = 2.0; // 2.0 meters tolerance
+
+          for (const line of lines) {
+            if (line.from) {
+              const d = Math.hypot(line.from.x - clickedDxfX, line.from.y - clickedDxfY);
+              if (d < bestPtDist) {
+                bestPtDist = d;
+                bestPt = { x: line.from.x, y: line.from.y };
+              }
+            }
+            if (line.to) {
+              const d = Math.hypot(line.to.x - clickedDxfX, line.to.y - clickedDxfY);
+              if (d < bestPtDist) {
+                bestPtDist = d;
+                bestPt = { x: line.to.x, y: line.to.y };
+              }
+            }
+            if (line.entity?.preview_points) {
+              for (const pt of line.entity.preview_points) {
+                const d = Math.hypot(pt.north - clickedDxfX, pt.east - clickedDxfY);
+                if (d < bestPtDist) {
+                  bestPtDist = d;
+                  bestPt = { x: pt.north, y: pt.east };
+                }
+              }
+            }
+          }
+
+          if (bestPt && bestPtDist < ptThreshold && onSelectPoint) {
+            onSelectPoint({ x: bestPt.y, y: bestPt.x });
+            return;
+          }
+
+          // 2. Try to find the nearest line
+          let bestLineId: string | null = null;
+          let bestLineDist = Infinity;
+          const lineThreshold = 3.5; // 3.5 meters tolerance
+
+          for (const line of lines) {
+            let dist = Infinity;
+            if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
+              for (let i = 0; i < line.entity.preview_points.length - 1; i++) {
+                const p1 = line.entity.preview_points[i];
+                const p2 = line.entity.preview_points[i + 1];
+                const d = distToSegment(clickedDxfX, clickedDxfY, p1.north, p1.east, p2.north, p2.east);
+                if (d < dist) dist = d;
+              }
+            } else if (line.from && line.to) {
+              dist = distToSegment(clickedDxfX, clickedDxfY, line.from.x, line.from.y, line.to.x, line.to.y);
+            }
+
+            if (dist < bestLineDist) {
+              bestLineDist = dist;
+              bestLineId = line.id;
+            }
+          }
+
+          if (bestLineId && bestLineDist < lineThreshold && onSelectLine) {
+            onSelectLine(bestLineId);
+          } else if (onSelectLine) {
+            onSelectLine(null);
+          }
+        } else if (data.type === "selectItems") {
+          onSelectionChange?.(data.ids);
+        } else if (data.type === "itemsMoved") {
+          const bw = boundaryWidth ?? 0;
+          const bh = boundaryHeight ?? 0;
+          const indent = indentSpacing ?? 0;
+          const leftIndent = -bw / 2 + indent;
+          const rightIndent = bw / 2 - indent;
+          const topIndent = -bh / 2 + indent;
+          const bottomIndent = bh / 2 - indent;
+
+          const updatedItems = placedItems.map((item) => {
+            const update = data.updates.find((u: any) => u.id === item.id);
+            if (update) {
+              const halfW = item.width / 2;
+              const halfH = item.height / 2;
+              let newX = update.x;
+              let newY = update.y;
+
+              // Clamp inside boundary indent
+              if (bw > 0 && bh > 0) {
+                newX = Math.max(leftIndent + halfW, Math.min(newX, rightIndent - halfW));
+                newY = Math.max(topIndent + halfH, Math.min(newY, bottomIndent - halfH));
+              }
+
+              return { ...item, x: newX, y: newY };
+            }
+            return item;
+          });
+
+          if (onUpdatePlacedItems) {
+            onUpdatePlacedItems(updatedItems);
+          } else if (onUpdatePlacedItem) {
+            data.updates.forEach((update: any) => {
+              const item = updatedItems.find((it) => it.id === update.id);
+              if (item) {
+                onUpdatePlacedItem(update.id, { x: item.x, y: item.y });
+              }
+            });
+          }
+        } else if (data.type === "itemsPinched") {
+          const bw = boundaryWidth ?? 0;
+          const bh = boundaryHeight ?? 0;
+          const indent = indentSpacing ?? 0;
+          const leftIndent = -bw / 2 + indent;
+          const rightIndent = bw / 2 - indent;
+          const topIndent = -bh / 2 + indent;
+          const bottomIndent = bh / 2 - indent;
+
+          const updatedItems = placedItems.map((item) => {
+            const update = data.updates.find((u: any) => u.id === item.id);
+            if (update) {
+              const scaleRatio = update.scale / item.scale;
+              const newW = item.width * scaleRatio;
+              const newH = item.height * scaleRatio;
+
+              let newX = item.x;
+              let newY = item.y;
+
+              // Clamp inside boundary indent
+              if (bw > 0 && bh > 0) {
+                newX = Math.max(leftIndent + newW / 2, Math.min(newX, rightIndent - newW / 2));
+                newY = Math.max(topIndent + newH / 2, Math.min(newY, bottomIndent - newH / 2));
+              }
+
+              // Update lines
+              const scaledLines = item.lines.map((l) => ({
+                ...l,
+                from: { ...l.from, x: l.from.x * scaleRatio, y: l.from.y * scaleRatio },
+                to: { ...l.to, x: l.to.x * scaleRatio, y: l.to.y * scaleRatio },
+              }));
+
+              return {
+                ...item,
+                scale: update.scale,
+                rotation: update.rotation,
+                width: newW,
+                height: newH,
+                x: newX,
+                y: newY,
+                lines: scaledLines,
+              };
+            }
+            return item;
+          });
+
+          if (onUpdatePlacedItems) {
+            onUpdatePlacedItems(updatedItems);
+          } else if (onUpdatePlacedItem) {
+            data.updates.forEach((update: any) => {
+              const item = updatedItems.find((it) => it.id === update.id);
+              if (item) {
+                onUpdatePlacedItem(update.id, {
+                  scale: item.scale,
+                  rotation: item.rotation,
+                  width: item.width,
+                  height: item.height,
+                  x: item.x,
+                  y: item.y,
+                  lines: item.lines,
+                });
+              }
+            });
+          }
+        }
+      } catch (e) {
+        console.error("MapView handleMessage error:", e);
+      }
+    },
+    [
+      lines,
+      alignedRefPoints,
+      telemetrySnapshot,
+      onSelectPoint,
+      onSelectLine,
+      mode,
+      placedItems,
+      selectedItemIds,
+      boundaryWidth,
+      boundaryHeight,
+      indentSpacing,
+      onUpdatePlacedItem,
+      onUpdatePlacedItems,
+      onSelectionChange,
+    ]
+  );
+
+  if (!visible) return null;
+
+  return (
+    <View style={styles.container}>
+      <WebView
+        ref={webViewRef}
+        originWhitelist={["*"]}
+        source={{ html: LEAFLET_HTML }}
+        style={styles.webview}
+        javaScriptEnabled
+        domStorageEnabled
+        onLoad={handleWebViewLoad}
+        onMessage={handleWebViewMessage}
+        startInLoadingState
+        renderLoading={() => (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#3b82f6" />
+            <Text style={styles.loadingText}>Loading Map…</Text>
+          </View>
+        )}
+        nestedScrollEnabled
+        scrollEnabled={false}
+        overScrollMode="never"
+      />
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 10,
+    elevation: 10,
+    borderRadius: 20,
+    overflow: "hidden",
+  },
+  webview: {
+    flex: 1,
+    backgroundColor: "#f8fafc",
+  },
+  loadingContainer: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#f8fafc",
+    gap: 12,
+  },
+  loadingText: {
+    color: "#64748b",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+});

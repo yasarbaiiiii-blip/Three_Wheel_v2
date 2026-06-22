@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "Rover Three Wheel",
+    "slug": "rover-three-wheel-native",
+    "version": "1.0.0",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "63e79af6-e534-48c3-9550-6ab6161e40bc"
+      }
+    },
+    "android": {
+      "package": "com.yasarrrrr.roverthreewheelnative",
+      "permissions": [
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.ACCESS_WIFI_STATE"
+      ],
+      "softwareKeyboardLayoutMode": "resize"
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ]
+  }
+}
