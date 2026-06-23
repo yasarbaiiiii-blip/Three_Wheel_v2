@@ -1,0 +1,1001 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; }
+    #map { width: 100%; height: 100%; }
+
+    /* Premium reference point tooltip */
+    .leaflet-tooltip.ref-tooltip {
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid #10b981;
+      color: #ffffff;
+      font-size: 10px;
+      font-weight: 700;
+      border-radius: 4px;
+      padding: 2px 6px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    }
+    .leaflet-tooltip-right.ref-tooltip::before {
+      border-right-color: rgba(15, 23, 42, 0.85);
+    }
+
+    .ref-marker {
+      width: 14px; height: 14px;
+      background: #10b981;
+      border: 2.5px solid #ffffff;
+      border-radius: 50%;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    }
+
+    /* Loading overlay */
+    .loading-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(255,255,255,0.92);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 10000; font-family: -apple-system, sans-serif;
+      flex-direction: column; gap: 12px;
+    }
+    .loading-overlay .spinner {
+      width: 36px; height: 36px;
+      border: 3px solid #e2e8f0; border-top-color: #3b82f6;
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-overlay .label { color: #64748b; font-size: 13px; font-weight: 600; }
+
+    /* Status badge */
+    .status-badge {
+      position: fixed; bottom: 12px; left: 12px; z-index: 9999;
+      background: rgba(15,23,42,0.85); color: #e2e8f0;
+      font-size: 11px; font-weight: 600; font-family: -apple-system, monospace;
+      padding: 6px 12px; border-radius: 8px;
+      backdrop-filter: blur(8px);
+      pointer-events: none;
+    }
+
+    @keyframes pulse-circle {
+      0% { opacity: 0.8; stroke-width: 0; }
+      100% { opacity: 0; stroke-width: 15px; }
+    }
+    .pulsing-circle {
+      animation: pulse-circle 1.5s infinite;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading" class="loading-overlay">
+    <div class="spinner"></div>
+    <div class="label">Loading Map…</div>
+  </div>
+  <div id="map"></div>
+  <div id="status" class="status-badge">Waiting for data…</div>
+
+  <script>
+    // ── Leaflet Setup ──
+    var osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 25,
+      maxNativeZoom: 19,
+      attribution: '© OpenStreetMap'
+    });
+
+    var satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 22,
+      maxNativeZoom: 18,
+      attribution: '© Esri'
+    });
+
+    var map = L.map('map', {
+      center: [0, 0],
+      zoom: 18,
+      layers: [osm],
+      zoomControl: true,
+      attributionControl: false
+    });
+
+    L.control.attribution({ position: 'bottomright', prefix: false }).addTo(map);
+
+    // Listen for map clicks and send back to React Native
+    map.on('click', function(e) {
+      if (mode !== 'templates') {
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'mapClick',
+            lat: e.latlng.lat,
+            lon: e.latlng.lng
+          }));
+        }
+      }
+    });
+
+    // Remove loading overlay after tiles load
+    map.whenReady(function() {
+      setTimeout(function() {
+        var el = document.getElementById('loading');
+        if (el) el.style.display = 'none';
+      }, 600);
+    });
+
+    // ── State ──
+    var mode = 'fields';
+    var currentItems = [];
+    var lockPanDrag = false;
+    var lockZoom = false;
+    var multiTouchMode = 'both';
+    var sketchMode = false;
+
+    var roverMarker = null;
+    var roverCircle = null;
+    var startArrowMarker = null;
+    var planLinesGroup = L.layerGroup().addTo(map);
+    var refPointsGroup = L.layerGroup().addTo(map);
+    var itemLayersGroup = L.layerGroup().addTo(map);
+    var boundaryLayersGroup = L.layerGroup().addTo(map);
+    var boundaryPointsGroup = L.layerGroup().addTo(map);
+    var selectedLineLayer = null;
+    var cornerMarkers = L.layerGroup().addTo(map);
+    
+    var nextTargetLine = null;
+    var nextTargetCircle = null;
+    var currentRefPoints = [];
+    var activeRefPointMarker = null;
+    var refPointLabelsVisible = false;
+
+    var boundaryControlPointsData = [];
+    var showBoundaryPoints = false;
+    var snapGlowCircle = L.circleMarker([0,0], {
+      radius: 12,
+      color: '#eab308',
+      fillColor: '#eab308',
+      fillOpacity: 0.4,
+      weight: 2,
+      className: 'pulsing-circle'
+    });
+
+    var hasAutocentered = false;
+    var statusEl = document.getElementById('status');
+
+    function updateStatus(text) {
+      if (statusEl) statusEl.textContent = text;
+    }
+
+    function postMessage(msg) {
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify(msg));
+      }
+    }
+
+    // Helper: Distance from point to line segment
+    function distToSegment(p, p1, p2) {
+      var x = p.x, y = p.y;
+      var x1 = p1.x, y1 = p1.y;
+      var x2 = p2.x, y2 = p2.y;
+      var l2 = (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2);
+      if (l2 === 0) return Math.hypot(x - x1, y - y1);
+      var t = ((x - x1) * (x2 - x1) + (y - y1) * (y2 - y1)) / l2;
+      t = Math.max(0, Math.min(1, t));
+      return Math.hypot(x - (x1 + t * (x2 - x1)), y - (y1 + t * (y2 - y1)));
+    }
+
+    // ── Rover Marker ──
+    function updateRover(lat, lon, heading, nextTarget) {
+      if (lat == null || lon == null) return;
+
+      var latlng = [lat, lon];
+
+      if (!roverMarker) {
+        var headingAngle = heading != null ? heading : 0;
+        var icon = L.divIcon({
+          className: 'rover-marker-wrapper',
+          html: '<div id="rover-vehicle" style="transform: rotate(' + headingAngle + 'deg); transition: transform 0.2s ease; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;">' +
+                '<svg width="40" height="40" viewBox="-20 -20 40 40" style="display: block;">' +
+                '<circle cx="0" cy="0" r="18.7" fill="rgba(14,165,233,0.12)" />' +
+                '<polygon points="-6.5,11 6.5,11 6.5,-4 0,-7.5 -6.5,-4" fill="#0ea5e9" stroke="#ffffff" stroke-width="1.8" stroke-linejoin="round" />' +
+                '<polygon points="-9.5,5 -6.5,5 -6.5,11 -9.5,11" fill="#0f172a" />' +
+                '<polygon points="9.5,5 6.5,5 6.5,11 9.5,11" fill="#0f172a" />' +
+                '<polygon points="-2.5,3 2.5,3 2.5,-3 -2.5,-3" fill="#0f172a" />' +
+                '<polygon points="-4.5,-2 4.5,-2 3.5,2 -3.5,2" fill="rgba(186,230,253,0.85)" />' +
+                '<circle cx="0" cy="-7.5" r="2.5" fill="#fbbf24" stroke="#fff" stroke-width="1" />' +
+                '</svg>' +
+                '</div>',
+          iconSize: [40, 40],
+          iconAnchor: [20, 20]
+        });
+        roverMarker = L.marker(latlng, { icon: icon, zIndexOffset: 1000 }).addTo(map);
+
+        roverCircle = L.circle(latlng, {
+          radius: 1.5,
+          color: '#3b82f6',
+          fillColor: '#3b82f6',
+          fillOpacity: 0.12,
+          weight: 1.5,
+          dashArray: '4 4'
+        }).addTo(map);
+      } else {
+        roverMarker.setLatLng(latlng);
+        roverCircle.setLatLng(latlng);
+      }
+
+      // Rotate vehicle
+      var el = document.getElementById('rover-vehicle');
+      if (el && heading != null) {
+        el.style.transform = 'rotate(' + heading + 'deg)';
+      }
+
+      if (nextTarget) {
+        var tl = L.latLng(nextTarget.lat, nextTarget.lon);
+        if (!nextTargetLine) {
+          nextTargetLine = L.polyline([latlng, tl], {
+            color: '#f59e0b',
+            weight: 2,
+            dashArray: '4 4'
+          }).addTo(map);
+          nextTargetCircle = L.circleMarker(tl, {
+            radius: 5,
+            color: '#f59e0b',
+            fillColor: '#f59e0b',
+            fillOpacity: 0.5,
+            className: 'pulsing-circle'
+          }).addTo(map);
+        } else {
+          nextTargetLine.setLatLngs([latlng, tl]);
+          nextTargetCircle.setLatLng(tl);
+        }
+      } else {
+        if (nextTargetLine) {
+          map.removeLayer(nextTargetLine);
+          map.removeLayer(nextTargetCircle);
+          nextTargetLine = null;
+          nextTargetCircle = null;
+        }
+      }
+
+      if (!hasAutocentered) {
+        map.setView(latlng, 19, { animate: false });
+        hasAutocentered = true;
+      }
+      updateStatus('Rover: ' + lat.toFixed(6) + ', ' + lon.toFixed(6));
+    }
+
+    // ── Plan Lines ──
+    function updatePlanLines(linesData) {
+      planLinesGroup.clearLayers();
+      if (startArrowMarker) {
+        map.removeLayer(startArrowMarker);
+        startArrowMarker = null;
+      }
+
+      if (!linesData || linesData.length === 0) return;
+
+      var allLatLngs = [];
+
+      for (var i = 0; i < linesData.length; i++) {
+        var seg = linesData[i];
+        var coords = seg.coords;
+        var color = seg.color || '#0f172a';
+        var weight = seg.weight || 2;
+
+        if (coords && coords.length >= 2) {
+          var polyline = L.polyline(coords, {
+            color: color,
+            weight: weight,
+            opacity: 0.85,
+            lineCap: 'round',
+            lineJoin: 'round'
+          });
+          planLinesGroup.addLayer(polyline);
+
+          for (var j = 0; j < coords.length; j++) {
+            allLatLngs.push(coords[j]);
+          }
+        }
+      }
+
+      // Add Start Direction Arrow at the start of the first segment of the plan
+      if (linesData[0] && linesData[0].coords && linesData[0].coords.length >= 2) {
+        var p1 = linesData[0].coords[0];
+        var p2 = linesData[0].coords[1];
+        
+        // dy = Lat, dx = Lon adjusted for latitude
+        var dy = p2[0] - p1[0];
+        var dx = (p2[1] - p1[1]) * Math.cos(p1[0] * Math.PI / 180);
+        var angle = Math.atan2(dx, dy) * 180 / Math.PI; // degrees clockwise from North
+        
+        var arrowHtml = '<div style="transform: rotate(' + angle + 'deg); width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 14px solid #ef4444; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.3));"></div>';
+        
+        var arrowIcon = L.divIcon({
+          className: '',
+          html: arrowHtml,
+          iconSize: [12, 14],
+          iconAnchor: [6, 7]
+        });
+        
+        startArrowMarker = L.marker(p1, { icon: arrowIcon }).addTo(map);
+      }
+
+      // If no rover, fit to plan bounds
+      if (!hasAutocentered && allLatLngs.length > 0) {
+        var bounds = L.latLngBounds(allLatLngs);
+        map.fitBounds(bounds, { padding: [40, 40] });
+        hasAutocentered = true;
+      }
+    }
+
+    // ── Reference Points ──
+    function updateRefPoints(points) {
+      refPointsGroup.clearLayers();
+      currentRefPoints = points || [];
+      activeRefPointMarker = null;
+
+      if (!points || points.length === 0) return;
+
+      for (var i = 0; i < points.length; i++) {
+        var pt = points[i];
+        var icon = L.divIcon({
+          className: '',
+          html: '<div class="ref-marker"></div>',
+          iconSize: [14, 14],
+          iconAnchor: [7, 7]
+        });
+        (function(markerIndex) {
+          var marker = L.marker([pt.lat, pt.lon], { icon: icon }).addTo(refPointsGroup);
+          marker._refPointIndex = markerIndex;
+          marker.bindTooltip('Ref #' + (markerIndex + 1) + ' (' + pt.lat.toFixed(6) + ', ' + pt.lon.toFixed(6) + ')', {
+            permanent: false,
+            direction: 'right',
+            className: 'ref-tooltip',
+            offset: [10, 0]
+          });
+          marker.on('click', function() {
+            if (!refPointLabelsVisible) return;
+            if (activeRefPointMarker && activeRefPointMarker !== marker) {
+              activeRefPointMarker.closeTooltip();
+            }
+            if (activeRefPointMarker === marker && marker.isTooltipOpen && marker.isTooltipOpen()) {
+              marker.closeTooltip();
+              activeRefPointMarker = null;
+              return;
+            }
+            marker.openTooltip();
+            activeRefPointMarker = marker;
+          });
+        })(i);
+      }
+    }
+
+    // ── Render Placed Items (Templates Mode) ──
+    function renderPlacedItems(items) {
+      itemLayersGroup.clearLayers();
+      currentItems = items;
+
+      items.forEach(function(item) {
+        // Draw template lines
+        item.lines.forEach(function(line) {
+          var poly = L.polyline([
+            [line.from.lat, line.from.lon],
+            [line.to.lat, line.to.lon]
+          ], {
+            color: '#16a34a',
+            weight: 2,
+            opacity: sketchMode && !item.selected ? 0.2 : (item.selected ? 1.0 : 0.8),
+            lineCap: 'round',
+            lineJoin: 'round'
+          });
+          poly._itemId = item.id;
+          itemLayersGroup.addLayer(poly);
+        });
+
+        // Draw bounding box polygon
+        if (item.box && item.box.length >= 4) {
+          var boxPoly = L.polygon(item.box, {
+            color: item.selected ? '#ef4444' : '#3b82f6',
+            weight: 1.5,
+            fillColor: item.selected ? '#ef4444' : '#3b82f6',
+            fillOpacity: item.selected ? 0.05 : 0.02,
+            dashArray: item.selected ? '' : '4 4'
+          });
+          boxPoly._itemId = item.id;
+          itemLayersGroup.addLayer(boxPoly);
+        });
+      });
+    }
+
+    // ── Render Boundary Box (Templates Mode) ──
+    function renderBoundary(boundary, controlPoints, isSelected) {
+      boundaryLayersGroup.clearLayers();
+      if (!boundary || !boundary.outer || boundary.outer.length < 4) return;
+
+      var outerPoly = L.polyline(boundary.outer, {
+        color: isSelected ? '#ef4444' : '#0f172a',
+        weight: isSelected ? 4 : 2,
+        opacity: 0.9,
+      });
+      outerPoly._boundaryId = 'boundary';
+      outerPoly.on('click', function(e) {
+        L.DomEvent.stopPropagation(e);
+        postMessage({ type: 'selectItems', ids: ['boundary'] });
+      });
+      boundaryLayersGroup.addLayer(outerPoly);
+
+      if (boundary.indent && boundary.indent.length > 0) {
+        var indentPoly = L.polyline(boundary.indent, {
+          color: '#cbd5e1',
+          weight: 2,
+          dashArray: '5, 5',
+          interactive: false
+        });
+        boundaryLayersGroup.addLayer(indentPoly);
+      }
+
+      renderBoundaryControlPoints(controlPoints);
+    }
+
+    function renderBoundaryControlPoints(controlPoints) {
+      boundaryPointsGroup.clearLayers();
+      if (!controlPoints || controlPoints.length === 0) return;
+
+      controlPoints.forEach(function(cp) {
+        var marker = L.circleMarker(cp.latlng, {
+          radius: 5,
+          color: '#3b82f6',
+          fillColor: '#3b82f6',
+          fillOpacity: 0.6,
+          weight: 2,
+          interactive: false, // Don't block clicks on boundary edges
+        });
+        boundaryPointsGroup.addLayer(marker);
+      });
+    }
+
+    // ── Update Selection Highlights (Fields Mode) ──
+    function updateSelection(data) {
+      if (selectedLineLayer) {
+        map.removeLayer(selectedLineLayer);
+        selectedLineLayer = null;
+      }
+      cornerMarkers.clearLayers();
+
+      if (!data) return;
+
+      if (data.line && data.line.coords && data.line.coords.length >= 2) {
+        selectedLineLayer = L.polyline(data.line.coords, {
+          color: '#ef4444',
+          weight: 4,
+          opacity: 1,
+          lineCap: 'round',
+          lineJoin: 'round'
+        }).addTo(map);
+      }
+
+      if (data.cornerPoints && data.cornerPoints.length > 0) {
+        data.cornerPoints.forEach(function(pt) {
+          L.circleMarker([pt.lat, pt.lon], {
+            radius: 5,
+            color: '#3b82f6',
+            fillColor: '#3b82f6',
+            fillOpacity: 0.9,
+            weight: 2
+          }).addTo(cornerMarkers);
+        });
+      }
+    }
+
+    function clearSelection() {
+      if (selectedLineLayer) {
+        map.removeLayer(selectedLineLayer);
+        selectedLineLayer = null;
+      }
+      cornerMarkers.clearLayers();
+    }
+
+    // ── Hit Testing ──
+    function hitTest(latlng) {
+      var minDistance = Infinity;
+      var hitId = null;
+      var thresholdPx = 18; // pixels
+
+      var clickPoint = map.latLngToContainerPoint(latlng);
+
+      currentItems.forEach(function(item) {
+        // Test lines
+        item.lines.forEach(function(line) {
+          var p1 = map.latLngToContainerPoint([line.from.lat, line.from.lon]);
+          var p2 = map.latLngToContainerPoint([line.to.lat, line.to.lon]);
+          var d = distToSegment(clickPoint, p1, p2);
+          if (d < minDistance) {
+            minDistance = d;
+            hitId = item.id;
+          }
+        });
+
+        // Test bounding box lines
+        if (item.box && item.box.length >= 4) {
+          for (var i = 0; i < item.box.length; i++) {
+            var nextIdx = (i + 1) % item.box.length;
+            var p1 = map.latLngToContainerPoint(item.box[i]);
+            var p2 = map.latLngToContainerPoint(item.box[nextIdx]);
+            var d = distToSegment(clickPoint, p1, p2);
+            if (d < minDistance) {
+              minDistance = d;
+              hitId = item.id;
+            }
+          }
+        }
+      });
+
+      // Hit test boundary
+      if (showBoundaryPoints) {
+        var boundaryLayers = boundaryLayersGroup.getLayers();
+        if (boundaryLayers.length > 0) {
+          var outerPoly = boundaryLayers[0];
+          if (outerPoly && outerPoly.getLatLngs) {
+             var lls = outerPoly.getLatLngs();
+             if (lls && lls.length > 0) {
+               var bounds = outerPoly.getBounds();
+               if (bounds.contains(latlng)) {
+                 // We hit the boundary interior
+                 var d2 = Infinity;
+                 // If it's too close to an item, item takes precedence
+                 if (minDistance > thresholdPx) {
+                   hitId = "boundary-interior";
+                   minDistance = 0; // definitely hit
+                 }
+               }
+             }
+          }
+        }
+      }
+
+      if (minDistance <= thresholdPx) {
+        return hitId;
+      }
+      return null;
+    }
+
+    // ── Dragging & Multi-Touch Gestures ──
+    var activeDrag = null; // { type: 'items'|'background', ids: [], startLatlng: L.LatLng, itemsStart: [] }
+    var touchState = null; // { initialDist, initialAngle, itemsStart, lastScale, lastRotation }
+
+    function onMouseDown(e) {
+      if (mode !== 'templates') return;
+
+      var hitId = hitTest(e.latlng);
+      if (hitId) {
+        if (hitId === 'boundary-interior') {
+          postMessage({ type: 'selectItems', ids: ['boundary'] });
+          if (lockPanDrag) return;
+          activeDrag = {
+            type: 'boundary',
+            startLatlng: e.latlng
+          };
+          boundaryLayersGroup.eachLayer(function(layer) {
+            if (layer.getLatLngs) {
+              layer._dragStartLatLngs = JSON.parse(JSON.stringify(layer.getLatLngs()));
+            }
+          });
+          map.dragging.disable();
+          return;
+        }
+
+        var selectedIds = currentItems.filter(function(it) { return it.selected; }).map(function(it) { return it.id; });
+        if (!selectedIds.includes(hitId)) {
+          selectedIds = [hitId];
+          postMessage({ type: 'selectItems', ids: selectedIds });
+        }
+
+        if (lockPanDrag) return;
+
+        var starts = selectedIds.map(function(id) {
+          var item = currentItems.find(function(it) { return it.id === id; });
+          return { id: id, x: item.x, y: item.y, rotation: item.rotation, scale: item.scale };
+        });
+
+        activeDrag = {
+          type: 'items',
+          ids: selectedIds,
+          startLatlng: e.latlng,
+          itemsStart: starts
+        };
+        
+        itemLayersGroup.eachLayer(function(layer) {
+          if (selectedIds.includes(layer._itemId) && layer.getLatLngs) {
+            layer._dragStartLatLngs = JSON.parse(JSON.stringify(layer.getLatLngs()));
+          }
+        });
+        
+        map.dragging.disable();
+      } else {
+        activeDrag = {
+          type: 'background',
+          startLatlng: e.latlng
+        };
+      }
+    }
+
+    function onMouseMove(e) {
+      if (!activeDrag || lockPanDrag) return;
+
+      if (activeDrag.type === 'items') {
+        var latDelta = e.latlng.lat - activeDrag.startLatlng.lat;
+        var lonDelta = e.latlng.lng - activeDrag.startLatlng.lng;
+
+        // Move layers locally in Leaflet at 60fps
+        itemLayersGroup.eachLayer(function(layer) {
+          if (activeDrag.ids.includes(layer._itemId) && layer._dragStartLatLngs) {
+             var lls = layer._dragStartLatLngs;
+             if (Array.isArray(lls[0])) {
+                var newLls = lls[0].map(function(ll) {
+                   return L.latLng(ll.lat + latDelta, ll.lng + lonDelta);
+                });
+                layer.setLatLngs([newLls]);
+             } else {
+                var newLls = lls.map(function(ll) {
+                   return L.latLng(ll.lat + latDelta, ll.lng + lonDelta);
+                });
+                layer.setLatLngs(newLls);
+             }
+          }
+        });
+      } else if (activeDrag.type === 'boundary') {
+        var latDelta = e.latlng.lat - activeDrag.startLatlng.lat;
+        var lonDelta = e.latlng.lng - activeDrag.startLatlng.lng;
+
+        var snapped = false;
+        var rll = null;
+        if (roverMarker && boundaryControlPointsData && boundaryControlPointsData.length > 0) {
+          rll = roverMarker.getLatLng();
+          var bestDist = Infinity;
+          var bestPtIdx = -1;
+
+          for (var i = 0; i < boundaryControlPointsData.length; i++) {
+            var cp = boundaryControlPointsData[i];
+            var pLat = cp.latlng[0] + latDelta;
+            var pLng = cp.latlng[1] + lonDelta;
+            
+            var dist = map.distance([pLat, pLng], rll);
+            if (dist < 3.0 && dist < bestDist) { // Snap threshold: 3 meters
+              bestDist = dist;
+              bestPtIdx = i;
+            }
+          }
+
+          if (bestPtIdx !== -1) {
+            var cp = boundaryControlPointsData[bestPtIdx];
+            latDelta = rll.lat - cp.latlng[0];
+            lonDelta = rll.lng - cp.latlng[1];
+            snapped = true;
+          }
+        }
+
+        if (snapped && rll) {
+           if (!map.hasLayer(snapGlowCircle)) {
+             snapGlowCircle.addTo(map);
+           }
+           snapGlowCircle.setLatLng(rll);
+        } else {
+           if (map.hasLayer(snapGlowCircle)) {
+             map.removeLayer(snapGlowCircle);
+           }
+        }
+
+        activeDrag.currentLatDelta = latDelta;
+        activeDrag.currentLonDelta = lonDelta;
+
+        boundaryLayersGroup.eachLayer(function(layer) {
+          if (layer._dragStartLatLngs) {
+             var lls = layer._dragStartLatLngs;
+             if (Array.isArray(lls[0])) {
+                var newLls = lls[0].map(function(ll) {
+                   return L.latLng(ll.lat + latDelta, ll.lng + lonDelta);
+                });
+                layer.setLatLngs([newLls]);
+             } else {
+                var newLls = lls.map(function(ll) {
+                   return L.latLng(ll.lat + latDelta, ll.lng + lonDelta);
+                });
+                layer.setLatLngs(newLls);
+             }
+          }
+        });
+        
+        boundaryPointsGroup.eachLayer(function(layer) {
+          if (layer._originalLatLng) {
+            layer.setLatLng(L.latLng(layer._originalLatLng[0] + latDelta, layer._originalLatLng[1] + lonDelta));
+          }
+        });
+      }
+    }
+
+    function onMouseUp(e) {
+      if (!activeDrag) return;
+
+      if (activeDrag.type === 'items') {
+        var latDelta = e.latlng.lat - activeDrag.startLatlng.lat;
+        var lonDelta = e.latlng.lng - activeDrag.startLatlng.lng;
+
+        var originLatRad = (activeDrag.startLatlng.lat * Math.PI) / 180;
+        var dy = latDelta * (6378137.0 * Math.PI / 180);
+        var dx = lonDelta * (6378137.0 * Math.cos(originLatRad) * Math.PI / 180);
+
+        var updates = activeDrag.itemsStart.map(function(start) {
+          return {
+            id: start.id,
+            x: start.x + dx,
+            y: start.y + dy
+          };
+        });
+
+        postMessage({ type: 'itemsMoved', updates: updates });
+      } else if (activeDrag.type === 'background') {
+        var p1 = map.latLngToContainerPoint(e.latlng);
+        var p2 = map.latLngToContainerPoint(activeDrag.startLatlng);
+        var dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+        if (dist < 5) {
+          if (activeDrag.type === 'boundary') {
+            // Keep boundary selected if they just clicked it
+          } else {
+            postMessage({ type: 'selectItems', ids: [] });
+          }
+        }
+      } else if (activeDrag.type === 'boundary') {
+        var latDelta = activeDrag.currentLatDelta !== undefined ? activeDrag.currentLatDelta : (e.latlng.lat - activeDrag.startLatlng.lat);
+        var lonDelta = activeDrag.currentLonDelta !== undefined ? activeDrag.currentLonDelta : (e.latlng.lng - activeDrag.startLatlng.lng);
+        
+        if (map.hasLayer(snapGlowCircle)) {
+          map.removeLayer(snapGlowCircle);
+        }
+
+        postMessage({ type: 'boundaryDragged', latDelta: latDelta, lonDelta: lonDelta });
+      }
+
+      activeDrag = null;
+      if (!lockPanDrag) {
+        map.dragging.enable();
+      }
+    }
+
+    // Touch handlers
+    function onTouchStart(e) {
+      if (mode !== 'templates') return;
+
+      var touches = e.touches || e.originalEvent.touches;
+      if (touches.length === 1) {
+        var latlng = map.mouseEventToLatLng(touches[0]);
+        onMouseDown({ latlng: latlng });
+      } else if (touches.length === 2 && !lockPanDrag) {
+        var p1 = map.mouseEventToContainerPoint(touches[0]);
+        var p2 = map.mouseEventToContainerPoint(touches[1]);
+        var dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+        var angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+
+        var selectedIds = currentItems.filter(function(it) { return it.selected; }).map(function(it) { return it.id; });
+        if (selectedIds.length > 0) {
+          var starts = selectedIds.map(function(id) {
+            var item = currentItems.find(function(it) { return it.id === id; });
+            return { id: id, x: item.x, y: item.y, rotation: item.rotation, scale: item.scale };
+          });
+
+          touchState = {
+            initialDist: dist,
+            initialAngle: angle,
+            itemsStart: starts,
+            lastScale: 1.0,
+            lastRotation: 0.0
+          };
+
+          map.dragging.disable();
+          map.touchZoom.disable();
+        }
+      }
+    }
+
+    function updatePinchVisuals(scaleMult, angleDelta) {
+      var cos = Math.cos(angleDelta * Math.PI / 180);
+      var sin = Math.sin(angleDelta * Math.PI / 180);
+
+      itemLayersGroup.eachLayer(function(layer) {
+        if (touchState.itemsStart.some(function(it) { return it.id === layer._itemId; })) {
+          var item = currentItems.find(function(it) { return it.id === layer._itemId; });
+          var center = item.center;
+
+          if (layer.getLatLngs) {
+            var lls = layer.getLatLngs();
+            var rotatePoint = function(ll) {
+              var latOffset = ll.lat - center.lat;
+              var lonOffset = ll.lng - center.lon;
+
+              var newLatOffset = (latOffset * cos - lonOffset * sin) * scaleMult;
+              var newLonOffset = (latOffset * sin + lonOffset * cos) * scaleMult;
+
+              return L.latLng(center.lat + newLatOffset, center.lng + newLonOffset);
+            };
+
+            if (Array.isArray(lls[0])) {
+              var newLls = lls[0].map(rotatePoint);
+              layer.setLatLngs([newLls]);
+            } else {
+              var newLls = lls.map(rotatePoint);
+              layer.setLatLngs(newLls);
+            }
+          }
+        }
+      });
+    }
+
+    function onTouchMove(e) {
+      if (mode !== 'templates') return;
+
+      var touches = e.touches || e.originalEvent.touches;
+      if (touches.length === 1 && activeDrag) {
+        var latlng = map.mouseEventToLatLng(touches[0]);
+        onMouseMove({ latlng: latlng });
+      } else if (touches.length === 2 && touchState && !lockPanDrag) {
+        var p1 = map.mouseEventToContainerPoint(touches[0]);
+        var p2 = map.mouseEventToContainerPoint(touches[1]);
+        var dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+        var angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+
+        var scaleMult = dist / touchState.initialDist;
+        var angleDelta = (angle - touchState.initialAngle) * 180 / Math.PI;
+
+        var modeSetting = multiTouchMode;
+        var appliedScale = modeSetting === 'rotate' ? 1 : scaleMult;
+        var appliedRot = modeSetting === 'scale' ? 0 : angleDelta;
+
+        touchState.lastScale = appliedScale;
+        touchState.lastRotation = appliedRot;
+
+        updatePinchVisuals(appliedScale, appliedRot);
+      }
+    }
+
+    function onTouchEnd(e) {
+      if (touchState) {
+        var updates = touchState.itemsStart.map(function(start) {
+          return {
+            id: start.id,
+            scale: start.scale * touchState.lastScale,
+            rotation: (start.rotation + touchState.lastRotation) % 360
+          };
+        });
+
+        postMessage({ type: 'itemsPinched', updates: updates });
+
+        touchState = null;
+        if (!lockPanDrag) {
+          map.dragging.enable();
+        }
+        if (!lockZoom) {
+          map.touchZoom.enable();
+        }
+      } else if (activeDrag) {
+        var touches = e.touches || (e.originalEvent && e.originalEvent.touches);
+        if (!touches || touches.length === 0) {
+          var changed = e.changedTouches || (e.originalEvent && e.originalEvent.changedTouches);
+          if (changed && changed.length > 0) {
+            onMouseUp({ latlng: map.mouseEventToLatLng(changed[0]) });
+          } else {
+            onMouseUp({ latlng: activeDrag.startLatlng });
+          }
+        }
+      }
+    }
+
+    // Hook listeners
+    map.on('mousedown', onMouseDown);
+    map.on('mousemove', onMouseMove);
+    map.on('mouseup', onMouseUp);
+
+    map.on('touchstart', onTouchStart);
+    map.on('touchmove', onTouchMove);
+    map.on('touchend', onTouchEnd);
+
+    // Lock Helper setters
+    function setLockPanDrag(locked) {
+      if (locked) {
+        map.dragging.disable();
+      } else {
+        map.dragging.enable();
+      }
+    }
+
+    function setLockZoom(locked) {
+      if (locked) {
+        map.doubleClickZoom.disable();
+        map.scrollWheelZoom.disable();
+        map.touchZoom.disable();
+      } else {
+        map.doubleClickZoom.enable();
+        map.scrollWheelZoom.enable();
+        map.touchZoom.enable();
+      }
+    }
+
+    // ── Message Handler ──
+    function handleMessage(event) {
+      try {
+        var data = JSON.parse(event.data);
+
+        if (data.type === 'updateRover') {
+          updateRover(data.lat, data.lon, data.heading, data.nextTarget);
+        } else if (data.type === 'updatePlanLines') {
+          updatePlanLines(data.lines);
+        } else if (data.type === 'updateRefPoints') {
+          updateRefPoints(data.points);
+        } else if (data.type === 'updateRefPointLabels') {
+          refPointLabelsVisible = !!data.visible;
+          if (!refPointLabelsVisible && activeRefPointMarker) {
+            activeRefPointMarker.closeTooltip();
+            activeRefPointMarker = null;
+          }
+          updateRefPoints(currentRefPoints);
+        } else if (data.type === 'recenter') {
+          if (roverMarker) {
+            map.setView(roverMarker.getLatLng(), map.getZoom());
+          }
+        } else if (data.type === 'fitPlan') {
+          var allLatLngs = [];
+          planLinesGroup.eachLayer(function(layer) {
+            if (layer.getLatLngs) {
+              var latlngs = layer.getLatLngs();
+              if (Array.isArray(latlngs[0])) {
+                for (var i = 0; i < latlngs.length; i++) {
+                  allLatLngs = allLatLngs.concat(latlngs[i]);
+                }
+              } else {
+                allLatLngs = allLatLngs.concat(latlngs);
+              }
+            }
+          });
+          if (allLatLngs.length > 0) {
+            var bounds = L.latLngBounds(allLatLngs);
+            map.fitBounds(bounds, { padding: [40, 40] });
+          }
+        } else if (data.type === 'updatePlacedItems') {
+          renderPlacedItems(data.items);
+        } else if (data.type === 'updateBoundary') {
+          boundaryControlPointsData = data.boundaryControlPoints || [];
+          // ensure the drag handles are reset
+          if (activeDrag && activeDrag.type === 'boundary') return;
+          renderBoundary(data.boundary, data.boundaryControlPoints, data.isBoundarySelected, data.selectedBoundaryEdge);
+        } else if (data.type === 'updateShowBoundaryPoints') {
+          showBoundaryPoints = !!data.showBoundaryPoints;
+          if (!showBoundaryPoints) {
+            boundaryPointsGroup.clearLayers();
+          }
+        } else if (data.type === 'updateSketchMode') {
+          sketchMode = data.sketchMode;
+          if (mode === 'templates') {
+            renderPlacedItems(currentItems);
+          }
+        } else if (data.type === 'updateLocks') {
+          lockPanDrag = data.lockPanDrag;
+          lockZoom = data.lockZoom;
+          setLockPanDrag(lockPanDrag);
+          setLockZoom(lockZoom);
+        } else if (data.type === 'updateMultiTouchMode') {
+          multiTouchMode = data.multiTouchMode;
+        } else if (data.type === 'updateSelection') {
+          updateSelection(data);
+        } else if (data.type === 'clearSelection') {
+          clearSelection();
+        } else if (data.type === 'setMode') {
+          mode = data.mode;
+        }
+      } catch (e) {
+        console.error('MapView message error:', e);
+      }
+    }
+
+    // Listen for RN WebView messages
+    document.addEventListener('message', handleMessage);
+    window.addEventListener('message', handleMessage);
+  </script>
+</body>
+</html>

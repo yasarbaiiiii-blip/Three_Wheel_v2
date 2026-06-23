@@ -26,6 +26,11 @@ export interface BoundaryEditorProps {
   setSelectedItemIds: (ids: string[]) => void;
   multiTouchMode: "both" | "scale" | "rotate";
   sketchMode?: boolean;
+  boundaryPosition?: { x: number; y: number };
+  onMoveBoundary?: (x: number, y: number) => void;
+  showBoundaryPoints?: boolean;
+  activeSnapPointId?: string | null;
+  onPlaceRoverAtPoint?: (pointId: string, localX: number, localY: number) => void;
 }
 
 export const BoundaryEditor = memo(function BoundaryEditor({
@@ -39,8 +44,31 @@ export const BoundaryEditor = memo(function BoundaryEditor({
   setSelectedItemIds,
   multiTouchMode,
   sketchMode = false,
+  boundaryPosition,
+  onMoveBoundary,
+  showBoundaryPoints,
+  activeSnapPointId,
+  onPlaceRoverAtPoint,
 }: BoundaryEditorProps) {
   const METER_TO_PX = 100;
+
+  const bpX = boundaryPosition?.x || 0;
+  const bpY = boundaryPosition?.y || 0;
+  const cx = bpX * METER_TO_PX;
+  const cy = -bpY * METER_TO_PX;
+  const halfW = boundaryWidth * METER_TO_PX / 2;
+  const halfH = boundaryHeight * METER_TO_PX / 2;
+
+  const controlPoints = useMemo(() => [
+    { id: "corner-tl", svgX: cx - halfW, svgY: cy - halfH },
+    { id: "corner-tr", svgX: cx + halfW, svgY: cy - halfH },
+    { id: "corner-br", svgX: cx + halfW, svgY: cy + halfH },
+    { id: "corner-bl", svgX: cx - halfW, svgY: cy + halfH },
+    { id: "midpoint-t",  svgX: cx,        svgY: cy - halfH },
+    { id: "midpoint-r",  svgX: cx + halfW, svgY: cy },
+    { id: "midpoint-b",  svgX: cx,        svgY: cy + halfH },
+    { id: "midpoint-l",  svgX: cx - halfW, svgY: cy },
+  ], [cx, cy, halfW, halfH]);
 
 
   const [svgSize, setSvgSize] = useState({ width: 400, height: 400 }); // fallback for initial taps
@@ -89,6 +117,21 @@ export const BoundaryEditor = memo(function BoundaryEditor({
   const svgSizeRef = useRef({ width: 0, height: 0 });
   useEffect(() => { svgSizeRef.current = svgSize; }, [svgSize]);
 
+  const boundaryPositionRef = useRef(boundaryPosition);
+  useEffect(() => { boundaryPositionRef.current = boundaryPosition; }, [boundaryPosition]);
+
+  const showBoundaryPointsRef = useRef(showBoundaryPoints);
+  useEffect(() => { showBoundaryPointsRef.current = showBoundaryPoints; }, [showBoundaryPoints]);
+
+  const controlPointsRef = useRef(controlPoints);
+  useEffect(() => { controlPointsRef.current = controlPoints; }, [controlPoints]);
+
+  const onMoveBoundaryRef = useRef(onMoveBoundary);
+  useEffect(() => { onMoveBoundaryRef.current = onMoveBoundary; }, [onMoveBoundary]);
+
+  const onPlaceRoverAtPointRef = useRef(onPlaceRoverAtPoint);
+  useEffect(() => { onPlaceRoverAtPointRef.current = onPlaceRoverAtPoint; }, [onPlaceRoverAtPoint]);
+
   /* ── RAF throttle refs (Step 3) ── */
   const rafPendingRef = useRef(false);
   const rafIdRef = useRef<number | null>(null);
@@ -122,10 +165,11 @@ export const BoundaryEditor = memo(function BoundaryEditor({
 
   type StartPosition = { id: string; x: number; y: number; width: number; height: number; rotation: number; scale: number; lines: PlanLine[] };
   const activeDragRef = useRef<{ 
-    type: "items" | "camera";
+    type: "items" | "camera" | "moveBoundary";
     ids?: string[]; 
     startPositions?: StartPosition[];
     startCamera?: { x: number; y: number; zoom: number };
+    startBoundaryPosition?: { x: number; y: number };
     pinchState?: { initialDist: number; initialAngle: number; startPos?: StartPosition[]; startCamera?: { x: number; y: number; zoom: number } };
   } | null>(null);
 
@@ -164,22 +208,7 @@ export const BoundaryEditor = memo(function BoundaryEditor({
       return (px - (vx + t * (wx - vx))) ** 2 + (py - (vy + t * (wy - vy))) ** 2;
     };
 
-    // 1. Check boundary lines
-    const bx1 = -bw * METER_TO_PX / 2;
-    const by1 = -bh * METER_TO_PX / 2;
-    const bx2 = bw * METER_TO_PX / 2;
-    const by2 = bh * METER_TO_PX / 2;
-    const dTop = distToSegmentSquared(svgTapX, svgTapY, bx1, by1, bx2, by1);
-    const dBot = distToSegmentSquared(svgTapX, svgTapY, bx1, by2, bx2, by2);
-    const dLeft = distToSegmentSquared(svgTapX, svgTapY, bx1, by1, bx1, by2);
-    const dRight = distToSegmentSquared(svgTapX, svgTapY, bx2, by1, bx2, by2);
-    const minBoundaryDist = Math.min(dTop, dBot, dLeft, dRight);
-    if (minBoundaryDist < toleranceLineSvgSq) {
-      bestLineId = "boundary";
-      bestLineArea = 999999; // Huge area so that actual item line hits are preferred over boundary
-      bestLineDistSq = minBoundaryDist;
-    }
-    
+    // 1. Items (Highest Priority)
     let bestBoxId: string | null = null;
     let bestBoxArea = Infinity;
 
@@ -213,7 +242,7 @@ export const BoundaryEditor = memo(function BoundaryEditor({
          }
       }
 
-      // 2. Bounding Box check (with tolerance scaled to SVG)
+      // Bounding Box check (with tolerance scaled to SVG)
       const toleranceBoxSvg = 30 * screenToSvg;
       const halfW = (item.height * METER_TO_PX) / 2 + toleranceBoxSvg;
       const halfH = (item.width * METER_TO_PX) / 2 + toleranceBoxSvg;
@@ -225,7 +254,38 @@ export const BoundaryEditor = memo(function BoundaryEditor({
       }
     });
 
-    return bestLineId || bestBoxId;
+    if (bestLineId || bestBoxId) {
+      return bestLineId || bestBoxId;
+    }
+
+    // 2. Boundary Edges
+    const bp = boundaryPositionRef.current || { x: 0, y: 0 };
+    const bcx = bp.x * METER_TO_PX;
+    const bcy = -bp.y * METER_TO_PX;
+    const bx1 = bcx - bw * METER_TO_PX / 2;
+    const by1 = bcy - bh * METER_TO_PX / 2;
+    const bx2 = bcx + bw * METER_TO_PX / 2;
+    const by2 = bcy + bh * METER_TO_PX / 2;
+
+    const edgeToleranceSq = (30 * screenToSvg) ** 2; // Wider tolerance for boundary edges
+    const dTop = distToSegmentSquared(svgTapX, svgTapY, bx1, by1, bx2, by1);
+    if (dTop < edgeToleranceSq) return "boundary-top";
+    
+    const dRight = distToSegmentSquared(svgTapX, svgTapY, bx2, by1, bx2, by2);
+    if (dRight < edgeToleranceSq) return "boundary-right";
+    
+    const dBot = distToSegmentSquared(svgTapX, svgTapY, bx1, by2, bx2, by2);
+    if (dBot < edgeToleranceSq) return "boundary-bottom";
+    
+    const dLeft = distToSegmentSquared(svgTapX, svgTapY, bx1, by1, bx1, by2);
+    if (dLeft < edgeToleranceSq) return "boundary-left";
+
+    // 3. Boundary Interior
+    if (svgTapX >= bx1 && svgTapX <= bx2 && svgTapY >= by1 && svgTapY <= by2) {
+      return "boundary-interior";
+    }
+
+    return null;
   };
 
   const panResponder = useMemo(() =>
@@ -234,7 +294,12 @@ export const BoundaryEditor = memo(function BoundaryEditor({
       onPanResponderGrant: (evt) => {
         const hitId = hitTest(evt.nativeEvent.locationX, evt.nativeEvent.locationY);
         
-        if (hitId && hitId !== "boundary" && selectedItemIdsRef.current.includes(hitId)) {
+        if (hitId && (hitId.startsWith("boundary-") || hitId === "boundary-interior")) {
+           activeDragRef.current = { 
+             type: "moveBoundary", 
+             startBoundaryPosition: { ...(boundaryPositionRef.current || { x: 0, y: 0 }) }
+           };
+        } else if (hitId && selectedItemIdsRef.current.includes(hitId)) {
            const starts = selectedItemIdsRef.current.map(id => {
              const it = itemsRef.current.find(i => i.id === id);
              return { id, x: it?.x || 0, y: it?.y || 0, width: it?.width || 0, height: it?.height || 0, rotation: it?.rotation || 0, scale: it?.scale || 1, lines: it?.lines || [] };
@@ -258,6 +323,8 @@ export const BoundaryEditor = memo(function BoundaryEditor({
            if (!dragData.pinchState) {
                if (dragData.type === "camera") {
                    dragData.pinchState = { initialDist: currentDist, initialAngle: currentAngle, startCamera: cameraRef.current };
+               } else if (dragData.type === "moveBoundary") {
+                   return; // Ignore pinch for moveBoundary
                } else {
                    const starts = dragData.ids!.map(id => {
                      const it = itemsRef.current.find(i => i.id === id);
@@ -362,6 +429,14 @@ export const BoundaryEditor = memo(function BoundaryEditor({
         const dx = gestureState.dx * (bwVal / (screenW * zoom));
         const dy = -gestureState.dy * (bhVal / (screenH * zoom));
 
+         if (dragData.type === "moveBoundary") {
+            if (lockPanDragRef.current) return;
+            const newX = dragData.startBoundaryPosition!.x + dx;
+            const newY = dragData.startBoundaryPosition!.y + dy;
+            onMoveBoundaryRef.current?.(newX, newY);
+            return;
+         }
+
          if (dragData.type === "camera") {
             if (lockPanDragRef.current) return;
             const camDx = -gestureState.dx * (bwVal / (screenW * zoom));
@@ -404,6 +479,7 @@ export const BoundaryEditor = memo(function BoundaryEditor({
          scheduleRaf();
       },
       onPanResponderRelease: (evt, gestureState) => {
+        const dragData = activeDragRef.current;
         activeDragRef.current = null;
         
         if (Math.abs(gestureState.dx) < 3 && Math.abs(gestureState.dy) < 3) {
@@ -411,28 +487,32 @@ export const BoundaryEditor = memo(function BoundaryEditor({
           const nearestId = hitTest(touch.locationX, touch.locationY);
           
           if (nearestId) {
-            const currentSelected = selectedItemIdsRef.current;
-            const tappedItem = itemsRef.current.find(i => i.id === nearestId);
-            
-            if (tappedItem?.groupId) {
-              const groupItemIds = itemsRef.current
-                .filter(i => i.groupId === tappedItem.groupId)
-                .map(i => i.id);
-              
-              if (currentSelected.length > 0 && currentSelected.every(id => groupItemIds.includes(id))) {
-                setSelectedItemIdsRef.current([]);
-              } else {
-                setSelectedItemIdsRef.current(groupItemIds);
-              }
-            } else {
-              if (currentSelected.includes(nearestId)) {
-                setSelectedItemIdsRef.current(currentSelected.filter(id => id !== nearestId));
-              } else {
-                setSelectedItemIdsRef.current([...currentSelected, nearestId]);
-              }
-            }
+             if (nearestId.startsWith("boundary-") || nearestId === "boundary-interior") {
+                setSelectedItemIdsRef.current(["boundary"]);
+             } else {
+                const currentSelected = selectedItemIdsRef.current;
+                const tappedItem = itemsRef.current.find(i => i.id === nearestId);
+                
+                if (tappedItem?.groupId) {
+                  const groupItemIds = itemsRef.current
+                    .filter(i => i.groupId === tappedItem.groupId)
+                    .map(i => i.id);
+                  
+                  if (currentSelected.length > 0 && currentSelected.every(id => groupItemIds.includes(id))) {
+                    setSelectedItemIdsRef.current([]);
+                  } else {
+                    setSelectedItemIdsRef.current(groupItemIds);
+                  }
+                } else {
+                  if (currentSelected.includes(nearestId)) {
+                     setSelectedItemIdsRef.current(currentSelected.filter((id) => id !== nearestId));
+                  } else {
+                     setSelectedItemIdsRef.current(multiTouchModeRef.current === "scale" ? [...currentSelected, nearestId] : [nearestId]);
+                  }
+                }
+             }
           } else {
-            setSelectedItemIdsRef.current([]);
+             setSelectedItemIdsRef.current([]);
           }
         }
       },
@@ -455,8 +535,8 @@ export const BoundaryEditor = memo(function BoundaryEditor({
       <Svg pointerEvents="none" style={{ width: "100%", height: "100%" }} viewBox={`${-boundaryWidth * METER_TO_PX / (2 * camera.zoom) - camera.x * METER_TO_PX} ${-boundaryHeight * METER_TO_PX / (2 * camera.zoom) + camera.y * METER_TO_PX} ${boundaryWidth * METER_TO_PX / camera.zoom} ${boundaryHeight * METER_TO_PX / camera.zoom}`}>
         {/* Draw Boundary Box (Outer area filled with light gray) */}
         <Rect
-          x={-boundaryWidth * METER_TO_PX / 2}
-          y={-boundaryHeight * METER_TO_PX / 2}
+          x={cx - boundaryWidth * METER_TO_PX / 2}
+          y={cy - boundaryHeight * METER_TO_PX / 2}
           width={boundaryWidth * METER_TO_PX}
           height={boundaryHeight * METER_TO_PX}
           fill="#f1f5f9"
@@ -468,13 +548,49 @@ export const BoundaryEditor = memo(function BoundaryEditor({
         {/* Draw Indent Spacing Bounds (Inner canvas filled with white) */}
         {indentSpacing >= 0 && (
            <Rect
-             x={-(boundaryWidth / 2 - indentSpacing) * METER_TO_PX}
-             y={-(boundaryHeight / 2 - indentSpacing) * METER_TO_PX}
+             x={cx - (boundaryWidth / 2 - indentSpacing) * METER_TO_PX}
+             y={cy - (boundaryHeight / 2 - indentSpacing) * METER_TO_PX}
              width={(boundaryWidth - indentSpacing * 2) * METER_TO_PX}
              height={(boundaryHeight - indentSpacing * 2) * METER_TO_PX}
              fill="#ffffff"
            />
         )}
+
+        {/* Draw Control Points */}
+        {showBoundaryPoints && controlPoints.map(pt => (
+          <G key={pt.id}>
+            {activeSnapPointId === pt.id ? (
+              <Circle
+                cx={pt.svgX}
+                cy={pt.svgY}
+                r={14 / camera.zoom}
+                fill="none"
+                stroke="#f59e0b"
+                strokeWidth={3 / camera.zoom}
+                opacity={0.55}
+              />
+            ) : null}
+            {activeSnapPointId === pt.id ? (
+              <Circle
+                cx={pt.svgX}
+                cy={pt.svgY}
+                r={9 / camera.zoom}
+                fill="none"
+                stroke="#f59e0b"
+                strokeWidth={2 / camera.zoom}
+                opacity={0.35}
+              />
+            ) : null}
+            <Circle
+              cx={pt.svgX}
+              cy={pt.svgY}
+              r={(activeSnapPointId === pt.id ? 7 : 6) / camera.zoom}
+              fill={activeSnapPointId === pt.id ? "#f59e0b" : "#3b82f6"}
+              stroke="#ffffff"
+              strokeWidth={2 / camera.zoom}
+            />
+          </G>
+        ))}
 
 
 
@@ -579,6 +695,10 @@ export const BoundaryEditor = memo(function BoundaryEditor({
     prev.indentSpacing === next.indentSpacing &&
     prev.letterSpacing === next.letterSpacing &&
     prev.multiTouchMode === next.multiTouchMode &&
+    prev.showBoundaryPoints === next.showBoundaryPoints &&
+    prev.activeSnapPointId === next.activeSnapPointId &&
+    prev.boundaryPosition?.x === next.boundaryPosition?.x &&
+    prev.boundaryPosition?.y === next.boundaryPosition?.y &&
     prev.selectedItemIds.length === next.selectedItemIds.length &&
     prev.selectedItemIds.every((id, idx) => id === next.selectedItemIds[idx]) &&
     prev.items.length === next.items.length &&

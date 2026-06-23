@@ -12,6 +12,16 @@ import { generateTemplateLines, ShapeType, ArcType } from "../utils/shapeTemplat
 import { generateSportsFieldLines, SportsFieldType, SPORTS_FIELD_LABELS, SPORTS_FIELD_BOUNDS } from "../utils/sportsFieldTemplates";
 import { linesToDxf } from "../utils/dxfGenerator";
 import type { PlanLine, LayerVisibility, Page, TelemetrySnapshot, DxfEntity } from "../types/plan";
+export type BoundarySide = 'top' | 'right' | 'bottom' | 'left';
+
+export interface BoundaryEdgeInfo {
+  side: BoundarySide;
+  id: string;            // e.g. "boundary-top"
+  from: { x: number; y: number };   // DXF local coords
+  to: { x: number; y: number };     // DXF local coords
+  length: number;        // width or height in meters
+  angle: number;         // 0, 90, 180, 270
+}
 
 interface TemplatesPageProps {
   telemetrySnapshot: TelemetrySnapshot | null;
@@ -72,7 +82,9 @@ export function TemplatesPage(props: TemplatesPageProps) {
       setMultiTouchMode("both");
     }
   }, [selectedItemIds, placedItems]);
-
+  const [boundaryPosition, setBoundaryPosition] = useState({ x: 0, y: 0 });
+  const [activeSnapPointId, setActiveSnapPointId] = useState<string | null>(null);
+  
   const [category, setCategory] = useState<"shapes" | "alphabets" | "numbers" | "road_signs" | "sports_fields" | "characters">("shapes");
   const [fontStyle, setFontStyle] = useState<FontStyle>("smooth");
   const [shape, setShape] = useState<ShapeType>("square");
@@ -91,6 +103,8 @@ export function TemplatesPage(props: TemplatesPageProps) {
   const [activeBoundaryHeight, setActiveBoundaryHeight] = useState(3.0);
   const [activeIndentSpacing, setActiveIndentSpacing] = useState(0.25);
   const [activeLetterSpacingCm, setActiveLetterSpacingCm] = useState(10);
+
+  const [showBoundaryPoints, setShowBoundaryPoints] = useState(false);
 
   const parsedSize = Math.max(0.1, parseFloat(sizeInput) || 1.0);
 
@@ -114,6 +128,55 @@ export function TemplatesPage(props: TemplatesPageProps) {
   const bh = activeBoundaryHeight;
   const indent = activeIndentSpacing;
   const lSpacing = activeLetterSpacingCm / 100; // cm → meters
+
+  const boundaryControlPointsLocal = useMemo(() => {
+    const halfW = bw / 2;
+    const halfH = bh / 2;
+
+    return [
+      { id: "corner-tl", localX: -halfW, localY: -halfH },
+      { id: "corner-tr", localX: halfW, localY: -halfH },
+      { id: "corner-br", localX: halfW, localY: halfH },
+      { id: "corner-bl", localX: -halfW, localY: halfH },
+      { id: "midpoint-t", localX: 0, localY: -halfH },
+      { id: "midpoint-r", localX: halfW, localY: 0 },
+      { id: "midpoint-b", localX: 0, localY: halfH },
+      { id: "midpoint-l", localX: -halfW, localY: 0 },
+    ];
+  }, [bw, bh]);
+
+  const SNAP_THRESHOLD_M = 0.5;
+
+  useEffect(() => {
+    if (!showBoundaryPoints) {
+      setActiveSnapPointId(null);
+      return;
+    }
+
+    const roverN = props.telemetrySnapshot?.pos_n;
+    const roverE = props.telemetrySnapshot?.pos_e;
+    if (roverN == null || roverE == null) {
+      setActiveSnapPointId(null);
+      return;
+    }
+
+    const bpX = boundaryPosition.x;
+    const bpY = boundaryPosition.y;
+    let nextActiveId: string | null = null;
+
+    for (const cp of boundaryControlPointsLocal) {
+      const worldX = bpX + cp.localX;
+      const worldY = bpY + cp.localY;
+      const dist = Math.hypot(roverE - worldX, roverN - worldY);
+
+      if (dist <= SNAP_THRESHOLD_M) {
+        nextActiveId = cp.id;
+        break;
+      }
+    }
+
+    setActiveSnapPointId(nextActiveId);
+  }, [boundaryControlPointsLocal, boundaryPosition.x, boundaryPosition.y, props.telemetrySnapshot?.pos_e, props.telemetrySnapshot?.pos_n, showBoundaryPoints]);
 
   // Check if pending values differ from active
   const hasBoundaryChanges =
@@ -548,6 +611,44 @@ export function TemplatesPage(props: TemplatesPageProps) {
     setActiveLetterSpacingCm(pendingLetterSpacingCm);
   }, [pendingWidth, pendingHeight, pendingIndent, pendingLetterSpacingCm]);
 
+  const handleMoveBoundary = useCallback((x: number, y: number) => {
+    if (typeof x !== "number" || typeof y !== "number" || isNaN(x) || isNaN(y)) return;
+    setBoundaryPosition({ x, y });
+  }, []);
+
+  const handlePlaceRoverAtPoint = useCallback((pointId: string, localX: number, localY: number) => {
+    if (previewLines.length === 0) return;
+    const bounds = computeBoundingBox(previewLines);
+    
+    const newWidth = bounds.width;
+    const newHeight = bounds.height;
+    
+    if (category === "sports_fields") {
+      const safeW = bw - 2 * indent;
+      const safeH = bh - 2 * indent;
+      if (newWidth > safeW || newHeight > safeH) {
+        Alert.alert(
+          "Cannot Add Sports Field",
+          `This field (${newWidth.toFixed(1)}m × ${newHeight.toFixed(1)}m) is larger than your available boundary space (${safeW.toFixed(1)}m × ${safeH.toFixed(1)}m).\n\nPlease increase your boundary size first.`
+        );
+        return;
+      }
+    }
+    
+    const newItem: PlacedItem = {
+      id: "item-" + Date.now(),
+      lines: previewLines,
+      x: localX,
+      y: localY,
+      rotation: 0,
+      scale: 1.0,
+      width: newWidth,
+      height: newHeight,
+    };
+    setPlacedItems(prev => [...prev, newItem]);
+    setSelectedItemIds([newItem.id]);
+  }, [previewLines, computeBoundingBox, category, bw, indent, bh]);
+
   const memoSetSelectedItemIds = useCallback((ids: string[]) => {
     setSelectedItemIds(ids);
   }, []);
@@ -572,6 +673,11 @@ export function TemplatesPage(props: TemplatesPageProps) {
               boundaryHeight={bh}
               indentSpacing={indent}
               sketchMode={sketchMode}
+              boundaryPosition={boundaryPosition}
+              onMoveBoundary={handleMoveBoundary}
+              showBoundaryPoints={showBoundaryPoints}
+              activeSnapPointId={activeSnapPointId}
+              onPlaceRoverAtPoint={handlePlaceRoverAtPoint}
               onUpdatePlacedItems={(items) => setPlacedItems(items)}
               onSelectionChange={(ids) => setSelectedItemIds(ids)}
             />
@@ -587,6 +693,11 @@ export function TemplatesPage(props: TemplatesPageProps) {
               setSelectedItemIds={memoSetSelectedItemIds}
               multiTouchMode={multiTouchMode}
               sketchMode={sketchMode}
+              boundaryPosition={boundaryPosition}
+              onMoveBoundary={handleMoveBoundary}
+              showBoundaryPoints={showBoundaryPoints}
+              activeSnapPointId={activeSnapPointId}
+              onPlaceRoverAtPoint={handlePlaceRoverAtPoint}
             />
           ) : (
             <View style={{ flex: 1, position: "relative" }}>
@@ -622,6 +733,12 @@ export function TemplatesPage(props: TemplatesPageProps) {
                 <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 12 }}>
                    <Text style={{ color: "#cbd5e1", fontSize: 13, fontWeight: "700" }}>Sketch Mode</Text>
                    <Switch value={sketchMode} onValueChange={setSketchMode} trackColor={{ false: "#334155", true: "#0b6b68" }} thumbColor={"#f8fafc"} />
+                </View>
+              )}
+              {boundaryMode && (
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 12 }}>
+                   <Text style={{ color: "#cbd5e1", fontSize: 13, fontWeight: "700" }}>Show Snap Points</Text>
+                   <Switch value={showBoundaryPoints} onValueChange={setShowBoundaryPoints} trackColor={{ false: "#334155", true: "#0b6b68" }} thumbColor={"#f8fafc"} />
                 </View>
               )}
             </View>
