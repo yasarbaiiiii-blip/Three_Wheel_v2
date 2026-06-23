@@ -308,6 +308,18 @@ const LEAFLET_HTML = `
       return Math.hypot(x - (x1 + t * (x2 - x1)), y - (y1 + t * (y2 - y1)));
     }
 
+    function pointInPolygon(point, polygon) {
+      var inside = false;
+      for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        var xi = polygon[i].x, yi = polygon[i].y;
+        var xj = polygon[j].x, yj = polygon[j].y;
+        var intersect = ((yi > point.y) !== (yj > point.y)) &&
+          (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+      }
+      return inside;
+    }
+
     // ── Rover Marker ──
     function updateRover(lat, lon, heading, nextTarget) {
       if (lat == null || lon == null) return;
@@ -693,7 +705,7 @@ const LEAFLET_HTML = `
           }
         });
 
-        // Test bounding box lines
+        // Test bounding box edges and interior
         if (item.box && item.box.length >= 4) {
           for (var i = 0; i < item.box.length; i++) {
             var nextIdx = (i + 1) % item.box.length;
@@ -704,6 +716,13 @@ const LEAFLET_HTML = `
               minDistance = d;
               hitId = item.id;
             }
+          }
+          var boxPts = item.box.map(function(corner) {
+            return map.latLngToContainerPoint(corner);
+          });
+          if (pointInPolygon(clickPoint, boxPts)) {
+            minDistance = 0;
+            hitId = item.id;
           }
         }
       });
@@ -1056,22 +1075,29 @@ const LEAFLET_HTML = `
       if (!activeDrag) return;
 
       if (activeDrag.type === 'items') {
-        var latDelta = e.latlng.lat - activeDrag.startLatlng.lat;
-        var lonDelta = e.latlng.lng - activeDrag.startLatlng.lng;
+        var p1 = map.latLngToContainerPoint(activeDrag.startLatlng);
+        var p2 = map.latLngToContainerPoint(e.latlng);
+        var dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
 
-        var originLatRad = (activeDrag.startLatlng.lat * Math.PI) / 180;
-        var dy = latDelta * (6378137.0 * Math.PI / 180);
-        var dx = lonDelta * (6378137.0 * Math.cos(originLatRad) * Math.PI / 180);
+        // Only trigger move updates if the item was physically dragged (not a tap).
+        if (dist > 3) {
+          var latDelta = e.latlng.lat - activeDrag.startLatlng.lat;
+          var lonDelta = e.latlng.lng - activeDrag.startLatlng.lng;
 
-        var updates = activeDrag.itemsStart.map(function(start) {
-          return {
-            id: start.id,
-            x: start.x + dx,
-            y: start.y + dy
-          };
-        });
+          var originLatRad = (activeDrag.startLatlng.lat * Math.PI) / 180;
+          var dy = latDelta * (6378137.0 * Math.PI / 180);
+          var dx = lonDelta * (6378137.0 * Math.cos(originLatRad) * Math.PI / 180);
 
-        postMessage({ type: 'itemsMoved', updates: updates });
+          var updates = activeDrag.itemsStart.map(function(start) {
+            return {
+              id: start.id,
+              x: start.x + dx,
+              y: start.y + dy
+            };
+          });
+
+          postMessage({ type: 'itemsMoved', updates: updates });
+        }
       } else if (activeDrag.type === 'background') {
         var p1 = map.latLngToContainerPoint(e.latlng);
         var p2 = map.latLngToContainerPoint(activeDrag.startLatlng);
@@ -1122,7 +1148,7 @@ const LEAFLET_HTML = `
 
     function onContainerTouchMove(e) {
       if (mode !== 'templates') return;
-      if (!activeDrag || activeDrag.type !== 'boundary') return;
+      if (!activeDrag) return;
       var touches = e.touches;
       if (!touches || touches.length !== 1) return;
 
@@ -1133,13 +1159,18 @@ const LEAFLET_HTML = `
 
     function onContainerTouchEnd(e) {
       if (mode !== 'templates') return;
-      if (!activeDrag || activeDrag.type !== 'boundary') return;
+      if (!activeDrag) return;
       var touch = e.changedTouches && e.changedTouches[0];
       if (!touch) return;
 
       if (e.cancelable) e.preventDefault();
       e.stopPropagation();
-      finishBoundaryDrag(map.mouseEventToLatLng(touch));
+
+      if (activeDrag.type === 'boundary') {
+        finishBoundaryDrag(map.mouseEventToLatLng(touch));
+      } else {
+        onMouseUp({ latlng: map.mouseEventToLatLng(touch) });
+      }
     }
 
     function onTouchStart(e) {
@@ -1181,6 +1212,12 @@ const LEAFLET_HTML = `
             lastRotation: 0.0
           };
 
+          itemLayersGroup.eachLayer(function(layer) {
+            if (selectedIds.includes(layer._itemId) && layer.getLatLngs) {
+              layer._pinchStartLatLngs = JSON.parse(JSON.stringify(layer.getLatLngs()));
+            }
+          });
+
           map.dragging.disable();
           map.touchZoom.disable();
         }
@@ -1196,8 +1233,8 @@ const LEAFLET_HTML = `
           var item = currentItems.find(function(it) { return it.id === layer._itemId; });
           var center = item.center;
 
-          if (layer.getLatLngs) {
-            var lls = layer.getLatLngs();
+          if (layer._pinchStartLatLngs) {
+            var lls = layer._pinchStartLatLngs;
             var rotatePoint = function(ll) {
               var latOffset = ll.lat - center.lat;
               var lonOffset = ll.lng - center.lon;
@@ -1263,15 +1300,21 @@ const LEAFLET_HTML = `
 
     function onTouchEnd(e) {
       if (touchState) {
-        var updates = touchState.itemsStart.map(function(start) {
-          return {
-            id: start.id,
-            scale: start.scale * touchState.lastScale,
-            rotation: (start.rotation + touchState.lastRotation) % 360
-          };
-        });
+        var scaleDiff = Math.abs(1.0 - touchState.lastScale);
+        var rotDiff = Math.abs(touchState.lastRotation);
 
-        postMessage({ type: 'itemsPinched', updates: updates });
+        // Only send update if meaningful scale or rotation occurred.
+        if (scaleDiff > 0.02 || rotDiff > 1.0) {
+          var updates = touchState.itemsStart.map(function(start) {
+            return {
+              id: start.id,
+              scale: start.scale * touchState.lastScale,
+              rotation: (start.rotation + touchState.lastRotation) % 360
+            };
+          });
+
+          postMessage({ type: 'itemsPinched', updates: updates });
+        }
 
         touchState = null;
         if (!lockPanDrag) {
@@ -1389,6 +1432,35 @@ const LEAFLET_HTML = `
             map.fitBounds(bounds, { padding: [40, 40] });
           }
         } else if (data.type === 'updatePlacedItems') {
+          // Protect active drags from being destroyed by React Native state updates.
+          if ((activeDrag && activeDrag.type === 'items') || touchState) {
+            currentItems.forEach(function(oldItem) {
+              var newItem = data.items.find(function(it) { return it.id === oldItem.id; });
+              if (newItem) {
+                oldItem.selected = newItem.selected;
+              }
+            });
+
+            itemLayersGroup.eachLayer(function(layer) {
+              var item = currentItems.find(function(it) { return it.id === layer._itemId; });
+              if (item) {
+                if (layer instanceof L.Polygon) {
+                  layer.setStyle({
+                    color: item.selected ? '#ef4444' : '#3b82f6',
+                    fillColor: item.selected ? '#ef4444' : '#3b82f6',
+                    fillOpacity: item.selected ? 0.05 : 0.02,
+                    dashArray: item.selected ? '' : '4 4'
+                  });
+                } else if (layer instanceof L.Polyline) {
+                  layer.setStyle({
+                    opacity: sketchMode && !item.selected ? 0.2 : (item.selected ? 1.0 : 0.8)
+                  });
+                }
+              }
+            });
+            return;
+          }
+
           renderPlacedItems(data.items);
         } else if (data.type === 'updateBoundary') {
           boundaryControlPointsData = data.boundaryControlPoints || [];
@@ -1490,6 +1562,18 @@ export function MapView({
   const lastRefMsgRef = useRef("");
   const webViewReadyRef = useRef(false);
 
+  const [latchedOrigin, setLatchedOrigin] = useState<{ lat: number; lon: number } | null>(null);
+
+  useEffect(() => {
+    if (!visible) {
+      setLatchedOrigin(null);
+      return;
+    }
+    if (telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null && !latchedOrigin) {
+      setLatchedOrigin({ lat: telemetrySnapshot.lat, lon: telemetrySnapshot.lon });
+    }
+  }, [visible, telemetrySnapshot?.lat, telemetrySnapshot?.lon, latchedOrigin]);
+
   // Helper to resolve origin coordinates
   const origin = useMemo(() => {
     let originLat = 28.6139;
@@ -1502,14 +1586,14 @@ export function MapView({
       originLon = alignedRefPoints[0].lon;
       originDxfX = alignedRefPoints[0].dxf_x;
       originDxfY = alignedRefPoints[0].dxf_y;
-    } else if (telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null) {
-      originLat = telemetrySnapshot.lat;
-      originLon = telemetrySnapshot.lon;
+    } else if (latchedOrigin != null) {
+      originLat = latchedOrigin.lat;
+      originLon = latchedOrigin.lon;
       originDxfX = 0;
       originDxfY = 0;
     }
     return { originLat, originLon, originDxfX, originDxfY };
-  }, [alignedRefPoints, telemetrySnapshot?.lat, telemetrySnapshot?.lon]);
+  }, [alignedRefPoints, latchedOrigin]);
 
   // Helper to project a single PlanLine to GPS
   const projectLineToGps = useCallback((line: PlanLine) => {
@@ -1591,6 +1675,9 @@ export function MapView({
 
   // ── Projected plan lines (DXF → GPS) ──
   const projectedPlanLines = useMemo(() => {
+    if (mode === "templates") {
+      return [];
+    }
     if (lines.length === 0) {
       return [];
     }
@@ -1646,7 +1733,7 @@ export function MapView({
     }
 
     return result;
-  }, [lines, origin]);
+  }, [lines, origin, mode]);
 
   // ── Projected boundary box (Templates Mode) ──
   const projectedBoundary = useMemo(() => {
@@ -1902,7 +1989,7 @@ export function MapView({
   useEffect(() => {
     if (!visible) return;
 
-    const msgKey = `${projectedPlanLines.length}:${lines.length}`;
+    const msgKey = `${projectedPlanLines.length}:${lines.length}:${origin.originLat}:${origin.originLon}`;
     if (msgKey === lastLinesMsgRef.current) return;
     lastLinesMsgRef.current = msgKey;
 
@@ -1910,7 +1997,7 @@ export function MapView({
       type: "updatePlanLines",
       lines: projectedPlanLines,
     });
-  }, [visible, projectedPlanLines, lines.length, sendToWebView]);
+  }, [visible, projectedPlanLines, lines.length, origin.originLat, origin.originLon, sendToWebView]);
 
   // Send reference points
   useEffect(() => {
@@ -2054,7 +2141,7 @@ export function MapView({
           })
         );
       } catch (e) {}
-      lastLinesMsgRef.current = `${projectedPlanLines.length}:${lines.length}`;
+      lastLinesMsgRef.current = `${projectedPlanLines.length}:${lines.length}:${origin.originLat}:${origin.originLon}`;
     }
 
     if (alignedRefPoints.length > 0) {
@@ -2160,6 +2247,8 @@ export function MapView({
     telemetrySnapshot,
     projectedPlanLines,
     alignedRefPoints,
+    origin.originLat,
+    origin.originLon,
     lines,
     mode,
     selectedLineId,
@@ -2200,9 +2289,9 @@ export function MapView({
             originLon = alignedRefPoints[0].lon;
             originDxfX = alignedRefPoints[0].dxf_x;
             originDxfY = alignedRefPoints[0].dxf_y;
-          } else if (telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null) {
-            originLat = telemetrySnapshot.lat;
-            originLon = telemetrySnapshot.lon;
+          } else if (latchedOrigin != null) {
+            originLat = latchedOrigin.lat;
+            originLon = latchedOrigin.lon;
             originDxfX = 0;
             originDxfY = 0;
           } else {
@@ -2293,10 +2382,14 @@ export function MapView({
           const bw = boundaryWidth ?? 0;
           const bh = boundaryHeight ?? 0;
           const indent = indentSpacing ?? 0;
-          const leftIndent = -bw / 2 + indent;
-          const rightIndent = bw / 2 - indent;
-          const topIndent = -bh / 2 + indent;
-          const bottomIndent = bh / 2 - indent;
+
+          const bpX = boundaryPosition?.x || 0;
+          const bpY = boundaryPosition?.y || 0;
+
+          const leftIndent = bpX - bw / 2 + indent;
+          const rightIndent = bpX + bw / 2 - indent;
+          const topIndent = bpY - bh / 2 + indent;
+          const bottomIndent = bpY + bh / 2 - indent;
 
           const updatedItems = placedItems.map((item) => {
             const update = data.updates.find((u: any) => u.id === item.id);
@@ -2331,10 +2424,14 @@ export function MapView({
           const bw = boundaryWidth ?? 0;
           const bh = boundaryHeight ?? 0;
           const indent = indentSpacing ?? 0;
-          const leftIndent = -bw / 2 + indent;
-          const rightIndent = bw / 2 - indent;
-          const topIndent = -bh / 2 + indent;
-          const bottomIndent = bh / 2 - indent;
+
+          const bpX = boundaryPosition?.x || 0;
+          const bpY = boundaryPosition?.y || 0;
+
+          const leftIndent = bpX - bw / 2 + indent;
+          const rightIndent = bpX + bw / 2 - indent;
+          const topIndent = bpY - bh / 2 + indent;
+          const bottomIndent = bpY + bh / 2 - indent;
 
           const updatedItems = placedItems.map((item) => {
             const update = data.updates.find((u: any) => u.id === item.id);
@@ -2437,7 +2534,7 @@ export function MapView({
     [
       lines,
       alignedRefPoints,
-      telemetrySnapshot,
+      latchedOrigin,
       onSelectPoint,
       onSelectLine,
       mode,

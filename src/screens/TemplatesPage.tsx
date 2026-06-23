@@ -662,7 +662,7 @@ export function TemplatesPage(props: TemplatesPageProps) {
               mode="templates"
               visible={true}
               telemetrySnapshot={props.telemetrySnapshot}
-              lines={boundaryLines.filter(l => l.layer !== "boundary" && l.layer !== "transit")}
+              lines={[]}
               alignedRefPoints={[]}
               placedItems={placedItems}
               selectedItemIds={selectedItemIds}

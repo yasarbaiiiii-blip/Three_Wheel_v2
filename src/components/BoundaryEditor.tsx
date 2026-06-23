@@ -395,10 +395,13 @@ export const BoundaryEditor = memo(function BoundaryEditor({
            const cosA = Math.cos(rad);
            const sinA = Math.sin(rad);
            
-           const leftBoundary = -boundaryWidthRef.current / 2 + indentSpacingRef.current;
-           const rightBoundary = boundaryWidthRef.current / 2 - indentSpacingRef.current;
-           const topBoundary = -boundaryHeightRef.current / 2 + indentSpacingRef.current;
-           const bottomBoundary = boundaryHeightRef.current / 2 - indentSpacingRef.current;
+           const bpX = boundaryPositionRef.current?.x || 0;
+           const bpY = boundaryPositionRef.current?.y || 0;
+
+           const leftBoundary = bpX - boundaryWidthRef.current / 2 + indentSpacingRef.current;
+           const rightBoundary = bpX + boundaryWidthRef.current / 2 - indentSpacingRef.current;
+           const topBoundary = bpY - boundaryHeightRef.current / 2 + indentSpacingRef.current;
+           const bottomBoundary = bpY + boundaryHeightRef.current / 2 - indentSpacingRef.current;
            
            setItemsRef.current(prev => prev.map(item => {
               const startP = starts.find(p => p.id === item.id);
@@ -481,16 +484,19 @@ export const BoundaryEditor = memo(function BoundaryEditor({
          const bh = boundaryHeightRef.current;
          const indent = indentSpacingRef.current;
 
+         const bpX = boundaryPositionRef.current?.x || 0;
+         const bpY = boundaryPositionRef.current?.y || 0;
+
          const updates: Record<string, {x: number, y: number}> = {};
 
          dragData.startPositions!.forEach(start => {
            let newX = start.x + dx;
            let newY = start.y + dy;
 
-           const leftIndent = -bw / 2 + indent;
-           const rightIndent = bw / 2 - indent;
-           const topIndent = -bh / 2 + indent;
-           const bottomIndent = bh / 2 - indent;
+           const leftIndent = bpX - bw / 2 + indent;
+           const rightIndent = bpX + bw / 2 - indent;
+           const topIndent = bpY - bh / 2 + indent;
+           const bottomIndent = bpY + bh / 2 - indent;
            const halfW = start.width / 2;
            const halfH = start.height / 2;
 
