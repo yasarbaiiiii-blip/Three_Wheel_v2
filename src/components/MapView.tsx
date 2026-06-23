@@ -522,7 +522,8 @@ const LEAFLET_HTML = `
             weight: 2,
             opacity: sketchMode && !item.selected ? 0.2 : (item.selected ? 1.0 : 0.8),
             lineCap: 'round',
-            lineJoin: 'round'
+            lineJoin: 'round',
+            interactive: false
           });
           poly._itemId = item.id;
           itemLayersGroup.addLayer(poly);
@@ -535,7 +536,8 @@ const LEAFLET_HTML = `
             weight: 1.5,
             fillColor: item.selected ? '#ef4444' : '#3b82f6',
             fillOpacity: item.selected ? 0.05 : 0.02,
-            dashArray: item.selected ? '' : '4 4'
+            dashArray: item.selected ? '' : '4 4',
+            interactive: false
           });
           boxPoly._itemId = item.id;
           itemLayersGroup.addLayer(boxPoly);
@@ -802,9 +804,17 @@ const LEAFLET_HTML = `
     var activeDrag = null; // { type: 'items'|'background', ids: [], startLatlng: L.LatLng, itemsStart: [] }
     var touchState = null; // { initialDist, initialAngle, itemsStart, lastScale, lastRotation }
 
+    function isPlacedItemHitId(hitId) {
+      return !!(hitId && currentItems.some(function(it) { return it.id === hitId; }));
+    }
+
     function syncTemplatesMapDragging() {
       if (mode !== 'templates') return;
-      if (lockPanDrag || boundaryDragHandleLatLng || (activeDrag && activeDrag.type === 'boundary')) {
+      if (
+        lockPanDrag ||
+        boundaryDragHandleLatLng ||
+        (activeDrag && (activeDrag.type === 'boundary' || activeDrag.type === 'items'))
+      ) {
         map.dragging.disable();
       } else if (!activeDrag || activeDrag.type === 'background') {
         map.dragging.enable();
@@ -890,6 +900,38 @@ const LEAFLET_HTML = `
       });
     }
 
+    function startItemDrag(latlng, hitId) {
+      var selectedIds = currentItems.filter(function(it) { return it.selected; }).map(function(it) { return it.id; });
+      if (!selectedIds.includes(hitId)) {
+        selectedIds = [hitId];
+        postMessage({ type: 'selectItems', ids: selectedIds });
+      }
+
+      if (lockPanDrag) return;
+
+      var starts = selectedIds.map(function(id) {
+        var item = currentItems.find(function(it) { return it.id === id; });
+        return { id: id, x: item.x, y: item.y, rotation: item.rotation, scale: item.scale };
+      });
+
+      activeDrag = {
+        type: 'items',
+        ids: selectedIds,
+        startLatlng: latlng,
+        itemsStart: starts
+      };
+
+      itemLayersGroup.eachLayer(function(layer) {
+        if (selectedIds.includes(layer._itemId) && layer.getLatLngs) {
+          layer._dragStartLatLngs = JSON.parse(JSON.stringify(layer.getLatLngs()));
+        }
+      });
+
+      map.dragging.disable();
+      map.touchZoom.disable();
+      syncTemplatesMapDragging();
+    }
+
     function onMouseDown(e) {
       if (mode !== 'templates') return;
 
@@ -909,33 +951,10 @@ const LEAFLET_HTML = `
           return;
         }
 
-        var selectedIds = currentItems.filter(function(it) { return it.selected; }).map(function(it) { return it.id; });
-        if (!selectedIds.includes(hitId)) {
-          selectedIds = [hitId];
-          postMessage({ type: 'selectItems', ids: selectedIds });
+        if (isPlacedItemHitId(hitId)) {
+          startItemDrag(e.latlng, hitId);
+          return;
         }
-
-        if (lockPanDrag) return;
-
-        var starts = selectedIds.map(function(id) {
-          var item = currentItems.find(function(it) { return it.id === id; });
-          return { id: id, x: item.x, y: item.y, rotation: item.rotation, scale: item.scale };
-        });
-
-        activeDrag = {
-          type: 'items',
-          ids: selectedIds,
-          startLatlng: e.latlng,
-          itemsStart: starts
-        };
-        
-        itemLayersGroup.eachLayer(function(layer) {
-          if (selectedIds.includes(layer._itemId) && layer.getLatLngs) {
-            layer._dragStartLatLngs = JSON.parse(JSON.stringify(layer.getLatLngs()));
-          }
-        });
-        
-        map.dragging.disable();
       } else {
         activeDrag = {
           type: 'background',
@@ -1080,7 +1099,7 @@ const LEAFLET_HTML = `
         var dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
 
         // Only trigger move updates if the item was physically dragged (not a tap).
-        if (dist > 3) {
+        if (dist >= MIN_BOUNDARY_DRAG_PX) {
           var latDelta = e.latlng.lat - activeDrag.startLatlng.lat;
           var lonDelta = e.latlng.lng - activeDrag.startLatlng.lng;
 
@@ -1143,6 +1162,10 @@ const LEAFLET_HTML = `
           lng: latlng.lng
         });
         startBoundaryDrag(latlng, hitId);
+      } else if (isPlacedItemHitId(hitId)) {
+        if (e.cancelable) e.preventDefault();
+        e.stopPropagation();
+        startItemDrag(latlng, hitId);
       }
     }
 
@@ -1184,7 +1207,7 @@ const LEAFLET_HTML = `
       });
 
       if (touches.length === 1) {
-        if (activeDrag && activeDrag.type === 'boundary') return;
+        if (activeDrag && (activeDrag.type === 'boundary' || activeDrag.type === 'items')) return;
         var latlng = map.mouseEventToLatLng(touches[0]);
         onMouseDown({ latlng: latlng });
         debugBoundary('onTouchStart_afterMouseDown', {
@@ -1337,10 +1360,13 @@ const LEAFLET_HTML = `
     }
 
     map.on('dragstart', function() {
-      if (mode === 'templates' && boundaryDragHandleLatLng) {
+      if (
+        mode === 'templates' &&
+        (boundaryDragHandleLatLng || (activeDrag && activeDrag.type === 'items'))
+      ) {
         map.dragging.disable();
         debugBoundary('leaflet_dragstart_blocked', {
-          reason: 'boundary_selected',
+          reason: boundaryDragHandleLatLng ? 'boundary_selected' : 'item_drag_active',
           activeDrag: activeDrag ? activeDrag.type : null
         });
         return;
