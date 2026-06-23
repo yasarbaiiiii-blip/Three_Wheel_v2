@@ -158,6 +158,18 @@ const LEAFLET_HTML = `
     .pulsing-circle {
       animation: pulse-circle 1.5s infinite;
     }
+
+    .boundary-drag-handle {
+      width: 32px;
+      height: 32px;
+      margin-left: -16px;
+      margin-top: -16px;
+      pointer-events: none;
+      filter: drop-shadow(0 1px 3px rgba(15, 23, 42, 0.35));
+    }
+    .boundary-drag-handle svg {
+      display: block;
+    }
   </style>
 </head>
 <body>
@@ -239,6 +251,7 @@ const LEAFLET_HTML = `
     var refPointLabelsVisible = false;
 
     var boundaryControlPointsData = [];
+    var boundaryDragHandleLatLng = null;
     var showBoundaryPoints = false;
     var activeSnapPointId = null;
     var snapGlowCircle = L.circleMarker([0,0], {
@@ -261,6 +274,26 @@ const LEAFLET_HTML = `
       if (window.ReactNativeWebView) {
         window.ReactNativeWebView.postMessage(JSON.stringify(msg));
       }
+    }
+
+    // ── Boundary drag tuning ──
+    var BOUNDARY_HANDLE_HIT_PX = 44;
+    var MIN_BOUNDARY_DRAG_PX = 5;
+
+    // ── Boundary drag debug (set false to silence) ──
+    var boundaryDragDebugEnabled = false;
+    var lastBoundaryDebugMoveLog = 0;
+
+    function debugBoundary(stage, payload) {
+      if (!boundaryDragDebugEnabled) return;
+      var entry = {
+        type: 'boundaryDragDebug',
+        stage: stage,
+        ts: Date.now(),
+        payload: payload || {}
+      };
+      console.log('[BoundaryDrag]', stage, entry.payload);
+      postMessage(entry);
     }
 
     // Helper: Distance from point to line segment
@@ -509,10 +542,6 @@ const LEAFLET_HTML = `
         opacity: 0.9,
       });
       outerPoly._boundaryId = 'boundary';
-      outerPoly.on('click', function(e) {
-        L.DomEvent.stopPropagation(e);
-        postMessage({ type: 'selectItems', ids: ['boundary'] });
-      });
       boundaryLayersGroup.addLayer(outerPoly);
 
       if (boundary.indent && boundary.indent.length > 0) {
@@ -525,6 +554,41 @@ const LEAFLET_HTML = `
         boundaryLayersGroup.addLayer(indentPoly);
       }
 
+      if (isSelected && boundary.outer.length >= 4) {
+        var tl = boundary.outer[0];
+        var handleLatLng = L.latLng(tl[0], tl[1]);
+        boundaryDragHandleLatLng = handleLatLng;
+        debugBoundary('renderBoundary_handle', {
+          isSelected: true,
+          handleLat: handleLatLng.lat,
+          handleLng: handleLatLng.lng,
+          interactive: false
+        });
+
+        var handleIcon = L.divIcon({
+          className: '',
+          html: '<div class="boundary-drag-handle">' +
+            '<svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">' +
+            '<circle cx="16" cy="16" r="14" fill="#3b82f6" stroke="#ffffff" stroke-width="2"/>' +
+            '<path d="M16 8v16M8 16h16" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>' +
+            '<path d="M16 8l-2.5 3.5M16 8l2.5 3.5M24 16l-3.5 2.5M24 16l-3.5-2.5M16 24l2.5-3.5M16 24l-2.5-3.5M8 16l3.5-2.5M8 16l3.5 2.5" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>' +
+            '</svg></div>',
+          iconSize: [32, 32],
+          iconAnchor: [16, 16],
+        });
+
+        var handleMarker = L.marker(handleLatLng, {
+          icon: handleIcon,
+          interactive: false,
+          zIndexOffset: 1000,
+        });
+        handleMarker._isDragHandle = true;
+        boundaryLayersGroup.addLayer(handleMarker);
+      } else {
+        boundaryDragHandleLatLng = null;
+      }
+
+      syncTemplatesMapDragging();
       renderBoundaryControlPoints(controlPoints);
     }
 
@@ -644,32 +708,74 @@ const LEAFLET_HTML = `
         }
       });
 
-      // Hit test boundary
-      if (showBoundaryPoints) {
-        var boundaryLayers = boundaryLayersGroup.getLayers();
-        if (boundaryLayers.length > 0) {
-          var outerPoly = boundaryLayers[0];
-          if (outerPoly && outerPoly.getLatLngs) {
-             var lls = outerPoly.getLatLngs();
-             if (lls && lls.length > 0) {
-               var bounds = outerPoly.getBounds();
-               if (bounds.contains(latlng)) {
-                 // We hit the boundary interior
-                 var d2 = Infinity;
-                 // If it's too close to an item, item takes precedence
-                 if (minDistance > thresholdPx) {
-                   hitId = "boundary-interior";
-                   minDistance = 0; // definitely hit
-                 }
-               }
-             }
+      // Drag handle (high priority — right after item geometry)
+      var handleDistPx = null;
+      if (boundaryDragHandleLatLng) {
+        var handlePt = map.latLngToContainerPoint(boundaryDragHandleLatLng);
+        handleDistPx = Math.hypot(clickPoint.x - handlePt.x, clickPoint.y - handlePt.y);
+        if (handleDistPx <= BOUNDARY_HANDLE_HIT_PX) {
+          debugBoundary('hitTest', {
+            result: 'boundary-drag-handle',
+            handleDistPx: handleDistPx,
+            handleThresholdPx: BOUNDARY_HANDLE_HIT_PX,
+            minDistancePx: minDistance,
+            hasHandleLatLng: true
+          });
+          return 'boundary-drag-handle';
+        }
+      }
+
+      // Hit test boundary (always — independent of showBoundaryPoints visibility)
+      var boundaryLayers = boundaryLayersGroup.getLayers();
+      if (boundaryLayers.length > 0) {
+        var outerPoly = boundaryLayers[0];
+        if (outerPoly && outerPoly.getLatLngs) {
+          var lls = outerPoly.getLatLngs();
+          if (lls && lls.length > 0) {
+            var flatLls = Array.isArray(lls[0]) ? lls[0] : lls;
+
+            // Test boundary edges (enables edge drag via onMouseDown)
+            for (var bi = 0; bi < flatLls.length - 1; bi++) {
+              var bp1 = map.latLngToContainerPoint(flatLls[bi]);
+              var bp2 = map.latLngToContainerPoint(flatLls[bi + 1]);
+              var bd = distToSegment(clickPoint, bp1, bp2);
+              if (bd < minDistance) {
+                minDistance = bd;
+                hitId = 'boundary-interior';
+              }
+            }
+
+            // Test boundary interior when tap is not closer to an item edge/line
+            var bounds = outerPoly.getBounds();
+            if (bounds.contains(latlng) && minDistance > thresholdPx) {
+              hitId = 'boundary-interior';
+              minDistance = 0;
+            }
           }
         }
       }
 
       if (minDistance <= thresholdPx) {
+        if (hitId === 'boundary-interior' || hitId === 'boundary-drag-handle') {
+          debugBoundary('hitTest', {
+            result: hitId,
+            handleDistPx: handleDistPx,
+            minDistancePx: minDistance,
+            thresholdPx: thresholdPx,
+            hasHandleLatLng: !!boundaryDragHandleLatLng
+          });
+        }
         return hitId;
       }
+
+      debugBoundary('hitTest', {
+        result: null,
+        handleDistPx: handleDistPx,
+        minDistancePx: minDistance,
+        thresholdPx: thresholdPx,
+        lastHitId: hitId,
+        hasHandleLatLng: !!boundaryDragHandleLatLng
+      });
       return null;
     }
 
@@ -677,24 +783,110 @@ const LEAFLET_HTML = `
     var activeDrag = null; // { type: 'items'|'background', ids: [], startLatlng: L.LatLng, itemsStart: [] }
     var touchState = null; // { initialDist, initialAngle, itemsStart, lastScale, lastRotation }
 
+    function syncTemplatesMapDragging() {
+      if (mode !== 'templates') return;
+      if (lockPanDrag || boundaryDragHandleLatLng || (activeDrag && activeDrag.type === 'boundary')) {
+        map.dragging.disable();
+      } else if (!activeDrag || activeDrag.type === 'background') {
+        map.dragging.enable();
+      }
+    }
+
+    function finishBoundaryDrag(endLatlng) {
+      if (!activeDrag || activeDrag.type !== 'boundary') return;
+
+      var latDelta = activeDrag.currentLatDelta !== undefined
+        ? activeDrag.currentLatDelta
+        : (endLatlng.lat - activeDrag.startLatlng.lat);
+      var lonDelta = activeDrag.currentLonDelta !== undefined
+        ? activeDrag.currentLonDelta
+        : (endLatlng.lng - activeDrag.startLatlng.lng);
+
+      if (map.hasLayer(snapGlowCircle)) {
+        map.removeLayer(snapGlowCircle);
+      }
+
+      var p1 = map.latLngToContainerPoint(activeDrag.startLatlng);
+      var p2 = map.latLngToContainerPoint(endLatlng);
+      var pxDist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+
+      debugBoundary('onMouseUp_boundary', {
+        latDelta: latDelta,
+        lonDelta: lonDelta,
+        pxDist: pxDist,
+        committed: pxDist >= MIN_BOUNDARY_DRAG_PX,
+        hadCurrentDelta: activeDrag.currentLatDelta !== undefined
+      });
+
+      if (pxDist >= MIN_BOUNDARY_DRAG_PX) {
+        postMessage({ type: 'boundaryDragged', latDelta: latDelta, lonDelta: lonDelta });
+      }
+
+      debugBoundary('onMouseUp', {
+        endedDragType: 'boundary',
+        lockPanDrag: lockPanDrag
+      });
+      activeDrag = null;
+      syncTemplatesMapDragging();
+    }
+
+    function startBoundaryDrag(latlng, sourceHitId) {
+      postMessage({ type: 'selectItems', ids: ['boundary'] });
+      if (lockPanDrag) {
+        debugBoundary('startBoundaryDrag_blocked', {
+          reason: 'lockPanDrag',
+          hitId: sourceHitId,
+          lat: latlng.lat,
+          lng: latlng.lng
+        });
+        return;
+      }
+      activeDrag = {
+        type: 'boundary',
+        startLatlng: latlng
+      };
+      var layerCount = 0;
+      var handleSnapshotted = false;
+      boundaryLayersGroup.eachLayer(function(layer) {
+        if (layer.getLatLngs) {
+          layer._dragStartLatLngs = JSON.parse(JSON.stringify(layer.getLatLngs()));
+          layerCount++;
+        } else if (layer._isDragHandle && layer.getLatLng) {
+          layer._dragStartLatLng = layer.getLatLng();
+          handleSnapshotted = true;
+        }
+      });
+      map.dragging.disable();
+      map.touchZoom.disable();
+      syncTemplatesMapDragging();
+      debugBoundary('startBoundaryDrag', {
+        hitId: sourceHitId,
+        lat: latlng.lat,
+        lng: latlng.lng,
+        lockPanDrag: lockPanDrag,
+        mapDraggingEnabled: map.dragging && map.dragging.enabled(),
+        boundaryLayersSnapshotted: layerCount,
+        handleSnapshotted: handleSnapshotted,
+        handleLatLng: boundaryDragHandleLatLng ? [boundaryDragHandleLatLng.lat, boundaryDragHandleLatLng.lng] : null
+      });
+    }
+
     function onMouseDown(e) {
       if (mode !== 'templates') return;
 
       var hitId = hitTest(e.latlng);
+      debugBoundary('onMouseDown', {
+        hitId: hitId,
+        lat: e.latlng.lat,
+        lng: e.latlng.lng,
+        lockPanDrag: lockPanDrag,
+        mapDraggingEnabled: map.dragging && map.dragging.enabled(),
+        activeDragBefore: activeDrag ? activeDrag.type : null
+      });
+
       if (hitId) {
-        if (hitId === 'boundary-interior') {
-          postMessage({ type: 'selectItems', ids: ['boundary'] });
-          if (lockPanDrag) return;
-          activeDrag = {
-            type: 'boundary',
-            startLatlng: e.latlng
-          };
-          boundaryLayersGroup.eachLayer(function(layer) {
-            if (layer.getLatLngs) {
-              layer._dragStartLatLngs = JSON.parse(JSON.stringify(layer.getLatLngs()));
-            }
-          });
-          map.dragging.disable();
+        if (hitId === 'boundary-interior' || hitId === 'boundary-drag-handle') {
+          startBoundaryDrag(e.latlng, hitId);
           return;
         }
 
@@ -730,11 +922,28 @@ const LEAFLET_HTML = `
           type: 'background',
           startLatlng: e.latlng
         };
+        if (!lockPanDrag) {
+          map.dragging.enable();
+        }
+        debugBoundary('onMouseDown_background', {
+          lat: e.latlng.lat,
+          lng: e.latlng.lng,
+          note: 'No hitTest match — map may pan on move'
+        });
       }
     }
 
     function onMouseMove(e) {
-      if (!activeDrag || lockPanDrag) return;
+      if (!activeDrag) {
+        return;
+      }
+      if (lockPanDrag) {
+        debugBoundary('onMouseMove_blocked', {
+          reason: 'lockPanDrag',
+          activeDragType: activeDrag.type
+        });
+        return;
+      }
 
       if (activeDrag.type === 'items') {
         var latDelta = e.latlng.lat - activeDrag.startLatlng.lat;
@@ -802,6 +1011,17 @@ const LEAFLET_HTML = `
         activeDrag.currentLatDelta = latDelta;
         activeDrag.currentLonDelta = lonDelta;
 
+        var now = Date.now();
+        if (now - lastBoundaryDebugMoveLog > 250) {
+          lastBoundaryDebugMoveLog = now;
+          debugBoundary('onMouseMove_boundary', {
+            latDelta: latDelta,
+            lonDelta: lonDelta,
+            snapped: snapped,
+            mapDraggingEnabled: map.dragging && map.dragging.enabled()
+          });
+        }
+
         boundaryLayersGroup.eachLayer(function(layer) {
           if (layer._dragStartLatLngs) {
              var lls = layer._dragStartLatLngs;
@@ -816,6 +1036,11 @@ const LEAFLET_HTML = `
                 });
                 layer.setLatLngs(newLls);
              }
+          } else if (layer._isDragHandle && layer._dragStartLatLng) {
+             layer.setLatLng(L.latLng(
+               layer._dragStartLatLng.lat + latDelta,
+               layer._dragStartLatLng.lng + lonDelta
+             ));
           }
         });
         
@@ -859,30 +1084,82 @@ const LEAFLET_HTML = `
           }
         }
       } else if (activeDrag.type === 'boundary') {
-        var latDelta = activeDrag.currentLatDelta !== undefined ? activeDrag.currentLatDelta : (e.latlng.lat - activeDrag.startLatlng.lat);
-        var lonDelta = activeDrag.currentLonDelta !== undefined ? activeDrag.currentLonDelta : (e.latlng.lng - activeDrag.startLatlng.lng);
-        
-        if (map.hasLayer(snapGlowCircle)) {
-          map.removeLayer(snapGlowCircle);
-        }
-
-        postMessage({ type: 'boundaryDragged', latDelta: latDelta, lonDelta: lonDelta });
+        finishBoundaryDrag(e.latlng);
+        return;
       }
 
+      debugBoundary('onMouseUp', {
+        endedDragType: activeDrag ? activeDrag.type : null,
+        lockPanDrag: lockPanDrag
+      });
       activeDrag = null;
+      syncTemplatesMapDragging();
       if (!lockPanDrag) {
-        map.dragging.enable();
+        map.touchZoom.enable();
       }
     }
 
-    // Touch handlers
+    // Touch handlers (capture phase on container — runs before Leaflet pan)
+    function onContainerTouchStart(e) {
+      if (mode !== 'templates') return;
+      var touches = e.touches;
+      if (!touches || touches.length !== 1) return;
+
+      var latlng = map.mouseEventToLatLng(touches[0]);
+      var hitId = hitTest(latlng);
+
+      if (hitId === 'boundary-interior' || hitId === 'boundary-drag-handle') {
+        if (e.cancelable) e.preventDefault();
+        e.stopPropagation();
+        debugBoundary('onContainerTouchStart', {
+          hitId: hitId,
+          lat: latlng.lat,
+          lng: latlng.lng
+        });
+        startBoundaryDrag(latlng, hitId);
+      }
+    }
+
+    function onContainerTouchMove(e) {
+      if (mode !== 'templates') return;
+      if (!activeDrag || activeDrag.type !== 'boundary') return;
+      var touches = e.touches;
+      if (!touches || touches.length !== 1) return;
+
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation();
+      onMouseMove({ latlng: map.mouseEventToLatLng(touches[0]) });
+    }
+
+    function onContainerTouchEnd(e) {
+      if (mode !== 'templates') return;
+      if (!activeDrag || activeDrag.type !== 'boundary') return;
+      var touch = e.changedTouches && e.changedTouches[0];
+      if (!touch) return;
+
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation();
+      finishBoundaryDrag(map.mouseEventToLatLng(touch));
+    }
+
     function onTouchStart(e) {
       if (mode !== 'templates') return;
 
       var touches = e.touches || e.originalEvent.touches;
+      debugBoundary('onTouchStart', {
+        touchCount: touches.length,
+        mapDraggingEnabled: map.dragging && map.dragging.enabled(),
+        activeDragBefore: activeDrag ? activeDrag.type : null
+      });
+
       if (touches.length === 1) {
+        if (activeDrag && activeDrag.type === 'boundary') return;
         var latlng = map.mouseEventToLatLng(touches[0]);
         onMouseDown({ latlng: latlng });
+        debugBoundary('onTouchStart_afterMouseDown', {
+          activeDragAfter: activeDrag ? activeDrag.type : null,
+          mapDraggingEnabled: map.dragging && map.dragging.enabled()
+        });
       } else if (touches.length === 2 && !lockPanDrag) {
         var p1 = map.mouseEventToContainerPoint(touches[0]);
         var p2 = map.mouseEventToContainerPoint(touches[1]);
@@ -947,9 +1224,23 @@ const LEAFLET_HTML = `
       if (mode !== 'templates') return;
 
       var touches = e.touches || e.originalEvent.touches;
-      if (touches.length === 1 && activeDrag) {
+      if (touches.length === 1 && activeDrag && activeDrag.type === 'boundary') {
+        if (e.cancelable) e.preventDefault();
         var latlng = map.mouseEventToLatLng(touches[0]);
         onMouseMove({ latlng: latlng });
+      } else if (touches.length === 1 && activeDrag) {
+        var latlng = map.mouseEventToLatLng(touches[0]);
+        onMouseMove({ latlng: latlng });
+      } else if (touches.length === 1 && !activeDrag) {
+        var nowMove = Date.now();
+        if (nowMove - lastBoundaryDebugMoveLog > 500) {
+          lastBoundaryDebugMoveLog = nowMove;
+          debugBoundary('onTouchMove_noActiveDrag', {
+            touchCount: touches.length,
+            mapDraggingEnabled: map.dragging && map.dragging.enabled(),
+            note: 'Leaflet map pan may be active'
+          });
+        }
       } else if (touches.length === 2 && touchState && !lockPanDrag) {
         var p1 = map.mouseEventToContainerPoint(touches[0]);
         var p2 = map.mouseEventToContainerPoint(touches[1]);
@@ -1002,6 +1293,35 @@ const LEAFLET_HTML = `
       }
     }
 
+    map.on('dragstart', function() {
+      if (mode === 'templates' && boundaryDragHandleLatLng) {
+        map.dragging.disable();
+        debugBoundary('leaflet_dragstart_blocked', {
+          reason: 'boundary_selected',
+          activeDrag: activeDrag ? activeDrag.type : null
+        });
+        return;
+      }
+      debugBoundary('leaflet_dragstart', {
+        activeDrag: activeDrag ? activeDrag.type : null,
+        mode: mode,
+        lockPanDrag: lockPanDrag,
+        mapDraggingEnabled: map.dragging && map.dragging.enabled()
+      });
+    });
+
+    map.on('dragend', function() {
+      debugBoundary('leaflet_dragend', {
+        activeDrag: activeDrag ? activeDrag.type : null
+      });
+    });
+
+    var mapContainer = map.getContainer();
+    mapContainer.addEventListener('touchstart', onContainerTouchStart, { passive: false, capture: true });
+    mapContainer.addEventListener('touchmove', onContainerTouchMove, { passive: false, capture: true });
+    mapContainer.addEventListener('touchend', onContainerTouchEnd, { passive: false, capture: true });
+    mapContainer.addEventListener('touchcancel', onContainerTouchEnd, { passive: false, capture: true });
+
     // Hook listeners
     map.on('mousedown', onMouseDown);
     map.on('mousemove', onMouseMove);
@@ -1013,11 +1333,7 @@ const LEAFLET_HTML = `
 
     // Lock Helper setters
     function setLockPanDrag(locked) {
-      if (locked) {
-        map.dragging.disable();
-      } else {
-        map.dragging.enable();
-      }
+      syncTemplatesMapDragging();
     }
 
     function setLockZoom(locked) {
@@ -1112,6 +1428,7 @@ const LEAFLET_HTML = `
           clearSelection();
         } else if (data.type === 'setMode') {
           mode = data.mode;
+          syncTemplatesMapDragging();
         }
       } catch (e) {
         console.error('MapView message error:', e);
@@ -1966,6 +2283,12 @@ export function MapView({
           }
         } else if (data.type === "selectItems") {
           onSelectionChange?.(data.ids);
+        } else if (data.type === "boundaryDragDebug") {
+          console.log(
+            `[MapView BoundaryDrag] ${data.stage}`,
+            data.payload ?? {},
+            `(ts=${data.ts})`
+          );
         } else if (data.type === "itemsMoved") {
           const bw = boundaryWidth ?? 0;
           const bh = boundaryHeight ?? 0;
@@ -2070,14 +2393,32 @@ export function MapView({
           }
         } else if (data.type === "boundaryDragged") {
           const { latDelta, lonDelta } = data;
-          if (typeof latDelta !== "number" || typeof lonDelta !== "number" || isNaN(latDelta) || isNaN(lonDelta)) return;
+          if (typeof latDelta !== "number" || typeof lonDelta !== "number" || isNaN(latDelta) || isNaN(lonDelta)) {
+            console.warn("[MapView BoundaryDrag] boundaryDragged rejected — invalid deltas", { latDelta, lonDelta });
+            return;
+          }
 
           const originLatRad = (origin.originLat * Math.PI) / 180;
           const dy = latDelta * (EARTH_RADIUS * Math.PI / 180);
           const dx = lonDelta * (EARTH_RADIUS * Math.cos(originLatRad) * Math.PI / 180);
 
+          console.log("[MapView BoundaryDrag] boundaryDragged received", {
+            latDelta,
+            lonDelta,
+            dxMeters: dx,
+            dyMeters: dy,
+            from: boundaryPosition,
+            to: boundaryPosition ? { x: boundaryPosition.x + dx, y: boundaryPosition.y + dy } : null,
+            hasOnMoveBoundary: !!onMoveBoundary,
+          });
+
           if (onMoveBoundary && boundaryPosition) {
             onMoveBoundary(boundaryPosition.x + dx, boundaryPosition.y + dy);
+          } else {
+            console.warn("[MapView BoundaryDrag] boundaryDragged dropped", {
+              hasOnMoveBoundary: !!onMoveBoundary,
+              hasBoundaryPosition: !!boundaryPosition,
+            });
           }
         } else if (data.type === "boundaryPointClicked") {
           if (onPlaceRoverAtPoint) {

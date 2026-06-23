@@ -74,6 +74,12 @@ export const BoundaryEditor = memo(function BoundaryEditor({
   const [svgSize, setSvgSize] = useState({ width: 400, height: 400 }); // fallback for initial taps
   const [camera, setCamera] = useState({ x: 0, y: 0, zoom: 1 });
 
+  const dragHandleCx = cx - halfW - 14 / camera.zoom;
+  const dragHandleCy = cy - halfH - 14 / camera.zoom;
+  const dragHandleR = 14 / camera.zoom;
+  const dragHandleArm = 6 / camera.zoom;
+  const dragHandleArrow = 3.5 / camera.zoom;
+
   const [lockPanDrag, setLockPanDrag] = useState(false);
   const [lockZoom, setLockZoom] = useState(false);
 
@@ -208,7 +214,7 @@ export const BoundaryEditor = memo(function BoundaryEditor({
       return (px - (vx + t * (wx - vx))) ** 2 + (py - (vy + t * (wy - vy))) ** 2;
     };
 
-    // 1. Items (Highest Priority)
+    // 1. Items — line geometry has priority; padded bbox alone does not block boundary
     let bestBoxId: string | null = null;
     let bestBoxArea = Infinity;
 
@@ -254,11 +260,10 @@ export const BoundaryEditor = memo(function BoundaryEditor({
       }
     });
 
-    if (bestLineId || bestBoxId) {
-      return bestLineId || bestBoxId;
+    if (bestLineId) {
+      return bestLineId;
     }
 
-    // 2. Boundary Edges
     const bp = boundaryPositionRef.current || { x: 0, y: 0 };
     const bcx = bp.x * METER_TO_PX;
     const bcy = -bp.y * METER_TO_PX;
@@ -267,6 +272,19 @@ export const BoundaryEditor = memo(function BoundaryEditor({
     const bx2 = bcx + bw * METER_TO_PX / 2;
     const by2 = bcy + bh * METER_TO_PX / 2;
 
+    // 2. Boundary drag handle (when boundary is selected)
+    if (selectedItemIdsRef.current.includes("boundary")) {
+      const handleOffsetSvg = 14 / cam.zoom;
+      const handleRSvg = 44 / cam.zoom;
+      const handleX = bx1 - handleOffsetSvg;
+      const handleY = by1 - handleOffsetSvg;
+      const handleDistSq = (svgTapX - handleX) ** 2 + (svgTapY - handleY) ** 2;
+      if (handleDistSq <= handleRSvg ** 2) {
+        return "boundary-drag-handle";
+      }
+    }
+
+    // 3. Boundary Edges
     const edgeToleranceSq = (30 * screenToSvg) ** 2; // Wider tolerance for boundary edges
     const dTop = distToSegmentSquared(svgTapX, svgTapY, bx1, by1, bx2, by1);
     if (dTop < edgeToleranceSq) return "boundary-top";
@@ -280,9 +298,13 @@ export const BoundaryEditor = memo(function BoundaryEditor({
     const dLeft = distToSegmentSquared(svgTapX, svgTapY, bx1, by1, bx1, by2);
     if (dLeft < edgeToleranceSq) return "boundary-left";
 
-    // 3. Boundary Interior
+    // 4. Boundary Interior (wins over item bbox-only hits)
     if (svgTapX >= bx1 && svgTapX <= bx2 && svgTapY >= by1 && svgTapY <= by2) {
       return "boundary-interior";
+    }
+
+    if (bestBoxId) {
+      return bestBoxId;
     }
 
     return null;
@@ -294,7 +316,10 @@ export const BoundaryEditor = memo(function BoundaryEditor({
       onPanResponderGrant: (evt) => {
         const hitId = hitTest(evt.nativeEvent.locationX, evt.nativeEvent.locationY);
         
-        if (hitId && (hitId.startsWith("boundary-") || hitId === "boundary-interior")) {
+        if (
+          hitId === "boundary-drag-handle" ||
+          (hitId && (hitId.startsWith("boundary-") || hitId === "boundary-interior"))
+        ) {
            activeDragRef.current = { 
              type: "moveBoundary", 
              startBoundaryPosition: { ...(boundaryPositionRef.current || { x: 0, y: 0 }) }
@@ -554,6 +579,46 @@ export const BoundaryEditor = memo(function BoundaryEditor({
              height={(boundaryHeight - indentSpacing * 2) * METER_TO_PX}
              fill="#ffffff"
            />
+        )}
+
+        {/* Boundary drag handle (visible when boundary is selected) */}
+        {selectedItemIds.includes("boundary") && (
+          <G pointerEvents="none">
+            <Circle
+              cx={dragHandleCx}
+              cy={dragHandleCy}
+              r={dragHandleR}
+              fill="#3b82f6"
+              stroke="#ffffff"
+              strokeWidth={2 / camera.zoom}
+            />
+            <Line
+              x1={dragHandleCx - dragHandleArm}
+              y1={dragHandleCy}
+              x2={dragHandleCx + dragHandleArm}
+              y2={dragHandleCy}
+              stroke="#ffffff"
+              strokeWidth={2 / camera.zoom}
+              strokeLinecap="round"
+            />
+            <Line
+              x1={dragHandleCx}
+              y1={dragHandleCy - dragHandleArm}
+              x2={dragHandleCx}
+              y2={dragHandleCy + dragHandleArm}
+              stroke="#ffffff"
+              strokeWidth={2 / camera.zoom}
+              strokeLinecap="round"
+            />
+            <Line x1={dragHandleCx} y1={dragHandleCy - dragHandleArm} x2={dragHandleCx - dragHandleArrow} y2={dragHandleCy - dragHandleArrow} stroke="#ffffff" strokeWidth={1.5 / camera.zoom} strokeLinecap="round" />
+            <Line x1={dragHandleCx} y1={dragHandleCy - dragHandleArm} x2={dragHandleCx + dragHandleArrow} y2={dragHandleCy - dragHandleArrow} stroke="#ffffff" strokeWidth={1.5 / camera.zoom} strokeLinecap="round" />
+            <Line x1={dragHandleCx + dragHandleArm} y1={dragHandleCy} x2={dragHandleCx + dragHandleArrow} y2={dragHandleCy - dragHandleArrow} stroke="#ffffff" strokeWidth={1.5 / camera.zoom} strokeLinecap="round" />
+            <Line x1={dragHandleCx + dragHandleArm} y1={dragHandleCy} x2={dragHandleCx + dragHandleArrow} y2={dragHandleCy + dragHandleArrow} stroke="#ffffff" strokeWidth={1.5 / camera.zoom} strokeLinecap="round" />
+            <Line x1={dragHandleCx} y1={dragHandleCy + dragHandleArm} x2={dragHandleCx - dragHandleArrow} y2={dragHandleCy + dragHandleArrow} stroke="#ffffff" strokeWidth={1.5 / camera.zoom} strokeLinecap="round" />
+            <Line x1={dragHandleCx} y1={dragHandleCy + dragHandleArm} x2={dragHandleCx + dragHandleArrow} y2={dragHandleCy + dragHandleArrow} stroke="#ffffff" strokeWidth={1.5 / camera.zoom} strokeLinecap="round" />
+            <Line x1={dragHandleCx - dragHandleArm} y1={dragHandleCy} x2={dragHandleCx - dragHandleArrow} y2={dragHandleCy - dragHandleArrow} stroke="#ffffff" strokeWidth={1.5 / camera.zoom} strokeLinecap="round" />
+            <Line x1={dragHandleCx - dragHandleArm} y1={dragHandleCy} x2={dragHandleCx - dragHandleArrow} y2={dragHandleCy + dragHandleArrow} stroke="#ffffff" strokeWidth={1.5 / camera.zoom} strokeLinecap="round" />
+          </G>
         )}
 
         {/* Draw Control Points */}
