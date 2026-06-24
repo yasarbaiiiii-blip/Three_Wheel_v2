@@ -3075,6 +3075,77 @@ function HomeView({
   onStartVisualAlignment?: () => void;
   onConfirmVisualAlignment?: () => void;
 }) {
+  const [sprayModalOpen, setSprayModalOpen] = useState(false);
+  const [sprayTab, setSprayTab] = useState<"continuous" | "dashed" | "point">("continuous");
+  const [dashDistanceOn, setDashDistanceOn] = useState("0.3");
+  const [dashDistanceOff, setDashDistanceOff] = useState("0.3");
+  const [pointExecutionMode, setPointExecutionMode] = useState<"auto" | "manual">("auto");
+  const [activeSprayMode, setActiveSprayMode] = useState<string>("continuous");
+  const [activePointExecutionMode, setActivePointExecutionMode] = useState<string>("auto");
+  const [isSprayMasterEnabled, setIsSprayMasterEnabled] = useState(false);
+  const [isSprayMasterChanging, setIsSprayMasterChanging] = useState(false);
+
+  const handleSetSprayMode = async () => {
+    if (!apiBaseUrl || !selectedPathName) return;
+    try {
+      if (sprayTab === "continuous") {
+        await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/continuous`, { method: "PUT" });
+        setActiveSprayMode("continuous");
+      } else if (sprayTab === "dashed") {
+        await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/dash`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            dash_on_distance_m: parseFloat(dashDistanceOn) || 0.3,
+            dash_off_distance_m: parseFloat(dashDistanceOff) || 0.3,
+            dash_phase_reset: "per_mark_region"
+          })
+        });
+        setActiveSprayMode("dashed");
+      } else if (sprayTab === "point") {
+        await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/point`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            point_execution_mode: pointExecutionMode
+          })
+        });
+        setActiveSprayMode("point");
+        setActivePointExecutionMode(pointExecutionMode);
+      }
+      setSprayModalOpen(false);
+    } catch (err: any) {
+      Alert.alert("Error", err.message || "Failed to set spray mode.");
+    }
+  };
+
+  const handleSprayMasterToggle = async () => {
+    if (!apiBaseUrl) return;
+    const nextEnable = !isSprayMasterEnabled;
+    setIsSprayMasterChanging(true);
+    try {
+      const res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/spray/${nextEnable ? "enable" : "disable"}`, {
+        method: "POST",
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        Alert.alert("Error", errText || `Failed to ${nextEnable ? "enable" : "disable"} master spray.`);
+        return;
+      }
+      const data = await res.json();
+      if (data.enabled !== undefined) {
+        setIsSprayMasterEnabled(!!data.enabled);
+      } else {
+        setIsSprayMasterEnabled(nextEnable);
+      }
+    } catch (err: any) {
+      Alert.alert("Error", err.message || "Failed to connect to backend.");
+    } finally {
+      setIsSprayMasterChanging(false);
+    }
+  };
+
   const stagedStartGate = useMemo(
     () => evaluateStagedStartGate(stagedWorkflow, loadedPathInspection, stagedMissionId),
     [stagedWorkflow, loadedPathInspection, stagedMissionId]
@@ -3684,6 +3755,22 @@ function HomeView({
                       </Text>
                     </View>
 
+                    <Pressable
+                      onPress={() => setSprayModalOpen(true)}
+                      style={{
+                        backgroundColor: "#0ea5e9",
+                        height: 38,
+                        borderRadius: 8,
+                        alignItems: "center",
+                        justifyContent: "center",
+                        marginBottom: 12,
+                      }}
+                    >
+                      <Text style={{ color: "#ffffff", fontSize: 10, fontWeight: "800", textTransform: "uppercase", textAlign: "center" }}>
+                        Spray
+                      </Text>
+                    </Pressable>
+
                     <View style={{ flexDirection: "row", gap: 8, marginBottom: 12, alignItems: "center" }}>
                       <Pressable
                         onPress={() => setSafetyControlsEnabled(!safetyControlsEnabled)}
@@ -3721,32 +3808,32 @@ function HomeView({
 
                       <Pressable
                         onPress={() => {
-                          if (!protectedResident) setAutoOrigin(!autoOrigin);
+                          if (telemetrySnapshot?.mission_state === "running") {
+                            Alert.alert("Mission Running", "Cannot preview point during an active mission.");
+                            return;
+                          }
+                          if (lines.length === 0) {
+                            Alert.alert("No path", "Load a plan first.");
+                            return;
+                          }
+                          setShowPointsModal(true);
                         }}
-                        disabled={protectedResident}
                         style={{
+                          backgroundColor: "#e2e8f0",
                           flex: 1,
-                          flexDirection: "row",
-                          alignItems: "center",
-                          gap: 6,
-                          paddingVertical: 4,
-                          opacity: protectedResident ? 0.45 : 1,
-                        }}
-                      >
-                        <View style={{
-                          width: 14,
-                          height: 14,
-                          borderRadius: 3,
-                          borderWidth: 1.5,
-                          borderColor: autoOrigin ? "#14b8a6" : "#475569",
-                          backgroundColor: autoOrigin ? "#14b8a6" : "transparent",
+                          height: 38,
+                          borderRadius: 8,
                           alignItems: "center",
                           justifyContent: "center",
-                        }}>
-                          {autoOrigin && (
+                          position: "relative",
+                          overflow: "hidden",
+                        }}
+                      >
+                        <View style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 2, backgroundColor: "#cbd5e1" }}>
+                          {stagedWorkflow.alignment === "verified" && (
                             <View style={{
-                              width: 6,
-                              height: 6,
+                              width: "100%",
+                              height: "100%",
                               borderRadius: 1,
                               backgroundColor: "#ffffff",
                             }} />
@@ -3774,23 +3861,51 @@ function HomeView({
                       </Pressable>
                     </View>
 
-                    <Pressable
-                      onPress={onClearMission}
-                      disabled={missionActionBusy}
-                      style={{
-                        height: 38,
-                        borderRadius: 8,
-                        backgroundColor: missionActionBusy ? "#1e293b" : "#f97316",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        marginBottom: 12,
-                        opacity: missionActionBusy ? 0.7 : 1,
-                      }}
-                    >
-                      <Text style={{ color: missionActionBusy ? "#64748b" : "#ffffff", fontSize: 12, fontWeight: "800", textTransform: "uppercase" }}>
-                        {missionActionBusy ? "Clearing..." : "Clear"}
-                      </Text>
-                    </Pressable>
+                    <View style={{ flexDirection: "row", gap: 8, marginBottom: 12 }}>
+                      {activeSprayMode === "point" && activePointExecutionMode === "manual" && (
+                        <Pressable
+                          onPress={async () => {
+                            if (!apiBaseUrl) return;
+                            try {
+                              const res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/mission/point/continue`, { method: "POST" });
+                              if (!res.ok) {
+                                const err = await res.json();
+                                Alert.alert("Error", err.detail || "Failed to continue.");
+                              }
+                            } catch (e: any) {
+                              Alert.alert("Error", e.message || "Failed to continue.");
+                            }
+                          }}
+                          style={{
+                            flex: 1,
+                            height: 38,
+                            borderRadius: 8,
+                            backgroundColor: "#8b5cf6",
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                        >
+                          <Text style={{ color: "#ffffff", fontSize: 12, fontWeight: "800", textTransform: "uppercase" }}>Continue</Text>
+                        </Pressable>
+                      )}
+                      <Pressable
+                        onPress={onClearMission}
+                        disabled={missionActionBusy}
+                        style={{
+                          flex: 1,
+                          height: 38,
+                          borderRadius: 8,
+                          backgroundColor: missionActionBusy ? "#1e293b" : "#f97316",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          opacity: missionActionBusy ? 0.7 : 1,
+                        }}
+                      >
+                        <Text style={{ color: missionActionBusy ? "#64748b" : "#ffffff", fontSize: 12, fontWeight: "800", textTransform: "uppercase" }}>
+                          {missionActionBusy ? "Clearing..." : "Clear"}
+                        </Text>
+                      </Pressable>
+                    </View>
 
                     {startBlocked && stagedStartGate.message ? (
                       <Text style={{ color: "#fbbf24", fontSize: 10, lineHeight: 14, marginBottom: 8 }}>
@@ -4382,6 +4497,154 @@ function HomeView({
                 <Text style={{ color: "#fff", fontWeight: "800" }}>Save</Text>
               </Pressable>
             </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal transparent visible={sprayModalOpen} animationType="fade" onRequestClose={() => setSprayModalOpen(false)}>
+        <Pressable
+          onPress={() => setSprayModalOpen(false)}
+          style={{
+            flex: 1,
+            backgroundColor: "rgba(15,23,42,0.45)",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+          }}
+        >
+          <Pressable
+            onPress={() => { }}
+            style={{
+              width: "100%",
+              maxWidth: 360,
+              borderRadius: 16,
+              backgroundColor: "#ffffff",
+              padding: 16,
+              borderWidth: 1,
+              borderColor: "#d8e1eb",
+            }}
+          >
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <Text style={{ color: "#0f172a", fontSize: 18, fontWeight: "900" }}>Spray Configuration</Text>
+              <Pressable onPress={() => setSprayModalOpen(false)} hitSlop={10}>
+                <X size={20} color="#94a3b8" />
+              </Pressable>
+            </View>
+
+            {/* Master Spray Enable */}
+            <View style={{ backgroundColor: "#f8fafc", padding: 12, borderRadius: 12, marginBottom: 16 }}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                <Text style={{ color: "#334155", fontSize: 14, fontWeight: "700" }}>Master Spray Gate</Text>
+                {isSprayMasterEnabled && (
+                  <View style={{ backgroundColor: "#22c55e", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+                    <Text style={{ color: "#fff", fontSize: 9, fontWeight: "bold" }}>ENABLED</Text>
+                  </View>
+                )}
+              </View>
+              <Pressable
+                onPress={handleSprayMasterToggle}
+                disabled={isSprayMasterChanging}
+                style={{
+                  marginTop: 10,
+                  backgroundColor: isSprayMasterChanging ? "#94a3b8" : isSprayMasterEnabled ? "#ef4444" : "#0ea5e9",
+                  paddingVertical: 10,
+                  borderRadius: 8,
+                  alignItems: "center"
+                }}
+              >
+                <Text style={{ color: "#fff", fontWeight: "700", fontSize: 13 }}>
+                  {isSprayMasterChanging ? "..." : isSprayMasterEnabled ? "Spray Disable" : "Spray Enable"}
+                </Text>
+              </Pressable>
+            </View>
+
+            {/* Mode Selection */}
+            {!selectedPathName ? (
+              <View style={{ backgroundColor: "#fef2f2", padding: 12, borderRadius: 8, marginBottom: 16, borderWidth: 1, borderColor: "#fecaca" }}>
+                <Text style={{ color: "#b91c1c", fontSize: 12, fontWeight: "600", textAlign: "center" }}>
+                  You must load a path/plan to configure spray modes.
+                </Text>
+              </View>
+            ) : (
+              <>
+                <View style={{ flexDirection: "row", backgroundColor: "#e2e8f0", borderRadius: 8, padding: 4, marginBottom: 16 }}>
+                  {(["continuous", "dashed", "point"] as const).map(tab => (
+                    <Pressable
+                      key={tab}
+                      onPress={() => setSprayTab(tab)}
+                      style={{
+                        flex: 1,
+                        paddingVertical: 8,
+                        alignItems: "center",
+                        backgroundColor: sprayTab === tab ? "#ffffff" : "transparent",
+                        borderRadius: 6,
+                      }}
+                    >
+                      <Text style={{ color: sprayTab === tab ? "#0f172a" : "#64748b", fontSize: 12, fontWeight: sprayTab === tab ? "700" : "500", textTransform: "capitalize" }}>
+                        {tab}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                {sprayTab === "continuous" && (
+                  <View style={{ marginBottom: 16 }}>
+                    <Text style={{ color: "#64748b", fontSize: 12, marginBottom: 12 }}>Standard continuous spraying along marked regions.</Text>
+                    <Pressable
+                      onPress={handleSetSprayMode}
+                      style={{ backgroundColor: "#0ea5e9", paddingVertical: 10, borderRadius: 8, alignItems: "center" }}
+                    >
+                      <Text style={{ color: "#fff", fontWeight: "700", fontSize: 13 }}>Set Mode</Text>
+                    </Pressable>
+                  </View>
+                )}
+
+                {sprayTab === "dashed" && (
+                  <View style={{ marginBottom: 16 }}>
+                    <View style={{ flexDirection: "row", gap: 12, marginBottom: 12 }}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: "#64748b", fontSize: 12, marginBottom: 6 }}>Distance On (m)</Text>
+                        <TextInput value={dashDistanceOn} onChangeText={setDashDistanceOn} keyboardType="numeric" style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: "#f8fafc" }} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: "#64748b", fontSize: 12, marginBottom: 6 }}>Distance Off (m)</Text>
+                        <TextInput value={dashDistanceOff} onChangeText={setDashDistanceOff} keyboardType="numeric" style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: "#f8fafc" }} />
+                      </View>
+                    </View>
+                    <Pressable
+                      onPress={handleSetSprayMode}
+                      style={{ backgroundColor: "#0ea5e9", paddingVertical: 10, borderRadius: 8, alignItems: "center" }}
+                    >
+                      <Text style={{ color: "#fff", fontWeight: "700", fontSize: 13 }}>Set Mode</Text>
+                    </Pressable>
+                  </View>
+                )}
+
+                {sprayTab === "point" && (
+                  <View style={{ marginBottom: 16 }}>
+                    <Text style={{ color: "#64748b", fontSize: 12, marginBottom: 6 }}>Execution Mode</Text>
+                    <View style={{ flexDirection: "row", backgroundColor: "#f1f5f9", borderRadius: 8, padding: 4, marginBottom: 12 }}>
+                      {(["auto", "manual"] as const).map(mode => (
+                        <Pressable
+                          key={mode}
+                          onPress={() => setPointExecutionMode(mode as any)}
+                          style={{ flex: 1, paddingVertical: 6, alignItems: "center", backgroundColor: pointExecutionMode === mode ? "#ffffff" : "transparent", borderRadius: 6 }}
+                        >
+                          <Text style={{ color: pointExecutionMode === mode ? "#0f172a" : "#64748b", fontSize: 12, fontWeight: pointExecutionMode === mode ? "700" : "500", textTransform: "capitalize" }}>{mode}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                    <Pressable
+                      onPress={handleSetSprayMode}
+                      style={{ backgroundColor: "#0ea5e9", paddingVertical: 10, borderRadius: 8, alignItems: "center" }}
+                    >
+                      <Text style={{ color: "#fff", fontWeight: "700", fontSize: 13 }}>Set Mode</Text>
+                    </Pressable>
+                  </View>
+                )}
+              </>
+            )}
+
           </Pressable>
         </Pressable>
       </Modal>
@@ -9687,7 +9950,6 @@ function SwoziPage({
       setIsSavingSprayParams(false);
     }
   };
-
   const handleSprayHoldToggle = async () => {
     if (!apiBaseUrl) return;
     const nextHoldActive = !isSprayHoldActive;
@@ -9723,7 +9985,6 @@ function SwoziPage({
       <Text style={secH}>Pump</Text>
       <Text style={itemH}>Manual Control</Text>
       <Text style={itemT}>Disconnected</Text>
-
       {/* Spray Test Section */}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginVertical: 12 }}>
         <View style={{ flex: 1, flexDirection: "row", alignItems: "center" }}>
