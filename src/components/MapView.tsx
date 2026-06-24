@@ -1586,6 +1586,7 @@ export function MapView({
   const lastRoverMsgRef = useRef("");
   const lastLinesMsgRef = useRef("");
   const lastRefMsgRef = useRef("");
+  const lastPlacedItemsMsgRef = useRef("");
   const webViewReadyRef = useRef(false);
 
   const [latchedOrigin, setLatchedOrigin] = useState<{ lat: number; lon: number } | null>(null);
@@ -2075,6 +2076,14 @@ export function MapView({
   // Sync Templates mode placed items to WebView
   useEffect(() => {
     if (!visible || mode !== "templates") return;
+    const msgKey = projectedPlacedItems
+      .map((item) =>
+        `${item.id}:${item.x}:${item.y}:${item.rotation}:${item.scale}:${item.lines.length}`
+      )
+      .join("|");
+    if (msgKey === lastPlacedItemsMsgRef.current) return;
+    lastPlacedItemsMsgRef.current = msgKey;
+
     sendToWebView({
       type: "updatePlacedItems",
       items: projectedPlacedItems,

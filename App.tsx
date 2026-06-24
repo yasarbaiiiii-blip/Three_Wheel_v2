@@ -558,7 +558,11 @@ export default function App() {
 
   // 3. Trigger Function: Bundles lines into one item
   function startVisualAlignment() {
-    if (lines.length === 0) return;
+    console.log("[Align DXF] startVisualAlignment: Initiating visual alignment mode.");
+    if (lines.length === 0) {
+      console.log("[Align DXF] startVisualAlignment: No lines available to align, aborting.");
+      return;
+    }
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     lines.forEach(line => {
@@ -581,11 +585,16 @@ export default function App() {
       height: maxY - minY,
     });
 
+    console.log(`[Align DXF] startVisualAlignment: Created visual sticker. Width: ${maxX - minX}, Height: ${maxY - minY}`);
     setIsVisualAlignmentMode(true);
   }
 
   function handleConfirmVisualAlignment() {
-    if (!visualAlignmentItem) return;
+    console.log("[Align DXF] handleConfirmVisualAlignment: Confirming visual alignment position.");
+    if (!visualAlignmentItem) {
+      console.log("[Align DXF] handleConfirmVisualAlignment: visualAlignmentItem is null, aborting.");
+      return;
+    }
 
     const finalX = visualAlignmentItem.x; 
     const finalY = visualAlignmentItem.y; 
@@ -686,7 +695,8 @@ export default function App() {
     setExtractedCorners(extractedLLA);
     setLines(updatedLines); // <-- THIS FIXES THE SHIFTING ISSUE
     
-    // 6. Exit visual mode safely
+    // 6. Exit visual mode safely and drop the sticker so the map renders updated lines
+    setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
   }
   const [extractedCorners, setExtractedCorners] = useState<{dxf_x: number, dxf_y: number, lat: number, lon: number}[] | null>(null);
@@ -775,13 +785,9 @@ export default function App() {
       } else if (state === "idle") {
         // Clear the shift when the rover returns to idle.
         // This ensures the next mission can accurately lock its own fresh start position.
-        setOriginShift(null);
-      } else {
-        // "completed" or "paused" — preserve the existing origin shift.
-        // This prevents the plan from "jumping" when the mission finishes
-        // and the rover is at a different final position than its starting point.
-        setOriginShift((prev) => prev);
+        setOriginShift((prev) => (prev === null ? prev : null));
       }
+      // "completed" or "paused" — preserve the existing origin shift (no state write).
     } else {
       setOriginShift(null);
     }
@@ -2239,11 +2245,18 @@ export default function App() {
       setMissionLoaded(false);
       setMissionRunning(false);
       setOriginShift(null);
-      setStagedWorkflow((prev) => ({
-        ...prev,
-        loaded: "pending",
-        started: "pending",
-      }));
+      setExtractedCorners(null);
+      setAlignedRefPoints([]);
+      setAlignmentResult(null);
+      setVerifiedAlignmentRequest(null);
+      setVisualAlignmentItem(null);
+      setIsVisualAlignmentMode(false);
+      setSegmentVerification(null);
+      setStagedPlanResult(null);
+      setStagedMissionInspection(null);
+      setStagedMissionId(null);
+      setLoadedPathInspection(null);
+      setStagedWorkflow(INITIAL_STAGED_WORKFLOW_STATE);
 
       void refreshMissionIdentity();
       void refreshTelemetryPanel();
@@ -6497,8 +6510,13 @@ function FieldsPage({
   };
 
   const handleFixAlignment = async () => {
-    if (blockProtectedWorkflowMutation("Changing GPS alignment")) return;
+    console.log(`[Align DXF] handleFixAlignment: Starting alignment using method "${alignmentMethod}"`);
+    if (blockProtectedWorkflowMutation("Changing GPS alignment")) {
+      console.log("[Align DXF] handleFixAlignment: Blocked by protected workflow mutation.");
+      return;
+    }
     if (!selectedPathName || !apiBaseUrl || (alignmentMethod !== "visual_alignment" && refPoints.length === 0) || (alignmentMethod === "visual_alignment" && !extractedCorners)) {
+      console.log("[Align DXF] handleFixAlignment: Missing prerequisites. Path:", selectedPathName, "Method:", alignmentMethod, "ExtractedCorners:", !!extractedCorners);
       onWorkflowStep?.("alignment", "failed");
       setVerifiedAlignmentRequest(null);
       return;
@@ -6543,6 +6561,7 @@ function FieldsPage({
       const payload: pathApi.AlignPathRequest = {
         ref_points: validPoints,
       };
+      console.log("[Align DXF] handleFixAlignment: Constructed payload reference points:", validPoints);
 
       if (alignmentMethod === "single_point") {
         const rot = parseFloat(rotationDeg);
@@ -6556,10 +6575,12 @@ function FieldsPage({
         payload.rotation_deg = rot;
       }
 
+      console.log(`[Align DXF] handleFixAlignment: Sending align_mission request to API for path: ${selectedPathName}`);
       const res = await pathApi.alignPath(apiBaseUrl, selectedPathName, payload);
 
       if (res.ok) {
         const data = await res.json();
+        console.log("[Align DXF] handleFixAlignment: API response success. Data:", data);
         if (data.mission_summary) {
           setMissionSummary(data.mission_summary);
 
@@ -6608,6 +6629,50 @@ function FieldsPage({
             warnings: data.warnings ?? null,
           });
           onWorkflowStep?.("alignment", "verified");
+
+          // Skip frontend transform when lines were already shifted by the visual sticker workflow.
+          const isFromLLAReceiver = !isVisualAlignmentMode && alignmentMethod !== "visual_alignment";
+          const rotDeg = coerceFiniteNumber(data.rotation_deg);
+          const offsetE = coerceFiniteNumber(data.offset_e);
+          const offsetN = coerceFiniteNumber(data.offset_n);
+          if (isFromLLAReceiver && rotDeg != null && offsetE != null && offsetN != null) {
+            const rotRad = (rotDeg * Math.PI) / 180;
+            const cos = Math.cos(rotRad);
+            const sin = Math.sin(rotRad);
+
+            const applyOriginTransform = (pt: { x: number; y: number }) => {
+              return {
+                x: pt.x * cos - pt.y * sin + offsetE,
+                y: pt.x * sin + pt.y * cos + offsetN,
+              };
+            };
+
+            setLines((prev) =>
+              prev.map((line) => {
+                const transformedFrom = applyOriginTransform({ x: line.from.x, y: line.from.y });
+                const transformedTo = applyOriginTransform({ x: line.to.x, y: line.to.y });
+
+                let updatedEntity = line.entity;
+                if (updatedEntity?.preview_points) {
+                  updatedEntity = {
+                    ...updatedEntity,
+                    preview_points: updatedEntity.preview_points.map((pt: { north: number; east: number }) => {
+                      const transformed = applyOriginTransform({ x: pt.north, y: pt.east });
+                      return { ...pt, north: transformed.x, east: transformed.y };
+                    }),
+                  };
+                }
+
+                return {
+                  ...line,
+                  from: { ...line.from, x: transformedFrom.x, y: transformedFrom.y },
+                  to: { ...line.to, x: transformedTo.x, y: transformedTo.y },
+                  ...(updatedEntity ? { entity: updatedEntity } : {}),
+                };
+              })
+            );
+          }
+
           Alert.alert("Success", "Alignment verified.");
         }
         // Save the aligned ref points so they continue to render as green markers with GPS labels
@@ -7513,6 +7578,7 @@ function FieldsPage({
                   </Pressable>
                   <Pressable
                     onPress={() => {
+                      console.log("[Align DXF] Visual Alignment UI: 'Clear Alignment' clicked. Resetting visual state.");
                       setExtractedCorners?.(null);
                       setVisualAlignmentItem?.(null);
                     }}
@@ -8496,6 +8562,12 @@ function PlanPreview({
       headingDeg: normalizeDegrees(prevPose.headingDeg + shortestAngleDelta(prevPose.headingDeg, nextPose.headingDeg) * alpha),
     };
 
+    const smoothedDelta = Math.hypot(smoothedPose.north - prevPose.north, smoothedPose.east - prevPose.east);
+    const smoothedHeadingDelta = Math.abs(shortestAngleDelta(prevPose.headingDeg, smoothedPose.headingDeg));
+    if (smoothedDelta < 0.001 && smoothedHeadingDelta < 0.05) {
+      return;
+    }
+
     displayRoverPoseRef.current = smoothedPose;
     setDisplayRoverPose(smoothedPose);
   }, [hasRover, missionRunning, roverDeg, roverE, roverN]);
@@ -8516,6 +8588,13 @@ function PlanPreview({
     if (userPannedRef.current) return;
 
     const fitted = computeAutoFitViewport(filtered, layoutSize.width, layoutSize.height);
+    const prev = viewportRef.current;
+    const unchanged =
+      Math.abs(prev.panX - fitted.panX) < 0.5 &&
+      Math.abs(prev.panY - fitted.panY) < 0.5 &&
+      Math.abs(prev.zoom - fitted.zoom) < 0.001;
+    if (unchanged) return;
+
     viewportRef.current = fitted;
     setViewport(fitted);
     setRotation(0);
@@ -8787,7 +8866,7 @@ function PlanPreview({
         {mapViewEnabled ? (
           <MapView
             mode={isVisualAlignmentMode ? "templates" : "fields"}
-            placedItems={(isVisualAlignmentMode || visualAlignmentItem) && visualAlignmentItem ? [visualAlignmentItem] : []}
+            placedItems={isVisualAlignmentMode && visualAlignmentItem ? [visualAlignmentItem] : []}
             selectedItemIds={isVisualAlignmentMode ? ["visual-alignment-group"] : []}
             onUpdatePlacedItem={(id, updates) => {
               if (id === "visual-alignment-group") {
@@ -8805,7 +8884,7 @@ function PlanPreview({
               pos_n: telemetryPosN,
               pos_e: telemetryPosE,
             } as any}
-            lines={visualAlignmentItem ? [] : lines}
+            lines={isVisualAlignmentMode && visualAlignmentItem ? [] : lines}
             alignedRefPoints={alignedRefPoints}
             visible={true}
             recenterRoverTrigger={recenterRoverCount}
