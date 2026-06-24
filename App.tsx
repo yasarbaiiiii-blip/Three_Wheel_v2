@@ -3088,28 +3088,35 @@ function HomeView({
   const handleSetSprayMode = async () => {
     if (!apiBaseUrl || !selectedPathName) return;
     try {
+      let res;
       if (sprayTab === "continuous") {
-        await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/continuous`, { method: "PUT" });
+        res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/continuous`, { 
+          method: "PUT",
+          headers: { "Accept": "application/json" }
+        });
+        if (!res.ok) throw new Error(`Server error: ${res.status} ${await res.text()}`);
         setActiveSprayMode("continuous");
       } else if (sprayTab === "dashed") {
-        await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/dash`, {
+        res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/dash`, {
           method: "PUT",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "Accept": "application/json" },
           body: JSON.stringify({
             dash_on_distance_m: parseFloat(dashDistanceOn) || 0.3,
             dash_off_distance_m: parseFloat(dashDistanceOff) || 0.3,
             dash_phase_reset: "per_mark_region"
           })
         });
+        if (!res.ok) throw new Error(`Server error: ${res.status} ${await res.text()}`);
         setActiveSprayMode("dashed");
       } else if (sprayTab === "point") {
-        await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/point`, {
+        res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/point`, {
           method: "PUT",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "Accept": "application/json" },
           body: JSON.stringify({
             point_execution_mode: pointExecutionMode
           })
         });
+        if (!res.ok) throw new Error(`Server error: ${res.status} ${await res.text()}`);
         setActiveSprayMode("point");
         setActivePointExecutionMode(pointExecutionMode);
       }
