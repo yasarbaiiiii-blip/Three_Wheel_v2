@@ -3,6 +3,7 @@ import { View, StyleSheet, ActivityIndicator, Text } from "react-native";
 import { WebView } from "react-native-webview";
 
 import type { TelemetrySnapshot, PlanLine } from "../types/plan";
+import { transformVisualDxfPoint } from "../utils/visualAlignment";
 import type { PlacedItem } from "./BoundaryEditor";
 
 const EARTH_RADIUS = 6378137.0;
@@ -1845,11 +1846,12 @@ export function MapView({
 
       // Project each line's endpoints to GPS
       const linesGps = item.lines.map((l) => {
-        const fromNorth = (l.from.x * cos - l.from.y * sin) * item.scale + item.y;
-        const fromEast = (l.from.x * sin + l.from.y * cos) * item.scale + item.x;
-
-        const toNorth = (l.to.x * cos - l.to.y * sin) * item.scale + item.y;
-        const toEast = (l.to.x * sin + l.to.y * cos) * item.scale + item.x;
+        const fromPlaced = transformVisualDxfPoint(l.from.x, l.from.y, item);
+        const toPlaced = transformVisualDxfPoint(l.to.x, l.to.y, item);
+        const fromNorth = fromPlaced.north;
+        const fromEast = fromPlaced.east;
+        const toNorth = toPlaced.north;
+        const toEast = toPlaced.east;
 
         const fromGps = projectLocalMetersToGps(
           fromNorth - origin.originDxfX,

@@ -7,6 +7,7 @@ import {
   Alert,
   Animated,
   FlatList,
+  LogBox,
   Modal,
   PanResponder,
   Platform,
@@ -80,6 +81,18 @@ import { generateRoadSignLines, RoadSignType, ROAD_SIGN_LABELS } from "./src/uti
 import type { Page, TelemetrySnapshot, LayerVisibility } from "./src/types/plan";
 import { TemplatesPage } from "./src/screens/TemplatesPage";
 import { MapView } from "./src/components/MapView";
+import {
+  buildVisualAlignmentRefPoints,
+  computeLineBoundingBox,
+} from "./src/utils/visualAlignment";
+import {
+  anchorToAlignedRefPoints,
+  stagedMissionMatchesId,
+  waypointsToPlanLines,
+} from "./src/utils/stagedMissionHydration";
+
+LogBox.ignoreLogs(["Maximum update depth exceeded"]);
+
 const MAX_PREVIEW_CORNERS = 450;
 const PATH_SEGMENT_CHUNK_SIZE = 650;
 const PREVIEW_ARROWHEAD_LENGTH_PX = 14;
@@ -369,12 +382,12 @@ function ReorderableLineList({
 function isRenderableLine(line: PlanLine | null | undefined): line is PlanLine {
   return Boolean(
     line &&
-      line.from &&
-      line.to &&
-      isFiniteNumber(line.from.x) &&
-      isFiniteNumber(line.from.y) &&
-      isFiniteNumber(line.to.x) &&
-      isFiniteNumber(line.to.y)
+    line.from &&
+    line.to &&
+    isFiniteNumber(line.from.x) &&
+    isFiniteNumber(line.from.y) &&
+    isFiniteNumber(line.to.x) &&
+    isFiniteNumber(line.to.y)
   );
 }
 
@@ -389,7 +402,7 @@ function buildSvgPathChunks(lines: PlanLine[]) {
 
   for (const line of lines) {
     if (!isRenderableLine(line)) continue;
-    
+
     if (line.entity && line.entity.preview_points && line.entity.preview_points.length > 1) {
       const pts = line.entity.preview_points;
       current += `M${pts[0].east} ${pts[0].north}`;
@@ -399,7 +412,7 @@ function buildSvgPathChunks(lines: PlanLine[]) {
     } else {
       current += `M${line.from.y} ${line.from.x}L${line.to.y} ${line.to.x}`;
     }
-    
+
     count += 1;
 
     if (count >= PATH_SEGMENT_CHUNK_SIZE) {
@@ -576,8 +589,8 @@ export default function App() {
 
     setVisualAlignmentItem({
       id: "visual-alignment-group",
-      lines: lines, 
-      x: 0, 
+      lines: lines,
+      x: 0,
       y: 0,
       rotation: 0,
       scale: 1,
@@ -596,110 +609,31 @@ export default function App() {
       return;
     }
 
-    const finalX = visualAlignmentItem.x; 
-    const finalY = visualAlignmentItem.y; 
-    const finalRot = visualAlignmentItem.rotation;
-    
-    // 1. Find the bounding box to get the center point for rotation
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    lines.forEach(line => {
-      if (line.from && line.to) {
-        minX = Math.min(minX, line.from.x, line.to.x);
-        minY = Math.min(minY, line.from.y, line.to.y);
-        maxX = Math.max(maxX, line.from.x, line.to.x);
-        maxY = Math.max(maxY, line.from.y, line.to.y);
-      }
-    });
-
-    const centerX = (minX + maxX) / 2;
-    const centerY = (minY + maxY) / 2;
-
-    // 2. Setup the rotation math
-    const rad = (finalRot * Math.PI) / 180;
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
-
-    // 3. PERMANENTLY APPLY THE VISUAL TRANSFORM TO ALL PLAN LINES
-    const updatedLines = lines.map(line => {
-      const applyTransform = (pt: { x: number, y: number }) => {
-        // Shift point to origin (center)
-        const dx = pt.x - centerX;
-        const dy = pt.y - centerY;
-        // Rotate around center
-        const rotatedX = dx * cos - dy * sin;
-        const rotatedY = dx * sin + dy * cos;
-        // Shift back and apply the drag offsets (finalY = North/x-axis, finalX = East/y-axis)
-        return {
-          x: rotatedX + centerX + finalY, 
-          y: rotatedY + centerY + finalX
-        };
-      };
-
-      // Also transform the preview_points so curved entities don't break
-      let updatedEntity = line.entity;
-      if (updatedEntity && updatedEntity.preview_points) {
-        updatedEntity = {
-          ...updatedEntity,
-          preview_points: updatedEntity.preview_points.map((pt: any) => {
-            const transformed = applyTransform({ x: pt.north, y: pt.east });
-            return { ...pt, north: transformed.x, east: transformed.y };
-          }),
-        };
-      }
-
-      return {
-        ...line,
-        from: { ...line.from, ...applyTransform(line.from) },
-        to: { ...line.to, ...applyTransform(line.to) },
-        ...(updatedEntity ? { entity: updatedEntity } : {})
-      };
-    });
-
-    // 4. Calculate LLA Receiver logic exactly as before
-    const halfW = visualAlignmentItem.width / 2;
-    const halfH = visualAlignmentItem.height / 2;
-
-    const cornersLocal = [
-      { n: halfH, e: -halfW },  // Top Left
-      { n: halfH, e: halfW },   // Top Right
-      { n: -halfH, e: halfW },  // Bottom Right
-      { n: -halfH, e: -halfW }, // Bottom Left
-    ];
-
+    const { minX, minY, maxX, maxY } = computeLineBoundingBox(lines);
     const dxfCorners = [
-      { dxf_x: maxX, dxf_y: minY }, // Top Left
-      { dxf_x: maxX, dxf_y: maxY }, // Top Right
-      { dxf_x: minX, dxf_y: maxY }, // Bottom Right
-      { dxf_x: minX, dxf_y: minY }, // Bottom Left
+      { x: minX, y: minY },
+      { x: maxX, y: minY },
+      { x: maxX, y: maxY },
+      { x: minX, y: maxY },
     ];
 
-    const rotatedCorners = cornersLocal.map(c => ({
-      n: (c.n * cos - c.e * sin) + finalY, 
-      e: (c.n * sin + c.e * cos) + finalX, 
-    }));
+    const baseLat = telemetrySnapshot?.lat ?? 28.6139;
+    const baseLon = telemetrySnapshot?.lon ?? 77.2090;
 
-    const baseLat = telemetrySnapshot?.lat || 28.6139; // Fallback to Delhi
-    const baseLon = telemetrySnapshot?.lon || 77.2090;
+    const extractedLLA = buildVisualAlignmentRefPoints(
+      dxfCorners,
+      visualAlignmentItem,
+      baseLat,
+      baseLon
+    );
 
-    const extractedLLA = rotatedCorners.map((corner, i) => {
-      const EARTH_RADIUS = 6378137.0;
-      const originLatRad = (baseLat * Math.PI) / 180;
-      const lat = baseLat + (corner.n / EARTH_RADIUS) * (180 / Math.PI);
-      const lon = baseLon + (corner.e / (EARTH_RADIUS * Math.cos(originLatRad))) * (180 / Math.PI);
-      return { lat, lon, dxf_x: dxfCorners[i].dxf_x, dxf_y: dxfCorners[i].dxf_y };
-    });
+    console.log("Captured LLA reference points for rover:", extractedLLA);
 
-    console.log("Captured 4 LLA Corners for Rover:", extractedLLA);
-    
-    // 5. Save the coordinates and update the permanent plan lines state
+    // Keep canonical DXF lines unchanged; retain the sticker transform for map preview.
     setExtractedCorners(extractedLLA);
-    setLines(updatedLines); // <-- THIS FIXES THE SHIFTING ISSUE
-    
-    // 6. Exit visual mode safely and drop the sticker so the map renders updated lines
-    setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
   }
-  const [extractedCorners, setExtractedCorners] = useState<{dxf_x: number, dxf_y: number, lat: number, lon: number}[] | null>(null);
+  const [extractedCorners, setExtractedCorners] = useState<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>(null);
   const [layerVisibility, setLayerVisibility] = useState<LayerVisibility>({
     boundary: true,
     marking: true,
@@ -1389,7 +1323,7 @@ export default function App() {
         const res = await request();
         if (res.ok) return res;
         // If not ok, it might be a 404, which shouldn't be retried if the endpoint really doesn't exist
-        if (res.status === 404) return res; 
+        if (res.status === 404) return res;
       } catch (err) {
         if (i === retries - 1) throw err;
         await new Promise(r => setTimeout(r, 1000));
@@ -1639,7 +1573,7 @@ export default function App() {
     setMissionActionBusy(true);
     try {
       showToast("Parse", "Sending modifications to backend...", "info");
-      
+
       // The user indicated that the parse-dxf payload is still UploadFile
       // So we will reconstruct the DXF or rely on the backend to provide a way
       // Wait, we can't easily generate a perfect DXF on the frontend and upload it
@@ -1652,7 +1586,7 @@ export default function App() {
       // For now, I will use /api/path/parse-dxf if it accepts the file, but since the
       // prompt says "at bottom the abutton will appear to send to post for POST /api/path/parse-dxf endpoint"
       // I will implement a POST request.
-      
+
       // Sending an empty file if the backend expects multipart/form-data for /parse-dxf
       // But passing the modified entities in some way if possible.
       const content = linesToDxf(lines, importedPlan.fileName);
@@ -1679,7 +1613,7 @@ export default function App() {
       }
       invalidateStagedWorkflowFrom("alignment");
       setWorkflowStep("upload", "verified");
-      
+
       // Choice A: Refresh preview immediately!
       await previewSelectedPath(importedPlan.fileName);
       showToast("Parsed", "Plan updated successfully.", "success");
@@ -1932,6 +1866,35 @@ export default function App() {
           setLoadedPathInspection(loadedData);
           throw classifyMissionError(409, verification.message ?? "Loaded staged mission verification failed.");
         }
+
+        let stagedArtifact: pathApi.StagedMissionResponse | null =
+          stagedMissionMatchesId(stagedMissionInspection, missionId) ? stagedMissionInspection : null;
+        if (!stagedArtifact) {
+          const stagedRes = await pathApi.getStagedMission(apiBaseUrl, missionId);
+          if (!stagedRes.ok) {
+            const errMsg = await parseFetchError(stagedRes, "Staged mission geometry fetch failed");
+            throw new Error(errMsg);
+          }
+          stagedArtifact = (await stagedRes.json()) as pathApi.StagedMissionResponse;
+          if (!stagedMissionMatchesId(stagedArtifact, missionId)) {
+            throw new Error(`Staged mission ${missionId} could not be loaded for map preview.`);
+          }
+          setStagedMissionInspection(stagedArtifact);
+        }
+
+        const hydratedLines = waypointsToPlanLines(
+          stagedArtifact.waypoints ?? [],
+          stagedArtifact.spray_flags ?? []
+        );
+        if (hydratedLines.length === 0) {
+          throw new Error(`Staged mission ${missionId} has no drawable waypoints for map preview.`);
+        }
+
+        setAlignedRefPoints(anchorToAlignedRefPoints(stagedArtifact.anchor));
+        setLines(sanitizePlanLines(hydratedLines));
+        setSelectedLineId(hydratedLines[0]?.id ?? null);
+        setVisualAlignmentItem(null);
+        setIsVisualAlignmentMode(false);
 
         setLoadedPathInspection(loadedData);
         setMissionLoaded(true);
@@ -2316,7 +2279,7 @@ export default function App() {
         body: JSON.stringify({ arm }),
       });
       let data;
-      try { data = await res.clone().json(); } catch (e) {}
+      try { data = await res.clone().json(); } catch (e) { }
 
       if (!res.ok || (data && data.success === false)) {
         const errMsg = data?.message || (await parseFetchError(res, arm ? "Arm failed" : "Disarm failed"));
@@ -2807,58 +2770,58 @@ export default function App() {
               )}
 
 
-          {toast ? (
-            <View
-              pointerEvents="none"
-              style={{
-                position: "absolute",
-                left: 16,
-                right: 16,
-                bottom: 18,
-                zIndex: 999,
-                alignItems: "center",
-              }}
-            >
-              <View
-                style={{
-                  maxWidth: 560,
-                  width: "100%",
-                  borderRadius: 16,
-                  paddingHorizontal: 14,
-                  paddingVertical: 12,
-                  backgroundColor:
-                    toast.tone === "success"
-                      ? "#0f766e"
-                      : toast.tone === "warning"
-                        ? "#b45309"
-                        : toast.tone === "error"
-                          ? "#991b1b"
-                          : "#0f172a",
-                  borderWidth: 1,
-                  borderColor:
-                    toast.tone === "success"
-                      ? "#5eead4"
-                      : toast.tone === "warning"
-                        ? "#fdba74"
-                        : toast.tone === "error"
-                          ? "#fca5a5"
-                          : "#334155",
-                  shadowColor: "#000",
-                  shadowOpacity: 0.16,
-                  shadowRadius: 16,
-                  shadowOffset: { width: 0, height: 8 },
-                  elevation: 10,
-                }}
-              >
-                <Text style={{ color: "#fff", fontSize: 12, fontWeight: "900", letterSpacing: 0.6, textTransform: "uppercase" }}>
-                  {toast.title}
-                </Text>
-                <Text style={{ color: "#e2e8f0", marginTop: 4, fontSize: 13, lineHeight: 18 }}>
-                  {toast.message}
-                </Text>
-              </View>
-            </View>
-          ) : null}
+              {toast ? (
+                <View
+                  pointerEvents="none"
+                  style={{
+                    position: "absolute",
+                    left: 16,
+                    right: 16,
+                    bottom: 18,
+                    zIndex: 999,
+                    alignItems: "center",
+                  }}
+                >
+                  <View
+                    style={{
+                      maxWidth: 560,
+                      width: "100%",
+                      borderRadius: 16,
+                      paddingHorizontal: 14,
+                      paddingVertical: 12,
+                      backgroundColor:
+                        toast.tone === "success"
+                          ? "#0f766e"
+                          : toast.tone === "warning"
+                            ? "#b45309"
+                            : toast.tone === "error"
+                              ? "#991b1b"
+                              : "#0f172a",
+                      borderWidth: 1,
+                      borderColor:
+                        toast.tone === "success"
+                          ? "#5eead4"
+                          : toast.tone === "warning"
+                            ? "#fdba74"
+                            : toast.tone === "error"
+                              ? "#fca5a5"
+                              : "#334155",
+                      shadowColor: "#000",
+                      shadowOpacity: 0.16,
+                      shadowRadius: 16,
+                      shadowOffset: { width: 0, height: 8 },
+                      elevation: 10,
+                    }}
+                  >
+                    <Text style={{ color: "#fff", fontSize: 12, fontWeight: "900", letterSpacing: 0.6, textTransform: "uppercase" }}>
+                      {toast.title}
+                    </Text>
+                    <Text style={{ color: "#e2e8f0", marginTop: 4, fontSize: 13, lineHeight: 18 }}>
+                      {toast.message}
+                    </Text>
+                  </View>
+                </View>
+              ) : null}
             </View>
           )}
         </SafeAreaInsetsContext.Consumer>
@@ -4047,10 +4010,10 @@ function HomeView({
                       <View style={[drawerStyles.section, { marginTop: 24, paddingBottom: 20 }]}>
                         <SectionTitle title="Line Viewer (Spray Overrides)" />
                         <View style={{ borderRadius: 16, padding: 12, backgroundColor: "#1e293b", borderWidth: 1, borderColor: "rgba(148,163,184,0.16)", maxHeight: 250 }}>
-                          
+
                           <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.05)", marginBottom: 4 }}>
                             <Text style={{ color: "#fff", fontSize: 12, fontWeight: "600" }}>Total: {lines.filter(l => l.entity && l.entity.entity_id && l.layer !== "extension" && l.layer !== "transit").length}</Text>
-                            <Pressable 
+                            <Pressable
                               onPress={() => {
                                 onInvalidateWorkflow?.("spray");
                                 const entityLines = lines.filter(l => l.entity && l.entity.entity_id && l.layer !== "extension" && l.layer !== "transit");
@@ -4083,12 +4046,12 @@ function HomeView({
                                         prev.map((entry) =>
                                           entry.id === line.id && entry.entity
                                             ? {
-                                                ...entry,
-                                                entity: {
-                                                  ...entry.entity,
-                                                  is_mark: !entry.entity.is_mark,
-                                                },
-                                              }
+                                              ...entry,
+                                              entity: {
+                                                ...entry.entity,
+                                                is_mark: !entry.entity.is_mark,
+                                              },
+                                            }
                                             : entry
                                         )
                                       );
@@ -4107,7 +4070,7 @@ function HomeView({
                             ))}
                           </ScrollView>
                         </View>
-                        
+
                         <Pressable
                           onPress={handleSetSpray}
                           disabled={isSprayingSet}
@@ -4643,7 +4606,7 @@ function HomeView({
               >
                 <Text style={{ color: "#0f172a", fontWeight: "800", fontSize: 13 }}>Cancel</Text>
               </Pressable>
-              
+
               <Pressable
                 onPress={startNtrip}
                 disabled={rtkConnecting || rtkRunning}
@@ -5502,8 +5465,8 @@ function SectionScreen(props: {
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
   onStartVisualAlignment?: () => void;
   onConfirmVisualAlignment?: () => void;
-  extractedCorners?: {dxf_x: number, dxf_y: number, lat: number, lon: number}[] | null;
-  setExtractedCorners?: React.Dispatch<React.SetStateAction<{dxf_x: number, dxf_y: number, lat: number, lon: number}[] | null>>;
+  extractedCorners?: { dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null;
+  setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>>;
 }) {
   const { title, page, onBack, mapViewEnabled, setMapViewEnabled } = props;
 
@@ -6053,7 +6016,7 @@ function FieldsPage({
 }: {
   importedPlan: ImportedPlan | null;
   setImportedPlan: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
-  lines: PlanLine[]; 
+  lines: PlanLine[];
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   previewRoverPoint: { north: number; east: number } | null;
   missionRunning: boolean;
@@ -6102,8 +6065,8 @@ function FieldsPage({
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
   onStartVisualAlignment?: () => void;
   onConfirmVisualAlignment?: () => void;
-  extractedCorners?: {dxf_x: number, dxf_y: number, lat: number, lon: number}[] | null;
-  setExtractedCorners?: React.Dispatch<React.SetStateAction<{dxf_x: number, dxf_y: number, lat: number, lon: number}[] | null>>;
+  extractedCorners?: { dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null;
+  setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>>;
 }) {
   const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -6491,7 +6454,7 @@ function FieldsPage({
       if (existingIdx >= 0) {
         return prev.filter((_, i) => i !== existingIdx);
       }
-      
+
       if (alignmentMethod === "single_point") {
         if (prev.length >= 1) return [{ dxf_x: pt.y, dxf_y: pt.x, lat: prev[0].lat, lon: prev[0].lon }];
         return [{ dxf_x: pt.y, dxf_y: pt.x, lat: "", lon: "" }];
@@ -6523,10 +6486,10 @@ function FieldsPage({
     }
     setIsFixing(true);
     try {
-      let validPoints: {dxf_x: number, dxf_y: number, lat: number, lon: number}[] = [];
+      let validPoints: { dxf_x: number, dxf_y: number, lat: number, lon: number }[] = [];
 
       if (alignmentMethod === "visual_alignment") {
-        validPoints = extractedCorners!.slice(0, 2).map(p => ({
+        validPoints = extractedCorners!.map((p) => ({
           dxf_x: p.dxf_x,
           dxf_y: p.dxf_y,
           lat: p.lat,
@@ -6584,8 +6547,9 @@ function FieldsPage({
         if (data.mission_summary) {
           setMissionSummary(data.mission_summary);
 
-          // Update canvas lines
-          if (data.merged_waypoints) {
+          // Visual preview uses original DXF lines + sticker transform. Backend
+          // merged_waypoints are aligned local metres and must not replace lines.
+          if (data.merged_waypoints && alignmentMethod !== "visual_alignment") {
             const alignedLines: PlanLine[] = [];
             const pts = Array.isArray(data.merged_waypoints) ? data.merged_waypoints : [];
             const sprayFlags = Array.isArray(data.spray_flags) ? data.spray_flags : [];
@@ -6675,15 +6639,18 @@ function FieldsPage({
 
           Alert.alert("Success", "Alignment verified.");
         }
-        // Save the aligned ref points so they continue to render as green markers with GPS labels
-        if (setAlignedRefPoints) {
+        // Keep latchedOrigin as the visual-preview projection base. Alignment
+        // reference points are still sent to the backend for Plan & Stage.
+        if (setAlignedRefPoints && alignmentMethod !== "visual_alignment") {
           setAlignedRefPoints(validPoints.map(p => ({
             dxf_x: p.dxf_x, dxf_y: p.dxf_y, lat: p.lat, lon: p.lon
           })));
         }
         setRefPoints([]);
         setExtractedCorners?.(null);
-        setVisualAlignmentItem?.(null);
+        if (alignmentMethod !== "visual_alignment") {
+          setVisualAlignmentItem?.(null);
+        }
       } else {
         onWorkflowStep?.("alignment", "failed");
         setVerifiedAlignmentRequest(null);
@@ -6727,7 +6694,7 @@ function FieldsPage({
     setIsUploading(true);
     try {
       const ext = pickedFile.name.split('.').pop()?.toLowerCase();
-      
+
       const formData = new FormData();
       if (Platform.OS === "web") {
         // On web, DocumentPicker exposes the real browser File at `.file`;
@@ -6803,7 +6770,7 @@ function FieldsPage({
           </View>
         </View>
       </View>
-      
+
       {isPathPlanningMode ? (
         <ScrollView
           style={{ width: "42%", height: "100%" }}
@@ -6959,12 +6926,12 @@ function FieldsPage({
                             style={{
                               width: 24, height: 24, borderRadius: 6,
                               borderWidth: 1,
-                                borderColor: l.entity.is_mark ? "#0d9488" : "rgba(148,163,184,0.5)",
-                                backgroundColor: l.entity.is_mark ? "#0d9488" : "transparent",
-                                alignItems: "center", justifyContent: "center"
-                              }}
-                            >
-                              {l.entity.is_mark && <CheckIcon size={14} color="#fff" />}
+                              borderColor: l.entity.is_mark ? "#0d9488" : "rgba(148,163,184,0.5)",
+                              backgroundColor: l.entity.is_mark ? "#0d9488" : "transparent",
+                              alignItems: "center", justifyContent: "center"
+                            }}
+                          >
+                            {l.entity.is_mark && <CheckIcon size={14} color="#fff" />}
                           </Pressable>
                         )}
                       </Pressable>
@@ -6973,7 +6940,7 @@ function FieldsPage({
               </ScrollView>
             )}
           </View>
-          
+
           {!isReordering && (
             <ScrollView style={{ flexShrink: 1 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingVertical: 4 }}>
               <Pressable
@@ -7228,12 +7195,12 @@ function FieldsPage({
             <View style={{ flex: 1, backgroundColor: "rgba(15,23,42,0.6)", justifyContent: "center", alignItems: "center" }}>
               <View style={{ width: 340, backgroundColor: "#fff", borderRadius: 16, padding: 20, elevation: 10 }}>
                 <Text style={{ color: "#0f172a", fontSize: 18, fontWeight: "900", marginBottom: 16 }}>Path Summary</Text>
-                
+
                 <View style={{ gap: 12, marginBottom: 20 }}>
                   <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
                     <Text style={{ color: "#64748b", fontWeight: "700" }}>Primary Lines</Text>
                     <Text style={{ color: "#0f172a", fontWeight: "800" }}>
-                      {lines.filter(l => normalizeEntityType(l.entity?.entity_type) === "line" && l.layer !== "transit" && l.layer !== "extension").length} total 
+                      {lines.filter(l => normalizeEntityType(l.entity?.entity_type) === "line" && l.layer !== "transit" && l.layer !== "extension").length} total
                       ({lines.filter(l => normalizeEntityType(l.entity?.entity_type) === "line" && l.layer !== "transit" && l.layer !== "extension" && l.entity?.is_mark).length} spray ready)
                     </Text>
                   </View>
@@ -7272,294 +7239,402 @@ function FieldsPage({
 
         </ScrollView>
       ) : (
-      <View style={{ width: "42%", height: "100%", padding: 14, paddingLeft: 0, gap: 12 }}>
-        <View style={{ borderRadius: 14, padding: 14, backgroundColor: "#0f172a" }}>
-          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
-            <View>
-              <Text style={{ color: "#94a3b8", fontSize: 11, fontWeight: "800", letterSpacing: 1.2, textTransform: "uppercase" }}>
-                Field Workspace
-              </Text>
-              <Text style={{ color: "#fff", fontSize: 18, fontWeight: "900", marginTop: 5 }}>
-                Select Rover Path
-              </Text>
-              <Text style={{ color: "#cbd5e1", fontSize: 12, lineHeight: 17, marginTop: 6 }}>
-                Select a path directly from the rover.
-              </Text>
-            </View>
-            {(selectedPathName?.toLowerCase().endsWith(".dxf") || importedPlan?.fileName?.toLowerCase().endsWith(".dxf")) && (
-              <View style={{ gap: 8 }}>
-                <Pressable
-                  onPress={() => setIsPathPlanningMode(true)}
-                  style={{
-                    height: 36,
-                    paddingHorizontal: 12,
-                    backgroundColor: "#eab308",
-                    borderRadius: 8,
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  <Text style={{ color: "#0f172a", fontSize: 12, fontWeight: "800" }}>Path Planning</Text>
-                </Pressable>
-                
-                <Pressable
-                  onPress={async () => {
-                    // Load the saved config so the toggles reflect backend state
-                    // (per_line is sticky server-side; show its real value).
-                    if (apiBaseUrl && targetPathForExtensions) {
-                      try {
-                        const cfg = await pathApi.getExtensions(apiBaseUrl, targetPathForExtensions);
-                        setExtPre(String(cfg.pre_extension_m ?? 0.5));
-                        setExtAft(String(cfg.aft_extension_m ?? 0.5));
-                        setExtPerLine(!!cfg.per_line);
-                      } catch {
-                        // offline / not saved yet — keep current modal values
-                      }
-                    }
-                    setExtModalOpen(true);
-                  }}
-                  style={{
-                    height: 36,
-                    paddingHorizontal: 12,
-                    backgroundColor: "#8b5cf6",
-                    borderRadius: 8,
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  <Text style={{ color: "#fff", fontSize: 12, fontWeight: "800" }}>Enable Extension</Text>
-                </Pressable>
-                
-                {lines.some((l) => l.layer === "extension") && (
+        <View style={{ width: "42%", height: "100%", padding: 14, paddingLeft: 0, gap: 12 }}>
+          <View style={{ borderRadius: 14, padding: 14, backgroundColor: "#0f172a" }}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <View>
+                <Text style={{ color: "#94a3b8", fontSize: 11, fontWeight: "800", letterSpacing: 1.2, textTransform: "uppercase" }}>
+                  Field Workspace
+                </Text>
+                <Text style={{ color: "#fff", fontSize: 18, fontWeight: "900", marginTop: 5 }}>
+                  Select Rover Path
+                </Text>
+                <Text style={{ color: "#cbd5e1", fontSize: 12, lineHeight: 17, marginTop: 6 }}>
+                  Select a path directly from the rover.
+                </Text>
+              </View>
+              {(selectedPathName?.toLowerCase().endsWith(".dxf") || importedPlan?.fileName?.toLowerCase().endsWith(".dxf")) && (
+                <View style={{ gap: 8 }}>
                   <Pressable
-                    onPress={handleDisableExtension}
+                    onPress={() => setIsPathPlanningMode(true)}
                     style={{
                       height: 36,
                       paddingHorizontal: 12,
-                      backgroundColor: "#ef4444",
+                      backgroundColor: "#eab308",
                       borderRadius: 8,
                       alignItems: "center",
                       justifyContent: "center",
                     }}
                   >
-                    <Text style={{ color: "#fff", fontSize: 12, fontWeight: "800" }}>Disable Extension</Text>
+                    <Text style={{ color: "#0f172a", fontSize: 12, fontWeight: "800" }}>Path Planning</Text>
+                  </Pressable>
+
+                  <Pressable
+                    onPress={async () => {
+                      // Load the saved config so the toggles reflect backend state
+                      // (per_line is sticky server-side; show its real value).
+                      if (apiBaseUrl && targetPathForExtensions) {
+                        try {
+                          const cfg = await pathApi.getExtensions(apiBaseUrl, targetPathForExtensions);
+                          setExtPre(String(cfg.pre_extension_m ?? 0.5));
+                          setExtAft(String(cfg.aft_extension_m ?? 0.5));
+                          setExtPerLine(!!cfg.per_line);
+                        } catch {
+                          // offline / not saved yet — keep current modal values
+                        }
+                      }
+                      setExtModalOpen(true);
+                    }}
+                    style={{
+                      height: 36,
+                      paddingHorizontal: 12,
+                      backgroundColor: "#8b5cf6",
+                      borderRadius: 8,
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <Text style={{ color: "#fff", fontSize: 12, fontWeight: "800" }}>Enable Extension</Text>
+                  </Pressable>
+
+                  {lines.some((l) => l.layer === "extension") && (
+                    <Pressable
+                      onPress={handleDisableExtension}
+                      style={{
+                        height: 36,
+                        paddingHorizontal: 12,
+                        backgroundColor: "#ef4444",
+                        borderRadius: 8,
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Text style={{ color: "#fff", fontSize: 12, fontWeight: "800" }}>Disable Extension</Text>
+                    </Pressable>
+                  )}
+                </View>
+              )}
+            </View>
+          </View>
+
+          {/* --- EXTENSION MODAL --- */}
+          <Modal visible={extModalOpen} transparent={true} animationType="fade">
+            <View style={{ flex: 1, backgroundColor: "rgba(15,23,42,0.6)", justifyContent: "center", alignItems: "center" }}>
+              <View style={{ width: 340, backgroundColor: "#fff", borderRadius: 16, padding: 20, elevation: 10 }}>
+                <Text style={{ color: "#0f172a", fontSize: 18, fontWeight: "900", marginBottom: 12 }}>
+                  Path Extensions
+                </Text>
+                <View style={{ marginBottom: 12 }}>
+                  <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "700", marginBottom: 4 }}>File Name</Text>
+                  <TextInput
+                    style={{ backgroundColor: "#f8fafc", borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, padding: 10, color: "#64748b", fontWeight: "600" }}
+                    value={targetPathForExtensions || ""}
+                    editable={false}
+                  />
+                </View>
+                <View style={{ marginBottom: 12 }}>
+                  <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "700", marginBottom: 4 }}>Pre Extension (m)</Text>
+                  <TextInput
+                    style={{ backgroundColor: "#fff", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, padding: 10, color: "#0f172a" }}
+                    value={extPre}
+                    onChangeText={(value) => {
+                      onInvalidateWorkflow("spray");
+                      setExtPre(value);
+                    }}
+                    keyboardType="numeric"
+                  />
+                </View>
+                <View style={{ marginBottom: 20 }}>
+                  <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "700", marginBottom: 4 }}>Aft Extension (m)</Text>
+                  <TextInput
+                    style={{ backgroundColor: "#fff", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, padding: 10, color: "#0f172a" }}
+                    value={extAft}
+                    onChangeText={(value) => {
+                      onInvalidateWorkflow("spray");
+                      setExtAft(value);
+                    }}
+                    keyboardType="numeric"
+                  />
+                </View>
+                <View style={{ marginBottom: 20, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                  <View style={{ flex: 1, paddingRight: 10 }}>
+                    <Text style={{ color: "#0f172a", fontSize: 13, fontWeight: "800" }}>Per-line extensions</Text>
+                    <Text style={{ color: "#64748b", fontSize: 11, marginTop: 2 }}>
+                      Each line gets its own run-up/run-out (square sides too)
+                    </Text>
+                  </View>
+                  <Switch
+                    value={extPerLine}
+                    onValueChange={(value) => {
+                      onInvalidateWorkflow("spray");
+                      setExtPerLine(value);
+                    }}
+                    trackColor={{ false: "#cbd5e1", true: "#8b5cf6" }}
+                  />
+                </View>
+                <View style={{ flexDirection: "row", gap: 10 }}>
+                  <Pressable
+                    onPress={() => setExtModalOpen(false)}
+                    style={{ flex: 1, height: 44, backgroundColor: "#e2e8f0", borderRadius: 10, alignItems: "center", justifyContent: "center" }}
+                  >
+                    <Text style={{ color: "#475569", fontSize: 14, fontWeight: "700" }}>Cancel</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={handleSetExtension}
+                    disabled={isExtSetting}
+                    style={{ flex: 1, height: 44, backgroundColor: "#8b5cf6", borderRadius: 10, alignItems: "center", justifyContent: "center", opacity: isExtSetting ? 0.7 : 1 }}
+                  >
+                    <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>{isExtSetting ? "Setting..." : "Set Extension"}</Text>
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+          </Modal>
+
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingBottom: 20 }} style={{ flex: 1 }}>
+
+            {/* --- IMPORT SECTION --- */}
+            <View style={{ borderRadius: 14, padding: 14, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d8e1eb" }}>
+              <Text style={{ color: "#64748b", fontSize: 11, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+                Import from Device
+              </Text>
+              {!pickedFile ? (
+                <Pressable
+                  onPress={handlePickFile}
+                  disabled={protectedResident}
+                  style={{
+                    height: 44,
+                    borderRadius: 12,
+                    alignItems: "center",
+                    justifyContent: "center",
+                    backgroundColor: protectedResident ? "#cbd5e1" : "#e2e8f0",
+                    borderWidth: 1,
+                    borderColor: "#cbd5e1",
+                  }}
+                >
+                  <Text style={{ color: "#0f172a", fontSize: 14, fontWeight: "700" }}>
+                    Select .dxf, .csv, .waypoints
+                  </Text>
+                </Pressable>
+              ) : (
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                  <View style={{ flex: 1, backgroundColor: "#f8fafc", padding: 10, borderRadius: 8, borderWidth: 1, borderColor: "#e2e8f0" }}>
+                    <Text style={{ color: "#0f172a", fontSize: 13, fontWeight: "600" }} numberOfLines={1}>
+                      {pickedFile.name}
+                    </Text>
+                  </View>
+                  <Pressable
+                    onPress={handleParseFile}
+                    disabled={isUploading || protectedResident}
+                    style={{
+                      height: 40,
+                      paddingHorizontal: 16,
+                      borderRadius: 8,
+                      alignItems: "center",
+                      justifyContent: "center",
+                      backgroundColor: isUploading || protectedResident ? "#94a3b8" : "#0f988f",
+                    }}
+                  >
+                    <Text style={{ color: "#fff", fontSize: 13, fontWeight: "800" }}>
+                      {isUploading ? "..." : "Parse"}
+                    </Text>
+                  </Pressable>
+                  <Pressable onPress={() => setPickedFile(null)} style={{ padding: 4 }}>
+                    <X size={20} color="#64748b" />
+                  </Pressable>
+                </View>
+              )}
+            </View>
+            {/* --- END IMPORT SECTION --- */}
+
+            {/* --- ALIGNMENT SECTION --- */}
+            <View style={{ borderRadius: 14, padding: 14, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d8e1eb" }}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <Text style={{ color: "#64748b", fontSize: 11, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase" }}>
+                  Align DXF
+                </Text>
+                {refPoints.length > 0 && (
+                  <Pressable
+                    onPress={() => {
+                      onInvalidateWorkflow("alignment");
+                      setMissionSummary(null);
+                      setAlignmentResult(null);
+                      setVerifiedAlignmentRequest(null);
+                      setRefPoints([]);
+                    }}
+                  >
+                    <Text style={{ color: "#ef4444", fontSize: 11, fontWeight: "700" }}>Clear Points</Text>
                   </Pressable>
                 )}
               </View>
-            )}
-          </View>
-        </View>
 
-        {/* --- EXTENSION MODAL --- */}
-        <Modal visible={extModalOpen} transparent={true} animationType="fade">
-          <View style={{ flex: 1, backgroundColor: "rgba(15,23,42,0.6)", justifyContent: "center", alignItems: "center" }}>
-            <View style={{ width: 340, backgroundColor: "#fff", borderRadius: 16, padding: 20, elevation: 10 }}>
-              <Text style={{ color: "#0f172a", fontSize: 18, fontWeight: "900", marginBottom: 12 }}>
-                Path Extensions
-              </Text>
-              <View style={{ marginBottom: 12 }}>
-                <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "700", marginBottom: 4 }}>File Name</Text>
-                <TextInput
-                  style={{ backgroundColor: "#f8fafc", borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, padding: 10, color: "#64748b", fontWeight: "600" }}
-                  value={targetPathForExtensions || ""}
-                  editable={false}
-                />
-              </View>
-              <View style={{ marginBottom: 12 }}>
-                <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "700", marginBottom: 4 }}>Pre Extension (m)</Text>
-                <TextInput
-                  style={{ backgroundColor: "#fff", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, padding: 10, color: "#0f172a" }}
-                  value={extPre}
-                  onChangeText={(value) => {
-                    onInvalidateWorkflow("spray");
-                    setExtPre(value);
+              {/* Toggle Method */}
+              <View style={{ flexDirection: "row", backgroundColor: "#f1f5f9", borderRadius: 8, padding: 4, marginBottom: 12 }}>
+                <Pressable
+                  onPress={() => {
+                    onInvalidateWorkflow("alignment");
+                    setAlignmentMethod("least_squares");
+                    setRefPoints([]);
+                    setMissionSummary(null);
+                    setAlignmentResult(null);
+                    setVerifiedAlignmentRequest(null);
                   }}
-                  keyboardType="numeric"
-                />
-              </View>
-              <View style={{ marginBottom: 20 }}>
-                <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "700", marginBottom: 4 }}>Aft Extension (m)</Text>
-                <TextInput
-                  style={{ backgroundColor: "#fff", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, padding: 10, color: "#0f172a" }}
-                  value={extAft}
-                  onChangeText={(value) => {
-                    onInvalidateWorkflow("spray");
-                    setExtAft(value);
+                  style={{ flex: 1, paddingVertical: 8, alignItems: "center", borderRadius: 6, backgroundColor: alignmentMethod === "least_squares" ? "#ffffff" : "transparent", shadowColor: alignmentMethod === "least_squares" ? "#000" : "transparent", shadowOpacity: 0.05, shadowRadius: 2, shadowOffset: { width: 0, height: 1 } }}
+                >
+                  <Text style={{ color: alignmentMethod === "least_squares" ? "#0f172a" : "#64748b", fontSize: 12, fontWeight: "700" }}>2-Point Fit</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    onInvalidateWorkflow("alignment");
+                    setAlignmentMethod("single_point");
+                    setRefPoints([]);
+                    setMissionSummary(null);
+                    setAlignmentResult(null);
+                    setVerifiedAlignmentRequest(null);
+                    setExtractedCorners?.(null);
+                    setVisualAlignmentItem?.(null);
                   }}
-                  keyboardType="numeric"
-                />
+                  style={{ flex: 1, paddingVertical: 8, alignItems: "center", borderRadius: 6, backgroundColor: alignmentMethod === "single_point" ? "#ffffff" : "transparent", shadowColor: alignmentMethod === "single_point" ? "#000" : "transparent", shadowOpacity: 0.05, shadowRadius: 2, shadowOffset: { width: 0, height: 1 } }}
+                >
+                  <Text style={{ color: alignmentMethod === "single_point" ? "#0f172a" : "#64748b", fontSize: 12, fontWeight: "700" }}>1-Point + Angle</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    onInvalidateWorkflow("alignment");
+                    setAlignmentMethod("visual_alignment");
+                    setRefPoints([]);
+                    setMissionSummary(null);
+                    setAlignmentResult(null);
+                    setVerifiedAlignmentRequest(null);
+                    setExtractedCorners?.(null);
+                    setVisualAlignmentItem?.(null);
+                  }}
+                  style={{ flex: 1, paddingVertical: 8, alignItems: "center", borderRadius: 6, backgroundColor: alignmentMethod === "visual_alignment" ? "#ffffff" : "transparent", shadowColor: alignmentMethod === "visual_alignment" ? "#000" : "transparent", shadowOpacity: 0.05, shadowRadius: 2, shadowOffset: { width: 0, height: 1 } }}
+                >
+                  <Text style={{ color: alignmentMethod === "visual_alignment" ? "#0f172a" : "#64748b", fontSize: 12, fontWeight: "700" }}>Visual</Text>
+                </Pressable>
               </View>
-              <View style={{ marginBottom: 20, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-                <View style={{ flex: 1, paddingRight: 10 }}>
-                  <Text style={{ color: "#0f172a", fontSize: 13, fontWeight: "800" }}>Per-line extensions</Text>
-                  <Text style={{ color: "#64748b", fontSize: 11, marginTop: 2 }}>
-                    Each line gets its own run-up/run-out (square sides too)
-                  </Text>
+
+              {alignmentMethod === "visual_alignment" ? (
+                <View style={{ gap: 12, marginTop: 4 }}>
+                  {extractedCorners ? (
+                    <View style={{ gap: 8 }}>
+                      <Text style={{ color: "#0f172a", fontSize: 13, fontWeight: "700" }}>Extracted Coordinates</Text>
+                      {extractedCorners.map((pt, i) => (
+                        <View key={i} style={{ backgroundColor: "#f8fafc", padding: 8, borderRadius: 6, borderWidth: 1, borderColor: "#e2e8f0" }}>
+                          <Text style={{ color: "#334155", fontSize: 12, fontWeight: "600" }}>Corner {i + 1}</Text>
+                          <Text style={{ color: "#64748b", fontSize: 12, fontFamily: "monospace" }}>Lat: {pt.lat.toFixed(6)}</Text>
+                          <Text style={{ color: "#64748b", fontSize: 12, fontFamily: "monospace" }}>Lon: {pt.lon.toFixed(6)}</Text>
+                        </View>
+                      ))}
+                      <Pressable
+                        onPress={handleFixAlignment}
+                        disabled={isFixing || !selectedPathName}
+                        style={{
+                          height: 44,
+                          borderRadius: 10,
+                          alignItems: "center",
+                          justifyContent: "center",
+                          backgroundColor: isFixing || !selectedPathName ? "#94a3b8" : "#f59e0b",
+                          marginTop: 4,
+                        }}
+                      >
+                        <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>
+                          {isFixing ? "Fixing..." : "Fix Alignment"}
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => {
+                          console.log("[Align DXF] Visual Alignment UI: 'Clear Alignment' clicked. Resetting visual state.");
+                          setExtractedCorners?.(null);
+                          setVisualAlignmentItem?.(null);
+                        }}
+                        style={{ marginTop: 8, padding: 10, alignItems: "center", backgroundColor: "#f1f5f9", borderRadius: 6 }}
+                      >
+                        <Text style={{ color: "#ef4444", fontSize: 13, fontWeight: "600" }}>Clear Alignment</Text>
+                      </Pressable>
+                    </View>
+                  ) : isVisualAlignmentMode ? (
+                    <View style={{ gap: 12 }}>
+                      <Text style={{ color: "#64748b", fontSize: 12 }}>Drag and rotate the plan on the map to align it, then click Confirm.</Text>
+                      <View style={{ backgroundColor: "#f1f5f9", padding: 10, borderRadius: 6 }}>
+                        <Text style={{ color: "#334155", fontSize: 12, fontFamily: "monospace" }}>
+                          Offset: {visualAlignmentItem?.x?.toFixed(2) ?? "0.00"}m, {visualAlignmentItem?.y?.toFixed(2) ?? "0.00"}m
+                        </Text>
+                      </View>
+                      <Pressable
+                        onPress={onConfirmVisualAlignment}
+                        style={{ height: 44, backgroundColor: "#10b981", borderRadius: 8, alignItems: "center", justifyContent: "center" }}
+                      >
+                        <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>LLA Receiver (Confirm)</Text>
+                      </Pressable>
+                    </View>
+                  ) : (
+                    <Pressable
+                      onPress={onStartVisualAlignment}
+                      style={{ height: 44, borderWidth: 1, borderColor: "#0f172a", borderRadius: 8, alignItems: "center", justifyContent: "center" }}
+                    >
+                      <Text style={{ color: "#0f172a", fontSize: 14, fontWeight: "700" }}>Coordinate Receiver</Text>
+                    </Pressable>
+                  )}
                 </View>
-                <Switch
-                  value={extPerLine}
-                  onValueChange={(value) => {
-                    onInvalidateWorkflow("spray");
-                    setExtPerLine(value);
-                  }}
-                  trackColor={{ false: "#cbd5e1", true: "#8b5cf6" }}
-                />
-              </View>
-              <View style={{ flexDirection: "row", gap: 10 }}>
-                <Pressable
-                  onPress={() => setExtModalOpen(false)}
-                  style={{ flex: 1, height: 44, backgroundColor: "#e2e8f0", borderRadius: 10, alignItems: "center", justifyContent: "center" }}
-                >
-                  <Text style={{ color: "#475569", fontSize: 14, fontWeight: "700" }}>Cancel</Text>
-                </Pressable>
-                <Pressable
-                  onPress={handleSetExtension}
-                  disabled={isExtSetting}
-                  style={{ flex: 1, height: 44, backgroundColor: "#8b5cf6", borderRadius: 10, alignItems: "center", justifyContent: "center", opacity: isExtSetting ? 0.7 : 1 }}
-                >
-                  <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>{isExtSetting ? "Setting..." : "Set Extension"}</Text>
-                </Pressable>
-              </View>
-            </View>
-          </View>
-        </Modal>
-
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingBottom: 20 }} style={{ flex: 1 }}>
-
-        {/* --- IMPORT SECTION --- */}
-        <View style={{ borderRadius: 14, padding: 14, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d8e1eb" }}>
-          <Text style={{ color: "#64748b", fontSize: 11, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
-            Import from Device
-          </Text>
-          {!pickedFile ? (
-            <Pressable
-              onPress={handlePickFile}
-              disabled={protectedResident}
-              style={{
-                height: 44,
-                borderRadius: 12,
-                alignItems: "center",
-                justifyContent: "center",
-                backgroundColor: protectedResident ? "#cbd5e1" : "#e2e8f0",
-                borderWidth: 1,
-                borderColor: "#cbd5e1",
-              }}
-            >
-              <Text style={{ color: "#0f172a", fontSize: 14, fontWeight: "700" }}>
-                Select .dxf, .csv, .waypoints
-              </Text>
-            </Pressable>
-          ) : (
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-              <View style={{ flex: 1, backgroundColor: "#f8fafc", padding: 10, borderRadius: 8, borderWidth: 1, borderColor: "#e2e8f0" }}>
-                <Text style={{ color: "#0f172a", fontSize: 13, fontWeight: "600" }} numberOfLines={1}>
-                  {pickedFile.name}
+              ) : refPoints.length === 0 ? (
+                <Text style={{ color: "#94a3b8", fontSize: 12, fontStyle: "italic", textAlign: "center", marginVertical: 8 }}>
+                  {alignmentMethod === "least_squares" ? "Tap 2 points on the canvas to set alignment." : "Tap 1 point on the canvas to set anchor."}
                 </Text>
-              </View>
-              <Pressable
-                onPress={handleParseFile}
-                disabled={isUploading || protectedResident}
-                style={{
-                  height: 40,
-                  paddingHorizontal: 16,
-                  borderRadius: 8,
-                  alignItems: "center",
-                  justifyContent: "center",
-                  backgroundColor: isUploading || protectedResident ? "#94a3b8" : "#0f988f",
-                }}
-              >
-                <Text style={{ color: "#fff", fontSize: 13, fontWeight: "800" }}>
-                  {isUploading ? "..." : "Parse"}
-                </Text>
-              </Pressable>
-              <Pressable onPress={() => setPickedFile(null)} style={{ padding: 4 }}>
-                <X size={20} color="#64748b" />
-              </Pressable>
-            </View>
-          )}
-        </View>
-        {/* --- END IMPORT SECTION --- */}
-
-        {/* --- ALIGNMENT SECTION --- */}
-        <View style={{ borderRadius: 14, padding: 14, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d8e1eb" }}>
-          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <Text style={{ color: "#64748b", fontSize: 11, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase" }}>
-              Align DXF
-            </Text>
-            {refPoints.length > 0 && (
-              <Pressable
-                onPress={() => {
-                  onInvalidateWorkflow("alignment");
-                  setMissionSummary(null);
-                  setAlignmentResult(null);
-                  setVerifiedAlignmentRequest(null);
-                  setRefPoints([]);
-                }}
-              >
-                <Text style={{ color: "#ef4444", fontSize: 11, fontWeight: "700" }}>Clear Points</Text>
-              </Pressable>
-            )}
-          </View>
-
-          {/* Toggle Method */}
-          <View style={{ flexDirection: "row", backgroundColor: "#f1f5f9", borderRadius: 8, padding: 4, marginBottom: 12 }}>
-            <Pressable
-              onPress={() => {
-                onInvalidateWorkflow("alignment");
-                setAlignmentMethod("least_squares");
-                setRefPoints([]);
-                setMissionSummary(null);
-                setAlignmentResult(null);
-                setVerifiedAlignmentRequest(null);
-              }}
-              style={{ flex: 1, paddingVertical: 8, alignItems: "center", borderRadius: 6, backgroundColor: alignmentMethod === "least_squares" ? "#ffffff" : "transparent", shadowColor: alignmentMethod === "least_squares" ? "#000" : "transparent", shadowOpacity: 0.05, shadowRadius: 2, shadowOffset: { width: 0, height: 1 } }}
-            >
-              <Text style={{ color: alignmentMethod === "least_squares" ? "#0f172a" : "#64748b", fontSize: 12, fontWeight: "700" }}>2-Point Fit</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => {
-                onInvalidateWorkflow("alignment");
-                setAlignmentMethod("single_point");
-                setRefPoints([]);
-                setMissionSummary(null);
-                setAlignmentResult(null);
-                setVerifiedAlignmentRequest(null);
-                setExtractedCorners?.(null);
-                setVisualAlignmentItem?.(null);
-              }}
-              style={{ flex: 1, paddingVertical: 8, alignItems: "center", borderRadius: 6, backgroundColor: alignmentMethod === "single_point" ? "#ffffff" : "transparent", shadowColor: alignmentMethod === "single_point" ? "#000" : "transparent", shadowOpacity: 0.05, shadowRadius: 2, shadowOffset: { width: 0, height: 1 } }}
-            >
-              <Text style={{ color: alignmentMethod === "single_point" ? "#0f172a" : "#64748b", fontSize: 12, fontWeight: "700" }}>1-Point + Angle</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => {
-                onInvalidateWorkflow("alignment");
-                setAlignmentMethod("visual_alignment");
-                setRefPoints([]);
-                setMissionSummary(null);
-                setAlignmentResult(null);
-                setVerifiedAlignmentRequest(null);
-                setExtractedCorners?.(null);
-                setVisualAlignmentItem?.(null);
-              }}
-              style={{ flex: 1, paddingVertical: 8, alignItems: "center", borderRadius: 6, backgroundColor: alignmentMethod === "visual_alignment" ? "#ffffff" : "transparent", shadowColor: alignmentMethod === "visual_alignment" ? "#000" : "transparent", shadowOpacity: 0.05, shadowRadius: 2, shadowOffset: { width: 0, height: 1 } }}
-            >
-              <Text style={{ color: alignmentMethod === "visual_alignment" ? "#0f172a" : "#64748b", fontSize: 12, fontWeight: "700" }}>Visual</Text>
-            </Pressable>
-          </View>
-
-          {alignmentMethod === "visual_alignment" ? (
-            <View style={{ gap: 12, marginTop: 4 }}>
-              {extractedCorners ? (
+              ) : (
                 <View style={{ gap: 8 }}>
-                  <Text style={{ color: "#0f172a", fontSize: 13, fontWeight: "700" }}>Extracted Coordinates</Text>
-                  {extractedCorners.map((pt, i) => (
-                    <View key={i} style={{ backgroundColor: "#f8fafc", padding: 8, borderRadius: 6, borderWidth: 1, borderColor: "#e2e8f0" }}>
-                      <Text style={{ color: "#334155", fontSize: 12, fontWeight: "600" }}>Corner {i + 1}</Text>
-                      <Text style={{ color: "#64748b", fontSize: 12, fontFamily: "monospace" }}>Lat: {pt.lat.toFixed(6)}</Text>
-                      <Text style={{ color: "#64748b", fontSize: 12, fontFamily: "monospace" }}>Lon: {pt.lon.toFixed(6)}</Text>
+                  {refPoints.map((pt, i) => (
+                    <View key={i} style={{ backgroundColor: "#f8fafc", padding: 10, borderRadius: 8, borderWidth: 1, borderColor: "#e2e8f0" }}>
+                      <Text style={{ color: "#0f172a", fontSize: 12, fontWeight: "700", marginBottom: 6 }}>
+                        Point {i + 1} <Text style={{ fontWeight: "400", color: "#64748b" }}>(X: {pt.dxf_x.toFixed(2)}, Y: {pt.dxf_y.toFixed(2)})</Text>
+                      </Text>
+                      <View style={{ flexDirection: "row", gap: 8 }}>
+                        <TextInput
+                          style={{ flex: 1, height: 36, backgroundColor: "#fff", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 6, paddingHorizontal: 10, fontSize: 13 }}
+                          placeholder="Latitude"
+                          placeholderTextColor="#94a3b8"
+                          value={pt.lat}
+                          onChangeText={(val) => handleUpdateRefPoint(i, "lat", val)}
+                          keyboardType="numeric"
+                        />
+                        <TextInput
+                          style={{ flex: 1, height: 36, backgroundColor: "#fff", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 6, paddingHorizontal: 10, fontSize: 13 }}
+                          placeholder="Longitude"
+                          placeholderTextColor="#94a3b8"
+                          value={pt.lon}
+                          onChangeText={(val) => handleUpdateRefPoint(i, "lon", val)}
+                          keyboardType="numeric"
+                        />
+                      </View>
                     </View>
                   ))}
+
+                  {alignmentMethod === "single_point" && refPoints.length === 1 && (
+                    <View style={{ backgroundColor: "#f8fafc", padding: 10, borderRadius: 8, borderWidth: 1, borderColor: "#e2e8f0" }}>
+                      <Text style={{ color: "#0f172a", fontSize: 12, fontWeight: "700", marginBottom: 6 }}>Heading Angle</Text>
+                      <TextInput
+                        style={{ height: 36, backgroundColor: "#fff", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 6, paddingHorizontal: 10, fontSize: 13 }}
+                        placeholder="Degrees (e.g. 45)"
+                        placeholderTextColor="#94a3b8"
+                        value={rotationDeg}
+                        onChangeText={(value) => {
+                          onInvalidateWorkflow("alignment");
+                          setRotationDeg(value);
+                        }}
+                        keyboardType="numeric"
+                      />
+                    </View>
+                  )}
+
+                  {alignmentMethod === "least_squares" && refPoints.length === 2 && (
+                    <View style={{ backgroundColor: "#e2e8f0", padding: 10, borderRadius: 8, alignItems: "center" }}>
+                      <Text style={{ color: "#0f172a", fontSize: 13, fontWeight: "700" }}>
+                        Distance: {Math.hypot(refPoints[1].dxf_x - refPoints[0].dxf_x, refPoints[1].dxf_y - refPoints[0].dxf_y).toFixed(2)} meters
+                      </Text>
+                    </View>
+                  )}
+
                   <Pressable
                     onPress={handleFixAlignment}
                     disabled={isFixing || !selectedPathName}
@@ -7576,231 +7651,123 @@ function FieldsPage({
                       {isFixing ? "Fixing..." : "Fix Alignment"}
                     </Text>
                   </Pressable>
-                  <Pressable
-                    onPress={() => {
-                      console.log("[Align DXF] Visual Alignment UI: 'Clear Alignment' clicked. Resetting visual state.");
-                      setExtractedCorners?.(null);
-                      setVisualAlignmentItem?.(null);
-                    }}
-                    style={{ marginTop: 8, padding: 10, alignItems: "center", backgroundColor: "#f1f5f9", borderRadius: 6 }}
-                  >
-                    <Text style={{ color: "#ef4444", fontSize: 13, fontWeight: "600" }}>Clear Alignment</Text>
-                  </Pressable>
-                </View>
-              ) : isVisualAlignmentMode ? (
-                <View style={{ gap: 12 }}>
-                  <Text style={{ color: "#64748b", fontSize: 12 }}>Drag and rotate the plan on the map to align it, then click Confirm.</Text>
-                  <View style={{ backgroundColor: "#f1f5f9", padding: 10, borderRadius: 6 }}>
-                    <Text style={{ color: "#334155", fontSize: 12, fontFamily: "monospace" }}>
-                      Offset: {visualAlignmentItem?.x?.toFixed(2) ?? "0.00"}m, {visualAlignmentItem?.y?.toFixed(2) ?? "0.00"}m
-                    </Text>
-                  </View>
-                  <Pressable
-                    onPress={onConfirmVisualAlignment}
-                    style={{ height: 44, backgroundColor: "#10b981", borderRadius: 8, alignItems: "center", justifyContent: "center" }}
-                  >
-                    <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>LLA Receiver (Confirm)</Text>
-                  </Pressable>
-                </View>
-              ) : (
-                <Pressable
-                  onPress={onStartVisualAlignment}
-                  style={{ height: 44, borderWidth: 1, borderColor: "#0f172a", borderRadius: 8, alignItems: "center", justifyContent: "center" }}
-                >
-                  <Text style={{ color: "#0f172a", fontSize: 14, fontWeight: "700" }}>Coordinate Receiver</Text>
-                </Pressable>
-              )}
-            </View>
-          ) : refPoints.length === 0 ? (
-            <Text style={{ color: "#94a3b8", fontSize: 12, fontStyle: "italic", textAlign: "center", marginVertical: 8 }}>
-              {alignmentMethod === "least_squares" ? "Tap 2 points on the canvas to set alignment." : "Tap 1 point on the canvas to set anchor."}
-            </Text>
-          ) : (
-            <View style={{ gap: 8 }}>
-              {refPoints.map((pt, i) => (
-                <View key={i} style={{ backgroundColor: "#f8fafc", padding: 10, borderRadius: 8, borderWidth: 1, borderColor: "#e2e8f0" }}>
-                  <Text style={{ color: "#0f172a", fontSize: 12, fontWeight: "700", marginBottom: 6 }}>
-                    Point {i + 1} <Text style={{ fontWeight: "400", color: "#64748b" }}>(X: {pt.dxf_x.toFixed(2)}, Y: {pt.dxf_y.toFixed(2)})</Text>
-                  </Text>
-                  <View style={{ flexDirection: "row", gap: 8 }}>
-                    <TextInput
-                      style={{ flex: 1, height: 36, backgroundColor: "#fff", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 6, paddingHorizontal: 10, fontSize: 13 }}
-                      placeholder="Latitude"
-                      placeholderTextColor="#94a3b8"
-                      value={pt.lat}
-                      onChangeText={(val) => handleUpdateRefPoint(i, "lat", val)}
-                      keyboardType="numeric"
-                    />
-                    <TextInput
-                      style={{ flex: 1, height: 36, backgroundColor: "#fff", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 6, paddingHorizontal: 10, fontSize: 13 }}
-                      placeholder="Longitude"
-                      placeholderTextColor="#94a3b8"
-                      value={pt.lon}
-                      onChangeText={(val) => handleUpdateRefPoint(i, "lon", val)}
-                      keyboardType="numeric"
-                    />
-                  </View>
-                </View>
-              ))}
 
-              {alignmentMethod === "single_point" && refPoints.length === 1 && (
-                <View style={{ backgroundColor: "#f8fafc", padding: 10, borderRadius: 8, borderWidth: 1, borderColor: "#e2e8f0" }}>
-                  <Text style={{ color: "#0f172a", fontSize: 12, fontWeight: "700", marginBottom: 6 }}>Heading Angle</Text>
-                  <TextInput
-                    style={{ height: 36, backgroundColor: "#fff", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 6, paddingHorizontal: 10, fontSize: 13 }}
-                    placeholder="Degrees (e.g. 45)"
-                    placeholderTextColor="#94a3b8"
-                    value={rotationDeg}
-                    onChangeText={(value) => {
-                      onInvalidateWorkflow("alignment");
-                      setRotationDeg(value);
-                    }}
-                    keyboardType="numeric"
-                  />
-                </View>
-              )}
-
-              {alignmentMethod === "least_squares" && refPoints.length === 2 && (
-                <View style={{ backgroundColor: "#e2e8f0", padding: 10, borderRadius: 8, alignItems: "center" }}>
-                  <Text style={{ color: "#0f172a", fontSize: 13, fontWeight: "700" }}>
-                    Distance: {Math.hypot(refPoints[1].dxf_x - refPoints[0].dxf_x, refPoints[1].dxf_y - refPoints[0].dxf_y).toFixed(2)} meters
-                  </Text>
-                </View>
-              )}
-
-              <Pressable
-                onPress={handleFixAlignment}
-                disabled={isFixing || !selectedPathName}
-                style={{
-                  height: 44,
-                  borderRadius: 10,
-                  alignItems: "center",
-                  justifyContent: "center",
-                  backgroundColor: isFixing || !selectedPathName ? "#94a3b8" : "#f59e0b",
-                  marginTop: 4,
-                }}
-              >
-                <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>
-                  {isFixing ? "Fixing..." : "Fix Alignment"}
-                </Text>
-              </Pressable>
-
-              {alignmentResult && (
-                <View style={{ marginTop: 12, padding: 12, backgroundColor: "#f0fdf4", borderRadius: 8, borderWidth: 1, borderColor: "#bbf7d0" }}>
-                  <Text style={{ color: "#166534", fontWeight: "800", marginBottom: 8, fontSize: 13 }}>Alignment Verified</Text>
-                  <Text style={{ color: "#166534", fontSize: 12, marginBottom: 4 }}>
-                    Method: {alignmentResult.method != null ? String(alignmentResult.method) : "n/a"}
-                  </Text>
-                  <Text style={{ color: "#166534", fontSize: 12, marginBottom: 4 }}>
-                    Scale: {formatFinite(alignmentResult.scale, 6)}
-                  </Text>
-                  <Text style={{ color: "#166534", fontSize: 12, marginBottom: 4 }}>
-                    Rotation: {formatFinite(alignmentResult.rotation_deg, 3)} deg
-                  </Text>
-                  <Text style={{ color: "#166534", fontSize: 12, marginBottom: 4 }}>
-                    Offset: N {formatFinite(alignmentResult.offset_n, 3)} / E {formatFinite(alignmentResult.offset_e, 3)}
-                  </Text>
-                  <Text style={{ color: "#166534", fontSize: 12, marginBottom: 4 }}>
-                    Origin GPS: {alignmentResult.origin_gps ? JSON.stringify(alignmentResult.origin_gps) : "n/a"}
-                  </Text>
-                  <Text style={{ color: "#166534", fontSize: 12, marginBottom: 4 }}>
-                    RMSE: {formatFinite(alignmentResult.rmse_m, 3)}
-                  </Text>
-                  <Text style={{ color: "#166534", fontSize: 11, marginBottom: 4 }} numberOfLines={4}>
-                    Samples: {alignmentResult.sample_coords ? JSON.stringify(alignmentResult.sample_coords) : "n/a"}
-                  </Text>
-                  <Text style={{ color: "#166534", fontSize: 11, marginBottom: 4 }} numberOfLines={4}>
-                    Residuals: {alignmentResult.residuals ? JSON.stringify(alignmentResult.residuals) : "n/a"}
-                  </Text>
-                  <Text style={{ color: "#166534", fontSize: 11 }} numberOfLines={4}>
-                    Warnings: {alignmentResult.warnings ? JSON.stringify(alignmentResult.warnings) : "n/a"}
-                  </Text>
-                </View>
-              )}
-            </View>
-          )}
-        </View>
-        {/* --- END ALIGNMENT SECTION --- */}
-
-        <View style={{ flex: 1, borderRadius: 14, padding: 14, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d8e1eb", minHeight: 180 }}>
-          <Text style={{ color: "#64748b", fontSize: 11, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
-            Select Path from Rover
-          </Text>
-          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 8 }}>
-            {backendPaths.length === 0 ? (
-              <Text style={{ color: "#64748b", fontSize: 13, fontStyle: "italic", textAlign: "center", marginTop: 20 }}>
-                No paths found on rover or offline.
-              </Text>
-            ) : (
-              backendPaths.map((path) => {
-                const isSelected = selectedPathName === path.name;
-                return (
-                  <Pressable
-                    key={path.name}
-                    onPress={() => {
-                      if (blockProtectedWorkflowMutation("Selecting another path")) return;
-                      setMissionSummary(null);
-                      setAlignmentResult(null);
-                      setVerifiedAlignmentRequest(null);
-                      setSegmentVerification(null);
-                      setStagedPlanResult(null);
-                      setStagedMissionInspection(null);
-                      setStagedMissionId(null);
-                      onSelectPath(path.name);
-                    }}
-                    style={{
-                      borderRadius: 10,
-                      padding: 10,
-                      backgroundColor: isSelected ? "#0b6b68" : "#f8fafc",
-                      borderWidth: 1,
-                      borderColor: isSelected ? "#0b6b68" : "#e2e8f0",
-                      flexDirection: "row",
-                      justifyContent: "space-between",
-                      alignItems: "center"
-                    }}
-                  >
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ color: isSelected ? "#ffffff" : "#0f172a", fontWeight: "800", fontSize: 14 }}>
-                        {path.name}
+                  {alignmentResult && (
+                    <View style={{ marginTop: 12, padding: 12, backgroundColor: "#f0fdf4", borderRadius: 8, borderWidth: 1, borderColor: "#bbf7d0" }}>
+                      <Text style={{ color: "#166534", fontWeight: "800", marginBottom: 8, fontSize: 13 }}>Alignment Verified</Text>
+                      <Text style={{ color: "#166534", fontSize: 12, marginBottom: 4 }}>
+                        Method: {alignmentResult.method != null ? String(alignmentResult.method) : "n/a"}
                       </Text>
-                      <Text style={{ color: isSelected ? "#d1fae5" : "#64748b", fontSize: 11, marginTop: 2 }}>
-                        {path.description || `Points: ${path.num_points}`}
+                      <Text style={{ color: "#166534", fontSize: 12, marginBottom: 4 }}>
+                        Scale: {formatFinite(alignmentResult.scale, 6)}
+                      </Text>
+                      <Text style={{ color: "#166534", fontSize: 12, marginBottom: 4 }}>
+                        Rotation: {formatFinite(alignmentResult.rotation_deg, 3)} deg
+                      </Text>
+                      <Text style={{ color: "#166534", fontSize: 12, marginBottom: 4 }}>
+                        Offset: N {formatFinite(alignmentResult.offset_n, 3)} / E {formatFinite(alignmentResult.offset_e, 3)}
+                      </Text>
+                      <Text style={{ color: "#166534", fontSize: 12, marginBottom: 4 }}>
+                        Origin GPS: {alignmentResult.origin_gps ? JSON.stringify(alignmentResult.origin_gps) : "n/a"}
+                      </Text>
+                      <Text style={{ color: "#166534", fontSize: 12, marginBottom: 4 }}>
+                        RMSE: {formatFinite(alignmentResult.rmse_m, 3)}
+                      </Text>
+                      <Text style={{ color: "#166534", fontSize: 11, marginBottom: 4 }} numberOfLines={4}>
+                        Samples: {alignmentResult.sample_coords ? JSON.stringify(alignmentResult.sample_coords) : "n/a"}
+                      </Text>
+                      <Text style={{ color: "#166534", fontSize: 11, marginBottom: 4 }} numberOfLines={4}>
+                        Residuals: {alignmentResult.residuals ? JSON.stringify(alignmentResult.residuals) : "n/a"}
+                      </Text>
+                      <Text style={{ color: "#166534", fontSize: 11 }} numberOfLines={4}>
+                        Warnings: {alignmentResult.warnings ? JSON.stringify(alignmentResult.warnings) : "n/a"}
                       </Text>
                     </View>
-                    {isSelected && (
-                      <Pressable 
-                        onPress={() => handleDeletePath(path.name)}
-                        style={{ padding: 8, backgroundColor: "rgba(239, 68, 68, 0.2)", borderRadius: 8 }}
-                      >
-                        <Trash2 size={18} color="#fca5a5" />
-                      </Pressable>
-                    )}
-                  </Pressable>
-                );
-              })
-            )}
-          </ScrollView>
-          {selectedPathName && !missionSummary ? (
-            <Pressable
-              onPress={() => onLoadSelectedPath(canLoadStagedMission ? stagedMissionId ?? undefined : undefined)}
-              disabled={missionActionBusy || legacyLoadBlocked}
-              style={{
-                marginTop: 10,
-                height: 44,
-                borderRadius: 12,
-                alignItems: "center",
-                justifyContent: "center",
-                backgroundColor: missionActionBusy || legacyLoadBlocked ? "#94a3b8" : "#2563eb",
-              }}
-            >
-              <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>
-                {missionActionBusy ? "Loading..." : legacyLoadBlocked ? "Protected Mission Loaded" : canLoadStagedMission ? "Load Staged Mission" : "Load Path"}
+                  )}
+                </View>
+              )}
+            </View>
+            {/* --- END ALIGNMENT SECTION --- */}
+
+            <View style={{ flex: 1, borderRadius: 14, padding: 14, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d8e1eb", minHeight: 180 }}>
+              <Text style={{ color: "#64748b", fontSize: 11, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+                Select Path from Rover
               </Text>
-            </Pressable>
-          ) : null}
+              <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 8 }}>
+                {backendPaths.length === 0 ? (
+                  <Text style={{ color: "#64748b", fontSize: 13, fontStyle: "italic", textAlign: "center", marginTop: 20 }}>
+                    No paths found on rover or offline.
+                  </Text>
+                ) : (
+                  backendPaths.map((path) => {
+                    const isSelected = selectedPathName === path.name;
+                    return (
+                      <Pressable
+                        key={path.name}
+                        onPress={() => {
+                          if (blockProtectedWorkflowMutation("Selecting another path")) return;
+                          setMissionSummary(null);
+                          setAlignmentResult(null);
+                          setVerifiedAlignmentRequest(null);
+                          setSegmentVerification(null);
+                          setStagedPlanResult(null);
+                          setStagedMissionInspection(null);
+                          setStagedMissionId(null);
+                          onSelectPath(path.name);
+                        }}
+                        style={{
+                          borderRadius: 10,
+                          padding: 10,
+                          backgroundColor: isSelected ? "#0b6b68" : "#f8fafc",
+                          borderWidth: 1,
+                          borderColor: isSelected ? "#0b6b68" : "#e2e8f0",
+                          flexDirection: "row",
+                          justifyContent: "space-between",
+                          alignItems: "center"
+                        }}
+                      >
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: isSelected ? "#ffffff" : "#0f172a", fontWeight: "800", fontSize: 14 }}>
+                            {path.name}
+                          </Text>
+                          <Text style={{ color: isSelected ? "#d1fae5" : "#64748b", fontSize: 11, marginTop: 2 }}>
+                            {path.description || `Points: ${path.num_points}`}
+                          </Text>
+                        </View>
+                        {isSelected && (
+                          <Pressable
+                            onPress={() => handleDeletePath(path.name)}
+                            style={{ padding: 8, backgroundColor: "rgba(239, 68, 68, 0.2)", borderRadius: 8 }}
+                          >
+                            <Trash2 size={18} color="#fca5a5" />
+                          </Pressable>
+                        )}
+                      </Pressable>
+                    );
+                  })
+                )}
+              </ScrollView>
+              {selectedPathName && !missionSummary ? (
+                <Pressable
+                  onPress={() => onLoadSelectedPath(canLoadStagedMission ? stagedMissionId ?? undefined : undefined)}
+                  disabled={missionActionBusy || legacyLoadBlocked}
+                  style={{
+                    marginTop: 10,
+                    height: 44,
+                    borderRadius: 12,
+                    alignItems: "center",
+                    justifyContent: "center",
+                    backgroundColor: missionActionBusy || legacyLoadBlocked ? "#94a3b8" : "#2563eb",
+                  }}
+                >
+                  <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>
+                    {missionActionBusy ? "Loading..." : legacyLoadBlocked ? "Protected Mission Loaded" : canLoadStagedMission ? "Load Staged Mission" : "Load Path"}
+                  </Text>
+                </Pressable>
+              ) : null}
+            </View>
+          </ScrollView>
         </View>
-        </ScrollView>
-      </View>
       )}
     </View>
   );
@@ -8230,13 +8197,13 @@ function pickNearestLineId(
   return nearestId;
 }
 
-function getCornerPoints(lines: PlanLine[]): {x: number, y: number}[] {
-  const pointMap = new Map<string, { pt: {x: number, y: number}, segments: {dx: number, dy: number}[] }>();
+function getCornerPoints(lines: PlanLine[]): { x: number, y: number }[] {
+  const pointMap = new Map<string, { pt: { x: number, y: number }, segments: { dx: number, dy: number }[] }>();
 
   for (const line of lines) {
     const k1 = `${line.from.x.toFixed(3)},${line.from.y.toFixed(3)}`;
     const k2 = `${line.to.x.toFixed(3)},${line.to.y.toFixed(3)}`;
-    
+
     const len1 = Math.hypot(line.to.x - line.from.x, line.to.y - line.from.y);
     const dx1 = len1 > 0 ? (line.to.x - line.from.x) / len1 : 0;
     const dy1 = len1 > 0 ? (line.to.y - line.from.y) / len1 : 0;
@@ -8252,11 +8219,11 @@ function getCornerPoints(lines: PlanLine[]): {x: number, y: number}[] {
     pointMap.get(k2)!.segments.push({ dx: dx2, dy: dy2 });
   }
 
-  const corners: {x: number, y: number}[] = [];
+  const corners: { x: number, y: number }[] = [];
 
   for (const { pt, segments } of pointMap.values()) {
     if (segments.length === 1 || segments.length > 2) {
-      corners.push(pt); 
+      corners.push(pt);
     } else if (segments.length === 2) {
       const dotProduct = segments[0].dx * segments[1].dx + segments[0].dy * segments[1].dy;
       if (dotProduct > -0.99) {
@@ -8697,7 +8664,7 @@ function PlanPreview({
           } else {
             const scale = distance / pinchStartDistance;
             const newZoom = Math.max(0.01, Math.min(1000, pinchStartZoom * scale));
-            
+
             const currentCenterX = (touches[0].locationX + touches[1].locationX) / 2;
             const currentCenterY = (touches[0].locationY + touches[1].locationY) / 2;
 
@@ -8764,7 +8731,7 @@ function PlanPreview({
               return;
             }
           }
-          
+
           const tap = { x: tapX, y: tapY };
           if (onSelectPointRef.current) {
             const ptHit = pickNearestPoint(linesRef.current, viewportRef.current, tap, 28, rotationRef.current, layoutSizeRef.current);
@@ -8865,16 +8832,15 @@ function PlanPreview({
       >
         {mapViewEnabled ? (
           <MapView
-            mode={isVisualAlignmentMode ? "templates" : "fields"}
-            placedItems={isVisualAlignmentMode && visualAlignmentItem ? [visualAlignmentItem] : []}
-            selectedItemIds={isVisualAlignmentMode ? ["visual-alignment-group"] : []}
+            mode={visualAlignmentItem ? "templates" : "fields"}
+            placedItems={visualAlignmentItem ? [visualAlignmentItem] : []}
+            selectedItemIds={visualAlignmentItem ? ["visual-alignment-group"] : []}
             onUpdatePlacedItem={(id, updates) => {
-              if (id === "visual-alignment-group") {
-                setVisualAlignmentItem?.((prev: PlacedItem | null) => {
-                  if (!prev) return prev;
-                  return { ...prev, ...updates };
-                });
-              }
+              if (!isVisualAlignmentMode || id !== "visual-alignment-group") return;
+              setVisualAlignmentItem?.((prev: PlacedItem | null) => {
+                if (!prev) return prev;
+                return { ...prev, ...updates };
+              });
             }}
             telemetrySnapshot={{
               lat: telemetryPosLat,
@@ -8884,7 +8850,7 @@ function PlanPreview({
               pos_n: telemetryPosN,
               pos_e: telemetryPosE,
             } as any}
-            lines={isVisualAlignmentMode && visualAlignmentItem ? [] : lines}
+            lines={visualAlignmentItem ? [] : lines}
             alignedRefPoints={alignedRefPoints}
             visible={true}
             recenterRoverTrigger={recenterRoverCount}
@@ -8906,322 +8872,322 @@ function PlanPreview({
           </View>
         ) : (
           <Svg pointerEvents="none" width="100%" height="100%">
-          {/* ── Background grid (always visible) ── */}
-          {layoutSize.width > 0 && layoutSize.height > 0 && (() => {
-            const spacing = GRID_WORLD_SPACING * viewport.zoom;
-            if (spacing < 8) return null; // too dense to draw
-            const originX = viewport.panX;
-            const originY = viewport.panY;
-            // Batch vertical grid lines into single <Path>
-            let vPath = '';
-            const startCol = Math.floor(-originX / spacing) - 1;
-            const endCol = Math.ceil((layoutSize.width - originX) / spacing) + 1;
-            for (let c = startCol; c <= endCol; c++) {
-              if (c === 0) continue; // origin drawn separately
-              const sx = originX + c * spacing;
-              vPath += `M${sx} 0V${layoutSize.height}`;
-            }
-            // Batch horizontal grid lines into single <Path>
-            let hPath = '';
-            const startRow = Math.floor(-originY / spacing) - 1;
-            const endRow = Math.ceil((layoutSize.height - originY) / spacing) + 1;
-            for (let r = startRow; r <= endRow; r++) {
-              if (r === 0) continue; // origin drawn separately
-              const sy = originY + r * spacing;
-              hPath += `M0 ${sy}H${layoutSize.width}`;
-            }
-            // Origin axes
-            const oxLine = `M${originX} 0V${layoutSize.height}`;
-            const oyLine = `M0 ${originY}H${layoutSize.width}`;
-            return (
-              <>
-                {vPath ? <Path d={vPath} stroke="#d8e4f0" strokeWidth={0.6} opacity={0.6} /> : null}
-                {hPath ? <Path d={hPath} stroke="#d8e4f0" strokeWidth={0.6} opacity={0.6} /> : null}
-                <Path d={oxLine} stroke="#94a3b8" strokeWidth={1.2} opacity={0.9} />
-                <Path d={oyLine} stroke="#94a3b8" strokeWidth={1.2} opacity={0.9} />
-              </>
-            );
-          })()}
+            {/* ── Background grid (always visible) ── */}
+            {layoutSize.width > 0 && layoutSize.height > 0 && (() => {
+              const spacing = GRID_WORLD_SPACING * viewport.zoom;
+              if (spacing < 8) return null; // too dense to draw
+              const originX = viewport.panX;
+              const originY = viewport.panY;
+              // Batch vertical grid lines into single <Path>
+              let vPath = '';
+              const startCol = Math.floor(-originX / spacing) - 1;
+              const endCol = Math.ceil((layoutSize.width - originX) / spacing) + 1;
+              for (let c = startCol; c <= endCol; c++) {
+                if (c === 0) continue; // origin drawn separately
+                const sx = originX + c * spacing;
+                vPath += `M${sx} 0V${layoutSize.height}`;
+              }
+              // Batch horizontal grid lines into single <Path>
+              let hPath = '';
+              const startRow = Math.floor(-originY / spacing) - 1;
+              const endRow = Math.ceil((layoutSize.height - originY) / spacing) + 1;
+              for (let r = startRow; r <= endRow; r++) {
+                if (r === 0) continue; // origin drawn separately
+                const sy = originY + r * spacing;
+                hPath += `M0 ${sy}H${layoutSize.width}`;
+              }
+              // Origin axes
+              const oxLine = `M${originX} 0V${layoutSize.height}`;
+              const oyLine = `M0 ${originY}H${layoutSize.width}`;
+              return (
+                <>
+                  {vPath ? <Path d={vPath} stroke="#d8e4f0" strokeWidth={0.6} opacity={0.6} /> : null}
+                  {hPath ? <Path d={hPath} stroke="#d8e4f0" strokeWidth={0.6} opacity={0.6} /> : null}
+                  <Path d={oxLine} stroke="#94a3b8" strokeWidth={1.2} opacity={0.9} />
+                  <Path d={oyLine} stroke="#94a3b8" strokeWidth={1.2} opacity={0.9} />
+                </>
+              );
+            })()}
 
-          {/* ── Plan lines ── */}
-          <G transform={`translate(${layoutSize.width / 2}, ${layoutSize.height / 2}) rotate(${rotation}) translate(${-layoutSize.width / 2}, ${-layoutSize.height / 2}) translate(${viewport.panX}, ${viewport.panY}) scale(${viewport.zoom}, ${-viewport.zoom})`}>
-            {PREVIEW_RENDERED_LAYERS.flatMap((layer) =>
-              pathChunksByLayer[layer].map((d, index) => (
+            {/* ── Plan lines ── */}
+            <G transform={`translate(${layoutSize.width / 2}, ${layoutSize.height / 2}) rotate(${rotation}) translate(${-layoutSize.width / 2}, ${-layoutSize.height / 2}) translate(${viewport.panX}, ${viewport.panY}) scale(${viewport.zoom}, ${-viewport.zoom})`}>
+              {PREVIEW_RENDERED_LAYERS.flatMap((layer) =>
+                pathChunksByLayer[layer].map((d, index) => (
+                  <Path
+                    key={`${layer}-${index}`}
+                    d={d}
+                    stroke={strokeForLayer(layer)}
+                    strokeWidth={2 / viewport.zoom}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    fill="none"
+                    opacity={0.96}
+                    {...(layer === "extension" ? { strokeDasharray: `${8 / viewport.zoom} ${6 / viewport.zoom}` } : {})}
+                  />
+                ))
+              )}
+              {selectedLine ? (
                 <Path
-                  key={`${layer}-${index}`}
-                  d={d}
-                  stroke={strokeForLayer(layer)}
-                  strokeWidth={2 / viewport.zoom}
+                  d={buildSvgPathForLine(selectedLine)}
+                  stroke="#ef4444"
+                  strokeWidth={3 / viewport.zoom}
                   strokeLinecap="round"
                   strokeLinejoin="round"
                   fill="none"
-                  opacity={0.96}
-                  {...(layer === "extension" ? { strokeDasharray: `${8 / viewport.zoom} ${6 / viewport.zoom}` } : {})}
+                  opacity={1}
+                />
+              ) : null}
+              {/* ── Endpoints / Corners ── */}
+              {cornerPoints.map((pt, i) => (
+                <Circle key={`ep-${i}`} cx={pt.y} cy={pt.x} r={2.5 / viewport.zoom} fill="#3b82f6" opacity={0.8} />
+              ))}
+              {/* ── Selected Points ── */}
+              {selectedPoints?.map((pt, i) => (
+                <Circle
+                  key={`sp-${i}`}
+                  cx={pt.y}
+                  cy={pt.x}
+                  r={6 / viewport.zoom}
+                  fill="#f97316"
+                  stroke="#ffffff"
+                  strokeWidth={1.5 / viewport.zoom}
+                />
+              ))}
+
+              {/* ── Plan Start Direction Arrow ── */}
+              {filtered.length > 0 && (() => {
+                const first = filtered[0];
+                const startX = first.from.y;
+                const startY = first.from.x;
+                const endX = first.to.y;
+                const endY = first.to.x;
+                const angle = Math.atan2(endY - startY, endX - startX) * 180 / Math.PI;
+                return (
+                  <G transform={`translate(${startX}, ${startY})`}>
+                    <Polygon
+                      points={`0,${-8 / viewport.zoom} ${12 / viewport.zoom},0 0,${8 / viewport.zoom}`}
+                      fill="#ef4444"
+                      stroke="#ffffff"
+                      strokeWidth={1 / viewport.zoom}
+                      transform={`rotate(${90 - angle})`}
+                    />
+                  </G>
+                );
+              })()}
+
+            </G>
+
+            {/* ── Direction arrows ── */}
+            {PREVIEW_RENDERED_LAYERS.flatMap((layer) =>
+              arrowheadsByLayer[layer].map((points, index) => (
+                <Polygon
+                  key={`arrow-${layer}-${index}`}
+                  points={points}
+                  fill={strokeForLayer(layer)}
+                  stroke="#ffffff"
+                  strokeWidth={0.8}
+                  strokeLinejoin="round"
+                  opacity={0.98}
                 />
               ))
             )}
-            {selectedLine ? (
-              <Path
-                d={buildSvgPathForLine(selectedLine)}
-                stroke="#ef4444"
-                strokeWidth={3 / viewport.zoom}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                fill="none"
-                opacity={1}
-              />
-            ) : null}
-            {/* ── Endpoints / Corners ── */}
-            {cornerPoints.map((pt, i) => (
-              <Circle key={`ep-${i}`} cx={pt.y} cy={pt.x} r={2.5 / viewport.zoom} fill="#3b82f6" opacity={0.8} />
-            ))}
-            {/* ── Selected Points ── */}
-            {selectedPoints?.map((pt, i) => (
-              <Circle
-                key={`sp-${i}`}
-                cx={pt.y}
-                cy={pt.x}
-                r={6 / viewport.zoom}
-                fill="#f97316"
-                stroke="#ffffff"
-                strokeWidth={1.5 / viewport.zoom}
-              />
-            ))}
+            {selectedLine ? (() => {
+              const segment = getPreviewArrowSegment(selectedLine, viewport, rotation, layoutSize);
+              if (!segment) return null;
 
-            {/* ── Plan Start Direction Arrow ── */}
-            {filtered.length > 0 && (() => {
-              const first = filtered[0];
-              const startX = first.from.y;
-              const startY = first.from.x;
-              const endX = first.to.y;
-              const endY = first.to.x;
-              const angle = Math.atan2(endY - startY, endX - startX) * 180 / Math.PI;
+              const points = buildPreviewArrowheadPoints(segment.from, segment.to);
+              return points ? (
+                <Polygon
+                  points={points}
+                  fill="#ef4444"
+                  stroke="#ffffff"
+                  strokeWidth={0.9}
+                  strokeLinejoin="round"
+                />
+              ) : null;
+            })() : null}
+            {/* ── Rover-to-Plan distance indicator ── */}
+            {hasRealTelemetry && filtered.length > 0 && (() => {
+              let nextDist = Infinity;
+              let nextTarget = null;
+              const realN = roverN;
+              const realE = roverE;
+
+              for (let i = 0; i < filtered.length; i++) {
+                const line = filtered[i];
+                const segStart = { x: line.from.x, y: line.from.y };
+                const segEnd = { x: line.to.x, y: line.to.y };
+
+                const segDx = segEnd.x - segStart.x;
+                const segDy = segEnd.y - segStart.y;
+                const segLen2 = segDx * segDx + segDy * segDy;
+                if (segLen2 === 0) continue;
+
+                const t = ((realN - segStart.x) * segDx + (realE - segStart.y) * segDy) / segLen2;
+                const targetPt = t <= 0.5
+                  ? { x: segEnd.x, y: segEnd.y }
+                  : (i < filtered.length - 1 ? { x: filtered[i + 1].from.x, y: filtered[i + 1].from.y } : { x: segEnd.x, y: segEnd.y });
+                const targetDist = Math.hypot(targetPt.x - realN, targetPt.y - realE);
+                nextDist = targetDist;
+                nextTarget = targetPt;
+                break;
+              }
+              if (nextTarget && nextDist < 100) {
+                const planScreenX = nextTarget.y * viewport.zoom + viewport.panX;
+                const planScreenY = -nextTarget.x * viewport.zoom + viewport.panY;
+                let rotatedPlanX = planScreenX;
+                let rotatedPlanY = planScreenY;
+                if (rotation !== 0 && layoutSize.width > 0 && layoutSize.height > 0) {
+                  const rotated = rotatePoint(planScreenX, planScreenY, layoutSize.width / 2, layoutSize.height / 2, rotation);
+                  rotatedPlanX = rotated.x;
+                  rotatedPlanY = rotated.y;
+                }
+                const rx = roverScreenX;
+                const ry = roverScreenY;
+                const midX = (rx + rotatedPlanX) / 2;
+                const midY = (ry + rotatedPlanY) / 2;
+                const altSuffix = telemetryPosAlt != null ? ` (Alt: ${telemetryPosAlt.toFixed(1)}m)` : '';
+                return (
+                  <G key="rover-to-plan-distance">
+                    <Line
+                      x1={rx}
+                      y1={ry}
+                      x2={rotatedPlanX}
+                      y2={rotatedPlanY}
+                      stroke="#f59e0b"
+                      strokeWidth={1.5}
+                      strokeDasharray="4 3"
+                    />
+                    <SvgText
+                      x={midX}
+                      y={midY - 8}
+                      fill="#ffffff"
+                      stroke="#ffffff"
+                      strokeWidth={3}
+                      fontSize={11}
+                      fontWeight="800"
+                      textAnchor="middle"
+                    >
+                      {`${nextDist.toFixed(2)}m${altSuffix}`}
+                    </SvgText>
+                    <SvgText
+                      x={midX}
+                      y={midY - 8}
+                      fill="#f59e0b"
+                      fontSize={11}
+                      fontWeight="800"
+                      textAnchor="middle"
+                    >
+                      {`${nextDist.toFixed(2)}m${altSuffix}`}
+                    </SvgText>
+                  </G>
+                );
+              }
+              return null;
+            })()}
+
+            {/* ── Aligned Reference Points with GPS labels ── */}
+            {alignedRefPoints?.map((pt, i) => {
+              const rawSX = pt.dxf_y * viewport.zoom + viewport.panX;
+              const rawSY = -pt.dxf_x * viewport.zoom + viewport.panY;
+              let sx = rawSX;
+              let sy = rawSY;
+              if (rotation !== 0 && layoutSize.width > 0 && layoutSize.height > 0) {
+                const rotated = rotatePoint(rawSX, rawSY, layoutSize.width / 2, layoutSize.height / 2, rotation);
+                sx = rotated.x;
+                sy = rotated.y;
+              }
               return (
-                <G transform={`translate(${startX}, ${startY})`}>
-                  <Polygon
-                    points={`0,${-8 / viewport.zoom} ${12 / viewport.zoom},0 0,${8 / viewport.zoom}`}
-                    fill="#ef4444"
-                    stroke="#ffffff"
-                    strokeWidth={1 / viewport.zoom}
-                    transform={`rotate(${90 - angle})`}
+                <G key={`arp-${i}`}>
+                  <Circle
+                    cx={sx}
+                    cy={sy}
+                    r={8}
+                    fill="none"
+                    stroke="#10b981"
+                    strokeWidth={2}
+                    strokeDasharray="3 2"
                   />
+                  {showRefPointLabels && activeRefPointLabelIndex === i && (
+                    <>
+                      <SvgText
+                        x={sx + 12}
+                        y={sy - 10}
+                        fontSize={10}
+                        fill="#ffffff"
+                        stroke="#ffffff"
+                        strokeWidth={3}
+                        fontWeight="700"
+                      >
+                        {`${pt.lat.toFixed(6)}, ${pt.lon.toFixed(6)}`}
+                      </SvgText>
+                      <SvgText
+                        x={sx + 12}
+                        y={sy - 10}
+                        fontSize={10}
+                        fill="#10b981"
+                        fontWeight="700"
+                      >
+                        {`${pt.lat.toFixed(6)}, ${pt.lon.toFixed(6)}`}
+                      </SvgText>
+                    </>
+                  )}
+                </G>
+              );
+            })}
+
+            {/* ── Rover icon (top-down car shape) ── */}
+            {hasRover && layoutSize.width > 0 && (() => {
+              const cx = roverScreenX;
+              const cy = roverScreenY;
+              // Car dimensions in screen pixels
+              const carLength = 22;
+              const carWidth = 13;
+              const noseLength = 7;
+              // heading_ned_deg: 0=North(up), 90=East(right), clockwise
+              // SVG rotation: 0=up, positive=clockwise, matches NED heading directly.
+              // We also add map rotation.
+              const headingRot = roverDisplayPose.headingDeg + rotation;
+              return (
+                <G transform={`translate(${cx}, ${cy}) rotate(${headingRot})`}>
+                  {/* Glow shadow */}
+                  <Circle cx={0} cy={0} r={carLength * 0.85} fill="rgba(14,165,233,0.12)" />
+                  {/* Car body */}
+                  <Polygon
+                    points={`${-carWidth / 2},${carLength / 2} ${carWidth / 2},${carLength / 2} ${carWidth / 2},${-carLength / 2 + noseLength} ${0},${-carLength / 2 - noseLength / 2} ${-carWidth / 2},${-carLength / 2 + noseLength}`}
+                    fill="#0ea5e9"
+                    stroke="#ffffff"
+                    strokeWidth={1.8}
+                    strokeLinejoin="round"
+                  />
+                  {/* Rear wheels */}
+                  <Polygon
+                    points={`${-carWidth / 2 - 3},${carLength / 2 - 6} ${-carWidth / 2},${carLength / 2 - 6} ${-carWidth / 2},${carLength / 2} ${-carWidth / 2 - 3},${carLength / 2}`}
+                    fill="#0f172a"
+                  />
+                  <Polygon
+                    points={`${carWidth / 2 + 3},${carLength / 2 - 6} ${carWidth / 2},${carLength / 2 - 6} ${carWidth / 2},${carLength / 2} ${carWidth / 2 + 3},${carLength / 2}`}
+                    fill="#0f172a"
+                  />
+                  {/* Front wheel (single, centred — 3-wheel rover) */}
+                  <Polygon
+                    points={`${-2.5},${-carLength / 2 + noseLength} ${2.5},${-carLength / 2 + noseLength} ${2.5},${-carLength / 2 + noseLength - 6} ${-2.5},${-carLength / 2 + noseLength - 6}`}
+                    fill="#0f172a"
+                  />
+                  {/* Windshield */}
+                  <Polygon
+                    points={`${-carWidth / 2 + 2},${-carLength / 2 + noseLength + 2} ${carWidth / 2 - 2},${-carLength / 2 + noseLength + 2} ${carWidth / 2 - 3},${-carLength / 2 + noseLength + 6} ${-carWidth / 2 + 3},${-carLength / 2 + noseLength + 6}`}
+                    fill="rgba(186,230,253,0.85)"
+                  />
+                  {/* Heading dot (nose tip) */}
+                  <Circle cx={0} cy={-carLength / 2 - noseLength / 2} r={2.5} fill="#fbbf24" stroke="#fff" strokeWidth={1} />
                 </G>
               );
             })()}
 
-          </G>
-
-          {/* ── Direction arrows ── */}
-          {PREVIEW_RENDERED_LAYERS.flatMap((layer) =>
-            arrowheadsByLayer[layer].map((points, index) => (
-              <Polygon
-                key={`arrow-${layer}-${index}`}
-                points={points}
-                fill={strokeForLayer(layer)}
-                stroke="#ffffff"
-                strokeWidth={0.8}
-                strokeLinejoin="round"
-                opacity={0.98}
-              />
-            ))
-          )}
-          {selectedLine ? (() => {
-            const segment = getPreviewArrowSegment(selectedLine, viewport, rotation, layoutSize);
-            if (!segment) return null;
-
-            const points = buildPreviewArrowheadPoints(segment.from, segment.to);
-            return points ? (
-              <Polygon
-                points={points}
-                fill="#ef4444"
-                stroke="#ffffff"
-                strokeWidth={0.9}
-                strokeLinejoin="round"
-              />
-            ) : null;
-          })() : null}
-          {/* ── Rover-to-Plan distance indicator ── */}
-          {hasRealTelemetry && filtered.length > 0 && (() => {
-            let nextDist = Infinity;
-            let nextTarget = null;
-            const realN = roverN;
-            const realE = roverE;
-
-            for (let i = 0; i < filtered.length; i++) {
-              const line = filtered[i];
-              const segStart = { x: line.from.x, y: line.from.y };
-              const segEnd = { x: line.to.x, y: line.to.y };
-
-              const segDx = segEnd.x - segStart.x;
-              const segDy = segEnd.y - segStart.y;
-              const segLen2 = segDx * segDx + segDy * segDy;
-              if (segLen2 === 0) continue;
-
-              const t = ((realN - segStart.x) * segDx + (realE - segStart.y) * segDy) / segLen2;
-              const targetPt = t <= 0.5
-                ? { x: segEnd.x, y: segEnd.y }
-                : (i < filtered.length - 1 ? { x: filtered[i + 1].from.x, y: filtered[i + 1].from.y } : { x: segEnd.x, y: segEnd.y });
-              const targetDist = Math.hypot(targetPt.x - realN, targetPt.y - realE);
-              nextDist = targetDist;
-              nextTarget = targetPt;
-              break;
-            }
-            if (nextTarget && nextDist < 100) {
-              const planScreenX = nextTarget.y * viewport.zoom + viewport.panX;
-              const planScreenY = -nextTarget.x * viewport.zoom + viewport.panY;
-              let rotatedPlanX = planScreenX;
-              let rotatedPlanY = planScreenY;
-              if (rotation !== 0 && layoutSize.width > 0 && layoutSize.height > 0) {
-                const rotated = rotatePoint(planScreenX, planScreenY, layoutSize.width / 2, layoutSize.height / 2, rotation);
-                rotatedPlanX = rotated.x;
-                rotatedPlanY = rotated.y;
-              }
-              const rx = roverScreenX;
-              const ry = roverScreenY;
-              const midX = (rx + rotatedPlanX) / 2;
-              const midY = (ry + rotatedPlanY) / 2;
-              const altSuffix = telemetryPosAlt != null ? ` (Alt: ${telemetryPosAlt.toFixed(1)}m)` : '';
-              return (
-                <G key="rover-to-plan-distance">
-                  <Line
-                    x1={rx}
-                    y1={ry}
-                    x2={rotatedPlanX}
-                    y2={rotatedPlanY}
-                    stroke="#f59e0b"
-                    strokeWidth={1.5}
-                    strokeDasharray="4 3"
-                  />
-                  <SvgText
-                    x={midX}
-                    y={midY - 8}
-                    fill="#ffffff"
-                    stroke="#ffffff"
-                    strokeWidth={3}
-                    fontSize={11}
-                    fontWeight="800"
-                    textAnchor="middle"
-                  >
-                    {`${nextDist.toFixed(2)}m${altSuffix}`}
-                  </SvgText>
-                  <SvgText
-                    x={midX}
-                    y={midY - 8}
-                    fill="#f59e0b"
-                    fontSize={11}
-                    fontWeight="800"
-                    textAnchor="middle"
-                  >
-                    {`${nextDist.toFixed(2)}m${altSuffix}`}
-                  </SvgText>
-                </G>
-              );
-            }
-            return null;
-          })()}
-
-          {/* ── Aligned Reference Points with GPS labels ── */}
-          {alignedRefPoints?.map((pt, i) => {
-            const rawSX = pt.dxf_y * viewport.zoom + viewport.panX;
-            const rawSY = -pt.dxf_x * viewport.zoom + viewport.panY;
-            let sx = rawSX;
-            let sy = rawSY;
-            if (rotation !== 0 && layoutSize.width > 0 && layoutSize.height > 0) {
-              const rotated = rotatePoint(rawSX, rawSY, layoutSize.width / 2, layoutSize.height / 2, rotation);
-              sx = rotated.x;
-              sy = rotated.y;
-            }
-            return (
-              <G key={`arp-${i}`}>
-                <Circle
-                  cx={sx}
-                  cy={sy}
-                  r={8}
-                  fill="none"
-                  stroke="#10b981"
-                  strokeWidth={2}
-                  strokeDasharray="3 2"
-                />
-                {showRefPointLabels && activeRefPointLabelIndex === i && (
-                  <>
-                    <SvgText
-                      x={sx + 12}
-                      y={sy - 10}
-                      fontSize={10}
-                      fill="#ffffff"
-                      stroke="#ffffff"
-                      strokeWidth={3}
-                      fontWeight="700"
-                    >
-                      {`${pt.lat.toFixed(6)}, ${pt.lon.toFixed(6)}`}
-                    </SvgText>
-                    <SvgText
-                      x={sx + 12}
-                      y={sy - 10}
-                      fontSize={10}
-                      fill="#10b981"
-                      fontWeight="700"
-                    >
-                      {`${pt.lat.toFixed(6)}, ${pt.lon.toFixed(6)}`}
-                    </SvgText>
-                  </>
-                )}
-              </G>
-            );
-          })}
-
-          {/* ── Rover icon (top-down car shape) ── */}
-          {hasRover && layoutSize.width > 0 && (() => {
-            const cx = roverScreenX;
-            const cy = roverScreenY;
-            // Car dimensions in screen pixels
-            const carLength = 22;
-            const carWidth = 13;
-            const noseLength = 7;
-            // heading_ned_deg: 0=North(up), 90=East(right), clockwise
-            // SVG rotation: 0=up, positive=clockwise, matches NED heading directly.
-            // We also add map rotation.
-            const headingRot = roverDisplayPose.headingDeg + rotation;
-            return (
-              <G transform={`translate(${cx}, ${cy}) rotate(${headingRot})`}>
-                {/* Glow shadow */}
-                <Circle cx={0} cy={0} r={carLength * 0.85} fill="rgba(14,165,233,0.12)" />
-                {/* Car body */}
-                <Polygon
-                  points={`${-carWidth / 2},${carLength / 2} ${carWidth / 2},${carLength / 2} ${carWidth / 2},${-carLength / 2 + noseLength} ${0},${-carLength / 2 - noseLength / 2} ${-carWidth / 2},${-carLength / 2 + noseLength}`}
-                  fill="#0ea5e9"
-                  stroke="#ffffff"
-                  strokeWidth={1.8}
-                  strokeLinejoin="round"
-                />
-                {/* Rear wheels */}
-                <Polygon
-                  points={`${-carWidth / 2 - 3},${carLength / 2 - 6} ${-carWidth / 2},${carLength / 2 - 6} ${-carWidth / 2},${carLength / 2} ${-carWidth / 2 - 3},${carLength / 2}`}
-                  fill="#0f172a"
-                />
-                <Polygon
-                  points={`${carWidth / 2 + 3},${carLength / 2 - 6} ${carWidth / 2},${carLength / 2 - 6} ${carWidth / 2},${carLength / 2} ${carWidth / 2 + 3},${carLength / 2}`}
-                  fill="#0f172a"
-                />
-                {/* Front wheel (single, centred — 3-wheel rover) */}
-                <Polygon
-                  points={`${-2.5},${-carLength / 2 + noseLength} ${2.5},${-carLength / 2 + noseLength} ${2.5},${-carLength / 2 + noseLength - 6} ${-2.5},${-carLength / 2 + noseLength - 6}`}
-                  fill="#0f172a"
-                />
-                {/* Windshield */}
-                <Polygon
-                  points={`${-carWidth / 2 + 2},${-carLength / 2 + noseLength + 2} ${carWidth / 2 - 2},${-carLength / 2 + noseLength + 2} ${carWidth / 2 - 3},${-carLength / 2 + noseLength + 6} ${-carWidth / 2 + 3},${-carLength / 2 + noseLength + 6}`}
-                  fill="rgba(186,230,253,0.85)"
-                />
-                {/* Heading dot (nose tip) */}
-                <Circle cx={0} cy={-carLength / 2 - noseLength / 2} r={2.5} fill="#fbbf24" stroke="#fff" strokeWidth={1} />
-              </G>
-            );
-          })()}
-
           </Svg>
         )}
-        </View>
+      </View>
 
       {/* ── Single Heading Compass (always shown) ── */}
       <View
@@ -9275,7 +9241,7 @@ function PlanPreview({
         {/* Heading label below compass — only shown when telemetry is active */}
         {hasRover && (
           <View style={{ alignItems: "center", marginTop: 3 }}>
-              <Text style={{ color: "#0f172a", fontSize: 9.5, fontWeight: "800", backgroundColor: "rgba(255,255,255,0.85)", paddingHorizontal: 5, paddingVertical: 1, borderRadius: 6 }}>
+            <Text style={{ color: "#0f172a", fontSize: 9.5, fontWeight: "800", backgroundColor: "rgba(255,255,255,0.85)", paddingHorizontal: 5, paddingVertical: 1, borderRadius: 6 }}>
               {roverDisplayPose.headingDeg.toFixed(1)}°
             </Text>
           </View>
@@ -9514,7 +9480,7 @@ function SwoziPage({
   const [paramsLoading, setParamsLoading] = useState(false);
   const [paramsError, setParamsError] = useState<string | null>(null);
   const [paramsSaving, setParamsSaving] = useState(false);
-  const [paramsSaveStatus, setParamsSaveStatus] = useState<'idle'|'ok'|'err'>('idle');
+  const [paramsSaveStatus, setParamsSaveStatus] = useState<'idle' | 'ok' | 'err'>('idle');
 
   // --- Manual Hold State ---
   const [manualHoldActive, setManualHoldActive] = useState(false);
@@ -9616,7 +9582,7 @@ function SwoziPage({
       setManualHoldActive(true);
       // Send a heartbeat every 7 s to keep the 8 s window alive
       manualHeartbeatRef.current = setInterval(async () => {
-        try { await fetch(`${apiBaseUrl}/api/spray/on`, { method: 'POST' }); } catch (_) {}
+        try { await fetch(`${apiBaseUrl}/api/spray/on`, { method: 'POST' }); } catch (_) { }
       }, 7000);
     } catch (err) {
       console.log('Spray ON failed', err);
@@ -9774,10 +9740,10 @@ function SwoziPage({
             onChangeText={setSprayDuration}
             keyboardType="numeric"
             placeholder="sec"
-            style={{ 
-              borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, 
-              width: 60, paddingHorizontal: 10, paddingVertical: 8, 
-              marginRight: 10, color: "#334155", textAlign: "center" 
+            style={{
+              borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8,
+              width: 60, paddingHorizontal: 10, paddingVertical: 8,
+              marginRight: 10, color: "#334155", textAlign: "center"
             }}
           />
           <Pressable
