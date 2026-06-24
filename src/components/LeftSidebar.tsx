@@ -40,6 +40,7 @@ import type {
   PlanLine,
   SidebarPanel,
 } from "../types/plan";
+import type { PlacedItem } from "./BoundaryEditor";
 
 const sliderThumbImage = require("../../assets/slider-thumb.png");
 
@@ -68,6 +69,10 @@ interface LeftSidebarProps {
   planNotes: string;
   onSavePlanNotes: (notes: string) => void;
   apiBaseUrl?: string;
+  isVisualAlignmentMode?: boolean;
+  visualAlignmentItem?: PlacedItem | null;
+  onStartVisualAlignment?: () => void;
+  onConfirmVisualAlignment?: () => void;
 }
 
 export function LeftSidebar({
@@ -95,6 +100,10 @@ export function LeftSidebar({
   planNotes,
   onSavePlanNotes,
   apiBaseUrl,
+  isVisualAlignmentMode,
+  visualAlignmentItem,
+  onStartVisualAlignment,
+  onConfirmVisualAlignment,
 }: LeftSidebarProps) {
   const { width: screenWidth } = useWindowDimensions();
   const selectedMetrics = useMemo(() => {
@@ -303,6 +312,10 @@ export function LeftSidebar({
             planNotes={planNotes}
             onSavePlanNotes={onSavePlanNotes}
             apiBaseUrl={apiBaseUrl}
+            isVisualAlignmentMode={isVisualAlignmentMode}
+            visualAlignmentItem={visualAlignmentItem}
+            onStartVisualAlignment={onStartVisualAlignment}
+            onConfirmVisualAlignment={onConfirmVisualAlignment}
           />
         </ScrollView>
       </View>
@@ -338,6 +351,10 @@ function PanelContent({
   planNotes,
   onSavePlanNotes,
   apiBaseUrl,
+  isVisualAlignmentMode,
+  visualAlignmentItem,
+  onStartVisualAlignment,
+  onConfirmVisualAlignment,
 }: {
   activePanel: SidebarPanel;
   palette: Palette;
@@ -364,6 +381,10 @@ function PanelContent({
   planNotes: string;
   onSavePlanNotes: (notes: string) => void;
   apiBaseUrl?: string;
+  isVisualAlignmentMode?: boolean;
+  visualAlignmentItem?: PlacedItem | null;
+  onStartVisualAlignment?: () => void;
+  onConfirmVisualAlignment?: () => void;
 }) {
   const [fieldName, setFieldName] = useState("");
   const [fieldNotes, setFieldNotes] = useState(planNotes);

@@ -1,0 +1,5 @@
+caster host: caster.emlid.com
+port: 2101
+mount point: MP23960a
+username: u98264
+Password: 998ckc

@@ -1,0 +1,121 @@
+# Build artifacts
+build/
+install/
+log/
+__pycache__/
+*.pyc
+
+# rosbags
+*.bag
+*.db3
+*.mcap
+bags/
+baseline/**/bag/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Local env / secrets (never commit credentials)
+.env
+*.local
+secrets/
+config/*.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code local state
+.claude/
+
+# Frontend verification app (not the real GCS app)
+front-end/
+
+# Node / frontend build artifacts
+node_modules/
+.expo/
+dist/
+*.tsbuildinfo
+
+# Android / iOS native build outputs (Capacitor / RN / Expo)
+android/
+ios/
+
+# Task planning docs (local scratch, not for tracking)
+task_frontend/
+task_rpp_upgrade/
+docs/Task_SRC/
+docs/Task_server/
+
+# Local analysis and scratch tools (not for tracking)
+docs/Analysis/
+tools/scp_tool.md
+
+# Misc
+nul
+.grok/
+
+# Mac dev-flow virtualenv (no-hardware testing — see docs/SESSION_STARTUP_MAC_NO_HARDWARE.md)
+.venv-dev/
+
+# Built frontend bundle — 21MB artifact, not version-controlled (deploy separately)
+front-end.zip
+
+# Uploaded mission files (runtime user data). Committed templates are negated below.
+server/missions/*.dxf
+server/missions/*.csv
+!server/missions/soccer_field_penalty_area.dxf
+
+# Staged aligned-DXF missions (runtime handoff artifacts)
+server/missions/staging/
+
+# Local scratch notes / planning (not for tracking)
+Todos/
+Role_of_Path_engine.md
+Server-rpp.md
+
+# API testing local config
+.postman.json
+.kiro/
+
+# GCS-imported params (dated subdirs — local reference only, not tracked)
+params/*/
+params/TANK_PARM/
+params/old/
+
+# GCS-imported firmware builds (local reference only, not tracked)
+firmware/
+
+# GCS analysis scripts (local reference only, not tracked)
+tools/analysis/
+*.bak
+
+# Local hardware / encoder experiments (not for tracking)
+Encoder_Fix/
+
+# GCS-imported PX4 params by date (local reference only)
+PX4_params/
+
+# DXF demo files (local scratch, not for tracking)
+Simple Demo/
+
+# Architecture and TODO scratch docs (local planning only)
+docs/Architecture/
+docs/TODO/
+
+# Field analysis images (local reference only)
+image_ref/
+
+# Rosbag topic lists (local scratch)
+tools/rosbag.txt
+
+# Runtime mission-debug recorder handshake files
+runtime/mission-debug/
+
+# Generated DXF sidecars (entities/extensions cache, regenerated on parse)
+server/missions/.*.dxf.*.json
+
+# Local bag/trajectory analysis output (data + plots, not for tracking)
+analysis/

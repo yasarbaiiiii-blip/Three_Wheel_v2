@@ -549,6 +549,147 @@ export default function App() {
   const [importedPlan, setImportedPlan] = useState<ImportedPlan | null>(null);
   const [lines, setLines] = useState<PlanLine[]>([]);
   const [selectedLineId, setSelectedLineId] = useState<string | null>(null);
+
+  // 1. Mode Toggle State
+  const [isVisualAlignmentMode, setIsVisualAlignmentMode] = useState(false);
+
+  // 2. The temporary "Sticker" holding all DXF lines
+  const [visualAlignmentItem, setVisualAlignmentItem] = useState<PlacedItem | null>(null);
+
+  // 3. Trigger Function: Bundles lines into one item
+  function startVisualAlignment() {
+    if (lines.length === 0) return;
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    lines.forEach(line => {
+      if (line.from && line.to) {
+        minX = Math.min(minX, line.from.x, line.to.x);
+        minY = Math.min(minY, line.from.y, line.to.y);
+        maxX = Math.max(maxX, line.from.x, line.to.x);
+        maxY = Math.max(maxY, line.from.y, line.to.y);
+      }
+    });
+
+    setVisualAlignmentItem({
+      id: "visual-alignment-group",
+      lines: lines, 
+      x: 0, 
+      y: 0,
+      rotation: 0,
+      scale: 1,
+      width: maxX - minX,
+      height: maxY - minY,
+    });
+
+    setIsVisualAlignmentMode(true);
+  }
+
+  function handleConfirmVisualAlignment() {
+    if (!visualAlignmentItem) return;
+
+    const finalX = visualAlignmentItem.x; 
+    const finalY = visualAlignmentItem.y; 
+    const finalRot = visualAlignmentItem.rotation;
+    
+    // 1. Find the bounding box to get the center point for rotation
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    lines.forEach(line => {
+      if (line.from && line.to) {
+        minX = Math.min(minX, line.from.x, line.to.x);
+        minY = Math.min(minY, line.from.y, line.to.y);
+        maxX = Math.max(maxX, line.from.x, line.to.x);
+        maxY = Math.max(maxY, line.from.y, line.to.y);
+      }
+    });
+
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+
+    // 2. Setup the rotation math
+    const rad = (finalRot * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    // 3. PERMANENTLY APPLY THE VISUAL TRANSFORM TO ALL PLAN LINES
+    const updatedLines = lines.map(line => {
+      const applyTransform = (pt: { x: number, y: number }) => {
+        // Shift point to origin (center)
+        const dx = pt.x - centerX;
+        const dy = pt.y - centerY;
+        // Rotate around center
+        const rotatedX = dx * cos - dy * sin;
+        const rotatedY = dx * sin + dy * cos;
+        // Shift back and apply the drag offsets (finalY = North/x-axis, finalX = East/y-axis)
+        return {
+          x: rotatedX + centerX + finalY, 
+          y: rotatedY + centerY + finalX
+        };
+      };
+
+      // Also transform the preview_points so curved entities don't break
+      let updatedEntity = line.entity;
+      if (updatedEntity && updatedEntity.preview_points) {
+        updatedEntity = {
+          ...updatedEntity,
+          preview_points: updatedEntity.preview_points.map((pt: any) => {
+            const transformed = applyTransform({ x: pt.north, y: pt.east });
+            return { ...pt, north: transformed.x, east: transformed.y };
+          }),
+        };
+      }
+
+      return {
+        ...line,
+        from: { ...line.from, ...applyTransform(line.from) },
+        to: { ...line.to, ...applyTransform(line.to) },
+        ...(updatedEntity ? { entity: updatedEntity } : {})
+      };
+    });
+
+    // 4. Calculate LLA Receiver logic exactly as before
+    const halfW = visualAlignmentItem.width / 2;
+    const halfH = visualAlignmentItem.height / 2;
+
+    const cornersLocal = [
+      { n: halfH, e: -halfW },  // Top Left
+      { n: halfH, e: halfW },   // Top Right
+      { n: -halfH, e: halfW },  // Bottom Right
+      { n: -halfH, e: -halfW }, // Bottom Left
+    ];
+
+    const dxfCorners = [
+      { dxf_x: maxX, dxf_y: minY }, // Top Left
+      { dxf_x: maxX, dxf_y: maxY }, // Top Right
+      { dxf_x: minX, dxf_y: maxY }, // Bottom Right
+      { dxf_x: minX, dxf_y: minY }, // Bottom Left
+    ];
+
+    const rotatedCorners = cornersLocal.map(c => ({
+      n: (c.n * cos - c.e * sin) + finalY, 
+      e: (c.n * sin + c.e * cos) + finalX, 
+    }));
+
+    const baseLat = telemetrySnapshot?.lat || 28.6139; // Fallback to Delhi
+    const baseLon = telemetrySnapshot?.lon || 77.2090;
+
+    const extractedLLA = rotatedCorners.map((corner, i) => {
+      const EARTH_RADIUS = 6378137.0;
+      const originLatRad = (baseLat * Math.PI) / 180;
+      const lat = baseLat + (corner.n / EARTH_RADIUS) * (180 / Math.PI);
+      const lon = baseLon + (corner.e / (EARTH_RADIUS * Math.cos(originLatRad))) * (180 / Math.PI);
+      return { lat, lon, dxf_x: dxfCorners[i].dxf_x, dxf_y: dxfCorners[i].dxf_y };
+    });
+
+    console.log("Captured 4 LLA Corners for Rover:", extractedLLA);
+    
+    // 5. Save the coordinates and update the permanent plan lines state
+    setExtractedCorners(extractedLLA);
+    setLines(updatedLines); // <-- THIS FIXES THE SHIFTING ISSUE
+    
+    // 6. Exit visual mode safely
+    setIsVisualAlignmentMode(false);
+  }
+  const [extractedCorners, setExtractedCorners] = useState<{dxf_x: number, dxf_y: number, lat: number, lon: number}[] | null>(null);
   const [layerVisibility, setLayerVisibility] = useState<LayerVisibility>({
     boundary: true,
     marking: true,
@@ -2581,6 +2722,13 @@ export default function App() {
                   setShowRefPointLabels={setShowRefPointLabels}
                   activeRefPointLabelIndex={activeRefPointLabelIndex}
                   setActiveRefPointLabelIndex={setActiveRefPointLabelIndex}
+                  isVisualAlignmentMode={isVisualAlignmentMode}
+                  visualAlignmentItem={visualAlignmentItem}
+                  setVisualAlignmentItem={setVisualAlignmentItem}
+                  onStartVisualAlignment={startVisualAlignment}
+                  onConfirmVisualAlignment={handleConfirmVisualAlignment}
+                  extractedCorners={extractedCorners}
+                  setExtractedCorners={setExtractedCorners}
                   onNav={(p) => setPage(p)}
                   onSelectLine={setSelectedLineId}
                   onGenerateTemplate={(name, generatedLines) => {
@@ -2870,6 +3018,11 @@ function HomeView({
   setShowRefPointLabels,
   activeRefPointLabelIndex = null,
   setActiveRefPointLabelIndex,
+  isVisualAlignmentMode,
+  visualAlignmentItem,
+  setVisualAlignmentItem,
+  onStartVisualAlignment,
+  onConfirmVisualAlignment,
 }: {
   autoOrigin: boolean;
   setAutoOrigin: React.Dispatch<React.SetStateAction<boolean>>;
@@ -2940,6 +3093,11 @@ function HomeView({
   setShowRefPointLabels: React.Dispatch<React.SetStateAction<boolean>>;
   activeRefPointLabelIndex?: number | null;
   setActiveRefPointLabelIndex?: React.Dispatch<React.SetStateAction<number | null>>;
+  isVisualAlignmentMode?: boolean;
+  visualAlignmentItem?: PlacedItem | null;
+  setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
+  onStartVisualAlignment?: () => void;
+  onConfirmVisualAlignment?: () => void;
 }) {
   const stagedStartGate = useMemo(
     () => evaluateStagedStartGate(stagedWorkflow, loadedPathInspection, stagedMissionId),
@@ -2964,6 +3122,38 @@ function HomeView({
   const [exportFileName, setExportFileName] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [showPointsModal, setShowPointsModal] = useState(false);
+  const [crossTrackAlerted, setCrossTrackAlerted] = useState(false);
+
+  useEffect(() => {
+    if (!missionRunning) {
+      if (crossTrackAlerted) setCrossTrackAlerted(false);
+      return;
+    }
+    const xtrack = telemetrySnapshot?.xtrack_m;
+    if (xtrack != null) {
+      if (Math.abs(xtrack) >= 0.05) {
+        if (!crossTrackAlerted) {
+          setCrossTrackAlerted(true);
+          Alert.alert(
+            "Cross Track Warning",
+            `Cross-track error exceeded 5cm (currently ${Math.abs(xtrack).toFixed(2)} m).`,
+            [
+              { text: "Dismiss", style: "cancel" },
+              {
+                text: "Pause Mission",
+                style: "destructive",
+                onPress: onPausePlan,
+              }
+            ]
+          );
+        }
+      } else {
+        if (crossTrackAlerted) {
+          setCrossTrackAlerted(false);
+        }
+      }
+    }
+  }, [telemetrySnapshot?.xtrack_m, missionRunning, crossTrackAlerted, onPausePlan]);
 
   const availableLayers = useMemo(() => {
     return {
@@ -3261,6 +3451,9 @@ function HomeView({
                   showRefPointLabels={showRefPointLabels}
                   activeRefPointLabelIndex={activeRefPointLabelIndex}
                   onToggleRefPointLabel={setActiveRefPointLabelIndex}
+                  isVisualAlignmentMode={isVisualAlignmentMode}
+                  visualAlignmentItem={visualAlignmentItem}
+                  setVisualAlignmentItem={setVisualAlignmentItem}
                 />
               </View>
             </View>
@@ -4245,9 +4438,45 @@ function HomeView({
               elevation: 8,
             }}
           >
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 4 }}>
-              <RadioTower size={22} color="#0ea5e9" />
-              <Text style={{ color: "#0f172a", fontSize: 18, fontWeight: "900" }}>RTK Caster Configuration</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <RadioTower size={22} color="#0ea5e9" />
+                <Text style={{ color: "#0f172a", fontSize: 18, fontWeight: "900" }}>RTK Caster Configuration</Text>
+              </View>
+              <Pressable
+                onPress={async () => {
+                  try {
+                    const result = await DocumentPicker.getDocumentAsync({ type: ["text/plain", "public.plain-text", "*/*"] });
+                    if (result.canceled || !result.assets || result.assets.length === 0) return;
+                    const uri = result.assets[0].uri;
+                    const content = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.UTF8 });
+                    const lines = content.split(/\r?\n/);
+                    let foundAny = false;
+                    for (const line of lines) {
+                      const trimmed = line.trim();
+                      if (!trimmed || trimmed.startsWith("#")) continue;
+                      const match = trimmed.match(/^([^:=]+)[:=](.*)$/);
+                      if (match) {
+                        const key = match[1].trim().toLowerCase();
+                        const val = match[2].trim();
+                        if (key === "host" || key === "caster host") { setRtkCaster(val); foundAny = true; }
+                        else if (key === "port") { setRtkPort(val); foundAny = true; }
+                        else if (key === "mountpoint" || key === "mount point") { setRtkMountPoint(val); foundAny = true; }
+                        else if (key === "username" || key === "user") { setRtkUsername(val); foundAny = true; }
+                        else if (key === "password" || key === "pass") { setRtkPassword(val); foundAny = true; }
+                      }
+                    }
+                    if (!foundAny) {
+                      Alert.alert("Invalid File", "No matching RTK keys found in the file.");
+                    }
+                  } catch (e) {
+                    Alert.alert("Import Failed", "Could not read the RTK file.");
+                  }
+                }}
+                style={{ padding: 6, backgroundColor: "#f1f5f9", borderRadius: 8 }}
+              >
+                <FileUp size={18} color="#0f172a" />
+              </Pressable>
             </View>
             <Text style={{ color: "#64748b", fontSize: 11.5, marginBottom: 14 }}>
               Enter NTRIP caster credentials to inject RTK correction data into the GPS.
@@ -5255,6 +5484,13 @@ function SectionScreen(props: {
   setShowRefPointLabels?: React.Dispatch<React.SetStateAction<boolean>>;
   activeRefPointLabelIndex?: number | null;
   setActiveRefPointLabelIndex?: React.Dispatch<React.SetStateAction<number | null>>;
+  isVisualAlignmentMode?: boolean;
+  visualAlignmentItem?: PlacedItem | null;
+  setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
+  onStartVisualAlignment?: () => void;
+  onConfirmVisualAlignment?: () => void;
+  extractedCorners?: {dxf_x: number, dxf_y: number, lat: number, lon: number}[] | null;
+  setExtractedCorners?: React.Dispatch<React.SetStateAction<{dxf_x: number, dxf_y: number, lat: number, lon: number}[] | null>>;
 }) {
   const { title, page, onBack, mapViewEnabled, setMapViewEnabled } = props;
 
@@ -5284,6 +5520,9 @@ function SectionScreen(props: {
               showRefPointLabels={props.showRefPointLabels}
               activeRefPointLabelIndex={props.activeRefPointLabelIndex}
               onToggleRefPointLabel={props.setActiveRefPointLabelIndex}
+              isVisualAlignmentMode={props.isVisualAlignmentMode}
+              visualAlignmentItem={props.visualAlignmentItem}
+              setVisualAlignmentItem={props.setVisualAlignmentItem}
             />
           )}
         />
@@ -5791,6 +6030,13 @@ function FieldsPage({
   mapViewEnabled = false,
   activeRefPointLabelIndex = null,
   setActiveRefPointLabelIndex,
+  isVisualAlignmentMode,
+  visualAlignmentItem,
+  setVisualAlignmentItem,
+  onStartVisualAlignment,
+  onConfirmVisualAlignment,
+  extractedCorners,
+  setExtractedCorners,
 }: {
   importedPlan: ImportedPlan | null;
   setImportedPlan: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
@@ -5838,11 +6084,18 @@ function FieldsPage({
   activeRefPointLabelIndex?: number | null;
   setActiveRefPointLabelIndex?: React.Dispatch<React.SetStateAction<number | null>>;
   showRefPointLabels?: boolean;
+  isVisualAlignmentMode?: boolean;
+  visualAlignmentItem?: PlacedItem | null;
+  setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
+  onStartVisualAlignment?: () => void;
+  onConfirmVisualAlignment?: () => void;
+  extractedCorners?: {dxf_x: number, dxf_y: number, lat: number, lon: number}[] | null;
+  setExtractedCorners?: React.Dispatch<React.SetStateAction<{dxf_x: number, dxf_y: number, lat: number, lon: number}[] | null>>;
 }) {
   const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [refPoints, setRefPoints] = useState<{ dxf_x: number; dxf_y: number; lat: string; lon: string }[]>([]);
-  const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "single_point">("least_squares");
+  const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "single_point" | "visual_alignment">("least_squares");
   const [rotationDeg, setRotationDeg] = useState<string>("");
   const [isFixing, setIsFixing] = useState(false);
   const [missionSummary, setMissionSummary] = useState<any | null>(null);
@@ -6245,35 +6498,46 @@ function FieldsPage({
 
   const handleFixAlignment = async () => {
     if (blockProtectedWorkflowMutation("Changing GPS alignment")) return;
-    if (!selectedPathName || !apiBaseUrl || refPoints.length === 0) {
+    if (!selectedPathName || !apiBaseUrl || (alignmentMethod !== "visual_alignment" && refPoints.length === 0) || (alignmentMethod === "visual_alignment" && !extractedCorners)) {
       onWorkflowStep?.("alignment", "failed");
       setVerifiedAlignmentRequest(null);
       return;
     }
     setIsFixing(true);
     try {
-      const validPoints = refPoints
-        .filter(p => p.lat.trim() !== "" && p.lon.trim() !== "")
-        .map(p => ({
+      let validPoints: {dxf_x: number, dxf_y: number, lat: number, lon: number}[] = [];
+
+      if (alignmentMethod === "visual_alignment") {
+        validPoints = extractedCorners!.slice(0, 2).map(p => ({
           dxf_x: p.dxf_x,
           dxf_y: p.dxf_y,
-          lat: parseFloat(p.lat),
-          lon: parseFloat(p.lon),
+          lat: p.lat,
+          lon: p.lon,
         }));
+      } else {
+        validPoints = refPoints
+          .filter(p => p.lat.trim() !== "" && p.lon.trim() !== "")
+          .map(p => ({
+            dxf_x: p.dxf_x,
+            dxf_y: p.dxf_y,
+            lat: parseFloat(p.lat),
+            lon: parseFloat(p.lon),
+          }));
 
-      if (alignmentMethod === "least_squares" && validPoints.length < 2) {
-        onWorkflowStep?.("alignment", "failed");
-        setVerifiedAlignmentRequest(null);
-        Alert.alert("Validation", "Please select 2 points and enter their WGS84 coordinates.");
-        setIsFixing(false);
-        return;
-      }
-      if (alignmentMethod === "single_point" && validPoints.length === 0) {
-        onWorkflowStep?.("alignment", "failed");
-        setVerifiedAlignmentRequest(null);
-        Alert.alert("Validation", "Please select a point and enter its coordinates.");
-        setIsFixing(false);
-        return;
+        if (alignmentMethod === "least_squares" && validPoints.length < 2) {
+          onWorkflowStep?.("alignment", "failed");
+          setVerifiedAlignmentRequest(null);
+          Alert.alert("Validation", "Please select 2 points and enter their WGS84 coordinates.");
+          setIsFixing(false);
+          return;
+        }
+        if (alignmentMethod === "single_point" && validPoints.length === 0) {
+          onWorkflowStep?.("alignment", "failed");
+          setVerifiedAlignmentRequest(null);
+          Alert.alert("Validation", "Please select a point and enter its coordinates.");
+          setIsFixing(false);
+          return;
+        }
       }
 
       const payload: pathApi.AlignPathRequest = {
@@ -6353,6 +6617,8 @@ function FieldsPage({
           })));
         }
         setRefPoints([]);
+        setExtractedCorners?.(null);
+        setVisualAlignmentItem?.(null);
       } else {
         onWorkflowStep?.("alignment", "failed");
         setVerifiedAlignmentRequest(null);
@@ -6465,6 +6731,9 @@ function FieldsPage({
               showRefPointLabels={showRefPointLabels}
               activeRefPointLabelIndex={activeRefPointLabelIndex}
               onToggleRefPointLabel={setActiveRefPointLabelIndex}
+              isVisualAlignmentMode={isVisualAlignmentMode}
+              visualAlignmentItem={visualAlignmentItem}
+              setVisualAlignmentItem={setVisualAlignmentItem}
             />
           </View>
         </View>
@@ -7190,14 +7459,93 @@ function FieldsPage({
                 setMissionSummary(null);
                 setAlignmentResult(null);
                 setVerifiedAlignmentRequest(null);
+                setExtractedCorners?.(null);
+                setVisualAlignmentItem?.(null);
               }}
               style={{ flex: 1, paddingVertical: 8, alignItems: "center", borderRadius: 6, backgroundColor: alignmentMethod === "single_point" ? "#ffffff" : "transparent", shadowColor: alignmentMethod === "single_point" ? "#000" : "transparent", shadowOpacity: 0.05, shadowRadius: 2, shadowOffset: { width: 0, height: 1 } }}
             >
               <Text style={{ color: alignmentMethod === "single_point" ? "#0f172a" : "#64748b", fontSize: 12, fontWeight: "700" }}>1-Point + Angle</Text>
             </Pressable>
+            <Pressable
+              onPress={() => {
+                onInvalidateWorkflow("alignment");
+                setAlignmentMethod("visual_alignment");
+                setRefPoints([]);
+                setMissionSummary(null);
+                setAlignmentResult(null);
+                setVerifiedAlignmentRequest(null);
+                setExtractedCorners?.(null);
+                setVisualAlignmentItem?.(null);
+              }}
+              style={{ flex: 1, paddingVertical: 8, alignItems: "center", borderRadius: 6, backgroundColor: alignmentMethod === "visual_alignment" ? "#ffffff" : "transparent", shadowColor: alignmentMethod === "visual_alignment" ? "#000" : "transparent", shadowOpacity: 0.05, shadowRadius: 2, shadowOffset: { width: 0, height: 1 } }}
+            >
+              <Text style={{ color: alignmentMethod === "visual_alignment" ? "#0f172a" : "#64748b", fontSize: 12, fontWeight: "700" }}>Visual</Text>
+            </Pressable>
           </View>
 
-          {refPoints.length === 0 ? (
+          {alignmentMethod === "visual_alignment" ? (
+            <View style={{ gap: 12, marginTop: 4 }}>
+              {extractedCorners ? (
+                <View style={{ gap: 8 }}>
+                  <Text style={{ color: "#0f172a", fontSize: 13, fontWeight: "700" }}>Extracted Coordinates</Text>
+                  {extractedCorners.map((pt, i) => (
+                    <View key={i} style={{ backgroundColor: "#f8fafc", padding: 8, borderRadius: 6, borderWidth: 1, borderColor: "#e2e8f0" }}>
+                      <Text style={{ color: "#334155", fontSize: 12, fontWeight: "600" }}>Corner {i + 1}</Text>
+                      <Text style={{ color: "#64748b", fontSize: 12, fontFamily: "monospace" }}>Lat: {pt.lat.toFixed(6)}</Text>
+                      <Text style={{ color: "#64748b", fontSize: 12, fontFamily: "monospace" }}>Lon: {pt.lon.toFixed(6)}</Text>
+                    </View>
+                  ))}
+                  <Pressable
+                    onPress={handleFixAlignment}
+                    disabled={isFixing || !selectedPathName}
+                    style={{
+                      height: 44,
+                      borderRadius: 10,
+                      alignItems: "center",
+                      justifyContent: "center",
+                      backgroundColor: isFixing || !selectedPathName ? "#94a3b8" : "#f59e0b",
+                      marginTop: 4,
+                    }}
+                  >
+                    <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>
+                      {isFixing ? "Fixing..." : "Fix Alignment"}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => {
+                      setExtractedCorners?.(null);
+                      setVisualAlignmentItem?.(null);
+                    }}
+                    style={{ marginTop: 8, padding: 10, alignItems: "center", backgroundColor: "#f1f5f9", borderRadius: 6 }}
+                  >
+                    <Text style={{ color: "#ef4444", fontSize: 13, fontWeight: "600" }}>Clear Alignment</Text>
+                  </Pressable>
+                </View>
+              ) : isVisualAlignmentMode ? (
+                <View style={{ gap: 12 }}>
+                  <Text style={{ color: "#64748b", fontSize: 12 }}>Drag and rotate the plan on the map to align it, then click Confirm.</Text>
+                  <View style={{ backgroundColor: "#f1f5f9", padding: 10, borderRadius: 6 }}>
+                    <Text style={{ color: "#334155", fontSize: 12, fontFamily: "monospace" }}>
+                      Offset: {visualAlignmentItem?.x?.toFixed(2) ?? "0.00"}m, {visualAlignmentItem?.y?.toFixed(2) ?? "0.00"}m
+                    </Text>
+                  </View>
+                  <Pressable
+                    onPress={onConfirmVisualAlignment}
+                    style={{ height: 44, backgroundColor: "#10b981", borderRadius: 8, alignItems: "center", justifyContent: "center" }}
+                  >
+                    <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>LLA Receiver (Confirm)</Text>
+                  </Pressable>
+                </View>
+              ) : (
+                <Pressable
+                  onPress={onStartVisualAlignment}
+                  style={{ height: 44, borderWidth: 1, borderColor: "#0f172a", borderRadius: 8, alignItems: "center", justifyContent: "center" }}
+                >
+                  <Text style={{ color: "#0f172a", fontSize: 14, fontWeight: "700" }}>Coordinate Receiver</Text>
+                </Pressable>
+              )}
+            </View>
+          ) : refPoints.length === 0 ? (
             <Text style={{ color: "#94a3b8", fontSize: 12, fontStyle: "italic", textAlign: "center", marginVertical: 8 }}>
               {alignmentMethod === "least_squares" ? "Tap 2 points on the canvas to set alignment." : "Tap 1 point on the canvas to set anchor."}
             </Text>
@@ -7909,6 +8257,9 @@ function PlanPreview({
   showRefPointLabels = false,
   activeRefPointLabelIndex = null,
   onToggleRefPointLabel,
+  isVisualAlignmentMode,
+  visualAlignmentItem,
+  setVisualAlignmentItem,
 }: {
   lines: PlanLine[];
   visibility: LayerVisibility;
@@ -7930,6 +8281,9 @@ function PlanPreview({
   showRefPointLabels?: boolean;
   activeRefPointLabelIndex?: number | null;
   onToggleRefPointLabel?: (index: number | null) => void;
+  isVisualAlignmentMode?: boolean;
+  visualAlignmentItem?: PlacedItem | null;
+  setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
 }) {
   const filtered = useMemo(
     () =>
@@ -8432,6 +8786,17 @@ function PlanPreview({
       >
         {mapViewEnabled ? (
           <MapView
+            mode={isVisualAlignmentMode ? "templates" : "fields"}
+            placedItems={(isVisualAlignmentMode || visualAlignmentItem) && visualAlignmentItem ? [visualAlignmentItem] : []}
+            selectedItemIds={isVisualAlignmentMode ? ["visual-alignment-group"] : []}
+            onUpdatePlacedItem={(id, updates) => {
+              if (id === "visual-alignment-group") {
+                setVisualAlignmentItem?.((prev: PlacedItem | null) => {
+                  if (!prev) return prev;
+                  return { ...prev, ...updates };
+                });
+              }
+            }}
             telemetrySnapshot={{
               lat: telemetryPosLat,
               lon: telemetryPosLon,
@@ -8440,7 +8805,7 @@ function PlanPreview({
               pos_n: telemetryPosN,
               pos_e: telemetryPosE,
             } as any}
-            lines={lines}
+            lines={visualAlignmentItem ? [] : lines}
             alignedRefPoints={alignedRefPoints}
             visible={true}
             recenterRoverTrigger={recenterRoverCount}

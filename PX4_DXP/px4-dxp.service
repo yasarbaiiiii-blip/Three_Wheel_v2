@@ -1,0 +1,78 @@
+[Unit]
+Description=PX4 DXP Bridge - MAVROS2 (CubeOrangePlus)
+After=network.target network-online.target dev-ttyACM0.device
+Wants=network-online.target
+# Keep the dependent ROS services active whenever the bridge service is active.
+# This closes the PartOf= start gap after a px4-dxp restart.
+Upholds=rpp-pipeline.service rover-server.service
+
+[Service]
+Type=exec
+User=flash
+Group=flash
+WorkingDirectory=/home/flash/PX4_DXP
+ExecStartPre=/bin/sh -c 'rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* 2>/dev/null || true'
+ExecStart=/home/flash/PX4_DXP/px4_start_service.sh
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=10
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/flash/.ros /home/flash/PX4_DXP /tmp /var/tmp
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=no
+SupplementaryGroups=dialout
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=3G
+# CPUQuota is intentionally NOT set: it has no effect under SCHED_FIFO
+# (a FIFO process bypasses CFS quotas). Use CPUAffinity below to bound
+# which cores the service runs on instead.
+
+# Realtime priority limit — needed so CPUSchedulingPolicy=fifo + Priority=80
+# actually grants without depending on /etc/security/limits.conf for the
+# `flash` user.
+LimitRTPRIO=99
+
+# P2.5 — Real-time scheduling for latency reduction
+# Runs the service at FIFO priority 80 on CPU core 4 (Jetson Orin has 12 cores).
+# Reduces timer jitter from ±20 ms to ±2 ms, enabling 250 Hz control loop.
+# Requires CAP_SYS_NICE capability (granted by systemd automatically with these settings).
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=80
+CPUAffinity=4
+ProtectClock=no
+
+# Environment
+Environment=ROS_DOMAIN_ID=0
+Environment=ROS_LOCALHOST_ONLY=0
+Environment=FASTRTPS_DEFAULT_PROFILES_FILE=/home/flash/PX4_DXP/config/fastdds_no_shm.xml
+UnsetEnvironment=AMENT_TRACE_SETUP_FILES
+Environment=HOME=/home/flash
+
+# Output
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=px4-dxp
+
+# Shutdown
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+# Watchdog disabled until sd_notify is added to px4_start_service.sh
+# (without sd_notify heartbeat, systemd kills the process after timeout)
+# WatchdogSec=60
+
+[Install]
+WantedBy=multi-user.target
