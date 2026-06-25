@@ -3814,6 +3814,42 @@ function HomeView({
                       </Pressable>
 
                       <Pressable
+                        onPress={() => setAutoOrigin(!autoOrigin)}
+                        style={{
+                          flex: 1,
+                          flexDirection: "row",
+                          alignItems: "center",
+                          gap: 6,
+                          paddingVertical: 4,
+                        }}
+                      >
+                        <View style={{
+                          width: 14,
+                          height: 14,
+                          borderRadius: 3,
+                          borderWidth: 1.5,
+                          borderColor: autoOrigin ? "#3b82f6" : "#475569",
+                          backgroundColor: autoOrigin ? "#3b82f6" : "transparent",
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}>
+                          {autoOrigin && (
+                            <View style={{
+                              width: 6,
+                              height: 6,
+                              borderRadius: 1,
+                              backgroundColor: "#ffffff",
+                            }} />
+                          )}
+                        </View>
+                        <Text style={{ color: "#94a3b8", fontSize: 10, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.3 }} numberOfLines={1}>
+                          Origin Check
+                        </Text>
+                      </Pressable>
+                    </View>
+
+                    <View style={{ flexDirection: "row", gap: 8, marginBottom: 12, alignItems: "center" }}>
+                      <Pressable
                         onPress={() => {
                           if (telemetrySnapshot?.mission_state === "running") {
                             Alert.alert("Mission Running", "Cannot preview point during an active mission.");
@@ -3847,7 +3883,7 @@ function HomeView({
                           )}
                         </View>
                         <Text style={{ color: "#94a3b8", fontSize: 10, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.3 }} numberOfLines={1}>
-                          Origin Check
+                          Preview Points
                         </Text>
                       </Pressable>
 
