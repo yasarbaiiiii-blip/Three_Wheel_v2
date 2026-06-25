@@ -61,8 +61,9 @@ import {
 } from "lucide-react-native";
 
 import { BoundaryEditor, PlacedItem } from "./src/components/BoundaryEditor";
+import { DeadmanButton } from "./src/components/DeadmanButton";
 import { ManualJoystick } from "./src/components/ManualJoystick";
-import * as vehicleApi from "./src/api/vehicleApi";
+import { useVirtualJoystick } from "./src/hooks/useVirtualJoystick";
 import { readImportedPlanFile, normalizePlanLines } from "./src/utils/planImport";
 import type { ImportedPlan, PlanLine } from "./src/types/plan";
 import * as missionApi from "./src/api/missionApi";
@@ -531,6 +532,8 @@ const SUBNET_HOST_MIN = 1;
 const SUBNET_HOST_MAX = 254;
 const SUBNET_SCAN_CONCURRENCY = 24;
 const DEFAULT_ROVER_BACKEND = "http://192.168.1.102:5001";
+/** Set via Jetson ~/.rover_token when auth is enabled; empty when ROVER_DISABLE_AUTH=1 */
+const ROVER_AUTH_TOKEN = "";
 
 const MENU_ITEMS: Array<{ key: Page; label: string; icon: React.ReactNode }> = [
   { key: "fields", label: "Fields", icon: <File size={22} color="#fff" /> },
@@ -881,6 +884,15 @@ export default function App() {
     }, 2800);
   }, []);
 
+  const virtualJoystick = useVirtualJoystick({
+    socket,
+    authToken: ROVER_AUTH_TOKEN,
+    socketConnected: wsStatus === "connected",
+    onErrorMessage: (title, message) => showToast(title, message, "error"),
+  });
+  const virtualJoystickRef = useRef(virtualJoystick);
+  virtualJoystickRef.current = virtualJoystick;
+
   const setWorkflowStep = useCallback((step: StagedWorkflowStep, status: StagedWorkflowStatus) => {
     setStagedWorkflow((prev) => (prev[step] === status ? prev : { ...prev, [step]: status }));
   }, []);
@@ -1059,6 +1071,8 @@ export default function App() {
           return;
         }
 
+        virtualJoystickRef.current.reconcileTelemetry(data);
+
         setTelemetrySnapshot((prev) => {
           if (!prev) return data;
           // Optimize updates: only set state if keys have actually changed
@@ -1073,7 +1087,11 @@ export default function App() {
             prev.gps_fix === data.gps_fix &&
             prev.gps_sat === data.gps_sat &&
             prev.hrms === data.hrms &&
-            prev.vrms === data.vrms
+            prev.vrms === data.vrms &&
+            prev.joystick_state === data.joystick_state &&
+            prev.joystick_active === data.joystick_active &&
+            prev.control_owner === data.control_owner &&
+            prev.joystick_last_valid_cmd_age_ms === data.joystick_last_valid_cmd_age_ms
           ) {
             return prev;
           }
@@ -1970,6 +1988,12 @@ export default function App() {
       return;
     }
 
+    if (virtualJoystick.joystickActive || telemetrySnapshot?.joystick_active) {
+      Alert.alert("Joystick active", "Release manual drive before starting a mission.");
+      showToast("Start blocked", "Release the joystick lease before starting.", "error");
+      return;
+    }
+
     const startGate = evaluateStagedStartGate(stagedWorkflow, loadedPathInspection, stagedMissionId);
     if (!startGate.allowed) {
       setWorkflowStep("started", "failed");
@@ -2358,6 +2382,7 @@ export default function App() {
       Alert.alert("No backend", "Connect to a backend before sending commands.");
       return;
     }
+    virtualJoystick.handleEStop();
     logAction("ESTOP_REQUEST", { apiBaseUrl });
     setMissionActionBusy(true);
     try {
@@ -2650,6 +2675,7 @@ export default function App() {
                   onArmVehicle={armVehicle}
                   onSetMode={setVehicleMode}
                   onEstopVehicle={estopVehicle}
+                  virtualJoystick={virtualJoystick}
                   missionActionBusy={missionActionBusy}
                   missionFileReady={missionFileReady}
                   missionLoaded={missionLoaded}
@@ -2973,6 +2999,7 @@ function HomeView({
   onArmVehicle,
   onSetMode,
   onEstopVehicle,
+  virtualJoystick,
   missionActionBusy,
   missionFileReady,
   missionLoaded,
@@ -3050,6 +3077,7 @@ function HomeView({
   onArmVehicle: (arm: boolean) => Promise<void>;
   onSetMode: (mode: "MANUAL" | "OFFBOARD") => Promise<void>;
   onEstopVehicle: () => Promise<void>;
+  virtualJoystick: ReturnType<typeof useVirtualJoystick>;
   missionActionBusy: boolean;
   missionFileReady: boolean;
   missionLoaded: boolean;
@@ -3205,12 +3233,21 @@ function HomeView({
   const [showPassword, setShowPassword] = useState(false);
   const [showPointsModal, setShowPointsModal] = useState(false);
   const [joystickPanelOpen, setJoystickPanelOpen] = useState(false);
-  const joystickValuesRef = useRef({ forward: 0, yaw: 0 });
   const [crossTrackAlerted, setCrossTrackAlerted] = useState(false);
 
   const isVehicleArmed = telemetrySnapshot?.armed ?? systemHealth?.armed ?? false;
   const vehicleMode = (telemetrySnapshot?.mode ?? systemHealth?.mode ?? "MANUAL").toUpperCase();
-  const joystickReady = isVehicleArmed && vehicleMode === "MANUAL" && !missionRunning;
+  const hasJoystickLease = Boolean(virtualJoystick.leaseId);
+  const stickEnabled =
+    hasJoystickLease &&
+    (virtualJoystick.state === "ACTIVE" || virtualJoystick.state === "HELD");
+  const canAcquireJoystick =
+    !missionRunning &&
+    virtualJoystick.state !== "BLOCKED_BY_MISSION" &&
+    (virtualJoystick.state === "AVAILABLE" ||
+      virtualJoystick.state === "ERROR" ||
+      virtualJoystick.state === "HELD" ||
+      virtualJoystick.state === "ACTIVE");
 
   const handleOpenJoystickPanel = useCallback(() => {
     if (missionRunning) {
@@ -3222,36 +3259,12 @@ function HomeView({
       return;
     }
     setJoystickPanelOpen(true);
-    if (vehicleMode !== "MANUAL") {
-      Alert.alert(
-        "Manual mode required",
-        "Switch to MANUAL mode and arm the vehicle before driving with the joystick.",
-      );
-    } else if (!isVehicleArmed) {
-      Alert.alert("Arm required", "Arm the vehicle before using manual drive.");
-    }
-  }, [apiBaseUrl, isVehicleArmed, missionRunning, vehicleMode]);
+  }, [apiBaseUrl, missionRunning]);
 
   const handleCloseJoystickPanel = useCallback(() => {
-    joystickValuesRef.current = { forward: 0, yaw: 0 };
-    if (apiBaseUrl) {
-      void vehicleApi.sendManualControl(apiBaseUrl, { forward: 0, yaw: 0 });
-    }
+    virtualJoystick.release();
     setJoystickPanelOpen(false);
-  }, [apiBaseUrl]);
-
-  useEffect(() => {
-    if (!joystickPanelOpen || !apiBaseUrl) return;
-    const intervalId = setInterval(() => {
-      const { forward, yaw } = joystickValuesRef.current;
-      if (!joystickReady) return;
-      void vehicleApi.sendManualControl(apiBaseUrl, { forward, yaw }).catch(() => {});
-    }, 40);
-    return () => {
-      clearInterval(intervalId);
-      void vehicleApi.sendManualControl(apiBaseUrl, { forward: 0, yaw: 0 }).catch(() => {});
-    };
-  }, [apiBaseUrl, joystickPanelOpen, joystickReady]);
+  }, [virtualJoystick]);
 
   useEffect(() => {
     if (!missionRunning) {
@@ -3850,30 +3863,110 @@ function HomeView({
                           </Pressable>
                         </View>
 
+                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                          <Text style={{ color: "#94a3b8", fontSize: 9.5, fontWeight: "700" }}>
+                            {virtualJoystick.state}
+                          </Text>
+                          <Text style={{ color: isVehicleArmed ? "#34d399" : "#f87171", fontSize: 9.5, fontWeight: "700" }}>
+                            {isVehicleArmed ? "ARMED" : "DISARMED"}
+                          </Text>
+                          <Text style={{ color: "#94a3b8", fontSize: 9.5, fontWeight: "700" }}>
+                            {vehicleMode}
+                          </Text>
+                          <Text style={{ color: "#94a3b8", fontSize: 9.5, fontWeight: "700" }}>
+                            {virtualJoystick.commandRateHz.toFixed(0)} Hz
+                          </Text>
+                          {virtualJoystick.lastCmdAgeMs != null ? (
+                            <Text style={{ color: "#94a3b8", fontSize: 9.5, fontWeight: "700" }}>
+                              cmd {virtualJoystick.lastCmdAgeMs.toFixed(0)}ms
+                            </Text>
+                          ) : null}
+                        </View>
+
                         <View style={{ alignItems: "center", justifyContent: "center", paddingVertical: 8 }}>
                           <ManualJoystick
-                            disabled={!joystickReady}
+                            disabled={!stickEnabled}
                             onChange={(values) => {
-                              joystickValuesRef.current = values;
+                              virtualJoystick.setIntent(values.forward, values.yaw);
                             }}
                             onRelease={() => {
-                              joystickValuesRef.current = { forward: 0, yaw: 0 };
-                              if (apiBaseUrl) {
-                                void vehicleApi.sendManualControl(apiBaseUrl, { forward: 0, yaw: 0 });
-                              }
+                              virtualJoystick.setIntent(0, 0);
                             }}
                           />
                         </View>
 
-                        <Text style={{ color: joystickReady ? "#64748b" : "#f87171", fontSize: 10, textAlign: "center", lineHeight: 15, marginTop: 10 }}>
-                          {joystickReady
-                            ? "Push up to drive forward, left/right to turn. Release to stop."
-                            : missionRunning
-                              ? "Stop the active mission before manual drive."
-                              : vehicleMode !== "MANUAL"
-                                ? "Switch to MANUAL mode and arm the vehicle."
-                                : "Arm the vehicle to enable the joystick."}
+                        <Text style={{ color: "#cbd5e1", fontSize: 10, textAlign: "center", lineHeight: 15, marginTop: 6 }}>
+                          Throttle {virtualJoystick.displayIntent.throttle >= 0 ? "+" : ""}
+                          {virtualJoystick.displayIntent.throttle.toFixed(2)} · Steering{" "}
+                          {virtualJoystick.displayIntent.steering >= 0 ? "+" : ""}
+                          {virtualJoystick.displayIntent.steering.toFixed(2)}
                         </Text>
+                        <Text style={{ color: "#64748b", fontSize: 9.5, textAlign: "center", marginTop: 4 }}>
+                          Limits ±{(virtualJoystick.maxThrottle * 100).toFixed(0)}% throttle · ±
+                          {(virtualJoystick.maxSteering * 100).toFixed(0)}% steering
+                        </Text>
+
+                        <View style={{ marginTop: 12 }}>
+                          <DeadmanButton
+                            disabled={!hasJoystickLease}
+                            active={virtualJoystick.deadmanPressed}
+                            onPress={() => virtualJoystick.setDeadman(true)}
+                            onRelease={() => virtualJoystick.setDeadman(false)}
+                          />
+                        </View>
+
+                        <Text style={{ color: stickEnabled ? "#64748b" : "#f87171", fontSize: 10, textAlign: "center", lineHeight: 15, marginTop: 10 }}>
+                          {stickEnabled
+                            ? "Hold dead-man, then move stick. Release stick or dead-man to stop."
+                            : virtualJoystick.state === "BLOCKED_BY_MISSION"
+                              ? "Mission active — release mission before manual drive."
+                              : hasJoystickLease
+                                ? "Acquire complete — hold dead-man to drive."
+                                : "Press Acquire (vehicle must be armed). Backend switches to MANUAL."}
+                        </Text>
+
+                        <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+                          <Pressable
+                            onPress={() => virtualJoystick.acquire()}
+                            disabled={!canAcquireJoystick || virtualJoystick.state === "ACQUIRING" || hasJoystickLease}
+                            style={{
+                              flex: 1,
+                              height: 36,
+                              borderRadius: 8,
+                              backgroundColor:
+                                !canAcquireJoystick || hasJoystickLease ? "#1e293b" : "#0d9488",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              opacity: virtualJoystick.state === "ACQUIRING" ? 0.6 : 1,
+                            }}
+                          >
+                            <Text style={{ color: "#ffffff", fontSize: 11, fontWeight: "800" }}>
+                              {virtualJoystick.state === "ACQUIRING" ? "Acquiring..." : "Acquire"}
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => virtualJoystick.release()}
+                            disabled={!hasJoystickLease}
+                            style={{
+                              flex: 1,
+                              height: 36,
+                              borderRadius: 8,
+                              backgroundColor: !hasJoystickLease ? "#1e293b" : "#b45309",
+                              alignItems: "center",
+                              justifyContent: "center",
+                            }}
+                          >
+                            <Text style={{ color: "#ffffff", fontSize: 11, fontWeight: "800" }}>
+                              Release
+                            </Text>
+                          </Pressable>
+                        </View>
+
+                        {virtualJoystick.stopReason ? (
+                          <Text style={{ color: "#fbbf24", fontSize: 9.5, textAlign: "center", marginTop: 8 }}>
+                            Stop: {virtualJoystick.stopReason}
+                          </Text>
+                        ) : null}
 
                         <View style={{ flexDirection: "row", gap: 8, marginTop: 14 }}>
                           <Pressable
@@ -4106,17 +4199,43 @@ function HomeView({
                     <View style={{ flexDirection: "row", gap: 8 }}>
                       <Pressable
                         onPress={() => onStartPlan()}
-                        disabled={missionActionBusy || lines.length === 0 || startBlocked}
+                        disabled={
+                          missionActionBusy ||
+                          lines.length === 0 ||
+                          startBlocked ||
+                          virtualJoystick.joystickActive ||
+                          Boolean(telemetrySnapshot?.joystick_active)
+                        }
                         style={{
                           flex: 1,
                           height: 38,
                           borderRadius: 8,
-                          backgroundColor: (missionActionBusy || lines.length === 0 || startBlocked) ? "#1e293b" : "#0d9488",
+                          backgroundColor:
+                            missionActionBusy ||
+                            lines.length === 0 ||
+                            startBlocked ||
+                            virtualJoystick.joystickActive ||
+                            telemetrySnapshot?.joystick_active
+                              ? "#1e293b"
+                              : "#0d9488",
                           alignItems: "center",
                           justifyContent: "center",
                         }}
                       >
-                        <Text style={{ color: (missionActionBusy || lines.length === 0 || startBlocked) ? "#64748b" : "#ffffff", fontSize: 12, fontWeight: "800" }}>
+                        <Text
+                          style={{
+                            color:
+                              missionActionBusy ||
+                              lines.length === 0 ||
+                              startBlocked ||
+                              virtualJoystick.joystickActive ||
+                              telemetrySnapshot?.joystick_active
+                                ? "#64748b"
+                                : "#ffffff",
+                            fontSize: 12,
+                            fontWeight: "800",
+                          }}
+                        >
                           Start
                         </Text>
                       </Pressable>

@@ -1,0 +1,7 @@
+---
+pid: 24272
+cwd: "D:\DXF_THREE_WHEEL"
+command: "cd D:\\DXF_THREE_WHEEL; npx tsc --noEmit 2>&1 | Select-Object -First 50"
+started_at: 2026-06-25T10:12:49.225Z
+running_for_ms: 375006   
+---

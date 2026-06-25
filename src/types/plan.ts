@@ -109,5 +109,24 @@ export interface TelemetrySnapshot {
   mission_state?: string | null;
   hrms?: number | null;
   vrms?: number | null;
+  joystick_state?: string | null;
+  joystick_active?: boolean | null;
+  joystick_owner_present?: boolean | null;
+  joystick_has_lease?: boolean | null;
+  joystick_last_valid_cmd_age_ms?: number | null;
+  joystick_deadman?: boolean | null;
+  joystick_commanded_throttle?: number | null;
+  joystick_commanded_steering?: number | null;
+  joystick_stop_reason?: string | null;
+  control_owner?: string | null;
+  joystick_owned?: boolean | null;
+  gateway_active?: boolean | null;
+  gateway_command_age_ms?: number | null;
+  gateway_last_send_age_ms?: number | null;
+  gateway_last_frame?: { x: number; y: number; z: number; r: number; buttons: number } | null;
+  gateway_last_sent_neutral?: boolean | null;
+  transport?: string | null;
+  transport_healthy?: boolean | null;
+  transport_error?: string | null;
 }
 
