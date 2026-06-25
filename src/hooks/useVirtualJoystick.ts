@@ -13,11 +13,19 @@ import type {
   JoystickReleasedResponse,
   JoystickTelemetryFields,
 } from "../types/joystick";
+import { JoystickCommandSerializer } from "../utils/joystickCommandScheduler";
+import {
+  cleanupPlanForJoystick,
+  joystickIntentDeadman,
+  joystickIntentIsCentered,
+  telemetryInactiveClearsLocalLease,
+} from "../utils/joystickFrontendSafety";
 import { processAxis } from "../utils/joystickMath";
 
 const DEFAULT_MAX_THROTTLE = 0.15;
 const DEFAULT_MAX_STEERING = 0.5;
 const DEFAULT_COMMAND_RATE_HZ = 20;
+const ACQUIRE_TIMEOUT_MS = 3800;
 const DEAD_ZONE = 0.03;
 const RESPONSE_CURVE = 1;
 
@@ -47,6 +55,12 @@ function createSessionId(): string {
     const v = c === "x" ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
+}
+
+function clientMonotonicMs(): number {
+  const perf = globalThis.performance;
+  if (perf && typeof perf.now === "function") return Math.floor(perf.now());
+  return Date.now();
 }
 
 function isJoystickAcquiredPayload(data: unknown): data is JoystickAcquiredResponse {
@@ -111,8 +125,12 @@ export function useVirtualJoystick({
   const commandRateHzRef = useRef(DEFAULT_COMMAND_RATE_HZ);
   const authTokenRef = useRef(authToken);
   const socketRef = useRef<Socket | null>(socket);
-  const commandTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const startMonotonicMsRef = useRef(Date.now());
+  const commandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const acquireTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const commandLoopRunningRef = useRef(false);
+  const urgentNeutralPendingRef = useRef(false);
+  const serializerRef = useRef(new JoystickCommandSerializer());
+  const runCommandLoopRef = useRef<() => void>(() => {});
 
   const setFrontendState = useCallback((next: FrontendJoystickState) => {
     stateRef.current = next;
@@ -127,9 +145,18 @@ export function useVirtualJoystick({
     socketRef.current = socket;
   }, [socket]);
 
+  const clearAcquireTimeout = useCallback(() => {
+    if (acquireTimeoutRef.current !== null) {
+      clearTimeout(acquireTimeoutRef.current);
+      acquireTimeoutRef.current = null;
+    }
+  }, []);
+
   const stopCommandSender = useCallback(() => {
+    commandLoopRunningRef.current = false;
+    urgentNeutralPendingRef.current = false;
     if (commandTimerRef.current !== null) {
-      clearInterval(commandTimerRef.current);
+      clearTimeout(commandTimerRef.current);
       commandTimerRef.current = null;
     }
   }, []);
@@ -141,60 +168,20 @@ export function useVirtualJoystick({
     };
   }, []);
 
-  const emitCommand = useCallback((payload: JoystickCommandRequest) => {
-    const sock = socketRef.current;
-    if (!sock?.connected) return;
-    sock.emit("joystick_command", payload);
+  const scheduleCommandLoop = useCallback((delayMs: number) => {
+    if (commandTimerRef.current !== null) {
+      clearTimeout(commandTimerRef.current);
+    }
+    commandTimerRef.current = setTimeout(() => {
+      commandTimerRef.current = null;
+      runCommandLoopRef.current();
+    }, Math.max(0, delayMs));
   }, []);
-
-  const sendImmediateNeutralDeadmanFrame = useCallback(() => {
-    const lease = leaseIdRef.current;
-    const session = sessionIdRef.current;
-    if (!lease || !session) return;
-
-    const seq = ++sequenceRef.current;
-    emitCommand({
-      auth: authTokenRef.current,
-      session_id: session,
-      lease_id: lease,
-      sequence: seq,
-      client_monotonic_ms: Date.now() - startMonotonicMsRef.current,
-      deadman: false,
-      throttle: 0,
-      steering: 0,
-    });
-  }, [emitCommand]);
-
-  const startCommandSender = useCallback(
-    (rateHz: number) => {
-      stopCommandSender();
-      const intervalMs = Math.max(1, Math.round(1000 / rateHz));
-
-      commandTimerRef.current = setInterval(() => {
-        const lease = leaseIdRef.current;
-        const session = sessionIdRef.current;
-        if (!lease || !session) return;
-
-        const seq = ++sequenceRef.current;
-        const deadman = deadmanRef.current;
-        emitCommand({
-          auth: authTokenRef.current,
-          session_id: session,
-          lease_id: lease,
-          sequence: seq,
-          client_monotonic_ms: Date.now() - startMonotonicMsRef.current,
-          deadman,
-          throttle: deadman ? latestThrottleRef.current : 0,
-          steering: deadman ? latestSteeringRef.current : 0,
-        });
-      }, intervalMs);
-    },
-    [emitCommand, stopCommandSender]
-  );
 
   const clearLease = useCallback(() => {
     leaseIdRef.current = null;
     sequenceRef.current = 0;
+    serializerRef.current.reset();
     setLeaseId(null);
   }, []);
 
@@ -205,6 +192,109 @@ export function useVirtualJoystick({
     setDeadmanPressed(false);
     setDisplayIntent({ throttle: 0, steering: 0 });
   }, []);
+
+  const emitSerializedCommand = useCallback(
+    (intent: { deadman: boolean; throttle: number; steering: number }) => {
+      const sock = socketRef.current;
+      if (!sock?.connected) return { emitted: false as const, reason: "no_lease" as const };
+
+      const result = serializerRef.current.build(
+        {
+          auth: authTokenRef.current,
+          sessionId: sessionIdRef.current,
+          leaseId: leaseIdRef.current,
+          commandRateHz: commandRateHzRef.current,
+          maxThrottle: maxThrottleRef.current,
+          maxSteering: maxSteeringRef.current,
+        },
+        intent,
+        clientMonotonicMs()
+      );
+
+      if (result.emitted) {
+        sequenceRef.current = result.sequence;
+        sock.emit("joystick_command", result.payload satisfies JoystickCommandRequest);
+        if (result.payload.deadman && stateRef.current === "HELD") {
+          setFrontendState("ACTIVE");
+        } else if (!result.payload.deadman && stateRef.current === "ACTIVE") {
+          setFrontendState("HELD");
+        }
+      }
+
+      return result;
+    },
+    [setFrontendState]
+  );
+
+  const runCommandLoop = useCallback(() => {
+    if (!commandLoopRunningRef.current && !urgentNeutralPendingRef.current) return;
+
+    const urgent = urgentNeutralPendingRef.current;
+    const deadman = urgent ? false : deadmanRef.current;
+    const result = emitSerializedCommand({
+      deadman,
+      throttle: deadman ? latestThrottleRef.current : 0,
+      steering: deadman ? latestSteeringRef.current : 0,
+    });
+    const now = clientMonotonicMs();
+
+    if (result.emitted && urgent) {
+      urgentNeutralPendingRef.current = false;
+    } else if (!result.emitted && result.reason === "too_soon") {
+      scheduleCommandLoop((result.nextAllowedMs ?? now) - now);
+      return;
+    } else if (!result.emitted && result.reason === "no_lease") {
+      stopCommandSender();
+      return;
+    } else if (!result.emitted && result.reason === "invalid_value") {
+      forceNeutral();
+      urgentNeutralPendingRef.current = true;
+    }
+
+    if (commandLoopRunningRef.current || urgentNeutralPendingRef.current) {
+      const nextAllowed = serializerRef.current.nextAllowedMs({
+        commandRateHz: commandRateHzRef.current,
+      });
+      scheduleCommandLoop(Math.max(0, nextAllowed - clientMonotonicMs()));
+    }
+  }, [emitSerializedCommand, forceNeutral, scheduleCommandLoop, stopCommandSender]);
+
+  runCommandLoopRef.current = runCommandLoop;
+
+  const startCommandSender = useCallback(
+    (rateHz: number) => {
+      stopCommandSender();
+      commandRateHzRef.current = rateHz;
+      commandLoopRunningRef.current = true;
+      scheduleCommandLoop(0);
+    },
+    [scheduleCommandLoop, stopCommandSender]
+  );
+
+  const requestUrgentNeutralCommand = useCallback(() => {
+    if (!leaseIdRef.current) return;
+    urgentNeutralPendingRef.current = true;
+    runCommandLoopRef.current();
+  }, []);
+
+  const emitReleaseIfOwned = useCallback(() => {
+    const sock = socketRef.current;
+    const lease = leaseIdRef.current;
+    if (!sock?.connected || !lease) return false;
+
+    sock.emit("joystick_release", {
+      auth: authTokenRef.current,
+      session_id: sessionIdRef.current,
+      lease_id: lease,
+    } satisfies JoystickReleaseRequest);
+    return true;
+  }, []);
+
+  const stopAndClearLocalControl = useCallback(() => {
+    stopCommandSender();
+    forceNeutral();
+    clearLease();
+  }, [clearLease, forceNeutral, stopCommandSender]);
 
   const handleJoystickError = useCallback(
     (err: JoystickErrorEvent) => {
@@ -225,9 +315,12 @@ export function useVirtualJoystick({
         "transport_unavailable",
         "acquire_cancelled",
       ].includes(err.code);
-      const requiresReacquire = ["not_owner", "lease_inactive", "acquire_cancelled"].includes(err.code);
+      const requiresReacquire =
+        ["not_owner", "lease_inactive", "acquire_cancelled"].includes(err.code) ||
+        (stateRef.current === "ACQUIRING" && shouldClearLease);
       const shouldForceNeutral = ["nan_value", "out_of_range", "transport_unavailable"].includes(err.code);
 
+      clearAcquireTimeout();
       if (shouldClearLease) clearLease();
       if (shouldStopSender) stopCommandSender();
       if (shouldForceNeutral) forceNeutral();
@@ -239,17 +332,19 @@ export function useVirtualJoystick({
         err.message || ERROR_MESSAGES[err.code] || err.code
       );
     },
-    [clearLease, forceNeutral, onErrorMessage, setFrontendState, stopCommandSender]
+    [clearAcquireTimeout, clearLease, forceNeutral, onErrorMessage, setFrontendState, stopCommandSender]
   );
 
   const onAcquired = useCallback(
     (data: JoystickAcquiredResponse) => {
+      clearAcquireTimeout();
       leaseIdRef.current = data.lease_id;
       sequenceRef.current = 0;
+      serializerRef.current.reset();
       maxThrottleRef.current = data.max_throttle;
       maxSteeringRef.current = data.max_steering;
       commandRateHzRef.current = data.command_rate_hz;
-      startMonotonicMsRef.current = Date.now();
+      forceNeutral();
 
       setLeaseId(data.lease_id);
       setMaxThrottle(data.max_throttle);
@@ -259,32 +354,33 @@ export function useVirtualJoystick({
       setFrontendState("HELD");
       startCommandSender(data.command_rate_hz);
     },
-    [setFrontendState, startCommandSender]
+    [clearAcquireTimeout, forceNeutral, setFrontendState, startCommandSender]
   );
 
   const onReleased = useCallback(
     (_data: JoystickReleasedResponse) => {
-      stopCommandSender();
-      forceNeutral();
-      clearLease();
+      clearAcquireTimeout();
+      stopAndClearLocalControl();
       setError(null);
       setStopReason(_data.reason ?? null);
-      setFrontendState(socketConnected ? "AVAILABLE" : "DISCONNECTED");
+      if (stateRef.current !== "SUSPENDED") {
+        setFrontendState(socketConnected ? "AVAILABLE" : "DISCONNECTED");
+      }
     },
-    [clearLease, forceNeutral, setFrontendState, socketConnected, stopCommandSender]
+    [clearAcquireTimeout, setFrontendState, socketConnected, stopAndClearLocalControl]
   );
 
   const onSocketDisconnect = useCallback(() => {
-    stopCommandSender();
-    forceNeutral();
-    clearLease();
-    setFrontendState("DISCONNECTED");
+    const plan = cleanupPlanForJoystick("disconnect", false);
+    clearAcquireTimeout();
+    stopAndClearLocalControl();
+    setFrontendState(plan.nextState ?? "DISCONNECTED");
     setError({
       type: "joystick_error",
       code: "unavailable",
       message: "Socket disconnected — re-acquire required",
     });
-  }, [clearLease, forceNeutral, setFrontendState, stopCommandSender]);
+  }, [clearAcquireTimeout, setFrontendState, stopAndClearLocalControl]);
 
   const reconcileTelemetry = useCallback(
     (telem: JoystickTelemetryFields) => {
@@ -310,15 +406,18 @@ export function useVirtualJoystick({
 
       if (
         telem.joystick_state === "inactive" &&
-        (stateRef.current === "ACTIVE" ||
-          stateRef.current === "HELD" ||
-          stateRef.current === "ACQUIRING" ||
-          stateRef.current === "RELEASING")
+        telemetryInactiveClearsLocalLease(stateRef.current)
       ) {
-        stopCommandSender();
-        forceNeutral();
-        clearLease();
-        setFrontendState(socketConnected ? "AVAILABLE" : "DISCONNECTED");
+        const plan = cleanupPlanForJoystick("telemetry_lease_loss", socketConnected);
+        stopAndClearLocalControl();
+        setFrontendState(plan.nextState ?? (socketConnected ? "AVAILABLE" : "DISCONNECTED"));
+      } else if (
+        stateRef.current === "SUSPENDED" &&
+        socketConnected &&
+        telem.joystick_state === "inactive" &&
+        telem.control_owner !== "mission"
+      ) {
+        setFrontendState("AVAILABLE");
       } else if (
         socketConnected &&
         telem.connected !== false &&
@@ -334,7 +433,7 @@ export function useVirtualJoystick({
         setFrontendState("AVAILABLE");
       }
     },
-    [clearLease, forceNeutral, setFrontendState, socketConnected, stopCommandSender]
+    [setFrontendState, socketConnected, stopAndClearLocalControl]
   );
 
   const acquire = useCallback(() => {
@@ -349,36 +448,68 @@ export function useVirtualJoystick({
     }
 
     setError(null);
+    stopCommandSender();
+    forceNeutral();
+    clearLease();
     setFrontendState("ACQUIRING");
+    clearAcquireTimeout();
+    acquireTimeoutRef.current = setTimeout(() => {
+      if (stateRef.current !== "ACQUIRING") return;
+      const plan = cleanupPlanForJoystick("command_timeout", sock.connected);
+      stopAndClearLocalControl();
+      setFrontendState(plan.nextState ?? (sock.connected ? "AVAILABLE" : "DISCONNECTED"));
+      const timeoutError: JoystickErrorEvent = {
+        type: "joystick_error",
+        code: "acquire_cancelled",
+        message: "Joystick acquire timed out before the backend granted a lease",
+      };
+      setError(timeoutError);
+      onErrorMessage?.("Joystick error", timeoutError.message);
+    }, ACQUIRE_TIMEOUT_MS);
     sock.emit("joystick_acquire", {
       auth: authTokenRef.current,
       session_id: sessionIdRef.current,
-      client_monotonic_ms: Date.now() - startMonotonicMsRef.current,
+      client_monotonic_ms: clientMonotonicMs(),
     });
-  }, [handleJoystickError, setFrontendState]);
+  }, [
+    clearAcquireTimeout,
+    clearLease,
+    forceNeutral,
+    handleJoystickError,
+    onErrorMessage,
+    setFrontendState,
+    stopCommandSender,
+    stopAndClearLocalControl,
+  ]);
 
   const release = useCallback(() => {
     const sock = socketRef.current;
     const lease = leaseIdRef.current;
     if (!sock?.connected || !lease) {
-      stopCommandSender();
-      forceNeutral();
-      clearLease();
-      setFrontendState(socketConnected ? "AVAILABLE" : "DISCONNECTED");
+      clearAcquireTimeout();
+      const plan = cleanupPlanForJoystick("release", socketConnected);
+      stopAndClearLocalControl();
+      setFrontendState(plan.nextState ?? (socketConnected ? "AVAILABLE" : "DISCONNECTED"));
       return;
     }
 
+    const plan = cleanupPlanForJoystick("release", socketConnected);
+    clearAcquireTimeout();
     setFrontendState("RELEASING");
-    stopCommandSender();
     forceNeutral();
-
-    const payload: JoystickReleaseRequest = {
-      auth: authTokenRef.current,
-      session_id: sessionIdRef.current,
-      lease_id: lease,
-    };
-    sock.emit("joystick_release", payload);
-  }, [clearLease, forceNeutral, setFrontendState, socketConnected, stopCommandSender]);
+    requestUrgentNeutralCommand();
+    emitReleaseIfOwned();
+    stopAndClearLocalControl();
+    setFrontendState(plan.nextState ?? (socketConnected ? "AVAILABLE" : "DISCONNECTED"));
+  }, [
+    clearAcquireTimeout,
+    emitReleaseIfOwned,
+    forceNeutral,
+    requestUrgentNeutralCommand,
+    setFrontendState,
+    socketConnected,
+    stopAndClearLocalControl,
+  ]);
 
   const setIntent = useCallback(
     (rawThrottle: number, rawSteering: number) => {
@@ -386,8 +517,22 @@ export function useVirtualJoystick({
       latestThrottleRef.current = processed.throttle;
       latestSteeringRef.current = processed.steering;
       setDisplayIntent(processed);
+
+      const hasLease = Boolean(leaseIdRef.current);
+      const shouldDrive = joystickIntentDeadman(hasLease, processed);
+      deadmanRef.current = shouldDrive;
+      setDeadmanPressed(shouldDrive);
+
+      if (!hasLease) return;
+
+      if (shouldDrive) {
+        scheduleCommandLoop(0);
+      } else if (joystickIntentIsCentered(processed)) {
+        requestUrgentNeutralCommand();
+        if (stateRef.current === "ACTIVE") setFrontendState("HELD");
+      }
     },
-    [processRawIntent]
+    [processRawIntent, requestUrgentNeutralCommand, scheduleCommandLoop, setFrontendState]
   );
 
   const setDeadman = useCallback(
@@ -398,40 +543,52 @@ export function useVirtualJoystick({
         latestThrottleRef.current = 0;
         latestSteeringRef.current = 0;
         setDisplayIntent({ throttle: 0, steering: 0 });
-        sendImmediateNeutralDeadmanFrame();
+        requestUrgentNeutralCommand();
         if (leaseIdRef.current) setFrontendState("HELD");
       } else if (leaseIdRef.current) {
-        setFrontendState("ACTIVE");
+        scheduleCommandLoop(0);
       }
     },
-    [sendImmediateNeutralDeadmanFrame, setFrontendState]
+    [requestUrgentNeutralCommand, scheduleCommandLoop, setFrontendState]
   );
 
   const handleBackground = useCallback(() => {
-    sendImmediateNeutralDeadmanFrame();
-    release();
-    setFrontendState("DISCONNECTED");
-  }, [release, sendImmediateNeutralDeadmanFrame, setFrontendState]);
+    const plan = cleanupPlanForJoystick("background", socketRef.current?.connected ?? false);
+    clearAcquireTimeout();
+    forceNeutral();
+    requestUrgentNeutralCommand();
+    emitReleaseIfOwned();
+    stopAndClearLocalControl();
+    setFrontendState(plan.nextState ?? "SUSPENDED");
+  }, [
+    clearAcquireTimeout,
+    emitReleaseIfOwned,
+    forceNeutral,
+    requestUrgentNeutralCommand,
+    setFrontendState,
+    stopAndClearLocalControl,
+  ]);
 
   const handleForeground = useCallback(() => {
     // Operator must explicitly re-acquire after backgrounding.
   }, []);
 
   const handleEStop = useCallback(() => {
-    stopCommandSender();
+    const plan = cleanupPlanForJoystick("estop", socketRef.current?.connected ?? false);
+    clearAcquireTimeout();
     forceNeutral();
-    const sock = socketRef.current;
-    const lease = leaseIdRef.current;
-    if (sock?.connected && lease) {
-      sock.emit("joystick_release", {
-        auth: authTokenRef.current,
-        session_id: sessionIdRef.current,
-        lease_id: lease,
-      } satisfies JoystickReleaseRequest);
-    }
-    clearLease();
-    setFrontendState("DISABLED");
-  }, [clearLease, forceNeutral, setFrontendState, stopCommandSender]);
+    requestUrgentNeutralCommand();
+    emitReleaseIfOwned();
+    stopAndClearLocalControl();
+    setFrontendState(plan.nextState ?? "DISABLED");
+  }, [
+    clearAcquireTimeout,
+    emitReleaseIfOwned,
+    forceNeutral,
+    requestUrgentNeutralCommand,
+    setFrontendState,
+    stopAndClearLocalControl,
+  ]);
 
   useEffect(() => {
     const sock = socket;
@@ -484,11 +641,19 @@ export function useVirtualJoystick({
 
   useEffect(() => {
     return () => {
-      stopCommandSender();
+      clearAcquireTimeout();
       forceNeutral();
-      clearLease();
+      requestUrgentNeutralCommand();
+      emitReleaseIfOwned();
+      stopAndClearLocalControl();
     };
-  }, [clearLease, forceNeutral, stopCommandSender]);
+  }, [
+    clearAcquireTimeout,
+    emitReleaseIfOwned,
+    forceNeutral,
+    requestUrgentNeutralCommand,
+    stopAndClearLocalControl,
+  ]);
 
   const joystickActive =
     state === "ACTIVE" || state === "HELD" || state === "ACQUIRING" || state === "RELEASING";

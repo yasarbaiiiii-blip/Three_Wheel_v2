@@ -81,6 +81,7 @@ import * as pathApi from "./src/api/pathApi";
 import { generateTemplateLines, ShapeType, ArcType } from "./src/utils/shapeTemplates";
 import { generateAlphabetLines, generateNumberLines, FontStyle, AlphabetType, NumberType } from "./src/utils/characterTemplates";
 import { generateRoadSignLines, RoadSignType, ROAD_SIGN_LABELS } from "./src/utils/roadSignTemplates";
+import { canAcquireJoystick as canAcquireJoystickForState } from "./src/utils/joystickFrontendSafety";
 
 import type { Page, TelemetrySnapshot, LayerVisibility } from "./src/types/plan";
 import { TemplatesPage } from "./src/screens/TemplatesPage";
@@ -2343,7 +2344,7 @@ export default function App() {
     }
   }
 
-  async function setVehicleMode(targetMode: "MANUAL" | "OFFBOARD") {
+  async function setVehicleMode(targetMode: "MANUAL") {
     if (!apiBaseUrl) {
       Alert.alert("No backend", "Connect to a backend before sending commands.");
       return;
@@ -3075,7 +3076,7 @@ function HomeView({
   onStartPlan: () => Promise<void>;
   onPausePlan: () => Promise<void>;
   onArmVehicle: (arm: boolean) => Promise<void>;
-  onSetMode: (mode: "MANUAL" | "OFFBOARD") => Promise<void>;
+  onSetMode: (mode: "MANUAL") => Promise<void>;
   onEstopVehicle: () => Promise<void>;
   virtualJoystick: ReturnType<typeof useVirtualJoystick>;
   missionActionBusy: boolean;
@@ -3242,12 +3243,12 @@ function HomeView({
     hasJoystickLease &&
     (virtualJoystick.state === "ACTIVE" || virtualJoystick.state === "HELD");
   const canAcquireJoystick =
-    !missionRunning &&
-    virtualJoystick.state !== "BLOCKED_BY_MISSION" &&
-    (virtualJoystick.state === "AVAILABLE" ||
-      virtualJoystick.state === "ERROR" ||
-      virtualJoystick.state === "HELD" ||
-      virtualJoystick.state === "ACTIVE");
+    canAcquireJoystickForState({
+      missionRunning,
+      frontendState: virtualJoystick.state,
+      backendJoystickActive: telemetrySnapshot?.joystick_active,
+      controlOwner: telemetrySnapshot?.control_owner,
+    });
 
   const handleOpenJoystickPanel = useCallback(() => {
     if (missionRunning) {
@@ -3906,23 +3907,27 @@ function HomeView({
                           {(virtualJoystick.maxSteering * 100).toFixed(0)}% steering
                         </Text>
 
-                        <View style={{ marginTop: 12 }}>
-                          <DeadmanButton
-                            disabled={!hasJoystickLease}
-                            active={virtualJoystick.deadmanPressed}
-                            onPress={() => virtualJoystick.setDeadman(true)}
-                            onRelease={() => virtualJoystick.setDeadman(false)}
-                          />
-                        </View>
+                        {/* Disabled for one-finger joystick drive. Keep the component wiring here for rollback/testing.
+                          <View style={{ marginTop: 12 }}>
+                            <DeadmanButton
+                              disabled={!hasJoystickLease}
+                              active={virtualJoystick.deadmanPressed}
+                              onPress={() => virtualJoystick.setDeadman(true)}
+                              onRelease={() => virtualJoystick.setDeadman(false)}
+                            />
+                          </View>
+                        */}
 
                         <Text style={{ color: stickEnabled ? "#64748b" : "#f87171", fontSize: 10, textAlign: "center", lineHeight: 15, marginTop: 10 }}>
                           {stickEnabled
-                            ? "Hold dead-man, then move stick. Release stick or dead-man to stop."
+                            ? "Move the stick to drive. Return to centre or lift finger to stop."
                             : virtualJoystick.state === "BLOCKED_BY_MISSION"
                               ? "Mission active — release mission before manual drive."
                               : hasJoystickLease
-                                ? "Acquire complete — hold dead-man to drive."
-                                : "Press Acquire (vehicle must be armed). Backend switches to MANUAL."}
+                                ? "Lease held neutral — move the stick to drive."
+                                : virtualJoystick.state === "SUSPENDED"
+                                  ? "App resumed — wait for telemetry, then acquire again."
+                                  : "Press Acquire (vehicle must be armed). Backend confirms MANUAL."}
                         </Text>
 
                         <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
@@ -4301,23 +4306,20 @@ function HomeView({
                           </Text>
                         </Pressable>
                         <Pressable
-                          onPress={() => {
-                            const currentMode = telemetrySnapshot?.mode ?? systemHealth?.mode ?? "MANUAL";
-                            const targetMode = currentMode === "OFFBOARD" ? "MANUAL" : "OFFBOARD";
-                            onSetMode?.(targetMode);
-                          }}
-                          disabled={missionActionBusy}
+                          onPress={() => onSetMode?.("MANUAL")}
+                          disabled={missionActionBusy || (telemetrySnapshot?.mode ?? systemHealth?.mode) === "MANUAL"}
                           style={{
                             flex: 1,
                             height: 38,
                             borderRadius: 8,
-                            backgroundColor: (telemetrySnapshot?.mode ?? systemHealth?.mode) === "OFFBOARD" ? "#f59e0b" : "#8b5cf6",
+                            backgroundColor: (telemetrySnapshot?.mode ?? systemHealth?.mode) === "MANUAL" ? "#1e293b" : "#8b5cf6",
                             alignItems: "center",
                             justifyContent: "center",
+                            opacity: missionActionBusy ? 0.6 : 1,
                           }}
                         >
                           <Text style={{ color: "#ffffff", fontSize: 12, fontWeight: "800" }}>
-                            {(telemetrySnapshot?.mode ?? systemHealth?.mode) === "OFFBOARD" ? "MANUAL" : "OFFBOARD"}
+                            {(telemetrySnapshot?.mode ?? systemHealth?.mode) === "MANUAL" ? "Manual Ready" : "Set Manual"}
                           </Text>
                         </Pressable>
                         <Pressable

@@ -66,6 +66,7 @@ export interface JoystickErrorEvent {
 export type FrontendJoystickState =
   | "DISABLED"
   | "DISCONNECTED"
+  | "SUSPENDED"
   | "AVAILABLE"
   | "ACQUIRING"
   | "ACTIVE"
