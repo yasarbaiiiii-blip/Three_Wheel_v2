@@ -37,6 +37,13 @@ class ModeRequest(BaseModel):
     mode: VehicleMode
 
 
+class ManualControlRequest(BaseModel):
+    """Normalized manual drive command for MANUAL mode (MAVROS manual_control)."""
+
+    forward: float = Field(0.0, ge=-1.0, le=1.0)
+    yaw: float = Field(0.0, ge=-1.0, le=1.0)
+
+
 class PathPublishRequest(BaseModel):
     name: Optional[str] = None
     file: Optional[str] = None
@@ -241,6 +248,11 @@ class ArmResponse(BaseModel):
 
 
 class ModeResponse(BaseModel):
+    success: bool
+    message: str
+
+
+class ManualControlResponse(BaseModel):
     success: bool
     message: str
 

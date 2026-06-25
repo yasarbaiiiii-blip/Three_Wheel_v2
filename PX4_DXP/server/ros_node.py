@@ -63,14 +63,16 @@ log = get_logger("server.ros")
 
 # ── Optional MAVROS imports ───────────────────────────────────────────────────
 try:
-    from mavros_msgs.msg import State
+    from mavros_msgs.msg import ManualControl, State
     from sensor_msgs.msg import BatteryState, NavSatFix
     from mavros_msgs.srv import CommandBool, SetMode
 
     _HAS_MAVROS = True
+    _HAS_MANUAL_CONTROL = True
 except ImportError:
     _HAS_MAVROS = False
-    State = BatteryState = NavSatFix = CommandBool = SetMode = None  # type: ignore
+    _HAS_MANUAL_CONTROL = False
+    State = BatteryState = NavSatFix = CommandBool = SetMode = ManualControl = None  # type: ignore
 
 try:
     from mavros_msgs.msg import GPSRAW
@@ -309,6 +311,13 @@ class RosBridgeNode(Node):
         # Manual spray override command — reliable VOLATILE (depth 1): must
         # arrive, but a stale override must never replay to a restarted node.
         self._spray_manual_pub = self.create_publisher(Bool, "/spray/manual", 1)
+        self._manual_control_pub = None
+        if _HAS_MANUAL_CONTROL:
+            self._manual_control_pub = self.create_publisher(
+                ManualControl,
+                "/mavros/manual_control/send",
+                10,
+            )
 
         # ── Service clients (reentrant group, can be called from any thread) ──
         self._arming_cli = None
@@ -515,6 +524,23 @@ class RosBridgeNode(Node):
             self._state["spray_manual"] = bool(msg.data)
 
     # ── Public API: spray manual override ────────────────────────────────────
+
+    def publish_manual_control(self, forward: float, yaw: float) -> tuple[bool, str]:
+        """Publish MAVROS manual_control for MANUAL-mode driving."""
+        if not _HAS_MANUAL_CONTROL or self._manual_control_pub is None:
+            return False, "MAVROS manual_control publisher not available"
+        forward_clamped = max(-1.0, min(1.0, float(forward)))
+        yaw_clamped = max(-1.0, min(1.0, float(yaw)))
+        msg = ManualControl()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "base_link"
+        msg.x = forward_clamped
+        msg.y = 0.0
+        msg.z = 0.0
+        msg.r = yaw_clamped
+        msg.buttons = 0
+        self._manual_control_pub.publish(msg)
+        return True, "ok"
 
     def publish_spray_manual(self, on: bool) -> None:
         """Command the spray_controller manual override (True=ON, False=cancel)."""

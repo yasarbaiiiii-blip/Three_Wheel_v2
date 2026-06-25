@@ -7,7 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from auth import require_token
 from models import (
-    ArmRequest, ArmResponse, EstopResponse, ModeRequest, ModeResponse,
+    ArmRequest,
+    ArmResponse,
+    EstopResponse,
+    ManualControlRequest,
+    ManualControlResponse,
+    ModeRequest,
+    ModeResponse,
 )
 
 router = APIRouter(tags=["vehicle"], dependencies=[Depends(require_token)])
@@ -43,6 +49,17 @@ async def set_mode(req: ModeRequest):
     msg = f"Mode {req.mode.value} {'set' if ok else f'FAILED: {why}'}"
     _record("info" if ok else "error", msg)
     return ModeResponse(success=ok, message=msg)
+
+
+@router.post("/manual_control", response_model=ManualControlResponse)
+async def manual_control(req: ManualControlRequest):
+    from main import ros_node
+    if ros_node is None:
+        raise HTTPException(503, "ROS node not ready")
+    ok, why = ros_node.publish_manual_control(req.forward, req.yaw)
+    if not ok:
+        raise HTTPException(503, why or "Manual control unavailable")
+    return ManualControlResponse(success=True, message="ok")
 
 
 @router.post("/estop", response_model=EstopResponse)

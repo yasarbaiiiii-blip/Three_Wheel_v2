@@ -51,6 +51,29 @@ function distToSegment(
   return Math.hypot(px - (x1 + t * (x2 - x1)), py - (y1 + t * (y2 - y1)));
 }
 
+function buildPlanLinesMsgKey(
+  lines: PlanLine[],
+  originLat: number,
+  originLon: number
+): string {
+  if (lines.length === 0) return `0:${originLat}:${originLon}`;
+  const first = lines[0];
+  const last = lines[lines.length - 1];
+  const mid = lines[Math.floor(lines.length / 2)];
+  return [
+    lines.length,
+    originLat,
+    originLon,
+    first.id,
+    first.from.x.toFixed(2),
+    first.from.y.toFixed(2),
+    mid.from.x.toFixed(2),
+    mid.from.y.toFixed(2),
+    last.to.x.toFixed(2),
+    last.to.y.toFixed(2),
+  ].join(":");
+}
+
 export interface MapViewProps {
   telemetrySnapshot: TelemetrySnapshot | null;
   lines: PlanLine[];
@@ -2018,7 +2041,7 @@ export function MapView({
   useEffect(() => {
     if (!visible) return;
 
-    const msgKey = `${projectedPlanLines.length}:${lines.length}:${origin.originLat}:${origin.originLon}`;
+    const msgKey = buildPlanLinesMsgKey(lines, origin.originLat, origin.originLon);
     if (msgKey === lastLinesMsgRef.current) return;
     lastLinesMsgRef.current = msgKey;
 
@@ -2026,7 +2049,7 @@ export function MapView({
       type: "updatePlanLines",
       lines: projectedPlanLines,
     });
-  }, [visible, projectedPlanLines, lines.length, origin.originLat, origin.originLon, sendToWebView]);
+  }, [visible, projectedPlanLines, lines, origin.originLat, origin.originLon, sendToWebView]);
 
   // Send reference points
   useEffect(() => {
@@ -2178,7 +2201,7 @@ export function MapView({
           })
         );
       } catch (e) {}
-      lastLinesMsgRef.current = `${projectedPlanLines.length}:${lines.length}:${origin.originLat}:${origin.originLon}`;
+      lastLinesMsgRef.current = buildPlanLinesMsgKey(lines, origin.originLat, origin.originLon);
     }
 
     if (alignedRefPoints.length > 0) {

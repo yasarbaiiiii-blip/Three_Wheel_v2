@@ -57,9 +57,12 @@ import {
   EyeOff,
   Map as MapIcon,
   Check as CheckIcon,
+  Gamepad2,
 } from "lucide-react-native";
 
 import { BoundaryEditor, PlacedItem } from "./src/components/BoundaryEditor";
+import { ManualJoystick } from "./src/components/ManualJoystick";
+import * as vehicleApi from "./src/api/vehicleApi";
 import { readImportedPlanFile, normalizePlanLines } from "./src/utils/planImport";
 import type { ImportedPlan, PlanLine } from "./src/types/plan";
 import * as missionApi from "./src/api/missionApi";
@@ -695,37 +698,62 @@ export default function App() {
   const [autoOrigin, setAutoOrigin] = useState(false);
   const [originShift, setOriginShift] = useState<{ offsetN: number; offsetE: number } | null>(null);
   const protectedMissionResident = isProtectedMissionResident(loadedPathInspection);
+  const originShiftEligible = autoOrigin && stagedWorkflow.staged !== "verified";
+  const missionStateRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    if (protectedMissionResident && autoOrigin) setAutoOrigin(false);
-  }, [autoOrigin, protectedMissionResident]);
   const [alignedRefPoints, setAlignedRefPoints] = useState<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>([]);
   const [mapViewEnabled, setMapViewEnabled] = useState(false);
 
-  useEffect(() => {
-    if (autoOrigin) {
-      const posN = telemetrySnapshot?.pos_n;
-      const posE = telemetrySnapshot?.pos_e;
-      const state = telemetrySnapshot?.mission_state;
+  const captureOriginShiftFromTelemetry = useCallback(() => {
+    const posN = telemetrySnapshot?.pos_n;
+    const posE = telemetrySnapshot?.pos_e;
+    if (posN == null || posE == null) return;
+    setOriginShift({ offsetN: posN, offsetE: posE });
+  }, [telemetrySnapshot?.pos_e, telemetrySnapshot?.pos_n]);
 
-      if (state === "running") {
-        // Lock origin to the rover's starting position exactly once per mission.
-        // The `prev === null` guard ensures we don't re-lock mid-mission if telemetry updates.
-        if (posN != null && posE != null) {
-          setOriginShift((prev) =>
-            prev === null ? { offsetN: posN, offsetE: posE } : prev
-          );
-        }
-      } else if (state === "idle") {
-        // Clear the shift when the rover returns to idle.
-        // This ensures the next mission can accurately lock its own fresh start position.
-        setOriginShift((prev) => (prev === null ? prev : null));
+  const toggleAutoOrigin = useCallback(() => {
+    setAutoOrigin((prev) => {
+      const next = !prev;
+      if (!next) {
+        setOriginShift(null);
+        return next;
       }
-      // "completed" or "paused" — preserve the existing origin shift (no state write).
-    } else {
+      if (stagedWorkflow.staged !== "verified") {
+        captureOriginShiftFromTelemetry();
+      }
+      return next;
+    });
+  }, [captureOriginShiftFromTelemetry, stagedWorkflow.staged]);
+
+  useEffect(() => {
+    const state = telemetrySnapshot?.mission_state ?? null;
+    missionStateRef.current = state;
+
+    if (!originShiftEligible) {
       setOriginShift(null);
+      return;
     }
-  }, [autoOrigin, telemetrySnapshot?.pos_n, telemetrySnapshot?.pos_e, telemetrySnapshot?.mission_state, setOriginShift]);
+
+    const posN = telemetrySnapshot?.pos_n;
+    const posE = telemetrySnapshot?.pos_e;
+    if (posN == null || posE == null) return;
+
+    if (state === "running") {
+      // Lock origin to the rover's starting position exactly once per mission.
+      setOriginShift((prev) =>
+        prev === null ? { offsetN: posN, offsetE: posE } : prev
+      );
+      return;
+    }
+
+    // Preview: anchor plan start to live rover pose (idle, paused, completed, or unknown).
+    setOriginShift({ offsetN: posN, offsetE: posE });
+  }, [
+    originShiftEligible,
+    telemetrySnapshot?.pos_n,
+    telemetrySnapshot?.pos_e,
+    telemetrySnapshot?.mission_state,
+  ]);
 
   const displayedLines = useMemo(() => {
     const base = sanitizePlanLines(lines);
@@ -770,7 +798,7 @@ export default function App() {
   // captured origin, run-state, or rover pose changes, so a wrong rover-icon
   // placement can be diagnosed against the drawn path's first point.
   useEffect(() => {
-    if (!autoOrigin) return;
+    if (!originShiftEligible) return;
     const first = getPlanStartPoint(sanitizePlanLines(lines));
     const rover =
       telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
@@ -787,7 +815,7 @@ export default function App() {
         : null,
     }));
   }, [
-    autoOrigin,
+    originShiftEligible,
     missionRunning,
     originShift,
     telemetrySnapshot?.mission_state,
@@ -810,17 +838,6 @@ export default function App() {
     telemetrySnapshot?.pos_e,
     telemetrySnapshot?.pos_n,
   ]);
-
-  const originShiftedRoverPoint = useMemo(() => {
-    if (!previewRoverPoint) return null;
-    if (originShift) {
-      return {
-        north: previewRoverPoint.north - originShift.offsetN,
-        east: previewRoverPoint.east - originShift.offsetE,
-      };
-    }
-    return previewRoverPoint;
-  }, [previewRoverPoint, originShift]);
 
   const frozenRoverPos = useMemo(() => {
     if (telemetrySnapshot?.pos_n == null || telemetrySnapshot?.pos_e == null) {
@@ -1462,12 +1479,13 @@ export default function App() {
               console.log("[API POST] /api/path/plan - overlay failed, using legacy preview:", planErr);
             }
 
-            // Extension run-ups (layer:"extension") always belong in the list,
-            // even when the runtime /plan overlay is applied: that overlay draws
-            // every non-spray run as a generic layer:"transit" line, so without
-            // this the "extensions" filter is always empty online. fallbackExtLines
-            // carries the exact pre/aft geometry from the /entities preview.
-            generatedLines.push(...fallbackExtLines);
+            // Extension run-ups belong in the list only when the runtime /plan
+            // overlay is unavailable. When runtimePathApplied, non-spray PRE/AFT
+            // segments are already drawn as runtime-transit-* lines — pushing
+            // fallbackExtLines too would duplicate the path on canvas and map.
+            if (!runtimePathApplied) {
+              generatedLines.push(...fallbackExtLines);
+            }
 
             if (!runtimePathApplied) {
               if (body.transit_preview && Array.isArray(body.transit_preview)) {
@@ -1985,7 +2003,7 @@ export default function App() {
       }
       setMissionRunning(true);
       setWorkflowStep("started", "verified");
-      if (autoOrigin && telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null) {
+      if (!isStagedStart && autoOrigin && telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null) {
         setOriginShift({ offsetN: telemetrySnapshot.pos_n, offsetE: telemetrySnapshot.pos_e });
         // Frame check: backend anchors the mission's FIRST waypoint at this
         // rover pose. The drawn path's first point should land here too.
@@ -2599,8 +2617,15 @@ export default function App() {
               ) : page === "home" ? (
                 <HomeView
                   autoOrigin={autoOrigin}
-                  setAutoOrigin={setAutoOrigin}
-                  previewRoverPoint={originShiftedRoverPoint}
+                  onToggleAutoOrigin={toggleAutoOrigin}
+                  previewRoverPoint={previewRoverPoint}
+                  originShiftKey={
+                    originShift
+                      ? `${originShift.offsetN.toFixed(3)}:${originShift.offsetE.toFixed(3)}`
+                      : autoOrigin
+                        ? "pending"
+                        : null
+                  }
                   importedPlan={importedPlan}
                   lines={displayedLines}
                   setLines={setLines}
@@ -2679,7 +2704,7 @@ export default function App() {
                 <SectionScreen
                   telemetrySnapshot={telemetrySnapshot}
                   missionRunning={missionRunning}
-                  previewRoverPoint={originShiftedRoverPoint}
+                  previewRoverPoint={previewRoverPoint}
                   title={sectionTitle}
                   page={page}
                   importedPlan={importedPlan}
@@ -2926,8 +2951,9 @@ function TopBar({
 
 function HomeView({
   autoOrigin,
-  setAutoOrigin,
+  onToggleAutoOrigin,
   previewRoverPoint,
+  originShiftKey,
   importedPlan,
   lines,
   selectedLineId,
@@ -3001,8 +3027,9 @@ function HomeView({
   onConfirmVisualAlignment,
 }: {
   autoOrigin: boolean;
-  setAutoOrigin: React.Dispatch<React.SetStateAction<boolean>>;
+  onToggleAutoOrigin: () => void;
   previewRoverPoint: { north: number; east: number } | null;
+  originShiftKey?: string | null;
   importedPlan: ImportedPlan | null;
   lines: PlanLine[];
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
@@ -3092,7 +3119,8 @@ function HomeView({
       if (sprayTab === "continuous") {
         res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/continuous`, { 
           method: "PUT",
-          headers: { "Accept": "application/json" }
+          headers: { "Content-Type": "application/json", "Accept": "application/json" },
+          body: JSON.stringify({})
         });
         if (!res.ok) throw new Error(`Server error: ${res.status} ${await res.text()}`);
         setActiveSprayMode("continuous");
@@ -3176,7 +3204,54 @@ function HomeView({
   const [exportFileName, setExportFileName] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [showPointsModal, setShowPointsModal] = useState(false);
+  const [joystickPanelOpen, setJoystickPanelOpen] = useState(false);
+  const joystickValuesRef = useRef({ forward: 0, yaw: 0 });
   const [crossTrackAlerted, setCrossTrackAlerted] = useState(false);
+
+  const isVehicleArmed = telemetrySnapshot?.armed ?? systemHealth?.armed ?? false;
+  const vehicleMode = (telemetrySnapshot?.mode ?? systemHealth?.mode ?? "MANUAL").toUpperCase();
+  const joystickReady = isVehicleArmed && vehicleMode === "MANUAL" && !missionRunning;
+
+  const handleOpenJoystickPanel = useCallback(() => {
+    if (missionRunning) {
+      Alert.alert("Mission Running", "Stop the mission before using manual drive.");
+      return;
+    }
+    if (!apiBaseUrl) {
+      Alert.alert("No backend", "Connect to a rover backend first.");
+      return;
+    }
+    setJoystickPanelOpen(true);
+    if (vehicleMode !== "MANUAL") {
+      Alert.alert(
+        "Manual mode required",
+        "Switch to MANUAL mode and arm the vehicle before driving with the joystick.",
+      );
+    } else if (!isVehicleArmed) {
+      Alert.alert("Arm required", "Arm the vehicle before using manual drive.");
+    }
+  }, [apiBaseUrl, isVehicleArmed, missionRunning, vehicleMode]);
+
+  const handleCloseJoystickPanel = useCallback(() => {
+    joystickValuesRef.current = { forward: 0, yaw: 0 };
+    if (apiBaseUrl) {
+      void vehicleApi.sendManualControl(apiBaseUrl, { forward: 0, yaw: 0 });
+    }
+    setJoystickPanelOpen(false);
+  }, [apiBaseUrl]);
+
+  useEffect(() => {
+    if (!joystickPanelOpen || !apiBaseUrl) return;
+    const intervalId = setInterval(() => {
+      const { forward, yaw } = joystickValuesRef.current;
+      if (!joystickReady) return;
+      void vehicleApi.sendManualControl(apiBaseUrl, { forward, yaw }).catch(() => {});
+    }, 40);
+    return () => {
+      clearInterval(intervalId);
+      void vehicleApi.sendManualControl(apiBaseUrl, { forward: 0, yaw: 0 }).catch(() => {});
+    };
+  }, [apiBaseUrl, joystickPanelOpen, joystickReady]);
 
   useEffect(() => {
     if (!missionRunning) {
@@ -3259,29 +3334,6 @@ function HomeView({
     value: ok === undefined || ok === null ? "Unknown" : ok ? "OK" : "Alert",
     tone: ok ? "#16a34a" : ok === false ? "#dc2626" : "#64748b",
   });
-  const rightPanelSwipeResponder = React.useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => false,
-        onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dx) > 8 && Math.abs(gesture.dy) < 18,
-        onPanResponderMove: (_, gesture) => {
-          if (gesture.dx < -20) {
-            setRightPanelMode("details");
-          } else if (gesture.dx > 20) {
-            setRightPanelMode("system");
-          }
-        },
-        onPanResponderRelease: (_, gesture) => {
-          if (gesture.dx < -70) {
-            setRightPanelMode("details");
-          } else if (gesture.dx > 70) {
-            setRightPanelMode("system");
-          }
-        },
-      }),
-    []
-  );
-
   const openExportDialog = () => {
     if (!importedPlan || lines.length === 0) return;
     const baseName = importedPlan.fileName.replace(/\.[^/.]+$/, "") || "generated_plan";
@@ -3491,6 +3543,7 @@ function HomeView({
                   visibility={layerVisibility}
                   selectedLineId={selectedLineId}
                   onSelectLine={onSelectLine}
+                  originShiftKey={originShiftKey}
                   roverPosN={previewRoverPoint?.north ?? null}
                   roverPosE={previewRoverPoint?.east ?? null}
                   roverHeadingDeg={telemetrySnapshot?.heading_ned_deg ?? null}
@@ -3520,7 +3573,6 @@ function HomeView({
                 minHeight: 0,
                 backgroundColor: "transparent",
               }}
-              {...rightPanelSwipeResponder.panHandlers}
             >
               {rightPanelMode === "system" ? (
                 <View style={{ flex: 1 }}>
@@ -3539,8 +3591,8 @@ function HomeView({
                       showsVerticalScrollIndicator={false}
                     >
                       <View style={{ borderBottomWidth: 1, borderBottomColor: "#f1f5f9", paddingBottom: 12, marginBottom: 12 }}>
-                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
-                          <View>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginTop: 4, gap: 12 }}>
+                          <View style={{ flex: 1 }}>
                             <Text style={{ color: "#64748b", fontSize: 9.5, fontWeight: "800", letterSpacing: 1.4, textTransform: "uppercase" }}>
                               Rover Ops
                             </Text>
@@ -3558,47 +3610,66 @@ function HomeView({
                                 {(!telemetryError && (systemHealth?.ros_node || systemHealth?.fcu_connected || telemetrySnapshot !== null)) ? "Live" : "Offline"}
                               </Text>
                             </View>
+                            <Text style={{ color: "#475569", fontSize: 12, lineHeight: 17, marginTop: 6 }}>
+                              Real-time diagnostics and status feed.
+                            </Text>
                           </View>
-                          <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
-                            <RadioTower
-                              size={18}
-                              color={
-                                telemetrySnapshot?.gps_fix === 6
-                                  ? "#16a34a"
-                                  : telemetrySnapshot?.gps_fix === 5
-                                    ? "#ea580c"
+                          <View style={{ alignItems: "flex-end", gap: 8 }}>
+                            <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
+                              <RadioTower
+                                size={18}
+                                color={
+                                  telemetrySnapshot?.gps_fix === 6
+                                    ? "#16a34a"
+                                    : telemetrySnapshot?.gps_fix === 5
+                                      ? "#ea580c"
+                                      : "#dc2626"
+                                }
+                              />
+                              <Battery
+                                size={18}
+                                color={
+                                  telemetrySnapshot?.battery_pct != null
+                                    ? telemetrySnapshot.battery_pct >= 50
+                                      ? "#16a34a"
+                                      : telemetrySnapshot.battery_pct >= 20
+                                        ? "#ea580c"
+                                        : "#dc2626"
                                     : "#dc2626"
-                              }
-                            />
-                            <Battery
-                              size={18}
-                              color={
-                                telemetrySnapshot?.battery_pct != null
-                                  ? telemetrySnapshot.battery_pct >= 50
-                                    ? "#16a34a"
-                                    : telemetrySnapshot.battery_pct >= 20
-                                      ? "#ea580c"
-                                      : "#dc2626"
-                                  : "#dc2626"
-                              }
-                            />
-                            <Signal
-                              size={18}
-                              color={
-                                telemetrySnapshot?.gps_sat != null
-                                  ? telemetrySnapshot.gps_sat >= 10
-                                    ? "#16a34a"
-                                    : telemetrySnapshot.gps_sat >= 6
-                                      ? "#ea580c"
-                                      : "#dc2626"
-                                  : "#dc2626"
-                              }
-                            />
+                                }
+                              />
+                              <Signal
+                                size={18}
+                                color={
+                                  telemetrySnapshot?.gps_sat != null
+                                    ? telemetrySnapshot.gps_sat >= 10
+                                      ? "#16a34a"
+                                      : telemetrySnapshot.gps_sat >= 6
+                                        ? "#ea580c"
+                                        : "#dc2626"
+                                    : "#dc2626"
+                                }
+                              />
+                            </View>
+                            <Pressable
+                              onPress={() => setRightPanelMode("details")}
+                              style={{
+                                flexDirection: "row",
+                                alignItems: "center",
+                                gap: 6,
+                                backgroundColor: "#0f172a",
+                                paddingHorizontal: 10,
+                                paddingVertical: 8,
+                                borderRadius: 8,
+                              }}
+                            >
+                              <ListChecks size={14} color="#ffffff" />
+                              <Text style={{ color: "#ffffff", fontSize: 10, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.3 }}>
+                                View Line Details
+                              </Text>
+                            </Pressable>
                           </View>
                         </View>
-                        <Text style={{ color: "#475569", fontSize: 12, lineHeight: 17, marginTop: 6 }}>
-                          Real-time diagnostics and status feed.
-                        </Text>
                       </View>
 
                       {telemetryError ? <Text style={[drawerStyles.error, { color: "#b91c1c" }]}>{telemetryError}</Text> : null}
@@ -3755,6 +3826,94 @@ function HomeView({
                     borderColor: "rgba(255,255,255,0.08)",
                     marginTop: 10,
                   }}>
+                    {joystickPanelOpen ? (
+                      <View style={{ minHeight: 280 }}>
+                        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12, marginTop: 8 }}>
+                          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                            <View style={{ width: 3, height: 10, backgroundColor: "#3b82f6", borderRadius: 1.5 }} />
+                            <Text style={{ color: "#94a3b8", fontSize: 9.5, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.8 }}>
+                              Manual Drive
+                            </Text>
+                          </View>
+                          <Pressable
+                            onPress={handleCloseJoystickPanel}
+                            style={{
+                              width: 32,
+                              height: 32,
+                              borderRadius: 8,
+                              backgroundColor: "rgba(255,255,255,0.08)",
+                              alignItems: "center",
+                              justifyContent: "center",
+                            }}
+                          >
+                            <X size={18} color="#e2e8f0" strokeWidth={2.5} />
+                          </Pressable>
+                        </View>
+
+                        <View style={{ alignItems: "center", justifyContent: "center", paddingVertical: 8 }}>
+                          <ManualJoystick
+                            disabled={!joystickReady}
+                            onChange={(values) => {
+                              joystickValuesRef.current = values;
+                            }}
+                            onRelease={() => {
+                              joystickValuesRef.current = { forward: 0, yaw: 0 };
+                              if (apiBaseUrl) {
+                                void vehicleApi.sendManualControl(apiBaseUrl, { forward: 0, yaw: 0 });
+                              }
+                            }}
+                          />
+                        </View>
+
+                        <Text style={{ color: joystickReady ? "#64748b" : "#f87171", fontSize: 10, textAlign: "center", lineHeight: 15, marginTop: 10 }}>
+                          {joystickReady
+                            ? "Push up to drive forward, left/right to turn. Release to stop."
+                            : missionRunning
+                              ? "Stop the active mission before manual drive."
+                              : vehicleMode !== "MANUAL"
+                                ? "Switch to MANUAL mode and arm the vehicle."
+                                : "Arm the vehicle to enable the joystick."}
+                        </Text>
+
+                        <View style={{ flexDirection: "row", gap: 8, marginTop: 14 }}>
+                          <Pressable
+                            onPress={() => onArmVehicle?.(!isVehicleArmed)}
+                            disabled={missionActionBusy}
+                            style={{
+                              flex: 1,
+                              height: 36,
+                              borderRadius: 8,
+                              backgroundColor: isVehicleArmed ? "#b91c1c" : "#2563eb",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              opacity: missionActionBusy ? 0.6 : 1,
+                            }}
+                          >
+                            <Text style={{ color: "#ffffff", fontSize: 11, fontWeight: "800" }}>
+                              {isVehicleArmed ? "Disarm" : "Arm"}
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => onSetMode?.("MANUAL")}
+                            disabled={missionActionBusy || vehicleMode === "MANUAL"}
+                            style={{
+                              flex: 1,
+                              height: 36,
+                              borderRadius: 8,
+                              backgroundColor: vehicleMode === "MANUAL" ? "#1e293b" : "#8b5cf6",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              opacity: missionActionBusy ? 0.6 : 1,
+                            }}
+                          >
+                            <Text style={{ color: "#ffffff", fontSize: 11, fontWeight: "800" }}>
+                              {vehicleMode === "MANUAL" ? "Manual Ready" : "Set Manual"}
+                            </Text>
+                          </Pressable>
+                        </View>
+                      </View>
+                    ) : (
+                    <>
                     <View style={{ flexDirection: "row", alignItems: "center", gap: 5, marginBottom: 16, marginTop: 12 }}>
                       <View style={{ width: 3, height: 10, backgroundColor: "#10b981", borderRadius: 1.5 }} />
                       <Text style={{ color: "#94a3b8", fontSize: 9.5, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.8 }}>
@@ -3814,7 +3973,7 @@ function HomeView({
                       </Pressable>
 
                       <Pressable
-                        onPress={() => setAutoOrigin(!autoOrigin)}
+                        onPress={onToggleAutoOrigin}
                         style={{
                           flex: 1,
                           flexDirection: "row",
@@ -3850,40 +4009,21 @@ function HomeView({
 
                     <View style={{ flexDirection: "row", gap: 8, marginBottom: 12, alignItems: "center" }}>
                       <Pressable
-                        onPress={() => {
-                          if (telemetrySnapshot?.mission_state === "running") {
-                            Alert.alert("Mission Running", "Cannot preview point during an active mission.");
-                            return;
-                          }
-                          if (lines.length === 0) {
-                            Alert.alert("No path", "Load a plan first.");
-                            return;
-                          }
-                          setShowPointsModal(true);
-                        }}
+                        onPress={handleOpenJoystickPanel}
                         style={{
-                          backgroundColor: "#e2e8f0",
+                          backgroundColor: "#1d4ed8",
                           flex: 1,
                           height: 38,
                           borderRadius: 8,
                           alignItems: "center",
                           justifyContent: "center",
-                          position: "relative",
-                          overflow: "hidden",
+                          flexDirection: "row",
+                          gap: 6,
                         }}
                       >
-                        <View style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 2, backgroundColor: "#cbd5e1" }}>
-                          {stagedWorkflow.alignment === "verified" && (
-                            <View style={{
-                              width: "100%",
-                              height: "100%",
-                              borderRadius: 1,
-                              backgroundColor: "#ffffff",
-                            }} />
-                          )}
-                        </View>
-                        <Text style={{ color: "#94a3b8", fontSize: 10, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.3 }} numberOfLines={1}>
-                          Preview Points
+                        <Gamepad2 size={14} color="#ffffff" />
+                        <Text style={{ color: "#ffffff", fontSize: 10, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.3 }} numberOfLines={1}>
+                          Joystick
                         </Text>
                       </Pressable>
 
@@ -4079,6 +4219,8 @@ function HomeView({
                         </Pressable>
                       </View>
                     )}
+                    </>
+                    )}
                   </View>
                 </View>
               ) : (
@@ -4096,16 +4238,31 @@ function HomeView({
                     contentContainerStyle={{ padding: 14, paddingBottom: 18 }}
                     showsVerticalScrollIndicator={false}
                   >
-                    <View style={{ marginTop: 4 }}>
-                      <Text style={{ color: "#64748b", fontSize: 9.5, fontWeight: "800", letterSpacing: 1.4, textTransform: "uppercase" }}>
-                        Rover Ops
-                      </Text>
-                      <Text style={{ color: "#fff", fontSize: 22, fontWeight: "900", marginTop: 2 }}>
-                        Line Details
-                      </Text>
+                    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 4, marginBottom: 8 }}>
+                      <View>
+                        <Text style={{ color: "#64748b", fontSize: 9.5, fontWeight: "800", letterSpacing: 1.4, textTransform: "uppercase" }}>
+                          Rover Ops
+                        </Text>
+                        <Text style={{ color: "#fff", fontSize: 22, fontWeight: "900", marginTop: 2 }}>
+                          Line Details
+                        </Text>
+                      </View>
+                      <Pressable
+                        onPress={() => setRightPanelMode("system")}
+                        style={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: 8,
+                          backgroundColor: "rgba(255,255,255,0.08)",
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        <X size={18} color="#e2e8f0" strokeWidth={2.5} />
+                      </Pressable>
                     </View>
-                    <Text style={{ color: "#94a3b8", fontSize: 12, lineHeight: 17, marginTop: 6, marginBottom: 4 }}>
-                      Swipe right to inspect the selected line in a focused side panel.
+                    <Text style={{ color: "#94a3b8", fontSize: 12, lineHeight: 17, marginBottom: 4 }}>
+                      Tap a line on the canvas, then inspect geometry and spray overrides here.
                     </Text>
 
                     <View style={drawerStyles.section}>
@@ -5295,7 +5452,7 @@ function LineDetailsDrawer({
             </Text>
           </View>
           <Text style={{ color: "#94a3b8", fontSize: 12, lineHeight: 17, marginTop: 6, marginBottom: 4 }}>
-            Swipe right to inspect the selected line in a focused side panel.
+                      Tap a line on the canvas, then inspect geometry and spray overrides here.
           </Text>
 
           <View style={drawerStyles.grid}>
@@ -8267,7 +8424,12 @@ function computePlanBounds(lines: PlanLine[]) {
   return { minX, minY, maxX, maxY };
 }
 
-function computeAutoFitViewport(lines: PlanLine[], width: number, height: number): PreviewViewport {
+function computeAutoFitViewport(
+  lines: PlanLine[],
+  width: number,
+  height: number,
+  roverPoint?: { north: number; east: number } | null
+): PreviewViewport {
   if (lines.length === 0 || width <= 0 || height <= 0) {
     return { panX: width / 2, panY: height / 2, zoom: 1 };
   }
@@ -8286,6 +8448,13 @@ function computeAutoFitViewport(lines: PlanLine[], width: number, height: number
     maxN = Math.max(maxN, line.from.x, line.to.x);
     minE = Math.min(minE, line.from.y, line.to.y);
     maxE = Math.max(maxE, line.from.y, line.to.y);
+  }
+
+  if (roverPoint) {
+    minN = Math.min(minN, roverPoint.north);
+    maxN = Math.max(maxN, roverPoint.north);
+    minE = Math.min(minE, roverPoint.east);
+    maxE = Math.max(maxE, roverPoint.east);
   }
 
   const bboxW = maxE - minE; // Width on screen is Easting span
@@ -8580,6 +8749,7 @@ function PlanPreview({
   visibility,
   selectedLineId,
   onSelectLine,
+  originShiftKey = null,
   roverPosN,
   roverPosE,
   roverHeadingDeg,
@@ -8604,6 +8774,7 @@ function PlanPreview({
   visibility: LayerVisibility;
   selectedLineId: string | null;
   onSelectLine?: (id: string | null) => void;
+  originShiftKey?: string | null;
   roverPosN?: number | null;
   roverPosE?: number | null;
   roverHeadingDeg?: number | null;
@@ -8667,8 +8838,14 @@ function PlanPreview({
     [filtered]
   );
 
-  // Projected rover point from raw GPS telemetry (Lat/Lon) or fallback to EKF offsets
+  // Prefer NED telemetry from parent — matches origin-shifted plan coordinates.
   const projectedRoverPoint = useMemo(() => {
+    if (roverPosN != null && roverPosE != null) {
+      return {
+        north: roverPosN,
+        east: roverPosE,
+      };
+    }
     if (
       telemetryPosLat != null &&
       telemetryPosLon != null &&
@@ -8685,12 +8862,6 @@ function PlanPreview({
       return {
         north: origin.dxf_x + north,
         east: origin.dxf_y + east,
-      };
-    }
-    if (roverPosN != null && roverPosE != null) {
-      return {
-        north: roverPosN,
-        east: roverPosE,
       };
     }
     return null;
@@ -8828,7 +8999,7 @@ function PlanPreview({
       return;
     }
 
-    const alpha = missionRunning ? 0.18 : 0.32;
+    const alpha = missionRunning ? 0.18 : 1;
     const smoothedPose = {
       north: prevPose.north + (nextPose.north - prevPose.north) * alpha,
       east: prevPose.east + (nextPose.east - prevPose.east) * alpha,
@@ -8849,10 +9020,10 @@ function PlanPreview({
     viewportRef.current = viewport;
   }, [viewport]);
 
-  // Reset manual pan state when plan changes so it auto-fits the new plan
+  // Reset manual pan state when plan or origin alignment changes
   useEffect(() => {
     userPannedRef.current = false;
-  }, [filteredPlanSignature]);
+  }, [filteredPlanSignature, originShiftKey]);
 
   // Auto-fit when plan lines change (only triggers when plan or layout changes)
   useEffect(() => {
@@ -8860,7 +9031,9 @@ function PlanPreview({
     if (filtered.length === 0) return; // Handled by rover tracking
     if (userPannedRef.current) return;
 
-    const fitted = computeAutoFitViewport(filtered, layoutSize.width, layoutSize.height);
+    const roverFitPoint =
+      hasRover ? { north: roverN, east: roverE } : null;
+    const fitted = computeAutoFitViewport(filtered, layoutSize.width, layoutSize.height, roverFitPoint);
     const prev = viewportRef.current;
     const unchanged =
       Math.abs(prev.panX - fitted.panX) < 0.5 &&
@@ -8871,7 +9044,7 @@ function PlanPreview({
     viewportRef.current = fitted;
     setViewport(fitted);
     setRotation(0);
-  }, [filteredPlanSignature, layoutSize.width, layoutSize.height]);
+  }, [filteredPlanSignature, originShiftKey, hasRover, roverE, roverN, layoutSize.width, layoutSize.height]);
 
   // Auto-follow rover if no plan and user hasn't panned
   useEffect(() => {
@@ -9156,7 +9329,7 @@ function PlanPreview({
               pos_n: telemetryPosN,
               pos_e: telemetryPosE,
             } as any}
-            lines={visualAlignmentItem ? [] : lines}
+            lines={visualAlignmentItem ? [] : filtered}
             alignedRefPoints={alignedRefPoints}
             visible={true}
             recenterRoverTrigger={recenterRoverCount}
@@ -9262,7 +9435,13 @@ function PlanPreview({
 
               {/* ── Plan Start Direction Arrow ── */}
               {filtered.length > 0 && (() => {
-                const first = filtered[0];
+                const startPoint = getPlanStartPoint(filtered);
+                const first = startPoint
+                  ? filtered.find((line) =>
+                      coerceFiniteNumber(line.from?.x) === startPoint.north &&
+                      coerceFiniteNumber(line.from?.y) === startPoint.east
+                    ) ?? filtered[0]
+                  : filtered[0];
                 const startX = first.from.y;
                 const startY = first.from.x;
                 const endX = first.to.y;
@@ -10028,6 +10207,20 @@ function SwoziPage({
       <Text style={secH}>Pump</Text>
       <Text style={itemH}>Manual Control</Text>
       <Text style={itemT}>Disconnected</Text>
+      {/* Hold to Spray Button */}
+      <View style={{ marginVertical: 12 }}>
+        <Pressable
+          style={{
+            backgroundColor: "#f59e0b",
+            padding: 14,
+            borderRadius: 8,
+            alignItems: "center"
+          }}
+        >
+          <Text style={{ color: "#fff", fontWeight: "700", fontSize: 16 }}>Hold to Spray</Text>
+        </Pressable>
+      </View>
+
       {/* Spray Test Section */}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginVertical: 12 }}>
         <View style={{ flex: 1, flexDirection: "row", alignItems: "center" }}>
