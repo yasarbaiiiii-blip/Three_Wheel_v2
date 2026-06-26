@@ -1,7 +1,11 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback, memo } from "react";
 import { View, Text, Pressable, PanResponder, Switch, LayoutChangeEvent } from "react-native";
-import Svg, { Path, G, Line, Rect, Circle, Polygon, Text as SvgText } from "react-native-svg";
+import Svg, { Path, G, Line, Rect, Circle, Polygon, Polyline, Text as SvgText } from "react-native-svg";
 import type { PlanLine } from "../types/plan";
+import { screenToDesignMeters, designToSvg, simplifyPath } from "../utils/designTransform";
+import type { DesignVertex, DesignEntity } from "../types/designDocument";
+import { createDesignEntity } from "../types/designDocument";
+import { snapToGrid, findSnapCandidate } from "../utils/designSnap";
 
 export interface PlacedItem {
   id: string;
@@ -31,6 +35,11 @@ export interface BoundaryEditorProps {
   showBoundaryPoints?: boolean;
   activeSnapPointId?: string | null;
   onPlaceRoverAtPoint?: (pointId: string, localX: number, localY: number) => void;
+  activeTool?: "SELECT" | "LINE" | "FREEHAND";
+  onAddEntity?: (entity: DesignEntity) => void;
+  worldLines?: PlanLine[];
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
 }
 
 export const BoundaryEditor = memo(function BoundaryEditor({
@@ -49,6 +58,11 @@ export const BoundaryEditor = memo(function BoundaryEditor({
   showBoundaryPoints,
   activeSnapPointId,
   onPlaceRoverAtPoint,
+  activeTool = "SELECT",
+  onAddEntity,
+  worldLines = [],
+  onDragStart,
+  onDragEnd,
 }: BoundaryEditorProps) {
   const METER_TO_PX = 100;
 
@@ -73,6 +87,70 @@ export const BoundaryEditor = memo(function BoundaryEditor({
 
   const [svgSize, setSvgSize] = useState({ width: 400, height: 400 }); // fallback for initial taps
   const [camera, setCamera] = useState({ x: 0, y: 0, zoom: 1 });
+  const [pointerCoords, setPointerCoords] = useState<DesignVertex | null>(null);
+  const [freehandPoints, setFreehandPoints] = useState<DesignVertex[]>([]);
+  const drawingFreehandVertices = useRef<DesignVertex[]>([]);
+
+  const gridGeom = useMemo(() => {
+    const minorPath: string[] = [];
+    const majorPath: string[] = [];
+    
+    const minE = bpX - boundaryWidth / 2;
+    const maxE = bpX + boundaryWidth / 2;
+    const minN = bpY - boundaryHeight / 2;
+    const maxN = bpY + boundaryHeight / 2;
+    
+    const minYSvg = -maxN * METER_TO_PX;
+    const maxYSvg = -minN * METER_TO_PX;
+    const minXSvg = minE * METER_TO_PX;
+    const maxXSvg = maxE * METER_TO_PX;
+    
+    const step = 0.1;
+    const startE = Math.ceil(minE * 10) / 10;
+    const startN = Math.ceil(minN * 10) / 10;
+    
+    for (let e = startE; e <= maxE; e += step) {
+      const isMajor = Math.abs(e - Math.round(e)) < 0.01;
+      const x = e * METER_TO_PX;
+      const isAxis = Math.abs(e) < 0.01;
+      if (isAxis) continue;
+      
+      const pathStr = `M${x} ${minYSvg}L${x} ${maxYSvg}`;
+      if (isMajor) {
+        majorPath.push(pathStr);
+      } else {
+        minorPath.push(pathStr);
+      }
+    }
+    
+    for (let n = startN; n <= maxN; n += step) {
+      const isMajor = Math.abs(n - Math.round(n)) < 0.01;
+      const y = -n * METER_TO_PX;
+      const isAxis = Math.abs(n) < 0.01;
+      if (isAxis) continue;
+      
+      const pathStr = `M${minXSvg} ${y}L${maxXSvg} ${y}`;
+      if (isMajor) {
+        majorPath.push(pathStr);
+      } else {
+        minorPath.push(pathStr);
+      }
+    }
+    
+    const showVerticalAxis = minE <= 0 && maxE >= 0;
+    const showHorizontalAxis = minN <= 0 && maxN >= 0;
+    
+    return {
+      minorD: minorPath.join(''),
+      majorD: majorPath.join(''),
+      minXSvg,
+      maxXSvg,
+      minYSvg,
+      maxYSvg,
+      showVerticalAxis,
+      showHorizontalAxis,
+    };
+  }, [bpX, bpY, boundaryWidth, boundaryHeight]);
 
   const dragHandleCx = cx - halfW - 14 / camera.zoom;
   const dragHandleCy = cy - halfH - 14 / camera.zoom;
@@ -137,6 +215,23 @@ export const BoundaryEditor = memo(function BoundaryEditor({
 
   const onPlaceRoverAtPointRef = useRef(onPlaceRoverAtPoint);
   useEffect(() => { onPlaceRoverAtPointRef.current = onPlaceRoverAtPoint; }, [onPlaceRoverAtPoint]);
+
+  const onDragStartRef = useRef(onDragStart);
+  useEffect(() => { onDragStartRef.current = onDragStart; }, [onDragStart]);
+
+  const onDragEndRef = useRef(onDragEnd);
+  useEffect(() => { onDragEndRef.current = onDragEnd; }, [onDragEnd]);
+
+  const onAddEntityRef = useRef(onAddEntity);
+  useEffect(() => { onAddEntityRef.current = onAddEntity; }, [onAddEntity]);
+
+  const activeToolRef = useRef(activeTool);
+  useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
+
+  const worldLinesRef = useRef(worldLines);
+  useEffect(() => { worldLinesRef.current = worldLines; }, [worldLines]);
+
+  const drawingLineStart = useRef<DesignVertex | null>(null);
 
   /* ── RAF throttle refs (Step 3) ── */
   const rafPendingRef = useRef(false);
@@ -222,8 +317,10 @@ export const BoundaryEditor = memo(function BoundaryEditor({
       const dx = svgTapX - (item.x * METER_TO_PX);
       const dy = svgTapY - (-item.y * METER_TO_PX);
       const rad = -item.rotation * Math.PI / 180;
-      const localTapX = dx * Math.cos(rad) - dy * Math.sin(rad);
-      const localTapY = dx * Math.sin(rad) + dy * Math.cos(rad);
+      const localTapX = (dx * Math.cos(rad) - dy * Math.sin(rad)) / (item.scale || 1);
+      const localTapY = (dx * Math.sin(rad) + dy * Math.cos(rad)) / (item.scale || 1);
+      const localTapXScaled = dx * Math.cos(rad) - dy * Math.sin(rad);
+      const localTapYScaled = dx * Math.sin(rad) + dy * Math.cos(rad);
       
       const itemArea = item.width * item.height;
 
@@ -234,7 +331,7 @@ export const BoundaryEditor = memo(function BoundaryEditor({
          const y1 = -l.from.x * METER_TO_PX;
          const x2 = l.to.y * METER_TO_PX;
          const y2 = -l.to.x * METER_TO_PX;
-         const d2 = distToSegmentSquared(localTapX, localTapY, x1, y1, x2, y2);
+         const d2 = distToSegmentSquared(localTapX, localTapY, x1, y1, x2, y2) * ((item.scale || 1) ** 2);
          if (d2 < minItemLineDistSq) {
             minItemLineDistSq = d2;
          }
@@ -252,7 +349,7 @@ export const BoundaryEditor = memo(function BoundaryEditor({
       const toleranceBoxSvg = 30 * screenToSvg;
       const halfW = (item.height * METER_TO_PX) / 2 + toleranceBoxSvg;
       const halfH = (item.width * METER_TO_PX) / 2 + toleranceBoxSvg;
-      if (Math.abs(localTapX) <= halfW && Math.abs(localTapY) <= halfH) {
+      if (Math.abs(localTapXScaled) <= halfW && Math.abs(localTapYScaled) <= halfH) {
          if (itemArea < bestBoxArea) {
             bestBoxArea = itemArea;
             bestBoxId = item.id;
@@ -307,211 +404,345 @@ export const BoundaryEditor = memo(function BoundaryEditor({
       return bestBoxId;
     }
 
-    return null;
+    return null;  
   };
 
   const panResponder = useMemo(() =>
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onPanResponderGrant: (evt) => {
-        const hitId = hitTest(evt.nativeEvent.locationX, evt.nativeEvent.locationY);
+        const locX = evt.nativeEvent.locationX;
+        const locY = evt.nativeEvent.locationY;
+        if (typeof locX !== 'number' || typeof locY !== 'number') return;
         
-        if (
-          hitId === "boundary-drag-handle" ||
-          (hitId && (hitId.startsWith("boundary-") || hitId === "boundary-interior"))
-        ) {
-           activeDragRef.current = { 
-             type: "moveBoundary", 
-             startBoundaryPosition: { ...(boundaryPositionRef.current || { x: 0, y: 0 }) }
-           };
-        } else if (hitId && selectedItemIdsRef.current.includes(hitId)) {
-           const starts = selectedItemIdsRef.current.map(id => {
-             const it = itemsRef.current.find(i => i.id === id);
-             return { id, x: it?.x || 0, y: it?.y || 0, width: it?.width || 0, height: it?.height || 0, rotation: it?.rotation || 0, scale: it?.scale || 1, lines: it?.lines || [] };
-           });
-           activeDragRef.current = { type: "items", ids: selectedItemIdsRef.current, startPositions: starts };
-        } else {
-           activeDragRef.current = { type: "camera", startCamera: cameraRef.current };
-        }
+        try {
+          const coords = screenToDesignMeters(locX, locY, {
+            svgSize: svgSizeRef.current,
+            camera: cameraRef.current,
+            boundaryWidthM: boundaryWidthRef.current,
+            boundaryHeightM: boundaryHeightRef.current,
+            frame: { originNorthM: 0, originEastM: 0 }
+          });
+
+          if (activeToolRef.current === "LINE") {
+            const snapPt = findSnapCandidate(coords, worldLinesRef.current, cameraRef.current.zoom) || snapToGrid(coords, 0.1);
+            drawingLineStart.current = snapPt;
+            setPointerCoords(snapPt);
+            activeDragRef.current = { type: "draw" as any };
+            return;
+          }
+
+          if (activeToolRef.current === "FREEHAND") {
+            drawingFreehandVertices.current = [coords];
+            setFreehandPoints([coords]);
+            activeDragRef.current = { type: "freehand" as any };
+            return;
+          }
+
+          setPointerCoords(coords);
+
+          const hitId = hitTest(locX, locY);
+          
+          if (
+            hitId === "boundary-drag-handle" ||
+            (hitId && (hitId.startsWith("boundary-") || hitId === "boundary-interior"))
+          ) {
+             activeDragRef.current = { 
+               type: "moveBoundary", 
+               startBoundaryPosition: { ...(boundaryPositionRef.current || { x: 0, y: 0 }) }
+             };
+          } else if (hitId && selectedItemIdsRef.current.includes(hitId)) {
+             const starts = selectedItemIdsRef.current.map(id => {
+               const it = itemsRef.current.find(i => i.id === id);
+               return { id, x: it?.x || 0, y: it?.y || 0, width: it?.width || 0, height: it?.height || 0, rotation: it?.rotation || 0, scale: it?.scale || 1, lines: it?.lines || [] };
+             });
+             activeDragRef.current = { type: "items", ids: selectedItemIdsRef.current, startPositions: starts };
+             if (onDragStartRef.current) onDragStartRef.current();
+          } else {
+             activeDragRef.current = { type: "camera", startCamera: cameraRef.current };
+          }
+        } catch (err) {}
       },
       onPanResponderMove: (evt, gestureState) => {
-        const dragData = activeDragRef.current;
-        if (!dragData) return;
+        const locX = evt.nativeEvent.locationX;
+        const locY = evt.nativeEvent.locationY;
+        if (typeof locX !== 'number' || typeof locY !== 'number') return;
         
-        const touches = evt.nativeEvent.touches;
-        if (touches.length >= 2) {
-           const t1 = touches[0];
-           const t2 = touches[1];
-           const currentDist = Math.hypot(t2.pageX - t1.pageX, t2.pageY - t1.pageY);
-           const currentAngle = Math.atan2(t2.pageY - t1.pageY, t2.pageX - t1.pageX) * (180 / Math.PI);
-           
-           if (!dragData.pinchState) {
-               if (dragData.type === "camera") {
-                   dragData.pinchState = { initialDist: currentDist, initialAngle: currentAngle, startCamera: cameraRef.current };
-               } else if (dragData.type === "moveBoundary") {
-                   return; // Ignore pinch for moveBoundary
-               } else {
-                   const starts = dragData.ids!.map(id => {
-                     const it = itemsRef.current.find(i => i.id === id);
-                     return { id, x: it?.x || 0, y: it?.y || 0, width: it?.width || 0, height: it?.height || 0, rotation: it?.rotation || 0, scale: it?.scale || 1, lines: it?.lines || [] };
-                   });
-                   dragData.pinchState = { initialDist: currentDist, initialAngle: currentAngle, startPos: starts };
-               }
-           }
-           
-            if (dragData.type === "camera") {
-                if (lockZoomRef.current) return;
-                const initialDist = dragData.pinchState.initialDist;
-                if (initialDist === 0) return;
-                const scaleMultiplier = currentDist / initialDist;
-                rafCameraRef.current = {
-                   ...dragData.pinchState.startCamera!,
-                   zoom: Math.max(0.01, Math.min(10, dragData.pinchState.startCamera!.zoom * scaleMultiplier))
-                };
-                scheduleRaf();
-                return;
+        try {
+          const coords = screenToDesignMeters(locX, locY, {
+            svgSize: svgSizeRef.current,
+            camera: cameraRef.current,
+            boundaryWidthM: boundaryWidthRef.current,
+            boundaryHeightM: boundaryHeightRef.current,
+            frame: { originNorthM: 0, originEastM: 0 }
+          });
+
+          const dragData = activeDragRef.current;
+          if (!dragData) return;
+
+          if (dragData.type === "draw" as any) {
+            const snapPt = findSnapCandidate(coords, worldLinesRef.current, cameraRef.current.zoom) || snapToGrid(coords, 0.1);
+            setPointerCoords(snapPt);
+            return;
+          }
+
+          if (dragData.type === "freehand" as any) {
+            const last = drawingFreehandVertices.current[drawingFreehandVertices.current.length - 1];
+            if (last) {
+              const dx = coords.eastM - last.eastM;
+              const dy = coords.northM - last.northM;
+              const dist = Math.hypot(dx, dy);
+              if (dist >= 0.01) {
+                drawingFreehandVertices.current.push(coords);
+                setFreehandPoints([...drawingFreehandVertices.current]);
+              }
             }
-            
-            if (lockPanDragRef.current) return;
-           
-           const initialDist = dragData.pinchState.initialDist;
-           const initialAngle = dragData.pinchState.initialAngle;
-           const scaleMultiplier = initialDist === 0 ? 1 : currentDist / initialDist;
-           const angleDelta = currentAngle - initialAngle;
-           
-           const mode = multiTouchModeRef.current;
-           const appliedScale = mode === "rotate" ? 1 : Math.max(0.1, scaleMultiplier);
-           const appliedRot = mode === "scale" ? 0 : angleDelta;
-           
-           const starts = dragData.pinchState.startPos!;
-           let cX = 0, cY = 0;
-           if (starts.length > 0) {
-              starts.forEach(p => { cX += p.x; cY += p.y; });
-              cX /= starts.length;
-              cY /= starts.length;
+            return;
+          }
+
+          setPointerCoords(coords);
+
+          const touches = evt.nativeEvent.touches;
+          if (touches.length >= 2) {
+             const t1 = touches[0];
+             const t2 = touches[1];
+             const currentDist = Math.hypot(t2.pageX - t1.pageX, t2.pageY - t1.pageY);
+             const currentAngle = Math.atan2(t2.pageY - t1.pageY, t2.pageX - t1.pageX) * (180 / Math.PI);
+             
+             if (!dragData.pinchState) {
+                 if (dragData.type === "camera") {
+                     dragData.pinchState = { initialDist: currentDist, initialAngle: currentAngle, startCamera: cameraRef.current };
+                 } else if (dragData.type === "moveBoundary") {
+                     return; // Ignore pinch for moveBoundary
+                 } else {
+                     const starts = dragData.ids!.map(id => {
+                       const it = itemsRef.current.find(i => i.id === id);
+                       return { id, x: it?.x || 0, y: it?.y || 0, width: it?.width || 0, height: it?.height || 0, rotation: it?.rotation || 0, scale: it?.scale || 1, lines: it?.lines || [] };
+                     });
+                     dragData.pinchState = { initialDist: currentDist, initialAngle: currentAngle, startPos: starts };
+                 }
+             }
+             
+              if (dragData.type === "camera") {
+                  if (lockZoomRef.current) return;
+                  const initialDist = dragData.pinchState.initialDist;
+                  if (initialDist === 0) return;
+                  const scaleMultiplier = currentDist / initialDist;
+                  rafCameraRef.current = {
+                     ...dragData.pinchState.startCamera!,
+                     zoom: Math.max(0.01, Math.min(10, dragData.pinchState.startCamera!.zoom * scaleMultiplier))
+                  };
+                  scheduleRaf();
+                  return;
+              }
+              
+              if (lockPanDragRef.current) return;
+             
+             const initialDist = dragData.pinchState.initialDist;
+             const initialAngle = dragData.pinchState.initialAngle;
+             const scaleMultiplier = initialDist === 0 ? 1 : currentDist / initialDist;
+             const angleDelta = currentAngle - initialAngle;
+             
+             const mode = multiTouchModeRef.current;
+             const appliedScale = mode === "rotate" ? 1 : Math.max(0.1, scaleMultiplier);
+             const appliedRot = mode === "scale" ? 0 : angleDelta;
+             
+             const starts = dragData.pinchState.startPos!;
+             let cX = 0, cY = 0;
+             if (starts.length > 0) {
+                starts.forEach(p => { cX += p.x; cY += p.y; });
+                cX /= starts.length;
+                cY /= starts.length;
+             }
+             
+             const rad = -(appliedRot) * Math.PI / 180;
+             const cosA = Math.cos(rad);
+             const sinA = Math.sin(rad);
+             
+             const bpX = boundaryPositionRef.current?.x || 0;
+             const bpY = boundaryPositionRef.current?.y || 0;
+  
+             const leftBoundary = bpX - boundaryWidthRef.current / 2 + indentSpacingRef.current;
+             const rightBoundary = bpX + boundaryWidthRef.current / 2 - indentSpacingRef.current;
+             const topBoundary = bpY - boundaryHeightRef.current / 2 + indentSpacingRef.current;
+             const bottomBoundary = bpY + boundaryHeightRef.current / 2 - indentSpacingRef.current;
+             
+             setItemsRef.current(prev => prev.map(item => {
+                const startP = starts.find(p => p.id === item.id);
+                if (startP) {
+                   const dx = startP.x - cX;
+                   const dy = startP.y - cY;
+                   const sdx = dx * appliedScale;
+                   const sdy = dy * appliedScale;
+                   
+                   let newX = cX + sdx * cosA - sdy * sinA;
+                   let newY = cY + sdx * sinA + sdy * cosA;
+                   
+                   const newW = startP.width * appliedScale;
+                   const newH = startP.height * appliedScale;
+                   
+                   newX = Math.max(leftBoundary + newW / 2, Math.min(newX, rightBoundary - newW / 2));
+                   newY = Math.max(topBoundary + newH / 2, Math.min(newY, bottomBoundary - newH / 2));
+                   
+                   return {
+                      ...item,
+                      rotation: (startP.rotation + appliedRot) % 360,
+                      scale: startP.scale * appliedScale,
+                      width: newW,
+                      height: newH,
+                      x: newX,
+                      y: newY,
+                       lines: startP.lines
+                    };
+                 }
+                 return item;
+              }));
+             return;
+          } else {
+             if (dragData.pinchState) {
+                 dragData.pinchState = undefined;
+                 if (dragData.type === "camera") {
+                     dragData.startCamera = cameraRef.current;
+                 }
+             }
+          }
+  
+          const zoom = cameraRef.current.zoom;
+          const sz = svgSizeRef.current;
+          const screenW = sz.width > 0 ? sz.width : 400;
+          const screenH = sz.height > 0 ? sz.height : 400;
+          const bwVal = boundaryWidthRef.current;
+          const bhVal = boundaryHeightRef.current;
+  
+          const dx = gestureState.dx * (bwVal / (screenW * zoom));
+          const dy = -gestureState.dy * (bhVal / (screenH * zoom));
+  
+           if (dragData.type === "moveBoundary") {
+              if (lockPanDragRef.current) return;
+              const newX = dragData.startBoundaryPosition!.x + dx;
+              const newY = dragData.startBoundaryPosition!.y + dy;
+              onMoveBoundaryRef.current?.(newX, newY);
+              return;
            }
-           
-           const rad = -(appliedRot) * Math.PI / 180;
-           const cosA = Math.cos(rad);
-           const sinA = Math.sin(rad);
-           
+  
+           if (dragData.type === "camera") {
+              if (lockPanDragRef.current) return;
+              const camDx = -gestureState.dx * (bwVal / (screenW * zoom));
+              const camDy = gestureState.dy * (bhVal / (screenH * zoom));
+              rafCameraRef.current = {
+                 ...dragData.startCamera!,
+                 x: dragData.startCamera!.x + camDx,
+                 y: dragData.startCamera!.y + camDy
+              };
+              scheduleRaf();
+              return;
+           }
+  
+           if (lockPanDragRef.current) return;
+  
+           const bw = boundaryWidthRef.current;
+           const bh = boundaryHeightRef.current;
+           const indent = indentSpacingRef.current;
+  
            const bpX = boundaryPositionRef.current?.x || 0;
            const bpY = boundaryPositionRef.current?.y || 0;
-
-           const leftBoundary = bpX - boundaryWidthRef.current / 2 + indentSpacingRef.current;
-           const rightBoundary = bpX + boundaryWidthRef.current / 2 - indentSpacingRef.current;
-           const topBoundary = bpY - boundaryHeightRef.current / 2 + indentSpacingRef.current;
-           const bottomBoundary = bpY + boundaryHeightRef.current / 2 - indentSpacingRef.current;
+  
+           const updates: Record<string, {x: number, y: number}> = {};
+  
+           dragData.startPositions!.forEach(start => {
+             let newX = start.x + dx;
+             let newY = start.y + dy;
+  
+             const leftIndent = bpX - bw / 2 + indent;
+             const rightIndent = bpX + bw / 2 - indent;
+             const topIndent = bpY - bh / 2 + indent;
+             const bottomIndent = bpY + bh / 2 - indent;
+             const halfW = start.width / 2;
+             const halfH = start.height / 2;
+  
+             newX = Math.max(leftIndent + halfW, Math.min(newX, rightIndent - halfW));
+             newY = Math.max(topIndent + halfH, Math.min(newY, bottomIndent - halfH));
+  
+             updates[start.id] = {x: newX, y: newY};
+           });
            
-           setItemsRef.current(prev => prev.map(item => {
-              const startP = starts.find(p => p.id === item.id);
-              if (startP) {
-                 const dx = startP.x - cX;
-                 const dy = startP.y - cY;
-                 const sdx = dx * appliedScale;
-                 const sdy = dy * appliedScale;
-                 
-                 let newX = cX + sdx * cosA - sdy * sinA;
-                 let newY = cY + sdx * sinA + sdy * cosA;
-                 
-                 const newW = startP.width * appliedScale;
-                 const newH = startP.height * appliedScale;
-                 
-                 newX = Math.max(leftBoundary + newW / 2, Math.min(newX, rightBoundary - newW / 2));
-                 newY = Math.max(topBoundary + newH / 2, Math.min(newY, bottomBoundary - newH / 2));
-                 
-                 return {
-                    ...item,
-                    rotation: (startP.rotation + appliedRot) % 360,
-                    scale: startP.scale * appliedScale,
-                    width: newW,
-                    height: newH,
-                    x: newX,
-                    y: newY,
-                    lines: startP.lines.map(l => ({
-                        ...l,
-                        from: { ...l.from, x: l.from.x * appliedScale, y: l.from.y * appliedScale },
-                        to: { ...l.to, x: l.to.x * appliedScale, y: l.to.y * appliedScale },
-                    }))
-                 };
-              }
-              return item;
-           }));
-           return;
-        } else {
-           if (dragData.pinchState) {
-               dragData.pinchState = undefined;
-               if (dragData.type === "camera") {
-                   dragData.startCamera = cameraRef.current;
-               }
-           }
-        }
-
-        const zoom = cameraRef.current.zoom;
-        const sz = svgSizeRef.current;
-        const screenW = sz.width > 0 ? sz.width : 400;
-        const screenH = sz.height > 0 ? sz.height : 400;
-        const bwVal = boundaryWidthRef.current;
-        const bhVal = boundaryHeightRef.current;
-
-        const dx = gestureState.dx * (bwVal / (screenW * zoom));
-        const dy = -gestureState.dy * (bhVal / (screenH * zoom));
-
-         if (dragData.type === "moveBoundary") {
-            if (lockPanDragRef.current) return;
-            const newX = dragData.startBoundaryPosition!.x + dx;
-            const newY = dragData.startBoundaryPosition!.y + dy;
-            onMoveBoundaryRef.current?.(newX, newY);
-            return;
-         }
-
-         if (dragData.type === "camera") {
-            if (lockPanDragRef.current) return;
-            const camDx = -gestureState.dx * (bwVal / (screenW * zoom));
-            const camDy = gestureState.dy * (bhVal / (screenH * zoom));
-            rafCameraRef.current = {
-               ...dragData.startCamera!,
-               x: dragData.startCamera!.x + camDx,
-               y: dragData.startCamera!.y + camDy
-            };
-            scheduleRaf();
-            return;
-         }
-
-         if (lockPanDragRef.current) return;
-
-         const bw = boundaryWidthRef.current;
-         const bh = boundaryHeightRef.current;
-         const indent = indentSpacingRef.current;
-
-         const bpX = boundaryPositionRef.current?.x || 0;
-         const bpY = boundaryPositionRef.current?.y || 0;
-
-         const updates: Record<string, {x: number, y: number}> = {};
-
-         dragData.startPositions!.forEach(start => {
-           let newX = start.x + dx;
-           let newY = start.y + dy;
-
-           const leftIndent = bpX - bw / 2 + indent;
-           const rightIndent = bpX + bw / 2 - indent;
-           const topIndent = bpY - bh / 2 + indent;
-           const bottomIndent = bpY + bh / 2 - indent;
-           const halfW = start.width / 2;
-           const halfH = start.height / 2;
-
-           newX = Math.max(leftIndent + halfW, Math.min(newX, rightIndent - halfW));
-           newY = Math.max(topIndent + halfH, Math.min(newY, bottomIndent - halfH));
-
-           updates[start.id] = {x: newX, y: newY};
-         });
-         
-         rafItemsFnRef.current = prev => prev.map(item => updates[item.id] ? { ...item, x: updates[item.id].x, y: updates[item.id].y } : item);
-         scheduleRaf();
+           rafItemsFnRef.current = prev => prev.map(item => updates[item.id] ? { ...item, x: updates[item.id].x, y: updates[item.id].y } : item);
+           scheduleRaf();
+        } catch (err) {}
       },
       onPanResponderRelease: (evt, gestureState) => {
+        setPointerCoords(null);
         const dragData = activeDragRef.current;
         activeDragRef.current = null;
+
+        if (dragData && dragData.type === "draw" as any) {
+          const locX = evt.nativeEvent.locationX;
+          const locY = evt.nativeEvent.locationY;
+          if (typeof locX === 'number' && typeof locY === 'number') {
+            try {
+              const coords = screenToDesignMeters(locX, locY, {
+                svgSize: svgSizeRef.current,
+                camera: cameraRef.current,
+                boundaryWidthM: boundaryWidthRef.current,
+                boundaryHeightM: boundaryHeightRef.current,
+                frame: { originNorthM: 0, originEastM: 0 }
+              });
+              const snapPt = findSnapCandidate(coords, worldLinesRef.current, cameraRef.current.zoom) || snapToGrid(coords, 0.1);
+              if (drawingLineStart.current) {
+                const dx = snapPt.eastM - drawingLineStart.current.eastM;
+                const dy = snapPt.northM - drawingLineStart.current.northM;
+                if (Math.hypot(dx, dy) > 0.05) {
+                  if (onAddEntityRef.current) {
+                    const newEntity = createDesignEntity(
+                      `line-${Date.now()}`,
+                      "LINE",
+                      "marking",
+                      [drawingLineStart.current, snapPt]
+                    );
+                    onAddEntityRef.current(newEntity);
+                  }
+                }
+              }
+            } catch (err) {}
+          }
+          drawingLineStart.current = null;
+          return;
+        }
+
+        if (dragData && dragData.type === "freehand" as any) {
+          try {
+            const rawPoints = drawingFreehandVertices.current;
+            if (rawPoints.length >= 2) {
+              const simplified = simplifyPath(rawPoints, 0.005);
+              let strokeLen = 0;
+              for (let i = 0; i < simplified.length - 1; i++) {
+                strokeLen += Math.hypot(
+                  simplified[i+1].eastM - simplified[i].eastM,
+                  simplified[i+1].northM - simplified[i].northM
+                );
+              }
+
+              if (strokeLen >= 0.02) {
+                if (onAddEntityRef.current) {
+                  const newEntity = createDesignEntity(
+                    `freehand-${Date.now()}`,
+                    "FREEHAND",
+                    "marking",
+                    simplified
+                  );
+                  onAddEntityRef.current(newEntity);
+                }
+              }
+            }
+          } catch (err) {}
+          drawingFreehandVertices.current = [];
+          setFreehandPoints([]);
+          return;
+        }
+
+        if (dragData && dragData.type === "items") {
+          if (onDragEndRef.current) onDragEndRef.current();
+        }
         
         if (Math.abs(gestureState.dx) < 3 && Math.abs(gestureState.dy) < 3) {
           const touch = evt.nativeEvent;
@@ -525,21 +756,21 @@ export const BoundaryEditor = memo(function BoundaryEditor({
                 const tappedItem = itemsRef.current.find(i => i.id === nearestId);
                 
                 if (tappedItem?.groupId) {
-                  const groupItemIds = itemsRef.current
-                    .filter(i => i.groupId === tappedItem.groupId)
-                    .map(i => i.id);
-                  
-                  if (currentSelected.length > 0 && currentSelected.every(id => groupItemIds.includes(id))) {
-                    setSelectedItemIdsRef.current([]);
-                  } else {
-                    setSelectedItemIdsRef.current(groupItemIds);
-                  }
+                   const groupItemIds = itemsRef.current
+                     .filter(i => i.groupId === tappedItem.groupId)
+                     .map(i => i.id);
+                   
+                   if (currentSelected.length > 0 && currentSelected.every(id => groupItemIds.includes(id))) {
+                     setSelectedItemIdsRef.current([]);
+                   } else {
+                     setSelectedItemIdsRef.current(groupItemIds);
+                   }
                 } else {
-                  if (currentSelected.includes(nearestId)) {
-                     setSelectedItemIdsRef.current(currentSelected.filter((id) => id !== nearestId));
-                  } else {
-                     setSelectedItemIdsRef.current(multiTouchModeRef.current === "scale" ? [...currentSelected, nearestId] : [nearestId]);
-                  }
+                   if (currentSelected.includes(nearestId)) {
+                      setSelectedItemIdsRef.current(currentSelected.filter((id) => id !== nearestId));
+                   } else {
+                      setSelectedItemIdsRef.current(multiTouchModeRef.current === "scale" ? [...currentSelected, nearestId] : [nearestId]);
+                   }
                 }
              }
           } else {
@@ -548,11 +779,28 @@ export const BoundaryEditor = memo(function BoundaryEditor({
         }
       },
       onPanResponderTerminate: () => {
+        setPointerCoords(null);
+        const dragData = activeDragRef.current;
         activeDragRef.current = null;
+        if (dragData && dragData.type === "draw" as any) {
+          drawingLineStart.current = null;
+        } else if (dragData && dragData.type === "freehand" as any) {
+          drawingFreehandVertices.current = [];
+          setFreehandPoints([]);
+        } else if (dragData && dragData.type === "items") {
+          if (onDragEndRef.current) onDragEndRef.current();
+        }
       }
     }),
     []
   );
+
+  const snapIndicator = useMemo(() => {
+    if (!pointerCoords || activeTool !== "LINE") return null;
+    const snapped = findSnapCandidate(pointerCoords, worldLines, camera.zoom, 100, 1.5);
+    if (snapped) return snapped;
+    return null;
+  }, [pointerCoords, worldLines, camera.zoom, activeTool]);
 
   return (
     <View 
@@ -571,6 +819,51 @@ export const BoundaryEditor = memo(function BoundaryEditor({
           width={boundaryWidth * METER_TO_PX}
           height={boundaryHeight * METER_TO_PX}
           fill="#f1f5f9"
+          stroke="#cbd5e1"
+          strokeWidth={2}
+        />
+        {/* Cartesian Grid System (Phase 2) */}
+        <Path
+          d={gridGeom.minorD}
+          stroke="#cbd5e1"
+          strokeWidth={0.5 / camera.zoom}
+          fill="none"
+          opacity={0.4}
+        />
+        <Path
+          d={gridGeom.majorD}
+          stroke="#cbd5e1"
+          strokeWidth={1.0 / camera.zoom}
+          fill="none"
+          opacity={0.8}
+        />
+        {/* Origin Axes (Frame Origin at 0,0) */}
+        {gridGeom.showVerticalAxis && (
+          <Line
+            x1={0}
+            y1={gridGeom.minYSvg}
+            x2={0}
+            y2={gridGeom.maxYSvg}
+            stroke="#64748b"
+            strokeWidth={1.5 / camera.zoom}
+          />
+        )}
+        {gridGeom.showHorizontalAxis && (
+          <Line
+            x1={gridGeom.minXSvg}
+            y1={0}
+            x2={gridGeom.maxXSvg}
+            y2={0}
+            stroke="#64748b"
+            strokeWidth={1.5 / camera.zoom}
+          />
+        )}
+        <Rect
+          x={cx - boundaryWidth * METER_TO_PX / 2}
+          y={cy - boundaryHeight * METER_TO_PX / 2}
+          width={boundaryWidth * METER_TO_PX}
+          height={boundaryHeight * METER_TO_PX}
+          fill="none"
           stroke={selectedItemIds.includes("boundary") ? "#ef4444" : "#0f172a"}
           strokeWidth={selectedItemIds.includes("boundary") ? 4 / camera.zoom : 3 / camera.zoom}
           strokeLinejoin="round"
@@ -674,13 +967,13 @@ export const BoundaryEditor = memo(function BoundaryEditor({
           return (
             <G 
               key={item.id} 
-              transform={`translate(${item.x * METER_TO_PX}, ${-item.y * METER_TO_PX}) rotate(${item.rotation})`}
+              transform={`translate(${item.x * METER_TO_PX}, ${-item.y * METER_TO_PX}) rotate(${item.rotation}) scale(${item.scale || 1})`}
             >
                {/* Item SVG Lines - batched into single <Path> per item (Step 4) */}
                <Path
                  d={item.lines.map(l => `M${l.from.y * METER_TO_PX} ${-l.from.x * METER_TO_PX}L${l.to.y * METER_TO_PX} ${-l.to.x * METER_TO_PX}`).join('')}
                  stroke={isSelected ? "#ef4444" : "#0f172a"}
-                 strokeWidth={isSelected ? (3 * sizeScale) / camera.zoom : (2 * sizeScale) / camera.zoom}
+                 strokeWidth={isSelected ? ((3 * sizeScale) / camera.zoom) / (item.scale || 1) : ((2 * sizeScale) / camera.zoom) / (item.scale || 1)}
                  strokeLinecap="round"
                  fill="none"
                  opacity={sketchMode && !isSelected ? 0.2 : 1.0}
@@ -688,6 +981,42 @@ export const BoundaryEditor = memo(function BoundaryEditor({
             </G>
           );
         })}
+
+        {/* Active drawing rubber-band line preview */}
+        {activeTool === "LINE" && drawingLineStart.current && pointerCoords && (
+          <Line
+            x1={drawingLineStart.current.eastM * METER_TO_PX}
+            y1={-drawingLineStart.current.northM * METER_TO_PX}
+            x2={pointerCoords.eastM * METER_TO_PX}
+            y2={-pointerCoords.northM * METER_TO_PX}
+            stroke="#ef4444"
+            strokeWidth={3.5 / camera.zoom}
+            strokeDasharray={`${6 / camera.zoom},${4 / camera.zoom}`}
+          />
+        )}
+
+        {/* Active freehand drawing preview */}
+        {activeTool === "FREEHAND" && freehandPoints.length > 1 && (
+          <Polyline
+            points={freehandPoints.map(p => `${p.eastM * METER_TO_PX},${-p.northM * METER_TO_PX}`).join(" ")}
+            stroke="#ef4444"
+            strokeWidth={3.5 / camera.zoom}
+            fill="none"
+          />
+        )}
+
+        {/* Snap endpoint indicator (red box) */}
+        {snapIndicator && (
+          <Rect
+            x={snapIndicator.eastM * METER_TO_PX - 8 / camera.zoom}
+            y={-snapIndicator.northM * METER_TO_PX - 8 / camera.zoom}
+            width={16 / camera.zoom}
+            height={16 / camera.zoom}
+            fill="none"
+            stroke="#ef4444"
+            strokeWidth={2.5 / camera.zoom}
+          />
+        )}
       </Svg>
 
       {/* Floating Control Panel for Lock Toggles */}
@@ -757,6 +1086,34 @@ export const BoundaryEditor = memo(function BoundaryEditor({
           </G>
         </Svg>
       </View>
+
+      {/* Floating Coordinate HUD Readout (Phase 2) */}
+      {pointerCoords && (
+        <View style={{
+          position: "absolute",
+          bottom: 16,
+          right: 16,
+          backgroundColor: "rgba(15, 23, 42, 0.9)",
+          borderRadius: 8,
+          paddingHorizontal: 12,
+          paddingVertical: 8,
+          borderWidth: 1,
+          borderColor: "rgba(255, 255, 255, 0.15)",
+          shadowColor: "#000",
+          shadowOffset: { width: 0, height: 2 },
+          shadowOpacity: 0.25,
+          shadowRadius: 4,
+          elevation: 5,
+          zIndex: 50,
+        }}>
+          <Text style={{ color: "#94a3b8", fontSize: 10, fontWeight: "800", letterSpacing: 0.5, textTransform: "uppercase" }}>
+            Design Coordinates
+          </Text>
+          <Text style={{ color: "#38bdf8", fontSize: 14, fontWeight: "700", marginTop: 2, fontFamily: "monospace" }}>
+            N: {pointerCoords.northM.toFixed(3)}m  E: {pointerCoords.eastM.toFixed(3)}m
+          </Text>
+        </View>
+      )}
     </View>
   );
 }, (prev, next) => {

@@ -95,6 +95,7 @@ import {
   stagedMissionMatchesId,
   waypointsToPlanLines,
 } from "./src/utils/stagedMissionHydration";
+import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
 
 LogBox.ignoreLogs(["Maximum update depth exceeded"]);
 
@@ -7166,7 +7167,7 @@ function FieldsPage({
           setVerifiedAlignmentRequest({ ...payload });
           setAlignmentResult({
             method: data.method ?? null,
-            scale: coerceFiniteNumber(data.scale),
+            scale: enforceAlignmentScale(coerceFiniteNumber(data.scale) ?? 1.0),
             rotation_deg: coerceFiniteNumber(data.rotation_deg),
             offset_n: coerceFiniteNumber(data.offset_n),
             offset_e: coerceFiniteNumber(data.offset_e),
