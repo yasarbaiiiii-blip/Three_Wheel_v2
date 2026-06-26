@@ -3943,7 +3943,12 @@ function HomeView({
                         <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
                           <Pressable
                             onPress={() => virtualJoystick.acquire()}
-                            disabled={!canAcquireJoystick || virtualJoystick.state === "ACQUIRING" || hasJoystickLease}
+                            disabled={
+                              !canAcquireJoystick ||
+                              virtualJoystick.state === "ACQUIRING" ||
+                              virtualJoystick.state === "RELEASING" ||
+                              hasJoystickLease
+                            }
                             style={{
                               flex: 1,
                               height: 36,

@@ -5,8 +5,11 @@ import {
   backgroundJoystickState,
   canAcquireJoystick,
   cleanupPlanForJoystick,
+  connectedJoystickState,
   joystickIntentDeadman,
   joystickIntentIsCentered,
+  resolveAcquireErrorState,
+  shouldRecoverFromInactiveTelemetry,
   telemetryInactiveClearsLocalLease,
 } from "./joystickFrontendSafety.ts";
 
@@ -67,6 +70,27 @@ test("release cleanup forces neutral release stop and local clear", () => {
     clearLocalControl: true,
     nextState: "AVAILABLE",
   });
+});
+
+test("acquire rejection always leaves ACQUIRING via resolveAcquireErrorState", () => {
+  const cases = [
+    ["mission_active", "BLOCKED_BY_MISSION"],
+    ["joystick_active", "AVAILABLE"],
+    ["manual_control_disabled", "ERROR"],
+    ["transport_unavailable", "AVAILABLE"],
+    ["mode_unavailable", "AVAILABLE"],
+    ["malformed", "AVAILABLE"],
+    ["unexpected_error", "AVAILABLE"],
+  ];
+  for (const [code, expected] of cases) {
+    assert.equal(resolveAcquireErrorState(code, true), expected, code);
+    assert.notEqual(resolveAcquireErrorState(code, true), "ACQUIRING", code);
+  }
+});
+
+test("release confirmation recovery uses AVAILABLE when socket is connected", () => {
+  assert.equal(connectedJoystickState(true), "AVAILABLE");
+  assert.equal(shouldRecoverFromInactiveTelemetry("RELEASING", false), true);
 });
 
 test("background disconnect and unmount cleanup stay distinct", () => {

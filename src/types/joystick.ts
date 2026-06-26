@@ -55,6 +55,7 @@ export interface JoystickReleasedResponse {
   type: "joystick_released";
   state: "inactive";
   reason: string;
+  lease_id?: string;
 }
 
 export interface JoystickErrorEvent {
