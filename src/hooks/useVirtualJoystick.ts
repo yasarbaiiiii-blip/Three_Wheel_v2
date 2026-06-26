@@ -526,7 +526,17 @@ export function useVirtualJoystick({
       if (!hasLease) return;
 
       if (shouldDrive) {
-        scheduleCommandLoop(0);
+        // The command loop started in onAcquired is a self-perpetuating ~18Hz
+        // heartbeat that reads deadmanRef/latestThrottleRef each tick — updating
+        // those refs above is all that's needed to drive. Do NOT call
+        // scheduleCommandLoop here: this runs on every gesture frame (~60-120Hz),
+        // and scheduleCommandLoop cancels+restarts the pending heartbeat timer.
+        // Under that flood the setTimeout(0) gets starved and never fires, so no
+        // command reaches the backend and the lease is revoked (lease_timeout).
+        // Only (re)start the loop if it isn't already running (transient recovery).
+        if (!commandLoopRunningRef.current) {
+          scheduleCommandLoop(0);
+        }
       } else if (joystickIntentIsCentered(processed)) {
         requestUrgentNeutralCommand();
         if (stateRef.current === "ACTIVE") setFrontendState("HELD");
@@ -545,7 +555,9 @@ export function useVirtualJoystick({
         setDisplayIntent({ throttle: 0, steering: 0 });
         requestUrgentNeutralCommand();
         if (leaseIdRef.current) setFrontendState("HELD");
-      } else if (leaseIdRef.current) {
+      } else if (leaseIdRef.current && !commandLoopRunningRef.current) {
+        // Heartbeat already running picks up deadmanRef on its next tick; only
+        // kick it if it somehow stopped while the lease is still held.
         scheduleCommandLoop(0);
       }
     },
