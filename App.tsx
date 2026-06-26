@@ -96,6 +96,13 @@ import {
   waypointsToPlanLines,
 } from "./src/utils/stagedMissionHydration";
 import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
+import type { AutoOriginReference, MapGeometryFrame } from "./src/types/autoOrigin";
+import {
+  applyAutoOriginShift,
+  buildAutoOriginReference,
+  planStartMatchesReference,
+} from "./src/utils/autoOrigin";
+import { resolveMapGeometryFrame } from "./src/utils/mapGeometryProjection";
 
 LogBox.ignoreLogs(["Maximum update depth exceeded"]);
 
@@ -701,109 +708,76 @@ export default function App() {
   const [prevMissionState, setPrevMissionState] = useState<string | null>(null);
 
   const [autoOrigin, setAutoOrigin] = useState(false);
-  const [originShift, setOriginShift] = useState<{ offsetN: number; offsetE: number } | null>(null);
-  const protectedMissionResident = isProtectedMissionResident(loadedPathInspection);
-  const originShiftEligible = autoOrigin && stagedWorkflow.staged !== "verified";
-  const missionStateRef = useRef<string | null>(null);
-
+  const [autoOriginReference, setAutoOriginReference] = useState<AutoOriginReference | null>(null);
   const [alignedRefPoints, setAlignedRefPoints] = useState<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>([]);
+  const protectedMissionResident = isProtectedMissionResident(loadedPathInspection);
+  const autoOriginEligible =
+    autoOrigin &&
+    stagedWorkflow.staged !== "verified" &&
+    alignedRefPoints.length === 0;
+  const missionStateRef = useRef<string | null>(null);
   const [mapViewEnabled, setMapViewEnabled] = useState(false);
-
-  const captureOriginShiftFromTelemetry = useCallback(() => {
-    const posN = telemetrySnapshot?.pos_n;
-    const posE = telemetrySnapshot?.pos_e;
-    if (posN == null || posE == null) return;
-    setOriginShift({ offsetN: posN, offsetE: posE });
-  }, [telemetrySnapshot?.pos_e, telemetrySnapshot?.pos_n]);
 
   const toggleAutoOrigin = useCallback(() => {
     setAutoOrigin((prev) => {
       const next = !prev;
       if (!next) {
-        setOriginShift(null);
-        return next;
-      }
-      if (stagedWorkflow.staged !== "verified") {
-        captureOriginShiftFromTelemetry();
+        setAutoOriginReference(null);
       }
       return next;
     });
-  }, [captureOriginShiftFromTelemetry, stagedWorkflow.staged]);
+  }, []);
 
   useEffect(() => {
-    const state = telemetrySnapshot?.mission_state ?? null;
-    missionStateRef.current = state;
+    missionStateRef.current = telemetrySnapshot?.mission_state ?? null;
+  }, [telemetrySnapshot?.mission_state]);
 
-    if (!originShiftEligible) {
-      setOriginShift(null);
-      return;
+  useEffect(() => {
+    if (!autoOriginEligible) {
+      setAutoOriginReference(null);
     }
+  }, [autoOriginEligible]);
 
-    const posN = telemetrySnapshot?.pos_n;
-    const posE = telemetrySnapshot?.pos_e;
-    if (posN == null || posE == null) return;
-
-    if (state === "running") {
-      // Lock origin to the rover's starting position exactly once per mission.
-      setOriginShift((prev) =>
-        prev === null ? { offsetN: posN, offsetE: posE } : prev
-      );
-      return;
+  useEffect(() => {
+    if (!autoOriginEligible || autoOriginReference) return;
+    const captured = buildAutoOriginReference(sanitizePlanLines(lines), telemetrySnapshot);
+    if (captured) {
+      setAutoOriginReference(captured);
     }
+  }, [autoOriginEligible, autoOriginReference, lines, telemetrySnapshot]);
 
-    // Preview: anchor plan start to live rover pose (idle, paused, completed, or unknown).
-    setOriginShift({ offsetN: posN, offsetE: posE });
-  }, [
-    originShiftEligible,
-    telemetrySnapshot?.pos_n,
-    telemetrySnapshot?.pos_e,
-    telemetrySnapshot?.mission_state,
-  ]);
+  useEffect(() => {
+    if (!autoOriginReference) return;
+    if (!planStartMatchesReference(lines, autoOriginReference)) {
+      setAutoOriginReference(null);
+    }
+  }, [lines, autoOriginReference]);
+
+  const mapSourceLines = useMemo(() => sanitizePlanLines(lines), [lines]);
 
   const displayedLines = useMemo(() => {
-    const base = sanitizePlanLines(lines);
-    if (!originShift) return base;
+    const base = mapSourceLines;
+    if (!autoOriginEligible || !autoOriginReference) return base;
+    return applyAutoOriginShift(base, autoOriginReference);
+  }, [mapSourceLines, autoOriginEligible, autoOriginReference]);
 
-    // Frame alignment with the backend's auto-origin.
-    //
-    // The backend anchors auto-origin missions with anchor="first_waypoint":
-    // it places the FIRST DRIVEN WAYPOINT (the mission start — e.g. the NW
-    // corner of a square, the start of entity 8D) exactly at the rover's pose.
-    // It does NOT place the DXF drawing origin (0,0) there.
-    //
-    // So translating every point by the raw rover pose (+originShift) is wrong:
-    // that pins drawing-origin (0,0) — the SW corner for square_2x2 — onto the
-    // rover, sliding the whole path so the live rover icon lands on the SW
-    // corner instead of the NW start. Anchor the path's first point at the
-    // rover instead, so the drawn path coincides with what the rover executes.
-    const first = getPlanStartPoint(base);
-    const dN = originShift.offsetN - (first?.north ?? 0);
-    const dE = originShift.offsetE - (first?.east ?? 0);
-
-    return base.map((l) => {
-      const shiftedEntity = l.entity ? {
-        ...l.entity,
-        preview_points: l.entity.preview_points?.map(pt => ({
-          ...pt,
-          north: pt.north + dN,
-          east: pt.east + dE,
-        }))
-      } : undefined;
-
-      return {
-        ...l,
-        from: { ...l.from, x: l.from.x + dN, y: l.from.y + dE },
-        to: { ...l.to, x: l.to.x + dN, y: l.to.y + dE },
-        ...(shiftedEntity ? { entity: shiftedEntity } : {}),
-      };
-    });
-  }, [lines, originShift]);
+  const mapGeometryFrame = useMemo(
+    () =>
+      resolveMapGeometryFrame({
+        mode: "fields",
+        alignedRefPoints,
+        stagedVerified: stagedWorkflow.staged === "verified",
+        autoOriginReference,
+        autoOriginEnabled: autoOriginEligible,
+      }),
+    [alignedRefPoints, stagedWorkflow.staged, autoOriginReference, autoOriginEligible]
+  );
 
   // [CANVAS] frame-alignment debug. Logs the auto-origin transform whenever the
   // captured origin, run-state, or rover pose changes, so a wrong rover-icon
   // placement can be diagnosed against the drawn path's first point.
   useEffect(() => {
-    if (!originShiftEligible) return;
+    if (!autoOriginEligible) return;
     const first = getPlanStartPoint(sanitizePlanLines(lines));
     const rover =
       telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
@@ -812,17 +786,20 @@ export default function App() {
     console.log("[CANVAS] frame", JSON.stringify({
       missionRunning,
       missionState: telemetrySnapshot?.mission_state ?? null,
-      originShift,
+      autoOriginReference,
       planFirstPoint: first,
       roverTelemetry: rover,
-      delta: originShift && first
-        ? { dN: originShift.offsetN - first.north, dE: originShift.offsetE - first.east }
+      delta: autoOriginReference && first
+        ? {
+            dN: autoOriginReference.roverNorth - autoOriginReference.planStartNorth,
+            dE: autoOriginReference.roverEast - autoOriginReference.planStartEast,
+          }
         : null,
     }));
   }, [
-    originShiftEligible,
+    autoOriginEligible,
     missionRunning,
-    originShift,
+    autoOriginReference,
     telemetrySnapshot?.mission_state,
     telemetrySnapshot?.pos_n,
     telemetrySnapshot?.pos_e,
@@ -1024,6 +1001,7 @@ export default function App() {
     setLines([]);
     setSelectedLineId(null);
     setImportedPlan(null);
+    setAutoOriginReference(null);
     setLayerVisibility({ boundary: true, marking: true, center: true, transit: true, extension: true });
   };
 
@@ -1081,6 +1059,8 @@ export default function App() {
           if (
             prev.pos_n === data.pos_n &&
             prev.pos_e === data.pos_e &&
+            prev.lat === data.lat &&
+            prev.lon === data.lon &&
             prev.heading_ned_deg === data.heading_ned_deg &&
             prev.rpp_state === data.rpp_state &&
             prev.armed === data.armed &&
@@ -2036,16 +2016,19 @@ export default function App() {
       }
       setMissionRunning(true);
       setWorkflowStep("started", "verified");
-      if (!isStagedStart && autoOrigin && telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null) {
-        setOriginShift({ offsetN: telemetrySnapshot.pos_n, offsetE: telemetrySnapshot.pos_e });
-        // Frame check: backend anchors the mission's FIRST waypoint at this
-        // rover pose. The drawn path's first point should land here too.
-        const planStart = getPlanStartPoint(sanitizePlanLines(lines));
+      if (!isStagedStart && autoOrigin && autoOriginReference) {
+        const planStart = getPlanStartPoint(displayedLines);
         console.log("[CANVAS] start-anchor", JSON.stringify({
-          capturedOrigin: { n: telemetrySnapshot.pos_n, e: telemetrySnapshot.pos_e },
+          capturedOrigin: {
+            n: autoOriginReference.roverNorth,
+            e: autoOriginReference.roverEast,
+          },
           planFirstPoint: planStart,
           expectedDelta: planStart
-            ? { dN: telemetrySnapshot.pos_n - planStart.north, dE: telemetrySnapshot.pos_e - planStart.east }
+            ? {
+                dN: autoOriginReference.roverNorth - autoOriginReference.planStartNorth,
+                dE: autoOriginReference.roverEast - autoOriginReference.planStartEast,
+              }
             : null,
         }));
       }
@@ -2258,7 +2241,8 @@ export default function App() {
       setMissionFileReady(false);
       setMissionLoaded(false);
       setMissionRunning(false);
-      setOriginShift(null);
+      setAutoOrigin(false);
+      setAutoOriginReference(null);
       setExtractedCorners(null);
       setAlignedRefPoints([]);
       setAlignmentResult(null);
@@ -2654,14 +2638,18 @@ export default function App() {
                   onToggleAutoOrigin={toggleAutoOrigin}
                   previewRoverPoint={previewRoverPoint}
                   originShiftKey={
-                    originShift
-                      ? `${originShift.offsetN.toFixed(3)}:${originShift.offsetE.toFixed(3)}`
+                    autoOriginReference
+                      ? `${autoOriginReference.roverNorth.toFixed(3)}:${autoOriginReference.roverEast.toFixed(3)}`
                       : autoOrigin
                         ? "pending"
                         : null
                   }
                   importedPlan={importedPlan}
                   lines={displayedLines}
+                  mapSourceLines={mapSourceLines}
+                  autoOriginReference={autoOriginReference}
+                  mapGeometryFrame={mapGeometryFrame}
+                  autoOriginEnabled={autoOriginEligible}
                   setLines={setLines}
                   selectedLineId={selectedLineId}
                   onSelectLine={setSelectedLineId}
@@ -2744,6 +2732,10 @@ export default function App() {
                   page={page}
                   importedPlan={importedPlan}
                   lines={displayedLines}
+                  mapSourceLines={mapSourceLines}
+                  autoOriginReference={autoOriginReference}
+                  mapGeometryFrame={mapGeometryFrame}
+                  autoOriginEnabled={autoOriginEligible}
                   setLines={setLines}
                   selectedLineId={selectedLineId}
                   backendPaths={backendPaths}
@@ -2989,6 +2981,10 @@ function HomeView({
   onToggleAutoOrigin,
   previewRoverPoint,
   originShiftKey,
+  mapSourceLines,
+  autoOriginReference,
+  mapGeometryFrame,
+  autoOriginEnabled,
   importedPlan,
   lines,
   selectedLineId,
@@ -3066,6 +3062,10 @@ function HomeView({
   onToggleAutoOrigin: () => void;
   previewRoverPoint: { north: number; east: number } | null;
   originShiftKey?: string | null;
+  mapSourceLines: PlanLine[];
+  autoOriginReference: AutoOriginReference | null;
+  mapGeometryFrame: MapGeometryFrame;
+  autoOriginEnabled: boolean;
   importedPlan: ImportedPlan | null;
   lines: PlanLine[];
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
@@ -3564,6 +3564,10 @@ function HomeView({
               <View style={{ flex: 1, position: "relative" }}>
                 <PlanPreview
                   lines={lines}
+                  mapSourceLines={mapSourceLines}
+                  autoOriginReference={autoOriginReference}
+                  mapGeometryFrame={mapGeometryFrame}
+                  autoOriginEnabled={autoOriginEnabled}
                   visibility={layerVisibility}
                   selectedLineId={selectedLineId}
                   onSelectLine={onSelectLine}
@@ -3585,6 +3589,7 @@ function HomeView({
                   isVisualAlignmentMode={isVisualAlignmentMode}
                   visualAlignmentItem={visualAlignmentItem}
                   setVisualAlignmentItem={setVisualAlignmentItem}
+                  stagedVerified={stagedWorkflow.staged === "verified"}
                 />
               </View>
             </View>
@@ -5998,6 +6003,10 @@ function SectionScreen(props: {
   previewRoverPoint: { north: number; east: number } | null;
   importedPlan: ImportedPlan | null;
   lines: PlanLine[];
+  mapSourceLines?: PlanLine[];
+  autoOriginReference?: AutoOriginReference | null;
+  mapGeometryFrame?: MapGeometryFrame;
+  autoOriginEnabled?: boolean;
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   selectedLineId: string | null;
   onBack: () => void;
@@ -6566,6 +6575,10 @@ function FieldsPage({
   importedPlan,
   setImportedPlan,
   lines,
+  mapSourceLines,
+  autoOriginReference = null,
+  mapGeometryFrame = "NONE",
+  autoOriginEnabled = false,
   setLines,
   previewRoverPoint,
   missionRunning,
@@ -6616,6 +6629,10 @@ function FieldsPage({
   importedPlan: ImportedPlan | null;
   setImportedPlan: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
   lines: PlanLine[];
+  mapSourceLines?: PlanLine[];
+  autoOriginReference?: AutoOriginReference | null;
+  mapGeometryFrame?: MapGeometryFrame;
+  autoOriginEnabled?: boolean;
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   previewRoverPoint: { north: number; east: number } | null;
   missionRunning: boolean;
@@ -7340,6 +7357,11 @@ function FieldsPage({
           <View style={{ flex: 1, position: "relative" }}>
             <PlanPreview
               lines={lines}
+              mapSourceLines={mapSourceLines}
+              autoOriginReference={autoOriginReference}
+              mapGeometryFrame={mapGeometryFrame}
+              autoOriginEnabled={autoOriginEnabled}
+              stagedVerified={stagedWorkflow.staged === "verified"}
               visibility={
                 isReordering
                   ? { ...layerVisibility, transit: false, extension: false }
@@ -8882,6 +8904,11 @@ function pickNearestPoint(
 
 function PlanPreview({
   lines,
+  mapSourceLines,
+  autoOriginReference = null,
+  mapGeometryFrame = "NONE",
+  autoOriginEnabled = false,
+  stagedVerified = false,
   visibility,
   selectedLineId,
   onSelectLine,
@@ -8907,6 +8934,11 @@ function PlanPreview({
   setVisualAlignmentItem,
 }: {
   lines: PlanLine[];
+  mapSourceLines?: PlanLine[];
+  autoOriginReference?: AutoOriginReference | null;
+  mapGeometryFrame?: MapGeometryFrame;
+  autoOriginEnabled?: boolean;
+  stagedVerified?: boolean;
   visibility: LayerVisibility;
   selectedLineId: string | null;
   onSelectLine?: (id: string | null) => void;
@@ -9465,8 +9497,18 @@ function PlanPreview({
               pos_n: telemetryPosN,
               pos_e: telemetryPosE,
             } as any}
-            lines={visualAlignmentItem ? [] : filtered}
+            lines={
+              visualAlignmentItem
+                ? []
+                : autoOriginEnabled && mapSourceLines
+                  ? mapSourceLines
+                  : filtered
+            }
             alignedRefPoints={alignedRefPoints}
+            autoOriginReference={autoOriginReference}
+            mapGeometryFrame={mapGeometryFrame}
+            autoOriginEnabled={autoOriginEnabled}
+            stagedVerified={stagedVerified}
             visible={true}
             recenterRoverTrigger={recenterRoverCount}
             recenterPlanTrigger={recenterPlanCount}

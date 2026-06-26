@@ -3,27 +3,19 @@ import { View, StyleSheet, ActivityIndicator, Text } from "react-native";
 import { WebView } from "react-native-webview";
 
 import type { TelemetrySnapshot, PlanLine } from "../types/plan";
+import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
 import { transformVisualDxfPoint } from "../utils/visualAlignment";
+import {
+  projectPlanLineToGpsSegments,
+  projectPlanNorthEastToGps,
+  resolveMapGeometryFrame,
+  resolveMapProjectionOrigin,
+  type MapProjectionOrigin,
+} from "../utils/mapGeometryProjection";
 import type { PlacedItem } from "./BoundaryEditor";
 import type { DesignPreviewAnchor } from "../types/designDocument";
 
 const EARTH_RADIUS = 6378137.0;
-
-/**
- * Project local DXF meters (north/east relative to an origin) back to GPS lat/lon.
- */
-function projectLocalMetersToGps(
-  north: number,
-  east: number,
-  originLat: number,
-  originLon: number
-): { lat: number; lon: number } {
-  const originLatRad = (originLat * Math.PI) / 180;
-  const lat = originLat + (north / EARTH_RADIUS) * (180 / Math.PI);
-  const lon =
-    originLon + (east / (EARTH_RADIUS * Math.cos(originLatRad))) * (180 / Math.PI);
-  return { lat, lon };
-}
 
 function projectGpsToLocalMeters(
   lat: number,
@@ -109,6 +101,10 @@ export interface MapViewProps {
   onSelectionChange?: (ids: string[]) => void;
   multiTouchMode?: "both" | "scale" | "rotate";
   previewAnchor?: DesignPreviewAnchor;
+  autoOriginReference?: AutoOriginReference | null;
+  mapGeometryFrame?: MapGeometryFrame;
+  stagedVerified?: boolean;
+  autoOriginEnabled?: boolean;
 }
 
 /**
@@ -1607,6 +1603,10 @@ export function MapView({
   onSelectionChange,
   multiTouchMode = "both",
   previewAnchor,
+  autoOriginReference = null,
+  mapGeometryFrame,
+  stagedVerified = false,
+  autoOriginEnabled = false,
 
 }: MapViewProps) {
   const webViewRef = useRef<WebView | null>(null);
@@ -1616,128 +1616,121 @@ export function MapView({
   const lastPlacedItemsMsgRef = useRef("");
   const webViewReadyRef = useRef(false);
 
-  const [latchedOrigin, setLatchedOrigin] = useState<{ lat: number; lon: number } | null>(null);
+  /** Templates-only floating preview latch — not used for fields mission geometry. */
+  const [templatesFloatingOrigin, setTemplatesFloatingOrigin] = useState<{ lat: number; lon: number } | null>(null);
 
   useEffect(() => {
-    if (!visible) {
-      setLatchedOrigin(null);
+    if (!visible || mode !== "templates") {
+      setTemplatesFloatingOrigin(null);
       return;
     }
-    if (telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null && !latchedOrigin) {
-      setLatchedOrigin({ lat: telemetrySnapshot.lat, lon: telemetrySnapshot.lon });
+    if (
+      previewAnchor ||
+      (alignedRefPoints && alignedRefPoints.length > 0) ||
+      templatesFloatingOrigin
+    ) {
+      return;
     }
-  }, [visible, telemetrySnapshot?.lat, telemetrySnapshot?.lon, latchedOrigin]);
+    if (telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null) {
+      setTemplatesFloatingOrigin({ lat: telemetrySnapshot.lat, lon: telemetrySnapshot.lon });
+    }
+  }, [
+    visible,
+    mode,
+    previewAnchor,
+    alignedRefPoints,
+    telemetrySnapshot?.lat,
+    telemetrySnapshot?.lon,
+    templatesFloatingOrigin,
+  ]);
 
-  // Helper to resolve origin coordinates
+  const geometryFrame = useMemo(
+    () =>
+      mapGeometryFrame ??
+      resolveMapGeometryFrame({
+        mode,
+        previewAnchor,
+        alignedRefPoints,
+        stagedVerified,
+        autoOriginReference,
+        autoOriginEnabled,
+      }),
+    [
+      mapGeometryFrame,
+      mode,
+      previewAnchor,
+      alignedRefPoints,
+      stagedVerified,
+      autoOriginReference,
+      autoOriginEnabled,
+    ]
+  );
+
+  const projectionOrigin = useMemo((): MapProjectionOrigin | null => {
+    const resolved = resolveMapProjectionOrigin(geometryFrame, {
+      mode,
+      previewAnchor,
+      alignedRefPoints,
+      stagedVerified,
+      autoOriginReference,
+      autoOriginEnabled,
+    });
+    if (resolved) return resolved;
+
+    if (mode === "templates" && templatesFloatingOrigin) {
+      return {
+        frame: "RAW_DESIGN",
+        originLat: templatesFloatingOrigin.lat,
+        originLon: templatesFloatingOrigin.lon,
+        originDxfNorth: 0,
+        originDxfEast: 0,
+      };
+    }
+
+    return null;
+  }, [
+    geometryFrame,
+    mode,
+    previewAnchor,
+    alignedRefPoints,
+    stagedVerified,
+    autoOriginReference,
+    autoOriginEnabled,
+    templatesFloatingOrigin,
+  ]);
+
   const origin = useMemo(() => {
-    let originLat = 28.6139;
-    let originLon = 77.2090;
-    let originDxfX = 0;
-    let originDxfY = 0;
-
-    if (previewAnchor) {
-      originLat = previewAnchor.lat;
-      originLon = previewAnchor.lon;
-      originDxfX = 0;
-      originDxfY = 0;
-    } else if (alignedRefPoints && alignedRefPoints.length > 0) {
-      originLat = alignedRefPoints[0].lat;
-      originLon = alignedRefPoints[0].lon;
-      originDxfX = alignedRefPoints[0].dxf_x;
-      originDxfY = alignedRefPoints[0].dxf_y;
-    } else if (latchedOrigin != null) {
-      originLat = latchedOrigin.lat;
-      originLon = latchedOrigin.lon;
-      originDxfX = 0;
-      originDxfY = 0;
+    if (!projectionOrigin) {
+      return null;
     }
-    return { originLat, originLon, originDxfX, originDxfY };
-  }, [previewAnchor, alignedRefPoints, latchedOrigin]);
+    return {
+      originLat: projectionOrigin.originLat,
+      originLon: projectionOrigin.originLon,
+      originDxfX: projectionOrigin.originDxfEast,
+      originDxfY: projectionOrigin.originDxfNorth,
+      frame: projectionOrigin.frame,
+    };
+  }, [projectionOrigin]);
 
   // Helper to project a single PlanLine to GPS
   const projectLineToGps = useCallback((line: PlanLine) => {
-    const coords: [number, number][] = [];
-    if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
-      for (const pt of line.entity.preview_points) {
-        const gps = projectLocalMetersToGps(
-          pt.north - origin.originDxfY,
-          pt.east - origin.originDxfX,
-          origin.originLat,
-          origin.originLon
-        );
-        coords.push([gps.lat, gps.lon]);
-      }
-    } else if (
-      line.from &&
-      line.to &&
-      Number.isFinite(line.from.x) &&
-      Number.isFinite(line.from.y) &&
-      Number.isFinite(line.to.x) &&
-      Number.isFinite(line.to.y)
-    ) {
-      const fromGps = projectLocalMetersToGps(
-        line.from.x - origin.originDxfY,
-        line.from.y - origin.originDxfX,
-        origin.originLat,
-        origin.originLon
-      );
-      const toGps = projectLocalMetersToGps(
-        line.to.x - origin.originDxfY,
-        line.to.y - origin.originDxfX,
-        origin.originLat,
-        origin.originLon
-      );
-      coords.push([fromGps.lat, fromGps.lon]);
-      coords.push([toGps.lat, toGps.lon]);
+    if (!projectionOrigin) {
+      return { coords: [] as [number, number][], color: "#ef4444", weight: 4 };
     }
+    const coords = projectPlanLineToGpsSegments(line, projectionOrigin);
     return { coords, color: "#ef4444", weight: 4 };
-  }, [origin]);
+  }, [projectionOrigin]);
 
   // Helper to extract GPS vertices for corner point indicators of a line
   const getCornerPointsForLine = useCallback((line: PlanLine) => {
-    const points: { lat: number; lon: number }[] = [];
-    if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
-      for (const pt of line.entity.preview_points) {
-        const gps = projectLocalMetersToGps(
-          pt.north - origin.originDxfY,
-          pt.east - origin.originDxfX,
-          origin.originLat,
-          origin.originLon
-        );
-        points.push({ lat: gps.lat, lon: gps.lon });
-      }
-    } else if (
-      line.from &&
-      line.to &&
-      Number.isFinite(line.from.x) &&
-      Number.isFinite(line.from.y) &&
-      Number.isFinite(line.to.x) &&
-      Number.isFinite(line.to.y)
-    ) {
-      const fromGps = projectLocalMetersToGps(
-        line.from.x - origin.originDxfY,
-        line.from.y - origin.originDxfX,
-        origin.originLat,
-        origin.originLon
-      );
-      const toGps = projectLocalMetersToGps(
-        line.to.x - origin.originDxfY,
-        line.to.y - origin.originDxfX,
-        origin.originLat,
-        origin.originLon
-      );
-      points.push({ lat: fromGps.lat, lon: fromGps.lon });
-      points.push({ lat: toGps.lat, lon: toGps.lon });
-    }
-    return points;
-  }, [origin]);
+    if (!projectionOrigin) return [];
+    const coords = projectPlanLineToGpsSegments(line, projectionOrigin);
+    return coords.map(([lat, lon]) => ({ lat, lon }));
+  }, [projectionOrigin]);
 
   // ── Projected plan lines (DXF → GPS) ──
   const projectedPlanLines = useMemo(() => {
-    if (mode === "templates") {
-      return [];
-    }
-    if (lines.length === 0) {
+    if (mode === "templates" || !projectionOrigin || lines.length === 0) {
       return [];
     }
 
@@ -1746,53 +1739,14 @@ export function MapView({
     for (const line of lines) {
       const color = LAYER_COLORS[line.layer] || "#0f172a";
       const weight = 2;
-
-      // If entity has preview_points, use those for curved paths
-      if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
-        const coords: [number, number][] = [];
-        for (const pt of line.entity.preview_points) {
-          const gps = projectLocalMetersToGps(
-            pt.north - origin.originDxfY,
-            pt.east - origin.originDxfX,
-            origin.originLat,
-            origin.originLon
-          );
-          coords.push([gps.lat, gps.lon]);
-        }
+      const coords = projectPlanLineToGpsSegments(line, projectionOrigin);
+      if (coords.length >= 2) {
         result.push({ coords, color, weight });
-      } else if (
-        line.from &&
-        line.to &&
-        Number.isFinite(line.from.x) &&
-        Number.isFinite(line.from.y) &&
-        Number.isFinite(line.to.x) &&
-        Number.isFinite(line.to.y)
-      ) {
-        const fromGps = projectLocalMetersToGps(
-          line.from.x - origin.originDxfY,
-          line.from.y - origin.originDxfX,
-          origin.originLat,
-          origin.originLon
-        );
-        const toGps = projectLocalMetersToGps(
-          line.to.x - origin.originDxfY,
-          line.to.y - origin.originDxfX,
-          origin.originLat,
-          origin.originLon
-        );
-        result.push({
-          coords: [
-            [fromGps.lat, fromGps.lon],
-            [toGps.lat, toGps.lon],
-          ],
-          color,
-          weight,
-        });
       }
     }
 
     return result;
-  }, [lines, origin, mode]);
+  }, [lines, projectionOrigin, mode]);
 
   // ── Projected boundary box (Templates Mode) ──
   const projectedBoundary = useMemo(() => {
@@ -1811,13 +1765,10 @@ export function MapView({
       { north: bpY - halfH, east: bpX - halfW },
     ];
 
+    if (!projectionOrigin) return null;
+
     const outerGps = outerDxfPoints.map((pt) => {
-      const gps = projectLocalMetersToGps(
-        pt.north - origin.originDxfY,
-        pt.east - origin.originDxfX,
-        origin.originLat,
-        origin.originLon
-      );
+      const gps = projectPlanNorthEastToGps(pt.north, pt.east, projectionOrigin);
       return [gps.lat, gps.lon] as [number, number];
     });
 
@@ -1834,12 +1785,7 @@ export function MapView({
           { north: bpY - indH, east: bpX - indW },
         ];
         indentGps = indentDxfPoints.map((pt) => {
-          const gps = projectLocalMetersToGps(
-            pt.north - origin.originDxfY,
-            pt.east - origin.originDxfX,
-            origin.originLat,
-            origin.originLon
-          );
+          const gps = projectPlanNorthEastToGps(pt.north, pt.east, projectionOrigin);
           return [gps.lat, gps.lon] as [number, number];
         });
       }
@@ -1849,7 +1795,7 @@ export function MapView({
       outer: outerGps,
       indent: indentGps.length > 0 ? indentGps : null,
     };
-  }, [boundaryWidth, boundaryHeight, indentSpacing, origin, boundaryPosition]);
+  }, [boundaryWidth, boundaryHeight, indentSpacing, projectionOrigin, boundaryPosition]);
 
   const projectedBoundaryControlPoints = useMemo(() => {
     if (!showBoundaryPoints || !projectedBoundary?.outer || projectedBoundary.outer.length < 4) return [];
@@ -1869,7 +1815,7 @@ export function MapView({
 
   // ── Projected placed items (Templates Mode) ──
   const projectedPlacedItems = useMemo(() => {
-    if (!placedItems || placedItems.length === 0) return [];
+    if (!placedItems || placedItems.length === 0 || !projectionOrigin) return [];
 
     return placedItems.map((item) => {
       const cos = Math.cos((item.rotation || 0) * Math.PI / 180);
@@ -1884,18 +1830,8 @@ export function MapView({
         const toNorth = toPlaced.north;
         const toEast = toPlaced.east;
 
-        const fromGps = projectLocalMetersToGps(
-          fromNorth - origin.originDxfY,
-          fromEast - origin.originDxfX,
-          origin.originLat,
-          origin.originLon
-        );
-        const toGps = projectLocalMetersToGps(
-          toNorth - origin.originDxfY,
-          toEast - origin.originDxfX,
-          origin.originLat,
-          origin.originLon
-        );
+        const fromGps = projectPlanNorthEastToGps(fromNorth, fromEast, projectionOrigin);
+        const toGps = projectPlanNorthEastToGps(toNorth, toEast, projectionOrigin);
 
         return {
           from: { lat: fromGps.lat, lon: fromGps.lon },
@@ -1917,22 +1853,12 @@ export function MapView({
       const boxGps = cornersLocal.map((c) => {
         const n = (c.n * cos - c.e * sin) * item.scale + item.y;
         const e = (c.n * sin + c.e * cos) * item.scale + item.x;
-        const gps = projectLocalMetersToGps(
-          n - origin.originDxfY,
-          e - origin.originDxfX,
-          origin.originLat,
-          origin.originLon
-        );
+        const gps = projectPlanNorthEastToGps(n, e, projectionOrigin);
         return [gps.lat, gps.lon] as [number, number];
       });
 
       // Center in GPS for rotation anchors
-      const centerGps = projectLocalMetersToGps(
-        item.y - origin.originDxfY,
-        item.x - origin.originDxfX,
-        origin.originLat,
-        origin.originLon
-      );
+      const centerGps = projectPlanNorthEastToGps(item.y, item.x, projectionOrigin);
 
       return {
         id: item.id,
@@ -1948,7 +1874,7 @@ export function MapView({
         selected: selectedItemIds?.includes(item.id) ?? false,
       };
     });
-  }, [placedItems, selectedItemIds, origin]);
+  }, [placedItems, selectedItemIds, projectionOrigin]);
 
   // ── Send data to WebView ──
   const sendToWebView = useCallback(
@@ -1987,7 +1913,12 @@ export function MapView({
     const heading = telemetrySnapshot?.heading_ned_deg;
     
     let nextTargetGps = null;
-    if (telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null && lines.length > 0 && origin.originLat) {
+    if (
+      telemetrySnapshot?.pos_n != null &&
+      telemetrySnapshot?.pos_e != null &&
+      lines.length > 0 &&
+      projectionOrigin
+    ) {
       const realN = telemetrySnapshot.pos_n;
       const realE = telemetrySnapshot.pos_e;
       let nextDist = Infinity;
@@ -2015,11 +1946,10 @@ export function MapView({
       }
       
       if (nextTarget && nextDist < 100) {
-        nextTargetGps = projectLocalMetersToGps(
-          nextTarget.x - origin.originDxfY,
-          nextTarget.y - origin.originDxfX,
-          origin.originLat,
-          origin.originLon
+        nextTargetGps = projectPlanNorthEastToGps(
+          nextTarget.x,
+          nextTarget.y,
+          projectionOrigin
         );
       }
     }
@@ -2040,8 +1970,7 @@ export function MapView({
     telemetrySnapshot?.pos_e,
     showRefPointLabels,
     lines,
-    origin,
-    projectLocalMetersToGps,
+    projectionOrigin,
     sendToWebView,
   ]);
 
@@ -2049,7 +1978,11 @@ export function MapView({
   useEffect(() => {
     if (!visible) return;
 
-    const msgKey = buildPlanLinesMsgKey(lines, origin.originLat, origin.originLon);
+    const msgKey = `${geometryFrame}:${buildPlanLinesMsgKey(
+      lines,
+      origin?.originLat ?? 0,
+      origin?.originLon ?? 0
+    )}`;
     if (msgKey === lastLinesMsgRef.current) return;
     lastLinesMsgRef.current = msgKey;
 
@@ -2057,7 +1990,7 @@ export function MapView({
       type: "updatePlanLines",
       lines: projectedPlanLines,
     });
-  }, [visible, projectedPlanLines, lines, origin.originLat, origin.originLon, sendToWebView]);
+  }, [visible, projectedPlanLines, lines, geometryFrame, origin, sendToWebView]);
 
   // Send reference points
   useEffect(() => {
@@ -2209,7 +2142,11 @@ export function MapView({
           })
         );
       } catch (e) {}
-      lastLinesMsgRef.current = buildPlanLinesMsgKey(lines, origin.originLat, origin.originLon);
+      lastLinesMsgRef.current = `${geometryFrame}:${buildPlanLinesMsgKey(
+        lines,
+        origin?.originLat ?? 0,
+        origin?.originLon ?? 0
+      )}`;
     }
 
     if (alignedRefPoints.length > 0) {
@@ -2315,8 +2252,8 @@ export function MapView({
     telemetrySnapshot,
     projectedPlanLines,
     alignedRefPoints,
-    origin.originLat,
-    origin.originLon,
+    geometryFrame,
+    origin,
     lines,
     mode,
     selectedLineId,
@@ -2347,31 +2284,18 @@ export function MapView({
 
           const { lat, lon } = data;
 
-          let originLat = 0;
-          let originLon = 0;
-          let originDxfX = 0;
-          let originDxfY = 0;
-
-          if (alignedRefPoints && alignedRefPoints.length > 0) {
-            originLat = alignedRefPoints[0].lat;
-            originLon = alignedRefPoints[0].lon;
-            originDxfX = alignedRefPoints[0].dxf_x;
-            originDxfY = alignedRefPoints[0].dxf_y;
-          } else if (latchedOrigin != null) {
-            originLat = latchedOrigin.lat;
-            originLon = latchedOrigin.lon;
-            originDxfX = 0;
-            originDxfY = 0;
-          } else {
-            originLat = 28.6139;
-            originLon = 77.2090;
-            originDxfX = 0;
-            originDxfY = 0;
+          if (!projectionOrigin) {
+            return;
           }
 
-          const local = projectGpsToLocalMeters(lat, lon, originLat, originLon);
-          const clickedDxfX = local.east + originDxfX;
-          const clickedDxfY = local.north + originDxfY;
+          const local = projectGpsToLocalMeters(
+            lat,
+            lon,
+            projectionOrigin.originLat,
+            projectionOrigin.originLon
+          );
+          const clickedDxfX = local.east + projectionOrigin.originDxfEast;
+          const clickedDxfY = local.north + projectionOrigin.originDxfNorth;
 
           // 1. Try to find the nearest point/vertex
           let bestPt: { x: number; y: number } | null = null;
@@ -2556,7 +2480,9 @@ export function MapView({
             return;
           }
 
-          const originLatRad = (origin.originLat * Math.PI) / 180;
+          if (!projectionOrigin) return;
+
+          const originLatRad = (projectionOrigin.originLat * Math.PI) / 180;
           const dy = latDelta * (EARTH_RADIUS * Math.PI / 180);
           const dx = lonDelta * (EARTH_RADIUS * Math.cos(originLatRad) * Math.PI / 180);
 
@@ -2579,10 +2505,15 @@ export function MapView({
             });
           }
         } else if (data.type === "boundaryPointClicked") {
-          if (onPlaceRoverAtPoint) {
-            const local = projectGpsToLocalMeters(data.latlng.lat, data.latlng.lng, origin.originLat, origin.originLon);
-            const dxfX = local.east + origin.originDxfX;
-            const dxfY = local.north + origin.originDxfY;
+          if (onPlaceRoverAtPoint && projectionOrigin) {
+            const local = projectGpsToLocalMeters(
+              data.latlng.lat,
+              data.latlng.lng,
+              projectionOrigin.originLat,
+              projectionOrigin.originLon
+            );
+            const dxfX = local.east + projectionOrigin.originDxfEast;
+            const dxfY = local.north + projectionOrigin.originDxfNorth;
             // North maps to Y, East maps to X
             onPlaceRoverAtPoint(data.pointId, dxfX, dxfY);
           }
@@ -2595,7 +2526,7 @@ export function MapView({
     [
       lines,
       alignedRefPoints,
-      latchedOrigin,
+      projectionOrigin,
       onSelectPoint,
       onSelectLine,
       mode,
