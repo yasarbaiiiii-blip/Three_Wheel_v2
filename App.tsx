@@ -1648,13 +1648,13 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (page !== "fields" || !apiBaseUrl) return;
+    if (page !== "fields" || !apiBaseUrl || missionActionBusy) return;
     void fetchBackendPaths();
     const timer = setInterval(() => {
       void fetchBackendPaths();
     }, 5000);
     return () => clearInterval(timer);
-  }, [page, apiBaseUrl]);
+  }, [page, apiBaseUrl, missionActionBusy]);
 
   async function refreshTelemetryPanel() {
     if (!apiBaseUrl) return;
@@ -1960,7 +1960,8 @@ export default function App() {
       logAction("LOAD_FAILED", {
         fileName: importedPlan?.fileName,
         stagedMissionId: requestedMissionId || null,
-        error: error instanceof Error ? error.message : String(error),
+        status: missionError?.status ?? null,
+        error: missionError?.message ?? (error instanceof Error ? error.message : String(error)),
       });
       const message = missionError?.message ?? (error instanceof Error ? error.message : "Could not load the mission.");
       const title = missionError?.title ?? "Load failed";
