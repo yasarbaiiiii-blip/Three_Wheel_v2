@@ -95,6 +95,7 @@ import {
   stagedMissionMatchesId,
   waypointsToPlanLines,
 } from "./src/utils/stagedMissionHydration";
+import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
 
 LogBox.ignoreLogs(["Maximum update depth exceeded"]);
 
@@ -7166,7 +7167,7 @@ function FieldsPage({
           setVerifiedAlignmentRequest({ ...payload });
           setAlignmentResult({
             method: data.method ?? null,
-            scale: coerceFiniteNumber(data.scale),
+            scale: enforceAlignmentScale(coerceFiniteNumber(data.scale) ?? 1.0),
             rotation_deg: coerceFiniteNumber(data.rotation_deg),
             offset_n: coerceFiniteNumber(data.offset_n),
             offset_e: coerceFiniteNumber(data.offset_e),
@@ -10182,10 +10183,11 @@ function SwoziPage({
 
   // Manual spray hold helpers
   const startManualHold = async () => {
-    if (!apiBaseUrl || manualHoldActive) return;
+    if (!apiBaseUrl || manualHoldActive || manualHeartbeatRef.current) return;
     try {
       await fetch(`${apiBaseUrl}/api/spray/on`, { method: 'POST' });
       setManualHoldActive(true);
+      if (manualHeartbeatRef.current) clearInterval(manualHeartbeatRef.current);
       // Send a heartbeat every 7 s to keep the 8 s window alive
       manualHeartbeatRef.current = setInterval(async () => {
         try { await fetch(`${apiBaseUrl}/api/spray/on`, { method: 'POST' }); } catch (_) { }
@@ -10321,6 +10323,7 @@ function SwoziPage({
 
   return (
     <ScrollView style={{ flex: 1, padding: 18 }}>
+
       <Text style={secH}>Cart</Text>
       <Text style={itemH}>Configured Machine</Text>
       <Text style={itemT}>Not Configured</Text>
@@ -10328,19 +10331,6 @@ function SwoziPage({
       <Text style={secH}>Pump</Text>
       <Text style={itemH}>Manual Control</Text>
       <Text style={itemT}>Disconnected</Text>
-      {/* Hold to Spray Button */}
-      <View style={{ marginVertical: 12 }}>
-        <Pressable
-          style={{
-            backgroundColor: "#f59e0b",
-            padding: 14,
-            borderRadius: 8,
-            alignItems: "center"
-          }}
-        >
-          <Text style={{ color: "#fff", fontWeight: "700", fontSize: 16 }}>Hold to Spray</Text>
-        </Pressable>
-      </View>
 
       {/* Spray Test Section */}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginVertical: 12 }}>
@@ -10390,36 +10380,23 @@ function SwoziPage({
               {isSprayHoldChanging ? "..." : isSprayHoldActive ? "Spray Off" : "Spray On"}
             </Text>
           </Pressable>
+          <Pressable
+            onPressIn={startManualHold}
+            onPressOut={stopManualHold}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            style={({ pressed }) => ({
+              marginLeft: 14,
+              opacity: pressed ? 0.6 : 1,
+            })}
+          >
+            <Text style={{ color: manualHoldActive ? "#10b981" : "#0f766e", fontWeight: "700", textDecorationLine: "underline" }}>
+              {manualHoldActive ? "SPRAYING..." : "Hold to Spray"}
+            </Text>
+          </Pressable>
         </View>
       </View>
-
-      {/* ── Manual Spray Hold Buttons ── */}
-      <View style={{ flexDirection: 'row', gap: 10, marginVertical: 10 }}>
-        <Pressable
-          onPress={startManualHold}
-          disabled={manualHoldActive}
-          style={{
-            flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: 'center',
-            backgroundColor: manualHoldActive ? '#86efac' : '#16a34a',
-            opacity: manualHoldActive ? 0.7 : 1,
-          }}
-        >
-          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 15 }}>💧 Spray ON</Text>
-        </Pressable>
-        <Pressable
-          onPress={stopManualHold}
-          disabled={!manualHoldActive}
-          style={{
-            flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: 'center',
-            backgroundColor: !manualHoldActive ? '#fca5a5' : '#dc2626',
-            opacity: !manualHoldActive ? 0.6 : 1,
-          }}
-        >
-          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 15 }}>🚫 Spray OFF</Text>
-        </Pressable>
-      </View>
       {manualHoldActive && (
-        <View style={{ backgroundColor: '#dcfce7', borderRadius: 8, padding: 8, marginBottom: 8 }}>
+        <View style={{ backgroundColor: '#dcfce7', borderRadius: 8, padding: 8, marginBottom: 12 }}>
           <Text style={{ color: '#15803d', fontSize: 12, textAlign: 'center', fontWeight: '600' }}>● Manual spray active — heartbeat running</Text>
         </View>
       )}

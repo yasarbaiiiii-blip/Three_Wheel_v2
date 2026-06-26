@@ -5,6 +5,7 @@ import { WebView } from "react-native-webview";
 import type { TelemetrySnapshot, PlanLine } from "../types/plan";
 import { transformVisualDxfPoint } from "../utils/visualAlignment";
 import type { PlacedItem } from "./BoundaryEditor";
+import type { DesignPreviewAnchor } from "../types/designDocument";
 
 const EARTH_RADIUS = 6378137.0;
 
@@ -107,6 +108,7 @@ export interface MapViewProps {
   onUpdatePlacedItems?: (items: PlacedItem[]) => void;
   onSelectionChange?: (ids: string[]) => void;
   multiTouchMode?: "both" | "scale" | "rotate";
+  previewAnchor?: DesignPreviewAnchor;
 }
 
 /**
@@ -1604,6 +1606,7 @@ export function MapView({
   onUpdatePlacedItems,
   onSelectionChange,
   multiTouchMode = "both",
+  previewAnchor,
 
 }: MapViewProps) {
   const webViewRef = useRef<WebView | null>(null);
@@ -1632,7 +1635,12 @@ export function MapView({
     let originDxfX = 0;
     let originDxfY = 0;
 
-    if (alignedRefPoints && alignedRefPoints.length > 0) {
+    if (previewAnchor) {
+      originLat = previewAnchor.lat;
+      originLon = previewAnchor.lon;
+      originDxfX = 0;
+      originDxfY = 0;
+    } else if (alignedRefPoints && alignedRefPoints.length > 0) {
       originLat = alignedRefPoints[0].lat;
       originLon = alignedRefPoints[0].lon;
       originDxfX = alignedRefPoints[0].dxf_x;
@@ -1644,7 +1652,7 @@ export function MapView({
       originDxfY = 0;
     }
     return { originLat, originLon, originDxfX, originDxfY };
-  }, [alignedRefPoints, latchedOrigin]);
+  }, [previewAnchor, alignedRefPoints, latchedOrigin]);
 
   // Helper to project a single PlanLine to GPS
   const projectLineToGps = useCallback((line: PlanLine) => {
@@ -1652,8 +1660,8 @@ export function MapView({
     if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
       for (const pt of line.entity.preview_points) {
         const gps = projectLocalMetersToGps(
-          pt.north - origin.originDxfX,
-          pt.east - origin.originDxfY,
+          pt.north - origin.originDxfY,
+          pt.east - origin.originDxfX,
           origin.originLat,
           origin.originLon
         );
@@ -1668,14 +1676,14 @@ export function MapView({
       Number.isFinite(line.to.y)
     ) {
       const fromGps = projectLocalMetersToGps(
-        line.from.x - origin.originDxfX,
-        line.from.y - origin.originDxfY,
+        line.from.x - origin.originDxfY,
+        line.from.y - origin.originDxfX,
         origin.originLat,
         origin.originLon
       );
       const toGps = projectLocalMetersToGps(
-        line.to.x - origin.originDxfX,
-        line.to.y - origin.originDxfY,
+        line.to.x - origin.originDxfY,
+        line.to.y - origin.originDxfX,
         origin.originLat,
         origin.originLon
       );
@@ -1691,8 +1699,8 @@ export function MapView({
     if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
       for (const pt of line.entity.preview_points) {
         const gps = projectLocalMetersToGps(
-          pt.north - origin.originDxfX,
-          pt.east - origin.originDxfY,
+          pt.north - origin.originDxfY,
+          pt.east - origin.originDxfX,
           origin.originLat,
           origin.originLon
         );
@@ -1707,14 +1715,14 @@ export function MapView({
       Number.isFinite(line.to.y)
     ) {
       const fromGps = projectLocalMetersToGps(
-        line.from.x - origin.originDxfX,
-        line.from.y - origin.originDxfY,
+        line.from.x - origin.originDxfY,
+        line.from.y - origin.originDxfX,
         origin.originLat,
         origin.originLon
       );
       const toGps = projectLocalMetersToGps(
-        line.to.x - origin.originDxfX,
-        line.to.y - origin.originDxfY,
+        line.to.x - origin.originDxfY,
+        line.to.y - origin.originDxfX,
         origin.originLat,
         origin.originLon
       );
@@ -1744,8 +1752,8 @@ export function MapView({
         const coords: [number, number][] = [];
         for (const pt of line.entity.preview_points) {
           const gps = projectLocalMetersToGps(
-            pt.north - origin.originDxfX,
-            pt.east - origin.originDxfY,
+            pt.north - origin.originDxfY,
+            pt.east - origin.originDxfX,
             origin.originLat,
             origin.originLon
           );
@@ -1761,14 +1769,14 @@ export function MapView({
         Number.isFinite(line.to.y)
       ) {
         const fromGps = projectLocalMetersToGps(
-          line.from.x - origin.originDxfX,
-          line.from.y - origin.originDxfY,
+          line.from.x - origin.originDxfY,
+          line.from.y - origin.originDxfX,
           origin.originLat,
           origin.originLon
         );
         const toGps = projectLocalMetersToGps(
-          line.to.x - origin.originDxfX,
-          line.to.y - origin.originDxfY,
+          line.to.x - origin.originDxfY,
+          line.to.y - origin.originDxfX,
           origin.originLat,
           origin.originLon
         );
@@ -1805,8 +1813,8 @@ export function MapView({
 
     const outerGps = outerDxfPoints.map((pt) => {
       const gps = projectLocalMetersToGps(
-        pt.north - origin.originDxfX,
-        pt.east - origin.originDxfY,
+        pt.north - origin.originDxfY,
+        pt.east - origin.originDxfX,
         origin.originLat,
         origin.originLon
       );
@@ -1827,8 +1835,8 @@ export function MapView({
         ];
         indentGps = indentDxfPoints.map((pt) => {
           const gps = projectLocalMetersToGps(
-            pt.north - origin.originDxfX,
-            pt.east - origin.originDxfY,
+            pt.north - origin.originDxfY,
+            pt.east - origin.originDxfX,
             origin.originLat,
             origin.originLon
           );
@@ -1877,14 +1885,14 @@ export function MapView({
         const toEast = toPlaced.east;
 
         const fromGps = projectLocalMetersToGps(
-          fromNorth - origin.originDxfX,
-          fromEast - origin.originDxfY,
+          fromNorth - origin.originDxfY,
+          fromEast - origin.originDxfX,
           origin.originLat,
           origin.originLon
         );
         const toGps = projectLocalMetersToGps(
-          toNorth - origin.originDxfX,
-          toEast - origin.originDxfY,
+          toNorth - origin.originDxfY,
+          toEast - origin.originDxfX,
           origin.originLat,
           origin.originLon
         );
@@ -1910,8 +1918,8 @@ export function MapView({
         const n = (c.n * cos - c.e * sin) * item.scale + item.y;
         const e = (c.n * sin + c.e * cos) * item.scale + item.x;
         const gps = projectLocalMetersToGps(
-          n - origin.originDxfX,
-          e - origin.originDxfY,
+          n - origin.originDxfY,
+          e - origin.originDxfX,
           origin.originLat,
           origin.originLon
         );
@@ -1920,8 +1928,8 @@ export function MapView({
 
       // Center in GPS for rotation anchors
       const centerGps = projectLocalMetersToGps(
-        item.y - origin.originDxfX,
-        item.x - origin.originDxfY,
+        item.y - origin.originDxfY,
+        item.x - origin.originDxfX,
         origin.originLat,
         origin.originLon
       );
@@ -2008,8 +2016,8 @@ export function MapView({
       
       if (nextTarget && nextDist < 100) {
         nextTargetGps = projectLocalMetersToGps(
-          nextTarget.x - origin.originDxfX,
-          nextTarget.y - origin.originDxfY,
+          nextTarget.x - origin.originDxfY,
+          nextTarget.y - origin.originDxfX,
           origin.originLat,
           origin.originLon
         );
@@ -2362,8 +2370,8 @@ export function MapView({
           }
 
           const local = projectGpsToLocalMeters(lat, lon, originLat, originLon);
-          const clickedDxfX = local.north + originDxfX;
-          const clickedDxfY = local.east + originDxfY;
+          const clickedDxfX = local.east + originDxfX;
+          const clickedDxfY = local.north + originDxfY;
 
           // 1. Try to find the nearest point/vertex
           let bestPt: { x: number; y: number } | null = null;
@@ -2372,14 +2380,14 @@ export function MapView({
 
           for (const line of lines) {
             if (line.from) {
-              const d = Math.hypot(line.from.x - clickedDxfX, line.from.y - clickedDxfY);
+              const d = Math.hypot(line.from.x - clickedDxfY, line.from.y - clickedDxfX);
               if (d < bestPtDist) {
                 bestPtDist = d;
                 bestPt = { x: line.from.x, y: line.from.y };
               }
             }
             if (line.to) {
-              const d = Math.hypot(line.to.x - clickedDxfX, line.to.y - clickedDxfY);
+              const d = Math.hypot(line.to.x - clickedDxfY, line.to.y - clickedDxfX);
               if (d < bestPtDist) {
                 bestPtDist = d;
                 bestPt = { x: line.to.x, y: line.to.y };
@@ -2387,7 +2395,7 @@ export function MapView({
             }
             if (line.entity?.preview_points) {
               for (const pt of line.entity.preview_points) {
-                const d = Math.hypot(pt.north - clickedDxfX, pt.east - clickedDxfY);
+                const d = Math.hypot(pt.north - clickedDxfY, pt.east - clickedDxfX);
                 if (d < bestPtDist) {
                   bestPtDist = d;
                   bestPt = { x: pt.north, y: pt.east };
@@ -2397,7 +2405,7 @@ export function MapView({
           }
 
           if (bestPt && bestPtDist < ptThreshold && onSelectPoint) {
-            onSelectPoint({ x: bestPt.y, y: bestPt.x });
+            onSelectPoint({ x: bestPt.x, y: bestPt.y });
             return;
           }
 
@@ -2509,13 +2517,6 @@ export function MapView({
                 newY = Math.max(topIndent + newH / 2, Math.min(newY, bottomIndent - newH / 2));
               }
 
-              // Update lines
-              const scaledLines = item.lines.map((l) => ({
-                ...l,
-                from: { ...l.from, x: l.from.x * scaleRatio, y: l.from.y * scaleRatio },
-                to: { ...l.to, x: l.to.x * scaleRatio, y: l.to.y * scaleRatio },
-              }));
-
               return {
                 ...item,
                 scale: update.scale,
@@ -2524,7 +2525,7 @@ export function MapView({
                 height: newH,
                 x: newX,
                 y: newY,
-                lines: scaledLines,
+                lines: item.lines,
               };
             }
             return item;

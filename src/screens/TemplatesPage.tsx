@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState, useEffect } from "react";
+import React, { useCallback, useMemo, useState, useEffect, useRef } from "react";
 import { Alert, Modal, Pressable, ScrollView, Switch, Text, TextInput, View } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
 import { X } from "lucide-react-native";
@@ -11,6 +11,11 @@ import { generateRoadSignLines, RoadSignType, ROAD_SIGN_LABELS } from "../utils/
 import { generateTemplateLines, ShapeType, ArcType } from "../utils/shapeTemplates";
 import { generateSportsFieldLines, SportsFieldType, SPORTS_FIELD_LABELS, SPORTS_FIELD_BOUNDS } from "../utils/sportsFieldTemplates";
 import { linesToDxf } from "../utils/dxfGenerator";
+import { DesignDocument, DesignNode, isDesignInstance, isDesignEntity, createDesignDocument, createDesignInstance, createDesignEntity, createDesignVertex, DesignPreviewAnchor } from "../types/designDocument";
+import { TemplateRegistry, createTemplateDefinition, snapshotTemplateId } from "../utils/designTemplateRegistry";
+import { flattenDesignDocument, flattenDesignNode } from "../utils/designTransform";
+import { migratePlacedItemsToDesignDocument, verifyMigrationParity } from "../utils/designMigration";
+import { applyDesignCommand } from "../utils/designHistory";
 import type { PlanLine, LayerVisibility, Page, TelemetrySnapshot, DxfEntity } from "../types/plan";
 export type BoundarySide = 'top' | 'right' | 'bottom' | 'left';
 
@@ -59,8 +64,220 @@ export function TemplatesPage(props: TemplatesPageProps) {
   const [indentSpacingStr, setIndentSpacingStr] = useState("0.25");
   const [letterSpacingStr, setLetterSpacingStr] = useState("10");
   const [charSpacingStr, setCharSpacingStr] = useState("10");
-  const [placedItems, setPlacedItems] = useState<PlacedItem[]>([]);
+  const [designDocument, setDesignDocument] = useState<DesignDocument>(createDesignDocument());
+  const templateRegistryRef = useRef<TemplateRegistry>(new TemplateRegistry());
+
+  const placedItems = useMemo(() => {
+    const registry = templateRegistryRef.current;
+    return designDocument.nodes.map(node => {
+      if (isDesignInstance(node)) {
+        const template = registry.getTemplate(node.templateId);
+        if (!template) {
+          return {
+            id: node.id,
+            lines: [],
+            x: node.transform.eastM,
+            y: node.transform.northM,
+            rotation: node.transform.rotationDeg,
+            scale: node.transform.scale,
+            width: 0,
+            height: 0,
+            groupId: node.metadata?.groupId as string | undefined,
+          };
+        }
+        return {
+          id: node.id,
+          lines: template.lines,
+          x: node.transform.eastM,
+          y: node.transform.northM,
+          rotation: node.transform.rotationDeg,
+          scale: node.transform.scale,
+          width: template.nominalWidthM * node.transform.scale,
+          height: template.nominalHeightM * node.transform.scale,
+          groupId: node.metadata?.groupId as string | undefined,
+        };
+      } else {
+        const flatLines = flattenDesignNode(node, registry, designDocument.frame);
+        let minN = Infinity, maxN = -Infinity;
+        let minE = Infinity, maxE = -Infinity;
+        for (const l of flatLines) {
+          minN = Math.min(minN, l.from.x, l.to.x);
+          maxN = Math.max(maxN, l.from.x, l.to.x);
+          minE = Math.min(minE, l.from.y, l.to.y);
+          maxE = Math.max(maxE, l.from.y, l.to.y);
+        }
+        return {
+          id: node.id,
+          lines: flatLines,
+          x: 0,
+          y: 0,
+          rotation: 0,
+          scale: 1.0,
+          width: isFinite(maxE - minE) ? (maxE - minE) : 0,
+          height: isFinite(maxN - minN) ? (maxN - minN) : 0,
+          groupId: node.metadata?.groupId as string | undefined,
+        };
+      }
+    });
+  }, [designDocument]);
+
+  const worldLines = useMemo(() => {
+    try {
+      return flattenDesignDocument(designDocument, templateRegistryRef.current);
+    } catch (e) {
+      return [];
+    }
+  }, [designDocument]);
+
+  const setPlacedItems = useCallback((updater: PlacedItem[] | ((prev: PlacedItem[]) => PlacedItem[])) => {
+    setDesignDocument(prevDoc => {
+      const registry = templateRegistryRef.current;
+      const currentItems = prevDoc.nodes.map(node => {
+        if (isDesignInstance(node)) {
+          const template = registry.getTemplate(node.templateId);
+          if (!template) {
+            return {
+              id: node.id,
+              lines: [],
+              x: node.transform.eastM,
+              y: node.transform.northM,
+              rotation: node.transform.rotationDeg,
+              scale: node.transform.scale,
+              width: 0,
+              height: 0,
+              groupId: node.metadata?.groupId as string | undefined,
+            };
+          }
+          return {
+            id: node.id,
+            lines: template.lines,
+            x: node.transform.eastM,
+            y: node.transform.northM,
+            rotation: node.transform.rotationDeg,
+            scale: node.transform.scale,
+            width: template.nominalWidthM * node.transform.scale,
+            height: template.nominalHeightM * node.transform.scale,
+            groupId: node.metadata?.groupId as string | undefined,
+          };
+        } else {
+          const flatLines = flattenDesignNode(node, registry, prevDoc.frame);
+          let minN = Infinity, maxN = -Infinity;
+          let minE = Infinity, maxE = -Infinity;
+          for (const l of flatLines) {
+            minN = Math.min(minN, l.from.x, l.to.x);
+            maxN = Math.max(maxN, l.from.x, l.to.x);
+            minE = Math.min(minE, l.from.y, l.to.y);
+            maxE = Math.max(maxE, l.from.y, l.to.y);
+          }
+          return {
+            id: node.id,
+            lines: flatLines,
+            x: 0,
+            y: 0,
+            rotation: 0,
+            scale: 1.0,
+            width: isFinite(maxE - minE) ? (maxE - minE) : 0,
+            height: isFinite(maxN - minN) ? (maxN - minN) : 0,
+            groupId: node.metadata?.groupId as string | undefined,
+          };
+        }
+      });
+      
+      const nextItems = typeof updater === 'function' ? updater(currentItems) : updater;
+      
+      const nextNodes = nextItems.map(item => {
+        const existingNode = prevDoc.nodes.find(n => n.id === item.id);
+        if (existingNode && isDesignInstance(existingNode)) {
+          return {
+            ...existingNode,
+            transform: {
+              ...existingNode.transform,
+              eastM: item.x,
+              northM: item.y,
+              rotationDeg: item.rotation,
+              scale: item.scale,
+            },
+            metadata: {
+              ...existingNode.metadata,
+              groupId: item.groupId,
+            }
+          };
+        } else if (existingNode && isDesignEntity(existingNode)) {
+          const dx = item.x;
+          const dy = item.y;
+          if (dx !== 0 || dy !== 0) {
+            return {
+              ...existingNode,
+              vertices: existingNode.vertices.map(v => ({
+                northM: v.northM + dy,
+                eastM: v.eastM + dx,
+              })),
+              metadata: {
+                ...existingNode.metadata,
+                groupId: item.groupId,
+              }
+            };
+          }
+          return existingNode;
+        } else {
+          const templateId = snapshotTemplateId(item.lines);
+          if (!registry.hasTemplate(templateId)) {
+            const def = createTemplateDefinition(templateId, item.lines, item.width / item.scale, item.height / item.scale);
+            registry.registerTemplate(def);
+          }
+          return createDesignInstance(
+            item.id,
+            templateId,
+            {
+              northM: item.y,
+              eastM: item.x,
+              rotationDeg: item.rotation,
+              scale: item.scale,
+            },
+            {
+              groupId: item.groupId,
+            }
+          );
+        }
+      });
+
+      return {
+        ...prevDoc,
+        nodes: nextNodes,
+        revision: prevDoc.revision + 1,
+      };
+    });
+  }, []);
   const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
+  const [activeTool, setActiveTool] = useState<"SELECT" | "LINE" | "FREEHAND">("SELECT");
+  const [history, setHistory] = useState<{ past: import('../types/designDocument').DesignCommand[]; future: import('../types/designDocument').DesignCommand[] }>({ past: [], future: [] });
+  const dragStartDocRef = useRef<DesignDocument | null>(null);
+
+  const [previewAnchor, setPreviewAnchor] = useState<DesignPreviewAnchor>({
+    mode: 'rover_latched',
+    lat: 28.6139,
+    lon: 77.2090,
+  });
+
+  useEffect(() => {
+    const gpsLat = props.telemetrySnapshot?.lat;
+    const gpsLon = props.telemetrySnapshot?.lon;
+    if (previewAnchor.mode === 'rover_latched' && gpsLat != null && gpsLon != null) {
+      setPreviewAnchor(prev => {
+        if (prev.lat === gpsLat && prev.lon === gpsLon) return prev;
+        return {
+          ...prev,
+          lat: gpsLat,
+          lon: gpsLon,
+        };
+      });
+    }
+  }, [props.telemetrySnapshot?.lat, props.telemetrySnapshot?.lon, previewAnchor.mode]);
+
+  const [itemNorthStr, setItemNorthStr] = useState("0.0");
+  const [itemEastStr, setItemEastStr] = useState("0.0");
+  const [lineLengthStr, setLineLengthStr] = useState("0.0");
+  const [lineAngleStr, setLineAngleStr] = useState("0.0");
   
   const [wordGroups, setWordGroups] = useState<WordGroup[]>([]);
   const [arrangeMode, setArrangeMode] = useState<"none" | "horizontal" | "vertical">("none");
@@ -73,15 +290,28 @@ export function TemplatesPage(props: TemplatesPageProps) {
 
   useEffect(() => {
     if (selectedItemIds.length > 0) {
-      const firstItem = placedItems.find(p => p.id === selectedItemIds[0]);
-      if (firstItem) {
-        setItemScaleStr(firstItem.scale.toFixed(2));
-        setItemRotationStr(Math.round(firstItem.rotation).toString());
+      const node = designDocument.nodes.find(n => n.id === selectedItemIds[0]);
+      if (node && isDesignInstance(node)) {
+        setItemScaleStr(node.transform.scale.toFixed(3));
+        setItemRotationStr(Math.round(node.transform.rotationDeg).toString());
+        setItemNorthStr(node.transform.northM.toFixed(3));
+        setItemEastStr(node.transform.eastM.toFixed(3));
+      } else if (node && isDesignEntity(node) && node.type === "LINE") {
+        const v0 = node.vertices[0];
+        const v1 = node.vertices[1];
+        if (v0 && v1) {
+          const len = Math.hypot(v1.eastM - v0.eastM, v1.northM - v0.northM);
+          const angle = Math.atan2(v1.eastM - v0.eastM, v1.northM - v0.northM) * 180 / Math.PI;
+          setLineLengthStr(len.toFixed(3));
+          setLineAngleStr(Math.round(angle).toString());
+          setItemNorthStr(v0.northM.toFixed(3));
+          setItemEastStr(v0.eastM.toFixed(3));
+        }
       }
     } else {
       setMultiTouchMode("both");
     }
-  }, [selectedItemIds, placedItems]);
+  }, [selectedItemIds, designDocument.nodes]);
   const [boundaryPosition, setBoundaryPosition] = useState({ x: 0, y: 0 });
   const [activeSnapPointId, setActiveSnapPointId] = useState<string | null>(null);
   
@@ -178,6 +408,126 @@ export function TemplatesPage(props: TemplatesPageProps) {
     setActiveSnapPointId(nextActiveId);
   }, [boundaryControlPointsLocal, boundaryPosition.x, boundaryPosition.y, props.telemetrySnapshot?.pos_e, props.telemetrySnapshot?.pos_n, showBoundaryPoints]);
 
+  const executeCommand = useCallback((cmd: import('../types/designDocument').DesignCommand) => {
+    let inverseCmd: import('../types/designDocument').DesignCommand | null = null;
+    setDesignDocument(prevDoc => {
+      const { doc: nextDoc, inverse } = applyDesignCommand(prevDoc, cmd);
+      inverseCmd = inverse;
+      return nextDoc;
+    });
+    setTimeout(() => {
+      if (inverseCmd) {
+        setHistory(prev => ({
+          past: [...prev.past, inverseCmd!],
+          future: []
+        }));
+      }
+    }, 0);
+  }, []);
+
+  const handleDragStart = useCallback(() => {
+    dragStartDocRef.current = designDocument;
+  }, [designDocument]);
+
+  const handleDragEnd = useCallback(() => {
+    if (!dragStartDocRef.current) return;
+    const startDoc = dragStartDocRef.current;
+    dragStartDocRef.current = null;
+
+    const commands: import('../types/designDocument').DesignCommand[] = [];
+    for (const node of designDocument.nodes) {
+      const startNode = startDoc.nodes.find(n => n.id === node.id);
+      if (!startNode) continue;
+
+      if (isDesignInstance(node) && isDesignInstance(startNode)) {
+        const tStart = startNode.transform;
+        const tEnd = node.transform;
+        if (
+          tStart.northM !== tEnd.northM ||
+          tStart.eastM !== tEnd.eastM ||
+          tStart.rotationDeg !== tEnd.rotationDeg ||
+          tStart.scale !== tEnd.scale
+        ) {
+          commands.push({
+            type: "UpdateInstanceTransform",
+            nodeId: node.id,
+            before: { ...tStart },
+            after: { ...tEnd }
+          });
+        }
+      } else if (isDesignEntity(node) && isDesignEntity(startNode)) {
+        const vStart = startNode.vertices;
+        const vEnd = node.vertices;
+        let changed = vStart.length !== vEnd.length;
+        if (!changed) {
+          for (let i = 0; i < vStart.length; i++) {
+            if (vStart[i].northM !== vEnd[i].northM || vStart[i].eastM !== vEnd[i].eastM) {
+              changed = true;
+              break;
+            }
+          }
+        }
+        if (changed) {
+          commands.push({
+            type: "UpdateEntityVertices",
+            nodeId: node.id,
+            before: [...vStart],
+            after: [...vEnd]
+          });
+        }
+      }
+    }
+
+    if (commands.length > 0) {
+      const batchCmd: import('../types/designDocument').DesignCommand = commands.length === 1 ? commands[0] : { type: "Batch", commands };
+      const { inverse } = applyDesignCommand(startDoc, batchCmd);
+      setHistory(prev => ({
+        past: [...prev.past, inverse],
+        future: []
+      }));
+    }
+  }, [designDocument]);
+
+  const handleUndo = useCallback(() => {
+    setHistory(prev => {
+      if (prev.past.length === 0) return prev;
+      const cmd = prev.past[prev.past.length - 1];
+      const newPast = prev.past.slice(0, -1);
+      
+      let invOfInv: import('../types/designDocument').DesignCommand | null = null;
+      setDesignDocument(prevDoc => {
+        const { doc: nextDoc, inverse } = applyDesignCommand(prevDoc, cmd);
+        invOfInv = inverse;
+        return nextDoc;
+      });
+      
+      return {
+        past: newPast,
+        future: invOfInv ? [...prev.future, invOfInv] : prev.future
+      };
+    });
+  }, []);
+
+  const handleRedo = useCallback(() => {
+    setHistory(prev => {
+      if (prev.future.length === 0) return prev;
+      const cmd = prev.future[prev.future.length - 1];
+      const newFuture = prev.future.slice(0, -1);
+      
+      let invOfInv: import('../types/designDocument').DesignCommand | null = null;
+      setDesignDocument(prevDoc => {
+        const { doc: nextDoc, inverse } = applyDesignCommand(prevDoc, cmd);
+        invOfInv = inverse;
+        return nextDoc;
+      });
+      
+      return {
+        past: invOfInv ? [...prev.past, invOfInv] : prev.past,
+        future: newFuture
+      };
+    });
+  }, []);
+
   // Check if pending values differ from active
   const hasBoundaryChanges =
     pendingWidth !== activeBoundaryWidth ||
@@ -195,73 +545,7 @@ export function TemplatesPage(props: TemplatesPageProps) {
     return [];
   }, [category, shape, selectedLetter, selectedDigit, selectedSign, selectedField, parsedSize, arcType, fontStyle, previewText, pendingCharSpacingCm]);
 
-  const boundaryLines = useMemo(() => {
-    const finalLines: PlanLine[] = [];
-    
-    // Add boundary box lines
-    const halfW = bw / 2;
-    const halfH = bh / 2;
-    const boxCoords = [
-      { fx: -halfW, fy: -halfH, tx: halfW, ty: -halfH },
-      { fx: halfW, fy: -halfH, tx: halfW, ty: halfH },
-      { fx: halfW, fy: halfH, tx: -halfW, ty: halfH },
-      { fx: -halfW, fy: halfH, tx: -halfW, ty: -halfH },
-    ];
-    boxCoords.forEach((c, idx) => {
-      finalLines.push({
-        id: `box-${idx}`,
-        layer: "boundary",
-        label: "boundary",
-        width: 3,
-        from: { id: idx * 2, x: c.fx, y: c.fy },
-        to: { id: idx * 2 + 1, x: c.tx, y: c.ty },
-      });
-    });
 
-    // Add indent box lines
-    const indW = halfW - indent;
-    const indH = halfH - indent;
-    if (indW > 0 && indH > 0) {
-      const indCoords = [
-        { fx: -indW, fy: -indH, tx: indW, ty: -indH },
-        { fx: indW, fy: -indH, tx: indW, ty: indH },
-        { fx: indW, fy: indH, tx: -indW, ty: indH },
-        { fx: -indW, fy: indH, tx: -indW, ty: -indH },
-      ];
-      indCoords.forEach((c, idx) => {
-        finalLines.push({
-          id: `indent-${idx}`,
-          layer: "transit",
-          label: "transit",
-          width: 2,
-          from: { id: 100 + idx * 2, x: c.fx, y: c.fy },
-          to: { id: 100 + idx * 2 + 1, x: c.tx, y: c.ty },
-        });
-      });
-    }
-
-    // Add placed items lines
-    placedItems.forEach(item => {
-      const cos = Math.cos((item.rotation || 0) * Math.PI / 180) || 0;
-      const sin = Math.sin((item.rotation || 0) * Math.PI / 180) || 0;
-      item.lines.forEach((l, i) => {
-        const fx = (l.from.x * cos - l.from.y * sin) + (item.y || 0);
-        const fy = (l.from.x * sin + l.from.y * cos) + (item.x || 0);
-        const tx = (l.to.x * cos - l.to.y * sin) + (item.y || 0);
-        const ty = (l.to.x * sin + l.to.y * cos) + (item.x || 0);
-        if (!isFinite(fx) || !isFinite(fy) || !isFinite(tx) || !isFinite(ty)) return;
-        
-        finalLines.push({
-          ...l,
-          id: `${item.id}-${i}`,
-          from: { ...l.from, x: fx, y: fy },
-          to: { ...l.to, x: tx, y: ty },
-        });
-      });
-    });
-
-    return finalLines;
-  }, [placedItems, bw, bh, indent]);
 
   const computeBoundingBox = useCallback((lines: PlanLine[]): { width: number; height: number } => {
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -276,7 +560,6 @@ export function TemplatesPage(props: TemplatesPageProps) {
       height: Math.max(0.5, maxY - minY || 0.5),
     };
   }, []);
-
   const handleAddToBoundary = useCallback(() => {
     if (previewLines.length === 0) return;
     const bounds = computeBoundingBox(previewLines);
@@ -315,32 +598,40 @@ export function TemplatesPage(props: TemplatesPageProps) {
       }
     }
     
-    const newItem: PlacedItem = {
-      id: "item-" + Date.now(),
-      lines: previewLines,
-      x: newX,
-      y: newY,
-      rotation: 0,
-      scale: 1.0,
-      width: newWidth,
-      height: newHeight,
-    };
-    setPlacedItems(prev => [...prev, newItem]);
-    // Auto-select so user can immediately scale/rotate/drag
-    setSelectedItemIds([newItem.id]);
-  }, [previewLines, parsedSize, computeBoundingBox, placedItems, lSpacing, bw, bh, indent, category, selectedField]);
+    const templateId = snapshotTemplateId(previewLines);
+    if (!templateRegistryRef.current.hasTemplate(templateId)) {
+      const def = createTemplateDefinition(templateId, previewLines, newWidth, newHeight);
+      templateRegistryRef.current.registerTemplate(def);
+    }
+    
+    const newNode = createDesignInstance(
+      `item-${Date.now()}`,
+      templateId,
+      {
+        northM: newY,
+        eastM: newX,
+        rotationDeg: 0,
+        scale: 1.0,
+      }
+    );
+    
+    executeCommand({ type: "AddNode", node: newNode });
+    setSelectedItemIds([newNode.id]);
+  }, [previewLines, computeBoundingBox, placedItems, lSpacing, bw, bh, indent, category, executeCommand]);
 
   const handleDeleteItem = useCallback(() => {
-    const deletedGroupIds = new Set(
-      placedItems.filter(p => selectedItemIds.includes(p.id) && p.groupId).map(p => p.groupId)
-    );
-    setPlacedItems(prev => prev.filter(p => !selectedItemIds.includes(p.id)));
-    setWordGroups(prev => prev.filter(g => 
-      !deletedGroupIds.has(g.id) ||
-      placedItems.filter(p => p.groupId === g.id && !selectedItemIds.includes(p.id)).length > 0
-    ));
+    const nodesToDelete = designDocument.nodes.filter(n => selectedItemIds.includes(n.id));
+    if (nodesToDelete.length === 0) return;
+    
+    const cmds: import('../types/designDocument').DesignCommand[] = nodesToDelete.map(node => ({
+      type: "DeleteNode",
+      nodeId: node.id,
+      snapshot: node
+    }));
+    
+    executeCommand(cmds.length === 1 ? cmds[0] : { type: "Batch", commands: cmds });
     setSelectedItemIds([]);
-  }, [placedItems, selectedItemIds]);
+  }, [designDocument.nodes, selectedItemIds, executeCommand]);
 
   const handleAutoArrange = useCallback(() => {
     if (placedItems.length === 0) return;
@@ -355,51 +646,140 @@ export function TemplatesPage(props: TemplatesPageProps) {
       return;
     }
     
-    // Start from the LEFT edge of the indent area
     const leftIndentEdge = -bw / 2 + indent;
     let cursorX = leftIndentEdge;
-    
-    // Center vertically in boundary (Y=0 is boundary center)
     const centerY = 0;
     
-    setPlacedItems(prev => prev.map(item => {
+    const cmds: import('../types/designDocument').DesignCommand[] = [];
+    placedItems.forEach(item => {
       const centerX = cursorX + item.width / 2;
       cursorX += item.width + lSpacing;
-      return { ...item, x: centerX, y: centerY };
-    }));
-  }, [placedItems, bw, indent, lSpacing]);
+      
+      const node = designDocument.nodes.find(n => n.id === item.id);
+      if (node && isDesignInstance(node)) {
+        cmds.push({
+          type: "UpdateInstanceTransform",
+          nodeId: node.id,
+          before: { ...node.transform },
+          after: {
+            ...node.transform,
+            eastM: centerX,
+            northM: centerY
+          }
+        });
+      }
+    });
+    
+    if (cmds.length > 0) {
+      executeCommand(cmds.length === 1 ? cmds[0] : { type: "Batch", commands: cmds });
+    }
+  }, [placedItems, designDocument.nodes, bw, indent, lSpacing, executeCommand]);
 
   const handleApplyScale = useCallback(() => {
     if (selectedItemIds.length === 0) return;
     const val = parseFloat(itemScaleStr);
     const targetScale = Math.max(0.1, isNaN(val) ? 1.0 : val);
-    setPlacedItems(prev => prev.map(p => {
-      if (!selectedItemIds.includes(p.id)) return p;
-      const scaleMultiplier = targetScale / p.scale;
-      return {
-        ...p,
-        scale: targetScale,
-        width: p.width * scaleMultiplier,
-        height: p.height * scaleMultiplier,
-        lines: p.lines.map(l => ({
-          ...l,
-          from: { ...l.from, x: l.from.x * scaleMultiplier, y: l.from.y * scaleMultiplier },
-          to: { ...l.to, x: l.to.x * scaleMultiplier, y: l.to.y * scaleMultiplier },
-        })),
-      };
-    }));
-  }, [selectedItemIds, itemScaleStr]);
+    
+    const cmds: import('../types/designDocument').DesignCommand[] = [];
+    designDocument.nodes.forEach(node => {
+      if (!selectedItemIds.includes(node.id)) return;
+      if (isDesignInstance(node)) {
+        cmds.push({
+          type: "UpdateInstanceTransform",
+          nodeId: node.id,
+          before: { ...node.transform },
+          after: { ...node.transform, scale: targetScale }
+        });
+      }
+    });
+    
+    if (cmds.length > 0) {
+      executeCommand(cmds.length === 1 ? cmds[0] : { type: "Batch", commands: cmds });
+    }
+  }, [selectedItemIds, itemScaleStr, designDocument.nodes, executeCommand]);
 
   const handleApplyRotation = useCallback(() => {
     if (selectedItemIds.length === 0) return;
     const val = parseFloat(itemRotationStr);
     const targetRot = isNaN(val) ? 0 : (val % 360);
-    setPlacedItems(prev => prev.map(p => 
-      selectedItemIds.includes(p.id) 
-        ? { ...p, rotation: targetRot }
-        : p
-    ));
-  }, [selectedItemIds, itemRotationStr]);
+    
+    const cmds: import('../types/designDocument').DesignCommand[] = [];
+    designDocument.nodes.forEach(node => {
+      if (!selectedItemIds.includes(node.id)) return;
+      if (isDesignInstance(node)) {
+        cmds.push({
+          type: "UpdateInstanceTransform",
+          nodeId: node.id,
+          before: { ...node.transform },
+          after: { ...node.transform, rotationDeg: targetRot }
+        });
+      }
+    });
+    
+    if (cmds.length > 0) {
+      executeCommand(cmds.length === 1 ? cmds[0] : { type: "Batch", commands: cmds });
+    }
+  }, [selectedItemIds, itemRotationStr, designDocument.nodes, executeCommand]);
+
+  const handleApplyCoordinates = useCallback(() => {
+    if (selectedItemIds.length === 0) return;
+    const node = designDocument.nodes.find(n => n.id === selectedItemIds[0]);
+    if (!node) return;
+
+    const nVal = parseFloat(itemNorthStr);
+    const eVal = parseFloat(itemEastStr);
+    if (isNaN(nVal) || isNaN(eVal)) return;
+
+    if (isDesignInstance(node)) {
+      executeCommand({
+        type: "UpdateInstanceTransform",
+        nodeId: node.id,
+        before: { ...node.transform },
+        after: { ...node.transform, northM: nVal, eastM: eVal }
+      });
+    } else if (isDesignEntity(node) && node.type === "LINE") {
+      const v0 = node.vertices[0];
+      const v1 = node.vertices[1];
+      if (v0 && v1) {
+        const dn = nVal - v0.northM;
+        const de = eVal - v0.eastM;
+        executeCommand({
+          type: "UpdateEntityVertices",
+          nodeId: node.id,
+          before: [...node.vertices],
+          after: [
+            { northM: nVal, eastM: eVal },
+            { northM: v1.northM + dn, eastM: v1.eastM + de }
+          ]
+        });
+      }
+    }
+  }, [selectedItemIds, itemNorthStr, itemEastStr, designDocument.nodes, executeCommand]);
+
+  const handleApplyLengthAngle = useCallback(() => {
+    if (selectedItemIds.length === 0) return;
+    const node = designDocument.nodes.find(n => n.id === selectedItemIds[0]);
+    if (!node || !isDesignEntity(node) || node.type !== "LINE") return;
+
+    const length = parseFloat(lineLengthStr);
+    const angleDeg = parseFloat(lineAngleStr);
+    if (isNaN(length) || isNaN(angleDeg)) return;
+
+    const v0 = node.vertices[0];
+    if (v0) {
+      const angleRad = (angleDeg * Math.PI) / 180;
+      const newV1 = {
+        northM: v0.northM + length * Math.cos(angleRad),
+        eastM: v0.eastM + length * Math.sin(angleRad)
+      };
+      executeCommand({
+        type: "UpdateEntityVertices",
+        nodeId: node.id,
+        before: [...node.vertices],
+        after: [v0, newV1]
+      });
+    }
+  }, [selectedItemIds, lineLengthStr, lineAngleStr, designDocument.nodes, executeCommand]);
 
   const handleScaleGroupToBoundary = useCallback((mode: "fit" | "fill") => {
     if (selectedItemIds.length === 0) return;
@@ -432,83 +812,118 @@ export function TemplatesPage(props: TemplatesPageProps) {
     const cx = (minX + maxX) / 2;
     const cy = (minY + maxY) / 2;
 
-    setPlacedItems(prev => prev.map(p => {
-      if (p.groupId !== firstItem.groupId) return p;
-      
-      const dx = p.x - cx;
-      const dy = p.y - cy;
-      
-      const newX = dx * scaleMultiplier;
-      const newY = dy * scaleMultiplier;
-      
-      return {
-        ...p,
-        x: newX,
-        y: newY,
-        scale: p.scale * scaleMultiplier,
-        width: p.width * scaleMultiplier,
-        height: p.height * scaleMultiplier,
-        lines: p.lines.map(l => ({
-          ...l,
-          from: { ...l.from, x: l.from.x * scaleMultiplier, y: l.from.y * scaleMultiplier },
-          to: { ...l.to, x: l.to.x * scaleMultiplier, y: l.to.y * scaleMultiplier },
-        })),
-      };
-    }));
-  }, [placedItems, selectedItemIds, bw, bh, indent]);
+    const cmds: import('../types/designDocument').DesignCommand[] = [];
+    designDocument.nodes.forEach(node => {
+      if (node.metadata?.groupId !== firstItem.groupId) return;
+      if (isDesignInstance(node)) {
+        const dx = node.transform.eastM - cx;
+        const dy = node.transform.northM - cy;
+        const newX = dx * scaleMultiplier;
+        const newY = dy * scaleMultiplier;
+        
+        cmds.push({
+          type: "UpdateInstanceTransform",
+          nodeId: node.id,
+          before: { ...node.transform },
+          after: {
+            northM: newY,
+            eastM: newX,
+            rotationDeg: node.transform.rotationDeg,
+            scale: node.transform.scale * scaleMultiplier
+          }
+        });
+      }
+    });
+    
+    if (cmds.length > 0) {
+      executeCommand(cmds.length === 1 ? cmds[0] : { type: "Batch", commands: cmds });
+    }
+  }, [placedItems, selectedItemIds, bw, bh, indent, designDocument.nodes, executeCommand]);
 
   const handleGroupItems = useCallback(() => {
      if (selectedItemIds.length < 2) return;
      const groupId = "grp-" + Date.now();
-     setPlacedItems(prev => prev.map(p => selectedItemIds.includes(p.id) ? { ...p, groupId } : p));
-     setWordGroups(prev => [...prev, { id: groupId, label: "Word", itemIds: [...selectedItemIds] }]);
-  }, [selectedItemIds]);
+     const cmds: import('../types/designDocument').DesignCommand[] = designDocument.nodes
+       .filter(n => selectedItemIds.includes(n.id))
+       .map(node => ({
+         type: "UpdateNodeGroupId",
+         nodeId: node.id,
+         before: node.metadata?.groupId as string | undefined,
+         after: groupId
+       }));
+     executeCommand({ type: "Batch", commands: cmds });
+  }, [selectedItemIds, designDocument.nodes, executeCommand]);
 
   const handleUngroupItems = useCallback(() => {
-    const firstItem = placedItems.find(p => selectedItemIds.includes(p.id));
-    if (!firstItem?.groupId) return;
-    const groupId = firstItem.groupId;
-    setPlacedItems(prev => prev.map(p => 
-      p.groupId === groupId ? { ...p, groupId: undefined } : p
-    ));
-    setWordGroups(prev => prev.filter(g => g.id !== groupId));
+    const firstItem = designDocument.nodes.find(p => selectedItemIds.includes(p.id));
+    if (!firstItem?.metadata?.groupId) return;
+    const groupId = firstItem.metadata.groupId as string;
+    
+    const cmds: import('../types/designDocument').DesignCommand[] = designDocument.nodes
+      .filter(n => n.metadata?.groupId === groupId)
+      .map(node => ({
+        type: "UpdateNodeGroupId",
+        nodeId: node.id,
+        before: groupId,
+        after: undefined
+      }));
+      
+    executeCommand({ type: "Batch", commands: cmds });
     setSelectedItemIds([firstItem.id]);
-  }, [placedItems, selectedItemIds]);
+  }, [designDocument.nodes, selectedItemIds, executeCommand]);
 
   const handleCopyItems = useCallback(() => {
     if (selectedItemIds.length === 0) return;
-    const itemsToCopy = placedItems.filter(p => selectedItemIds.includes(p.id));
-    if (itemsToCopy.length === 0) return;
+    const nodesToCopy = designDocument.nodes.filter(n => selectedItemIds.includes(n.id));
+    if (nodesToCopy.length === 0) return;
 
     const offset = 0.5;
-    const newItems: PlacedItem[] = [];
+    const cmds: import('../types/designDocument').DesignCommand[] = [];
     const newIds: string[] = [];
     const groupMapping: Record<string, string> = {};
 
-    itemsToCopy.forEach(item => {
+    nodesToCopy.forEach(node => {
       const newId = `item-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
       newIds.push(newId);
 
       let newGroupId: string | undefined = undefined;
-      if (item.groupId) {
-        if (!groupMapping[item.groupId]) {
-          groupMapping[item.groupId] = `grp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const grpId = node.metadata?.groupId as string | undefined;
+      if (grpId) {
+        if (!groupMapping[grpId]) {
+          groupMapping[grpId] = `grp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         }
-        newGroupId = groupMapping[item.groupId];
+        newGroupId = groupMapping[grpId];
       }
 
-      newItems.push({
-        ...item,
-        id: newId,
-        groupId: newGroupId,
-        x: item.x + offset,
-        y: item.y - offset,
-      });
+      if (isDesignInstance(node)) {
+        const newNode = createDesignInstance(
+          newId,
+          node.templateId,
+          {
+            northM: node.transform.northM - offset,
+            eastM: node.transform.eastM + offset,
+            rotationDeg: node.transform.rotationDeg,
+            scale: node.transform.scale,
+          },
+          { ...node.metadata, groupId: newGroupId }
+        );
+        cmds.push({ type: "AddNode", node: newNode });
+      } else if (isDesignEntity(node)) {
+        const newNode = createDesignEntity(
+          newId,
+          node.type,
+          node.layer,
+          node.vertices.map(v => ({ northM: v.northM - offset, eastM: v.eastM + offset })),
+          node.width,
+          { ...node.metadata, groupId: newGroupId }
+        );
+        cmds.push({ type: "AddNode", node: newNode });
+      }
     });
 
-    setPlacedItems(prev => [...prev, ...newItems]);
+    executeCommand(cmds.length === 1 ? cmds[0] : { type: "Batch", commands: cmds });
     setSelectedItemIds(newIds);
-  }, [placedItems, selectedItemIds]);
+  }, [designDocument.nodes, selectedItemIds, executeCommand]);
 
   const handleParse = async () => {
     if (!props.apiBaseUrl) return;
@@ -521,35 +936,28 @@ export function TemplatesPage(props: TemplatesPageProps) {
         return;
       }
       title = `Boundary_${bw}x${bh}_${new Date().toISOString().slice(0,10)}`;
-      placedItems.forEach(item => {
-        const cos = Math.cos((item.rotation || 0) * Math.PI / 180) || 0;
-        const sin = Math.sin((item.rotation || 0) * Math.PI / 180) || 0;
-        item.lines.forEach((l, i) => {
-          const fx = (l.from.x * cos - l.from.y * sin) + (item.y || 0);
-          const fy = (l.from.x * sin + l.from.y * cos) + (item.x || 0);
-          const tx = (l.to.x * cos - l.to.y * sin) + (item.y || 0);
-          const ty = (l.to.x * sin + l.to.y * cos) + (item.x || 0);
-          if (!isFinite(fx) || !isFinite(fy) || !isFinite(tx) || !isFinite(ty)) return;
-          
-          finalLines.push({
-            ...l,
-            id: `${item.id}-${i}`,
-            from: { ...l.from, x: fx, y: fy },
-            to: { ...l.to, x: tx, y: ty },
-            entity: {
-              entity_id: `${item.id}-${i}`,
-              entity_type: "LINE",
-              layer: "MARKING",
-              color: 3,
-              is_mark: true,
-              length_m: Math.hypot(tx - fx, ty - fy),
-              geometry: {},
-              preview_points: [
-                { north: fx, east: fy },
-                { north: tx, east: ty },
-              ],
-            } as DxfEntity,
-          });
+      const flattened = flattenDesignDocument(designDocument, templateRegistryRef.current);
+      flattened.forEach((l) => {
+        const fx = l.from.x; // north
+        const fy = l.from.y; // east
+        const tx = l.to.x;   // north
+        const ty = l.to.y;   // east
+        
+        finalLines.push({
+          ...l,
+          entity: {
+            entity_id: l.id,
+            entity_type: "LINE",
+            layer: "MARKING",
+            color: 3,
+            is_mark: true,
+            length_m: Math.hypot(tx - fx, ty - fy),
+            geometry: {},
+            preview_points: [
+              { north: fx, east: fy },
+              { north: tx, east: ty },
+            ],
+          } as DxfEntity,
         });
       });
     } else {
@@ -680,6 +1088,7 @@ export function TemplatesPage(props: TemplatesPageProps) {
               onPlaceRoverAtPoint={handlePlaceRoverAtPoint}
               onUpdatePlacedItems={(items) => setPlacedItems(items)}
               onSelectionChange={(ids) => setSelectedItemIds(ids)}
+              previewAnchor={previewAnchor}
             />
           ) : boundaryMode ? (
             <BoundaryEditor
@@ -698,6 +1107,11 @@ export function TemplatesPage(props: TemplatesPageProps) {
               showBoundaryPoints={showBoundaryPoints}
               activeSnapPointId={activeSnapPointId}
               onPlaceRoverAtPoint={handlePlaceRoverAtPoint}
+              activeTool={activeTool}
+              onAddEntity={(entity) => executeCommand({ type: "AddNode", node: entity })}
+              worldLines={worldLines}
+              onDragStart={handleDragStart}
+              onDragEnd={handleDragEnd}
             />
           ) : (
             <View style={{ flex: 1, position: "relative" }}>
@@ -739,6 +1153,63 @@ export function TemplatesPage(props: TemplatesPageProps) {
                 <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 12 }}>
                    <Text style={{ color: "#cbd5e1", fontSize: 13, fontWeight: "700" }}>Show Snap Points</Text>
                    <Switch value={showBoundaryPoints} onValueChange={setShowBoundaryPoints} trackColor={{ false: "#334155", true: "#0b6b68" }} thumbColor={"#f8fafc"} />
+                </View>
+              )}
+              {boundaryMode && (
+                <View style={{ marginTop: 12, borderTopWidth: 1, borderTopColor: "#1e293b", paddingTop: 12 }}>
+                  <Text style={{ color: "#94a3b8", fontSize: 11, fontWeight: "800", marginBottom: 8, textTransform: "uppercase" }}>Active Tool</Text>
+                  <View style={{ flexDirection: "row", gap: 8, marginBottom: 10 }}>
+                    {(["SELECT", "LINE"] as const).map(tool => (
+                      <Pressable
+                        key={tool}
+                        onPress={() => setActiveTool(tool)}
+                        style={{
+                          flex: 1,
+                          height: 36,
+                          borderRadius: 8,
+                          backgroundColor: activeTool === tool ? "#0b6b68" : "#1e293b",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          borderWidth: 1,
+                          borderColor: activeTool === tool ? "#0b6b68" : "#334155",
+                        }}
+                      >
+                        <Text style={{ color: "#fff", fontWeight: "800", fontSize: 12 }}>{tool}</Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <Pressable
+                      onPress={handleUndo}
+                      disabled={history.past.length === 0}
+                      style={{
+                        flex: 1,
+                        height: 36,
+                        borderRadius: 8,
+                        backgroundColor: history.past.length === 0 ? "#1e293b" : "#ef4444",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        opacity: history.past.length === 0 ? 0.4 : 1,
+                      }}
+                    >
+                      <Text style={{ color: "#fff", fontWeight: "800", fontSize: 12 }}>Undo ({history.past.length})</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={handleRedo}
+                      disabled={history.future.length === 0}
+                      style={{
+                        flex: 1,
+                        height: 36,
+                        borderRadius: 8,
+                        backgroundColor: history.future.length === 0 ? "#1e293b" : "#3b82f6",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        opacity: history.future.length === 0 ? 0.4 : 1,
+                      }}
+                    >
+                      <Text style={{ color: "#fff", fontWeight: "800", fontSize: 12 }}>Redo ({history.future.length})</Text>
+                    </Pressable>
+                  </View>
                 </View>
               )}
             </View>
@@ -1099,43 +1570,107 @@ export function TemplatesPage(props: TemplatesPageProps) {
               </View>
             )}
 
-            {boundaryMode && selectedItemIds.length > 0 && selectedItemIds.filter(id => id !== "boundary").length > 0 && (
-              <View style={{ borderRadius: 14, padding: 14, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d8e1eb", gap: 8 }}>
-                <Text style={{ color: "#64748b", fontSize: 11, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase" }}>
-                  Transform Selected
-                </Text>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                  <Text style={{ color: "#475569", fontSize: 12, fontWeight: "600", width: 50 }}>Scale:</Text>
-                  <TextInput
-                    style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, padding: 6, color: "#0f172a" }}
-                    value={itemScaleStr}
-                    onChangeText={setItemScaleStr}
-                    keyboardType="numeric"
-                  />
-                  <Pressable
-                    onPress={handleApplyScale}
-                    style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 8, backgroundColor: "#0b6b68" }}
-                  >
-                    <Text style={{ color: "#fff", fontSize: 12, fontWeight: "700" }}>Apply</Text>
-                  </Pressable>
+            {boundaryMode && selectedItemIds.length > 0 && selectedItemIds[0] !== "boundary" && (() => {
+              const selectedNode = designDocument.nodes.find(n => n.id === selectedItemIds[0]);
+              if (!selectedNode) return null;
+              return (
+                <View style={{ borderRadius: 14, padding: 14, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d8e1eb", gap: 8 }}>
+                  <Text style={{ color: "#64748b", fontSize: 11, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase" }}>
+                    Transform Selected
+                  </Text>
+                  
+                  {isDesignInstance(selectedNode) && (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <Text style={{ color: "#475569", fontSize: 12, fontWeight: "600", width: 60 }}>Scale:</Text>
+                      <TextInput
+                        style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, padding: 6, color: "#0f172a" }}
+                        value={itemScaleStr}
+                        onChangeText={setItemScaleStr}
+                        keyboardType="numeric"
+                      />
+                      <Pressable
+                        onPress={handleApplyScale}
+                        style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 8, backgroundColor: "#0b6b68" }}
+                      >
+                        <Text style={{ color: "#fff", fontSize: 12, fontWeight: "700" }}>Apply</Text>
+                      </Pressable>
+                    </View>
+                  )}
+                  
+                  {isDesignInstance(selectedNode) && (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <Text style={{ color: "#475569", fontSize: 12, fontWeight: "600", width: 60 }}>Angle:</Text>
+                      <TextInput
+                        style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, padding: 6, color: "#0f172a" }}
+                        value={itemRotationStr}
+                        onChangeText={setItemRotationStr}
+                        keyboardType="numeric"
+                      />
+                      <Pressable
+                        onPress={handleApplyRotation}
+                        style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 8, backgroundColor: "#6366f1" }}
+                      >
+                        <Text style={{ color: "#fff", fontSize: 12, fontWeight: "700" }}>Apply</Text>
+                      </Pressable>
+                    </View>
+                  )}
+                  
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <Text style={{ color: "#475569", fontSize: 12, fontWeight: "600", width: 60 }}>Position:</Text>
+                    <View style={{ flex: 1, flexDirection: "row", gap: 4 }}>
+                      <TextInput
+                        placeholder="N (m)"
+                        style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, padding: 6, color: "#0f172a" }}
+                        value={itemNorthStr}
+                        onChangeText={setItemNorthStr}
+                        keyboardType="numeric"
+                      />
+                      <TextInput
+                        placeholder="E (m)"
+                        style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, padding: 6, color: "#0f172a" }}
+                        value={itemEastStr}
+                        onChangeText={setItemEastStr}
+                        keyboardType="numeric"
+                      />
+                    </View>
+                    <Pressable
+                      onPress={handleApplyCoordinates}
+                      style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 8, backgroundColor: "#0b6b68" }}
+                    >
+                      <Text style={{ color: "#fff", fontSize: 12, fontWeight: "700" }}>Apply</Text>
+                    </Pressable>
+                  </View>
+                  
+                  {isDesignEntity(selectedNode) && selectedNode.type === "LINE" && (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <Text style={{ color: "#475569", fontSize: 12, fontWeight: "600", width: 60 }}>L & A:</Text>
+                      <View style={{ flex: 1, flexDirection: "row", gap: 4 }}>
+                        <TextInput
+                          placeholder="Len (m)"
+                          style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, padding: 6, color: "#0f172a" }}
+                          value={lineLengthStr}
+                          onChangeText={setLineLengthStr}
+                          keyboardType="numeric"
+                        />
+                        <TextInput
+                          placeholder="Ang (deg)"
+                          style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, padding: 6, color: "#0f172a" }}
+                          value={lineAngleStr}
+                          onChangeText={setLineAngleStr}
+                          keyboardType="numeric"
+                        />
+                      </View>
+                      <Pressable
+                        onPress={handleApplyLengthAngle}
+                        style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 8, backgroundColor: "#6366f1" }}
+                      >
+                        <Text style={{ color: "#fff", fontSize: 12, fontWeight: "700" }}>Apply</Text>
+                      </Pressable>
+                    </View>
+                  )}
                 </View>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                  <Text style={{ color: "#475569", fontSize: 12, fontWeight: "600", width: 50 }}>Angle:</Text>
-                  <TextInput
-                    style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, padding: 6, color: "#0f172a" }}
-                    value={itemRotationStr}
-                    onChangeText={setItemRotationStr}
-                    keyboardType="numeric"
-                  />
-                  <Pressable
-                    onPress={handleApplyRotation}
-                    style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 8, backgroundColor: "#6366f1" }}
-                  >
-                    <Text style={{ color: "#fff", fontSize: 12, fontWeight: "700" }}>Apply</Text>
-                  </Pressable>
-                </View>
-              </View>
-            )}
+              );
+            })()}
 
             {boundaryMode && props.mapViewEnabled && (
               <View style={{ borderRadius: 14, padding: 14, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d8e1eb", gap: 10 }}>
