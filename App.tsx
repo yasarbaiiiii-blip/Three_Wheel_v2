@@ -1090,6 +1090,8 @@ export default function App() {
             prev.gps_sat === data.gps_sat &&
             prev.hrms === data.hrms &&
             prev.vrms === data.vrms &&
+            prev.speed_m_s === data.speed_m_s &&
+            prev.measured_speed_m_s === data.measured_speed_m_s &&
             prev.joystick_state === data.joystick_state &&
             prev.joystick_active === data.joystick_active &&
             prev.control_owner === data.control_owner &&
@@ -1701,6 +1703,7 @@ export default function App() {
           heading_err_deg: number;
           lookahead_m: number;
           speed_m_s: number;
+          measured_speed_m_s?: number | null;
           kappa: number;
           dist_to_goal_m: number;
           pose_age_ms: number;
@@ -1734,6 +1737,10 @@ export default function App() {
         rpp_state_name: telemetryRes ? telemetryRes.rpp_state_name : statusRes.rpp_state_name,
         dist_to_goal_m: telemetryRes ? telemetryRes.dist_to_goal_m : statusRes.dist_to_goal,
         speed_m_s: telemetryRes ? telemetryRes.speed_m_s : statusRes.speed,
+        measured_speed_m_s:
+          telemetryRes?.measured_speed_m_s ??
+          statusRes?.measured_speed_m_s ??
+          null,
         xtrack_m: telemetryRes ? telemetryRes.xtrack_m : statusRes.xtrack,
         battery_pct: telemetryRes ? telemetryRes.battery_pct : 85,
         battery_v: telemetryRes ? telemetryRes.battery_v : null,
@@ -3403,7 +3410,9 @@ function HomeView({
     justifyContent: "center" as const,
   };
 
-
+  const displayedSpeedMps =
+    telemetrySnapshot?.measured_speed_m_s ??
+    telemetrySnapshot?.speed_m_s;
 
   return (
     <View style={{ flex: 1, backgroundColor: "#ffffff" }}>
@@ -3791,7 +3800,7 @@ function HomeView({
                         <SectionTitle title="Telemetry snapshot" light />
                         <MiniGrid
                           items={[
-                            ["Speed", telemetrySnapshot?.speed_m_s == null ? "n/a" : `${telemetrySnapshot.speed_m_s.toFixed(2)} m/s`],
+                            ["Speed", displayedSpeedMps == null ? "n/a" : `${displayedSpeedMps.toFixed(2)} m/s`],
                             ["Heading", telemetrySnapshot?.heading_ned_deg == null ? "n/a" : `${telemetrySnapshot.heading_ned_deg.toFixed(1)}°`],
                             ["Cross-track", telemetrySnapshot?.xtrack_m == null ? "n/a" : `${telemetrySnapshot.xtrack_m.toFixed(2)} m`],
                             ["Goal dist", telemetrySnapshot?.dist_to_goal_m == null ? "n/a" : `${telemetrySnapshot.dist_to_goal_m.toFixed(2)} m`],

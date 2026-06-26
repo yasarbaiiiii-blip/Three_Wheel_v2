@@ -91,6 +91,8 @@ export interface TelemetrySnapshot {
   heading_err_deg?: number | null;
   lookahead_m?: number | null;
   speed_m_s?: number | null;
+  /** Actual rover horizontal speed from MAVROS velocity_local. */
+  measured_speed_m_s?: number | null;
   kappa?: number | null;
   dist_to_goal_m?: number | null;
   pose_age_ms?: number | null;
