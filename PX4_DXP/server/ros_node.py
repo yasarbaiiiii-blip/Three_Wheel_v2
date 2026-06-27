@@ -18,6 +18,7 @@ shim if ever needed) but **must not** be called from the asyncio loop.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import threading
 import time
@@ -45,6 +46,10 @@ from spray_runtime_protocol import (
     parse_dwell_response,
     serialize_dwell_command,
 )
+from path_identity import (
+    PATH_IDENTITY_TOPIC,
+    make_path_identity,
+)
 
 from config import (
     SRV_RPP_GET_PARAMS,
@@ -57,22 +62,25 @@ from config import (
     SRV_SPRAY_START_DWELL,
 )
 from logging_setup import get_logger
+from path_validation import (
+    normalize_path_points,
+    normalize_spray_flags,
+    verified_path_fingerprint,
+)
 from rpp_status import RppStatusMonitor
 
 log = get_logger("server.ros")
 
 # ── Optional MAVROS imports ───────────────────────────────────────────────────
 try:
-    from mavros_msgs.msg import ManualControl, State
+    from mavros_msgs.msg import State
     from sensor_msgs.msg import BatteryState, NavSatFix
     from mavros_msgs.srv import CommandBool, SetMode
 
     _HAS_MAVROS = True
-    _HAS_MANUAL_CONTROL = True
 except ImportError:
     _HAS_MAVROS = False
-    _HAS_MANUAL_CONTROL = False
-    State = BatteryState = NavSatFix = CommandBool = SetMode = ManualControl = None  # type: ignore
+    State = BatteryState = NavSatFix = CommandBool = SetMode = None  # type: ignore
 
 try:
     from mavros_msgs.msg import GPSRAW
@@ -198,12 +206,17 @@ class RosBridgeNode(Node):
         "spraying": False,
         "spray_active": False,
         "spray_manual": False,
+        "measured_speed_m_s": None,
+        "rpp_debug_age_ms": None,
+        "rpp_debug_fresh": False,
+        "obstacle_clear": True,
     }
 
     def __init__(self) -> None:
         super().__init__("fastapi_bridge")
         self._lock = threading.Lock()
         self._state: dict[str, Any] = dict(self._DEFAULT_STATE)
+        self._obstacle_callback: Callable[[bool], None] | None = None
         self._rpp_monitor = RppStatusMonitor()
         # Track last time /mavros/state was received.
         # TRANSIENT_LOCAL means a MAVROS process crash produces no new
@@ -305,19 +318,24 @@ class RosBridgeNode(Node):
             _qos_best_effort(),
             callback_group=self._sub_group,
         )
+        self.create_subscription(
+            Bool,
+            "/rover/obstacle_clear",
+            self._cb_obstacle_clear,
+            _qos_best_effort(),
+            callback_group=self._sub_group,
+        )
 
         # ── Publishers ────────────────────────────────────────────────────────
         self._path_pub = self.create_publisher(Path, "/path", _qos_reliable_tl())
+        self._path_identity_pub = self.create_publisher(
+            String, PATH_IDENTITY_TOPIC, _qos_reliable_tl()
+        )
         # Manual spray override command — reliable VOLATILE (depth 1): must
         # arrive, but a stale override must never replay to a restarted node.
         self._spray_manual_pub = self.create_publisher(Bool, "/spray/manual", 1)
-        self._manual_control_pub = None
-        if _HAS_MANUAL_CONTROL:
-            self._manual_control_pub = self.create_publisher(
-                ManualControl,
-                "/mavros/manual_control/send",
-                10,
-            )
+        # F-01/F-02: feed the spray node's independent GPS_SURVEYED runtime gate.
+        self._gps_gate_pub = self.create_publisher(String, "/spray/gps_gate", 1)
 
         # ── Service clients (reentrant group, can be called from any thread) ──
         self._arming_cli = None
@@ -503,6 +521,9 @@ class RosBridgeNode(Node):
         # MAVROS velocity_local is ENU; yaw rate CCW+ → NED CW+ via negation.
         with self._lock:
             self._velocity_recv_time = time.monotonic()
+            self._state["measured_speed_m_s"] = math.hypot(
+                float(msg.twist.linear.x), float(msg.twist.linear.y)
+            )
             self._state["yaw_rate_rad_s"] = -float(msg.twist.angular.z)
 
     def _cb_spray_runtime_status(self, msg: String) -> None:
@@ -525,29 +546,32 @@ class RosBridgeNode(Node):
 
     # ── Public API: spray manual override ────────────────────────────────────
 
-    def publish_manual_control(self, forward: float, yaw: float) -> tuple[bool, str]:
-        """Publish MAVROS manual_control for MANUAL-mode driving."""
-        if not _HAS_MANUAL_CONTROL or self._manual_control_pub is None:
-            return False, "MAVROS manual_control publisher not available"
-        forward_clamped = max(-1.0, min(1.0, float(forward)))
-        yaw_clamped = max(-1.0, min(1.0, float(yaw)))
-        msg = ManualControl()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "base_link"
-        msg.x = forward_clamped
-        msg.y = 0.0
-        msg.z = 0.0
-        msg.r = yaw_clamped
-        msg.buttons = 0
-        self._manual_control_pub.publish(msg)
-        return True, "ok"
-
     def publish_spray_manual(self, on: bool) -> None:
         """Command the spray_controller manual override (True=ON, False=cancel)."""
         msg = Bool()
         msg.data = bool(on)
         self._spray_manual_pub.publish(msg)
         log.info("published /spray/manual: %s", "ON" if on else "OFF")
+
+    def publish_gps_gate(
+        self, *, active: bool, ok: bool, reason: str, seq: int
+    ) -> None:
+        """Feed the spray node's independent GPS_SURVEYED runtime gate (F-01/F-02).
+
+        Published every telemetry tick while a mission is RUNNING so the node can
+        detect feed loss (server death) and fail-closed. `active` is True only for
+        a GPS_SURVEYED continuous/dash mission; the node ignores the gate when
+        active is False, so LOCAL_NED missions are never RTK-gated."""
+        msg = String()
+        msg.data = json.dumps(
+            {
+                "active": bool(active),
+                "ok": bool(ok),
+                "reason": str(reason or ""),
+                "seq": int(seq),
+            }
+        )
+        self._gps_gate_pub.publish(msg)
 
     # ── Public API: state ─────────────────────────────────────────────────────
 
@@ -594,6 +618,11 @@ class RosBridgeNode(Node):
             age = time.monotonic() - self._state_recv_time
             if age > self._MAVROS_STATE_TIMEOUT_S:
                 state["connected"] = False
+        rpp_age_s = self._rpp_monitor.snapshot_age_s()
+        state["rpp_debug_age_ms"] = (
+            rpp_age_s * 1000.0 if rpp_age_s is not None else None
+        )
+        state["rpp_debug_fresh"] = self._rpp_monitor.is_fresh()
         return state
 
     def get_bridge_snapshot(self) -> dict[str, Any]:
@@ -954,32 +983,32 @@ class RosBridgeNode(Node):
         return True, values, ""
 
     async def set_spray_param_async(
-        self, name: str, value: float | int | bool | str, timeout: float = 5.0
+        self, name: str, value: float | int | bool | str, timeout: float = 8.0
     ) -> tuple[bool, str]:
         """Set a single spray_controller parameter at runtime."""
-        if self._spray_param_set_cli is None:
-            return False, "Spray param service not available"
         req = SetParameters.Request()
         param = Parameter()
         param.name = name
         param.value = _python_to_param_value(value)
         req.parameters = [param]
-        ok, _, msg = await self._call_spray_set_param(req, timeout)
+        ok, _, msg = await self._call_spray_set_param(
+            req, response_timeout_s=timeout
+        )
         return ok, msg
 
     async def set_spray_params_bulk_async(
-        self, params: dict[str, float | int | bool | str], timeout: float = 5.0
+        self, params: dict[str, float | int | bool | str], timeout: float = 8.0
     ) -> tuple[bool, list[bool], str]:
         """Set multiple spray_controller params atomically."""
-        if self._spray_param_set_cli is None:
-            return False, [], "Spray param service not available"
         req = SetParameters.Request()
         for name, value in params.items():
             param = Parameter()
             param.name = name
             param.value = _python_to_param_value(value)
             req.parameters.append(param)
-        ok, results, msg = await self._call_spray_set_param(req, timeout)
+        ok, results, msg = await self._call_spray_set_param(
+            req, response_timeout_s=timeout
+        )
         flags = [r.successful for r in results] if results else []
         return ok, flags, msg
 
@@ -1105,25 +1134,91 @@ class RosBridgeNode(Node):
             self._spray_runtime_status = dict(status)
             self._spray_runtime_status_recv_time = time.monotonic()
 
-    async def _call_spray_set_param(self, req, timeout: float) -> tuple[bool, list, str]:
+    async def _call_spray_set_param(
+        self,
+        req,
+        service_wait_timeout_s: float = 2.0,
+        response_timeout_s: float = 8.0,
+    ) -> tuple[bool, list, str]:
         """Shared rcl SetParameters call wrapper for spray_controller."""
-        if not await self._service_ready_async(
-            self._spray_param_set_cli, timeout_sec=0.5
-        ):
-            return False, [], "spray_controller not running"
+        client = self._spray_param_set_cli
+        if client is None:
+            return False, [], "Spray parameter client is not initialized"
+
         try:
-            result = await self._await_ros_future(
-                self._spray_param_set_cli.call_async(req), timeout=timeout
+            service_ready = await asyncio.to_thread(
+                lambda: client.wait_for_service(timeout_sec=service_wait_timeout_s)
+            )
+        except Exception as exc:
+            log.warning(
+                "spray parameter service check failed: %s", exc, exc_info=True
+            )
+            return False, [], f"Spray parameter service check failed: {exc}"
+
+        if not service_ready:
+            log.warning(
+                "spray parameter service unavailable after %.1fs",
+                service_wait_timeout_s,
+            )
+            return (
+                False,
+                [],
+                f"Spray parameter service unavailable after "
+                f"{service_wait_timeout_s:.1f}s",
+            )
+
+        t0 = time.monotonic()
+        try:
+            ros_future = client.call_async(req)
+            response = await self._await_ros_future(
+                ros_future, timeout=response_timeout_s
             )
         except asyncio.TimeoutError:
-            return False, [], "Spray param set timed out"
+            latency_s = time.monotonic() - t0
+            log.warning(
+                "spray parameter response timed out after %.1fs (latency_s=%.3f)",
+                response_timeout_s,
+                latency_s,
+            )
+            return (
+                False,
+                [],
+                f"Spray parameter response timed out after "
+                f"{response_timeout_s:.1f}s",
+            )
         except Exception as exc:
-            return False, [], f"Spray param set failed: {exc}"
-        if result is None:
-            return False, [], "Spray param set returned None"
-        results = list(result.results)
-        if results and not results[0].successful:
-            return False, results, results[0].reason or "Spray param set rejected"
+            latency_s = time.monotonic() - t0
+            log.warning(
+                "spray parameter call failed after %.3fs: %s",
+                latency_s,
+                exc,
+                exc_info=True,
+            )
+            return False, [], f"Spray parameter call failed: {exc}"
+
+        latency_s = time.monotonic() - t0
+        if response is None:
+            log.warning(
+                "spray parameter service returned no response (latency_s=%.3f)",
+                latency_s,
+            )
+            return False, [], "Spray parameter service returned no response"
+
+        results = list(response.results)
+        failed_reasons = [
+            result.reason or "parameter rejected"
+            for result in results
+            if not result.successful
+        ]
+        if failed_reasons:
+            log.warning(
+                "spray parameter rejected (latency_s=%.3f): %s",
+                latency_s,
+                "; ".join(failed_reasons),
+            )
+            return False, results, "; ".join(failed_reasons)
+
+        log.debug("spray parameter set succeeded (latency_s=%.3f)", latency_s)
         return True, results, ""
 
     async def list_rpp_params_async(
@@ -1161,8 +1256,13 @@ class RosBridgeNode(Node):
         frame_id: str = "local_ned",
         spray_flags: list[bool] | None = None,
         runtime_entry: bool = False,
+        mission_id: str = "",
+        configuration_revision: int = 0,
+        path_fingerprint: str = "",
+        verify_supplied_fingerprint: bool = True,
     ) -> None:
         """Publish nav_msgs/Path. Empty list → see publish_stop_path()."""
+        points = normalize_path_points(points, label="ROS path")
         if spray_flags is None:
             flags = [False] * len(points)
         elif len(spray_flags) != len(points):
@@ -1173,7 +1273,11 @@ class RosBridgeNode(Node):
             )
             flags = [False] * len(points)
         else:
-            flags = [bool(f) for f in spray_flags]
+            flags = normalize_spray_flags(spray_flags, len(points), default=False)
+        if path_fingerprint and not verify_supplied_fingerprint:
+            fingerprint = str(path_fingerprint)
+        else:
+            fingerprint = verified_path_fingerprint(points, flags, path_fingerprint)
 
         path = Path()
         path.header.stamp = self.get_clock().now().to_msg()
@@ -1192,13 +1296,52 @@ class RosBridgeNode(Node):
             else:
                 ps.pose.orientation.w = 1.0
             path.poses.append(ps)
+        ident = String()
+        ident.data = make_path_identity(
+            mission_id=mission_id,
+            path_fingerprint=fingerprint,
+            configuration_revision=configuration_revision,
+            source="raw_path",
+        )
+        self._path_identity_pub.publish(ident)
         self._path_pub.publish(path)
         log.info(
-            "published path: %d points → %s (spray_on=%d)",
+            "published path: %d points → %s (spray_on=%d, mission_id=%s)",
             len(points),
             frame_id,
             sum(1 for f in flags if f),
+            mission_id or "",
         )
+
+    def publish_path_clear(self, frame_id: str = "local_ned") -> None:
+        """Publish an explicit invalid path/identity reset for latched topics."""
+        ident = String()
+        ident.data = make_path_identity(
+            mission_id="",
+            path_fingerprint="",
+            configuration_revision=0,
+            source="clear",
+        )
+        path = Path()
+        path.header.stamp = self.get_clock().now().to_msg()
+        path.header.frame_id = frame_id
+        self._path_identity_pub.publish(ident)
+        self._path_pub.publish(path)
+        log.info("published latched path clear")
+
+    def set_obstacle_callback(self, cb: Callable[[bool], None] | None) -> None:
+        """Register orchestrator hook for ``/rover/obstacle_clear`` updates."""
+        self._obstacle_callback = cb
+
+    def _cb_obstacle_clear(self, msg: Bool) -> None:
+        clear = bool(msg.data)
+        with self._lock:
+            self._state["obstacle_clear"] = clear
+        if self._obstacle_callback is not None:
+            try:
+                self._obstacle_callback(clear)
+            except Exception:
+                log.exception("obstacle callback raised")
 
     def publish_stop_path(
         self, frame_id: str = "local_ned"

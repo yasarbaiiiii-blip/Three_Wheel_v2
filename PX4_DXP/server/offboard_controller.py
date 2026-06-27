@@ -14,11 +14,17 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import inspect
 import math
 from collections import deque
 from typing import Any, Callable, Optional
 
 from config import (
+    MISSION_COMPLETE_DISARM,
+    MISSION_COMPLETE_REST_SPEED_M_S,
+    MISSION_COMPLETE_REST_TIMEOUT_S,
+    MISSION_COMPLETE_SET_MANUAL,
+    MISSION_COMPLETE_SPRAY_TIMEOUT_S,
     RPP_IDLE,
     RPP_STALE,
     RPP_UNHEALTHY_CODES,
@@ -33,6 +39,11 @@ from mission_placement import (
     resolve_surveyed_points,
 )
 from models import MissionState
+from path_validation import (
+    normalize_path_points,
+    normalize_spray_flags,
+    verified_path_fingerprint,
+)
 
 log = get_logger("server.offboard")
 
@@ -51,6 +62,8 @@ ENTRY_COINCIDENT_TOLERANCE_M = 1e-6
 CLEAR_ALLOWED_STATES = {
     MissionState.IDLE,
     MissionState.COMPLETED,
+    MissionState.ABORTED,
+    MissionState.ERROR,
 }
 
 
@@ -106,6 +119,8 @@ class OffboardController:
         self._origin_gps: tuple[float, float] | None = None
         self._is_staged_mission = False
         self._spray_mode = "continuous"
+        self._path_fingerprint = ""
+        self._configuration_revision = 0
         # Serialises lifecycle calls. Created lazily on first use: on
         # Python 3.9 asyncio.Lock() binds an event loop at construction,
         # and the controller is built at server startup outside any loop.
@@ -154,6 +169,27 @@ class OffboardController:
     @property
     def spray_mode(self) -> str:
         return self._spray_mode
+
+    def gps_surveyed_runtime_context(self) -> dict[str, Any] | None:
+        """Context for the continuous/dash GPS_SURVEYED runtime watchdog (F-02).
+
+        Returns None unless a GPS_SURVEYED **continuous or dash** mission is
+        RUNNING — point missions carry their own runtime GPS gate in the point
+        orchestrator, and LOCAL_NED missions are never RTK-gated. When non-None,
+        the server watchdog evaluates GPS safety each tick and feeds the result
+        to the spray node's independent gate."""
+        if self._state != MissionState.RUNNING:
+            return None
+        if self._placement_mode != GPS_SURVEYED:
+            return None
+        if self._spray_mode not in ("continuous", "dash"):
+            return None
+        return {
+            "origin_gps": self._origin_gps,
+            "source_points": tuple(self._loaded_source_pts),
+            "spray_mode": self._spray_mode,
+            "mission_id": self._running_mission_id or self._loaded_mission_id,
+        }
 
     def loaded_path_summary(self, sample: int = 20) -> dict:
         """Read-only snapshot of the path currently resident in the controller.
@@ -208,6 +244,8 @@ class OffboardController:
         is_staged: bool = False,
         allow_replace_protected: bool = False,
         spray_mode: str = "continuous",
+        path_fingerprint: str = "",
+        configuration_revision: int = 0,
     ) -> None:
         reason = load_block_reason(self._state)
         if reason:
@@ -225,19 +263,28 @@ class OffboardController:
                 "use the staged mission workflow to replace it"
             )
 
-        self._loaded_source_pts = tuple(
-            (float(n), float(e)) for n, e in points
-        )
-        if spray_flags is not None and len(spray_flags) == len(points):
-            self._loaded_spray_flags = tuple(bool(f) for f in spray_flags)
+        normalized_points = normalize_path_points(points, label="mission path")
+        if spray_flags is not None and len(spray_flags) == len(normalized_points):
+            normalized_flags = normalize_spray_flags(
+                spray_flags, len(normalized_points), default=False
+            )
+            self._loaded_spray_flags = tuple(normalized_flags)
         elif spray_flags is not None:
+            normalized_flags = [False] * len(normalized_points)
             self._loaded_spray_flags = None
             self._log_entry(
                 "warning",
                 f"spray_flags length mismatch for {name or 'unknown'} — loading path with spray OFF",
             )
         else:
+            normalized_flags = [False] * len(normalized_points)
             self._loaded_spray_flags = None
+        verified_fingerprint = verified_path_fingerprint(
+            normalized_points,
+            normalized_flags,
+            path_fingerprint,
+        )
+        self._loaded_source_pts = tuple(normalized_points)
         self._path_name = name or source_name or new_mission_id
         self._loaded_mission_id = new_mission_id
         self._running_mission_id = None
@@ -245,10 +292,16 @@ class OffboardController:
         self._placement_mode = placement_mode
         self._is_staged_mission = bool(is_staged)
         self._spray_mode = str(spray_mode or "continuous")
-        self._origin_gps = (
-            (float(origin_gps[0]), float(origin_gps[1]))
-            if origin_gps is not None else None
-        )
+        self._path_fingerprint = verified_fingerprint
+        self._configuration_revision = int(configuration_revision or 0)
+        if origin_gps is not None:
+            lat = float(origin_gps[0])
+            lon = float(origin_gps[1])
+            if not math.isfinite(lat) or not math.isfinite(lon):
+                raise ValueError("origin_gps must contain finite latitude/longitude")
+            self._origin_gps = (lat, lon)
+        else:
+            self._origin_gps = None
         if self._state in (MissionState.COMPLETED, MissionState.ABORTED, MissionState.ERROR):
             self._state = MissionState.IDLE
         # Reset RPP done-settle timer so a leftover DONE from the previous
@@ -284,12 +337,46 @@ class OffboardController:
             self._origin_gps = None
             self._is_staged_mission = False
             self._spray_mode = "continuous"
+            self._path_fingerprint = ""
+            self._configuration_revision = 0
             self._state = MissionState.IDLE
+            if self._node is not None and hasattr(self._node, "publish_path_clear"):
+                self._node.publish_path_clear()
             self._log_entry(
                 "info",
                 f"Resident mission cleared: {cleared_name or 'none'}",
             )
-            return self.loaded_path_summary()
+            summary = self.loaded_path_summary()
+        # F-04: reset the live spray-controller config outside the lifecycle lock
+        # (it issues node service calls). Clears mission_id/fingerprint/revision +
+        # dash transform + dwell state on the node so the next load cannot inherit
+        # a stale mission-bound identity. Best-effort: a node that is down is logged
+        # but does not fail the clear.
+        await self._reset_spray_config_on_clear()
+        return summary
+
+    async def _reset_spray_config_on_clear(self) -> None:
+        if self._node is None:
+            return
+        try:
+            from spray_mission_config import (
+                apply_spray_mission_config,
+                default_backward_compatible_staged_fields,
+            )
+
+            defaults = default_backward_compatible_staged_fields()
+            defaults["spray_mode"] = "continuous"
+            defaults["mission_id"] = ""
+            defaults["path_fingerprint"] = ""
+            ok, why, _ = await apply_spray_mission_config(
+                self._node, defaults, revision=0
+            )
+            if not ok:
+                self._log_entry(
+                    "warning", f"spray config reset on clear not applied: {why}"
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            self._log_entry("warning", f"spray config reset on clear raised: {exc}")
 
     # ── Lifecycle (async) ─────────────────────────────────────────────────────
 
@@ -308,7 +395,41 @@ class OffboardController:
             )
         return f"start: RPP unhealthy (code={rpp_code})"
 
+    def _publish_path_to_node(self, points, **kwargs) -> None:
+        """Publish path while tolerating older test/helper node signatures."""
+        publish = self._node.publish_path
+        try:
+            sig = inspect.signature(publish)
+        except (TypeError, ValueError):
+            publish(points, **kwargs)
+            return
+        params = sig.parameters
+        if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            kwargs = {k: v for k, v in kwargs.items() if k in params}
+        publish(points, **kwargs)
+
     async def start_async(
+        self,
+        auto_origin: bool = False,
+        expected_mission_id: str | None = None,
+        pre_publish_hook: Callable[[dict[str, Any]], None] | None = None,
+    ) -> tuple[bool, str]:
+        from control_arbiter import ControlArbiterError, get_control_arbiter
+
+        try:
+            # RPP/RTK_WAIT start safety remains in _start_async_locked where
+            # rpp_code is checked immediately before OFFBOARD transition.
+            async with get_control_arbiter().mission_start(self):
+                return await self._start_async_locked(
+                    auto_origin=auto_origin,
+                    expected_mission_id=expected_mission_id,
+                    pre_publish_hook=pre_publish_hook,
+                )
+        except ControlArbiterError as exc:
+            self._log_entry("warning", exc.message)
+            return False, exc.message
+
+    async def _start_async_locked(
         self,
         auto_origin: bool = False,
         expected_mission_id: str | None = None,
@@ -407,6 +528,11 @@ class OffboardController:
             # quality failures retain their typed 422 contract instead of being
             # masked by the RPP STALE/RTK_WAIT state.
             rpp_code = fcu.get("rpp_state", RPP_STALE)
+            if fcu.get("rpp_debug_fresh") is not True:
+                self._state = MissionState.ERROR
+                msg = "start: RPP debug stale — setpoint chain not healthy"
+                self._log_entry("error", msg)
+                return False, msg
             if rpp_code in RPP_UNHEALTHY_CODES:
                 self._state = MissionState.ERROR
                 msg = self._rpp_unhealthy_start_message(rpp_code)
@@ -511,10 +637,16 @@ class OffboardController:
                 # Publish the mission path before the OFFBOARD request so the
                 # 50 Hz setpoint stream carries mission setpoints, not just the
                 # streamer's zero-velocity bootstrap, when PX4 evaluates entry.
-                publish_kwargs = {"spray_flags": spray_flags_to_publish}
+                publish_kwargs = {
+                    "spray_flags": spray_flags_to_publish,
+                    "mission_id": self._loaded_mission_id or "",
+                    "configuration_revision": self._configuration_revision,
+                    "path_fingerprint": self._path_fingerprint,
+                    "verify_supplied_fingerprint": False,
+                }
                 if entry_evidence["entry_transit_added"]:
                     publish_kwargs["runtime_entry"] = True
-                self._node.publish_path(pts_to_publish, **publish_kwargs)
+                self._publish_path_to_node(pts_to_publish, **publish_kwargs)
 
                 # ── Arm ───────────────────────────────────────────────────────
                 self._state = MissionState.ARMING
@@ -532,6 +664,12 @@ class OffboardController:
                 await asyncio.sleep(SETPOINT_STREAM_GRACE_S)
                 fcu = self._node.get_state()
                 rpp_code = fcu.get("rpp_state", RPP_STALE)
+                if fcu.get("rpp_debug_fresh") is not True:
+                    self._state = MissionState.ERROR
+                    msg = "start: RPP debug stale after path publish — setpoint chain not ready"
+                    self._log_entry("error", msg)
+                    await self._node.arm_async(False)
+                    return False, msg
                 if rpp_code in RPP_UNHEALTHY_CODES:
                     self._state = MissionState.ERROR
                     msg = self._rpp_unhealthy_start_message(rpp_code)
@@ -591,6 +729,9 @@ class OffboardController:
         if not fcu.get("connected", False):
             self._state = MissionState.ERROR
             return False, "start: FCU not connected"
+        if fcu.get("rpp_debug_fresh") is not True:
+            self._state = MissionState.ERROR
+            return False, "start: RPP debug stale — setpoint chain not healthy"
 
         if pre_publish_hook is not None:
             try:
@@ -616,6 +757,11 @@ class OffboardController:
 
             self._state = MissionState.SWITCHING_OFFBOARD
             await asyncio.sleep(SETPOINT_STREAM_GRACE_S)
+            fcu = self._node.get_state()
+            if fcu.get("rpp_debug_fresh") is not True:
+                self._state = MissionState.ERROR
+                await self._node.arm_async(False)
+                return False, "start: RPP debug stale after point shell arm"
             ok, why = await self._node.set_mode_async("OFFBOARD")
             if not ok:
                 self._state = MissionState.ERROR
@@ -686,6 +832,7 @@ class OffboardController:
                 await asyncio.sleep(STOP_SETTLE_S)
                 self._state = MissionState.IDLE
                 self._running_mission_id = None
+                self._mark_control_idle()
                 s = self._node.get_state()
                 n, e = stop_position
                 msg = f"mission stopped at N={n:.3f}, E={e:.3f}"
@@ -783,6 +930,7 @@ class OffboardController:
 
             self._state = MissionState.ABORTED
             self._running_mission_id = None
+            self._mark_control_idle()
             try:
                 s = self._node.get_state()
                 armed = s.get("armed")
@@ -823,20 +971,206 @@ class OffboardController:
             ok, why = await self._node.arm_async(False)
             self._state = MissionState.IDLE
             self._running_mission_id = None
+            self._mark_control_idle()
             self._log_entry(
                 "info" if ok else "error",
                 f"disarm {'ok' if ok else f'failed: {why}'}",
             )
             return ok
 
-    # Called from telemetry loop — no async lock to avoid blocking the loop.
+    async def complete_async(self) -> dict[str, Any]:
+        """Terminalize a successfully tracked mission before marking complete."""
+        async with self._lifecycle_lock():
+            if self._state != MissionState.RUNNING:
+                return {
+                    "success": False,
+                    "state": self._state.value,
+                    "action": "no_op",
+                    "message": f"complete called from {self._state.value}",
+                    "warnings": [],
+                }
+            if self._node is None:
+                self._state = MissionState.ERROR
+                return {
+                    "success": False,
+                    "state": self._state.value,
+                    "action": "no_node",
+                    "message": "complete: ROS node not available",
+                    "warnings": ["ROS node not available"],
+                }
+
+            warnings: list[str] = []
+            fresh_done = False
+            try:
+                fresh_done = bool(self._node.get_rpp_monitor().is_done())
+            except Exception as exc:
+                warnings.append(f"fresh DONE check failed: {exc}")
+            if not fresh_done:
+                warnings.append("RPP DONE was not fresh/settled at terminalization")
+
+            self._state = MissionState.STOPPING
+            spray_off_confirmed = await self._terminalize_spray(warnings)
+
+            stop_position: tuple[float, float] | None = None
+            try:
+                stop_position = self._node.publish_stop_path()
+                if stop_position is None:
+                    warnings.append("stop-path not published: no local pose")
+            except Exception as exc:
+                warnings.append(f"publish_stop_path raised: {exc}")
+                log.exception("completion publish_stop_path raised")
+
+            rest_confirmed = await self._wait_until_rest(warnings)
+
+            manual_mode = True
+            if MISSION_COMPLETE_SET_MANUAL:
+                try:
+                    ok, why = await self._node.set_mode_async("MANUAL")
+                    manual_mode = bool(ok)
+                    if not ok:
+                        warnings.append(f"set_mode(MANUAL): {why}")
+                except Exception as exc:
+                    manual_mode = False
+                    warnings.append(f"set_mode(MANUAL) raised: {exc}")
+                    log.exception("completion set_mode(MANUAL) raised")
+
+            disarmed = True
+            if MISSION_COMPLETE_DISARM:
+                self._state = MissionState.DISARMING
+                try:
+                    ok, why = await self._node.arm_async(False)
+                    disarmed = bool(ok)
+                    if not ok:
+                        warnings.append(f"disarm: {why}")
+                except Exception as exc:
+                    disarmed = False
+                    warnings.append(f"disarm raised: {exc}")
+                    log.exception("completion disarm raised")
+
+            all_confirmed = (
+                fresh_done
+                and spray_off_confirmed
+                and rest_confirmed
+                and manual_mode
+                and disarmed
+            )
+            if all_confirmed:
+                self.mark_completed()
+                self._log_entry("info", f"mission terminalized safely: {self._path_name}")
+                action = "complete_terminalized"
+                message = "mission completed"
+            else:
+                self._state = MissionState.ERROR
+                self._running_mission_id = None
+                self._mark_control_idle()
+                self._log_entry(
+                    "warning",
+                    "mission terminalization degraded: "
+                    + "; ".join(warnings),
+                )
+                action = "completion_degraded"
+                message = "mission terminalization degraded"
+            return {
+                "success": all_confirmed,
+                "state": self._state.value,
+                "action": action,
+                "message": message,
+                "warnings": warnings,
+                "fresh_done": fresh_done,
+                "spray_off_confirmed": spray_off_confirmed,
+                "rest_confirmed": rest_confirmed,
+                "manual_mode": manual_mode,
+                "disarmed": disarmed,
+                "stop_position": (
+                    {"n": stop_position[0], "e": stop_position[1]}
+                    if stop_position is not None else None
+                ),
+            }
+
+    async def _terminalize_spray(self, warnings: list[str]) -> bool:
+        try:
+            self._node.publish_spray_manual(False)
+        except Exception as exc:
+            warnings.append(f"spray manual OFF publish failed: {exc}")
+        try:
+            ok, why = await self._node.set_spray_param_async("spray_enabled", False)
+            if not ok:
+                warnings.append(f"spray_enabled=False: {why}")
+        except AttributeError:
+            warnings.append("spray param API unavailable")
+        except Exception as exc:
+            warnings.append(f"spray_enabled=False raised: {exc}")
+
+        deadline = asyncio.get_running_loop().time() + MISSION_COMPLETE_SPRAY_TIMEOUT_S
+        observed_runtime = False
+        last_status: dict[str, Any] = {}
+        while asyncio.get_running_loop().time() <= deadline:
+            try:
+                last_status = self._node.get_spray_runtime_status()
+                observed_runtime = True
+            except AttributeError:
+                break
+            except Exception as exc:
+                warnings.append(f"spray runtime status failed: {exc}")
+                break
+            if (
+                not bool(last_status.get("status_stale", True))
+                and not bool(last_status.get("commanded_on", False))
+                and bool(last_status.get("confirmed_off", False))
+            ):
+                return True
+            await asyncio.sleep(0.05)
+        if not observed_runtime:
+            s = self._node.get_state()
+            if not bool(s.get("spraying", False)):
+                warnings.append("spray runtime status unavailable; used /spray/state fallback")
+                return False
+        warnings.append(f"spray OFF not confirmed: {last_status}")
+        return False
+
+    async def _wait_until_rest(self, warnings: list[str]) -> bool:
+        deadline = asyncio.get_running_loop().time() + MISSION_COMPLETE_REST_TIMEOUT_S
+        last_speed: float | None = None
+        while asyncio.get_running_loop().time() <= deadline:
+            s = self._node.get_state()
+            value = s.get("measured_speed_m_s")
+            if value is not None:
+                try:
+                    last_speed = float(value)
+                except (TypeError, ValueError):
+                    last_speed = None
+                if last_speed is not None and math.isfinite(last_speed):
+                    if last_speed <= MISSION_COMPLETE_REST_SPEED_M_S:
+                        return True
+            await asyncio.sleep(0.05)
+        warnings.append(
+            "measured rest not confirmed"
+            + (f" (last speed {last_speed:.3f} m/s)" if last_speed is not None else "")
+        )
+        return False
+
+    # Called from telemetry loop or complete_async. State-only, no service calls.
     def mark_completed(self) -> None:
         if self._state == MissionState.RUNNING:
             self._state = MissionState.COMPLETED
             self._running_mission_id = None
+            self._mark_control_idle()
+            self._log_entry("info", f"mission completed: {self._path_name}")
+        elif self._state in {MissionState.STOPPING, MissionState.DISARMING}:
+            self._state = MissionState.COMPLETED
+            self._running_mission_id = None
+            self._mark_control_idle()
             self._log_entry("info", f"mission completed: {self._path_name}")
 
     # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _mark_control_idle(self) -> None:
+        try:
+            from control_arbiter import get_control_arbiter
+
+            get_control_arbiter().mark_idle_if_not_joystick()
+        except Exception:
+            pass
 
     def _log_entry(self, level: str, message: str) -> None:
         ts = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"

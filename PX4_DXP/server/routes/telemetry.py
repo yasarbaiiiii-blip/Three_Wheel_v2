@@ -20,6 +20,7 @@ async def telemetry_latest():
     s = ros_node.get_state()
     code = s.get("rpp_state", 0)
     spraying = bool(s.get("spraying", False))
+    spray_rt = ros_node.get_spray_runtime_status()
     mission_running = (
         offboard_ctrl is not None
         and offboard_ctrl.state == MissionState.RUNNING
@@ -44,8 +45,18 @@ async def telemetry_latest():
         pose_age_ms     = s.get("pose_age_ms"),
         rpp_state       = code,
         rpp_state_name  = RPP_STATE_NAMES.get(code, "UNKNOWN"),
+        rpp_debug_age_ms = s.get("rpp_debug_age_ms"),
+        rpp_debug_fresh = s.get("rpp_debug_fresh"),
+        measured_speed_m_s = s.get("measured_speed_m_s"),
         spraying        = spraying,
         marking_state   = marking_state,
+        commanded_on    = spray_rt.get("commanded_on"),
+        confirmed_off   = spray_rt.get("confirmed_off"),
+        spray_safety_reason = (
+            spray_rt.get("gps_safety_reason") or spray_rt.get("safety_reason")
+        ),
+        gps_safety_ok   = spray_rt.get("gps_safety_ok"),
+        manual_resume_required = spray_rt.get("manual_resume_required"),
         armed           = s.get("armed"),
         mode            = s.get("mode"),
         connected       = s.get("connected"),

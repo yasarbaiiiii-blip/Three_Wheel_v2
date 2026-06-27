@@ -1,5 +1,6 @@
 import math
 import os
+import json
 import shutil
 import sys
 
@@ -1317,6 +1318,42 @@ async def test_load_to_controller_rejects_while_running(monkeypatch, tmp_path):
     assert exc.value.status_code == 409
 
 
+@pytest.mark.anyio
+async def test_load_to_controller_rejects_non_finite_staged_geometry(monkeypatch, tmp_path):
+    import routes.path as path_routes
+    from models import LoadMissionRequest
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.setattr(path_routes, "STAGING_DIR", str(staging))
+    mission_id = "stg_bad_geometry"
+    (staging / f"{mission_id}.json").write_text(
+        json.dumps({
+            "mission_id": mission_id,
+            "waypoints": [[0.0, 0.0], [float("nan"), 1.0]],
+            "spray_flags": [True, True],
+            "configuration_revision": 1,
+            "path_fingerprint": "corrupt",
+        }),
+        encoding="utf-8",
+    )
+
+    class FakeController:
+        state = MissionState.IDLE
+
+        def load_path(self, *args, **kwargs):
+            raise AssertionError("invalid staged geometry must not reach controller")
+
+    monkeypatch.setattr(main, "offboard_ctrl", FakeController())
+
+    with pytest.raises(HTTPException) as exc:
+        await path_routes.load_mission_to_controller(
+            LoadMissionRequest(mission_id=mission_id)
+        )
+    assert exc.value.status_code == 422
+    assert "Invalid staged geometry" in str(exc.value.detail)
+
+
 # ── Extension-aware auto-origin (server flow) ───────────────────────────────
 
 def _write_line_dxf(path):
@@ -1378,11 +1415,10 @@ def test_load_path_executes_with_extension_config(tmp_path):
     _write_line_dxf(dxf)
     mgr = PathManager(str(tmp_path))
 
-    # Extensions OFF → no run-up; line starts at (0,0) (modulo a small spray
-    # lead-in of ~0.035 m from latency compensation).
+    # Extensions OFF → no run-up; line starts at exact CAD origin.
     mgr.save_extension_config("line.dxf", False, 0.5, 0.5)
     pts_off = mgr.load_path("line.dxf")
-    assert abs(pts_off[0][0]) < 0.1  # near drawing origin (spray lead-in only)
+    assert abs(pts_off[0][0]) < 0.1  # near drawing origin; no planner lead-in
 
     # Extensions ON → PRE leg prepended; path now starts 0.5 m before (0,0).
     mgr.save_extension_config("line.dxf", True, 0.5, 0.5)
@@ -1941,3 +1977,10 @@ def test_plan_and_stage_request_rejects_compensate_spray_true():
 
     with pytest.raises(ValidationError):
         PathPlanRequest(source="square_2x2.dxf", compensate_spray=True)
+
+
+def test_path_manager_plan_path_rejects_compensate_spray_true(tmp_path):
+    shutil.copy(_SQUARE_DXF, tmp_path / "square_2x2.dxf")
+    mgr = PathManager(str(tmp_path))
+    with pytest.raises(ValueError, match="compensate_spray=True is not permitted"):
+        mgr.plan_path("square_2x2.dxf", compensate_spray=True)

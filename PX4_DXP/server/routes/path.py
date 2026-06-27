@@ -44,6 +44,7 @@ from spray_mission_config import (
     apply_spray_mission_config,
     is_point_mode_staged,
     next_configuration_revision,
+    path_geometry_fingerprint,
     staged_spray_defaults,
     validate_staged_spray_config,
 )
@@ -666,10 +667,16 @@ async def parse_point_csv(file: UploadFile = File(...)):
     if str(src) not in sys.path:
         sys.path.insert(0, str(src))
     from point_ingest import parse_point_csv_text, points_to_staged_dict
+    from spray_config import staged_spray_defaults
 
     content = (await file.read()).decode("utf-8", errors="replace")
+    defaults = staged_spray_defaults()
     try:
-        points = parse_point_csv_text(content)
+        points = parse_point_csv_text(
+            content,
+            default_dwell_s=float(defaults["point_default_dwell_s"]),
+            max_dwell_s=float(defaults["point_max_dwell_s"]),
+        )
     except ValueError as exc:
         raise HTTPException(422, str(exc))
     return {
@@ -720,6 +727,13 @@ async def publish_path(req: PathPublishRequest):
             "Cannot publish a diagnostic path while a protected mission is loaded "
             f"or controller is {offboard_ctrl.state.value}",
         )
+    if offboard_ctrl is not None:
+        try:
+            from control_arbiter import ControlArbiterError, get_control_arbiter
+
+            await get_control_arbiter().ensure_mission_motion_allowed(offboard_ctrl)
+        except ControlArbiterError as exc:
+            raise HTTPException(409, exc.message)
     try:
         pts = path_mgr.load_path(name)
     except FileNotFoundError as exc:
@@ -985,6 +999,78 @@ def _stage_mission(req: PathPlanRequest, result: dict, alignment_meta: dict,
     # the global anchor header before the waypoint stream.
     spray_defaults = staged_spray_defaults()
     configuration_revision = next_configuration_revision()
+    path_fingerprint = path_geometry_fingerprint(
+        [(float(p[0]), float(p[1])) for p in result.get("merged_waypoints", [])],
+        [bool(f) for f in result.get("spray_flags", [])],
+    )
+
+    # Spray field resolution:
+    #   req.spray_mode is None  → use per-path sidecar written by /spray-mode endpoints
+    #   req.spray_mode explicit → use req body fields directly (legacy, backward-compat)
+    from spray_mode_store import load_spray_mode
+    if req.spray_mode is None:
+        _spray = load_spray_mode(MISSION_DIR, req.source or "")
+    else:
+        # Legacy plan body carries no continuous-mode timing fields, so the
+        # explicit-spray-mode flow keeps factory continuous params (unchanged
+        # behavior). Per-path continuous config is set via the /spray-mode
+        # sidecar endpoints and only takes effect through the sidecar branch.
+        _spray = {
+            "spray_mode": req.spray_mode,
+            "solenoid_open_delay_s": spray_defaults["solenoid_open_delay_s"],
+            "solenoid_close_delay_s": spray_defaults["solenoid_close_delay_s"],
+            "on_overspray_margin_m": spray_defaults["on_overspray_margin_m"],
+            "off_overspray_margin_m": spray_defaults["off_overspray_margin_m"],
+            "min_spray_speed_mps": spray_defaults["min_spray_speed_mps"],
+            "max_spray_speed_mps": spray_defaults["max_spray_speed_mps"],
+            "unsafe_speed_behavior": spray_defaults["unsafe_speed_behavior"],
+            "max_xtrack_error_m": spray_defaults["max_xtrack_error_m"],
+            "nozzle_forward_offset_m": spray_defaults["nozzle_forward_offset_m"],
+            "nozzle_lateral_offset_m": spray_defaults["nozzle_lateral_offset_m"],
+            "dash_on_distance_m": req.dash_on_distance_m,
+            "dash_off_distance_m": req.dash_off_distance_m,
+            "dash_phase_reset": req.dash_phase_reset,
+            "point_default_dwell_s": req.point_default_dwell_s,
+            "point_max_dwell_s": req.point_max_dwell_s,
+            "point_arrival_tolerance_m": req.point_arrival_tolerance_m,
+            "point_settle_time_s": req.point_settle_time_s,
+            "point_leg_timeout_s": req.point_leg_timeout_s,
+            "point_settle_speed_mps": req.point_settle_speed_mps,
+            "point_settle_yaw_rate_rad_s": req.point_settle_yaw_rate_rad_s,
+            "point_execution_mode": req.point_execution_mode,
+            "point_leg_trajectory_mode": req.point_leg_trajectory_mode,
+            "point_leg_spacing_m": req.point_leg_spacing_m,
+            "point_hold_drift_tolerance_m": req.point_hold_drift_tolerance_m,
+            "point_hold_drift_policy": req.point_hold_drift_policy,
+            "gps_required_fix_type": req.gps_required_fix_type,
+            "gps_global_position_max_age_ms": req.gps_global_position_max_age_ms,
+            "gps_local_pose_max_age_ms": req.gps_local_pose_max_age_ms,
+            "gps_fix_max_age_ms": req.gps_fix_max_age_ms,
+            "gps_max_pose_global_skew_ms": req.gps_max_pose_global_skew_ms,
+            "gps_runtime_policy": req.gps_runtime_policy,
+            "gps_resume_policy": req.gps_resume_policy,
+            "gps_recovery_stable_s": req.gps_recovery_stable_s,
+            "obstacle_integration_enabled": req.obstacle_integration_enabled,
+            "obstacle_signal_max_age_s": req.obstacle_signal_max_age_s,
+            "calibration_profile_id": spray_defaults["calibration_profile_id"],
+            "calibration_profile_version": spray_defaults["calibration_profile_version"],
+            "target_paint_density": spray_defaults["target_paint_density"],
+            "speed_pwm_table": spray_defaults["speed_pwm_table"],
+            "actuator_min_pwm": spray_defaults["actuator_min_pwm"],
+            "actuator_max_pwm": spray_defaults["actuator_max_pwm"],
+            "actuator_off_pwm": spray_defaults["actuator_off_pwm"],
+            "actuator_min_value": spray_defaults["actuator_min_value"],
+            "actuator_max_value": spray_defaults["actuator_max_value"],
+            "actuator_off_value": spray_defaults["actuator_off_value"],
+            "timing_only_compatibility": spray_defaults["timing_only_compatibility"],
+            "pump_inertia_enabled": spray_defaults["pump_inertia_enabled"],
+            "pwm_ramp_prediction_enabled": spray_defaults["pwm_ramp_prediction_enabled"],
+            "pressure_stabilization_enabled": spray_defaults["pressure_stabilization_enabled"],
+            "temperature_viscosity_compensation_enabled": (
+                spray_defaults["temperature_viscosity_compensation_enabled"]
+            ),
+        }
+
     point_rows = list(req.point_mission_points or spray_defaults["point_mission_points"])
     original_point_rows = [dict(row) for row in point_rows]
     point_source_frame = req.point_source_frame
@@ -1010,20 +1096,65 @@ def _stage_mission(req: PathPlanRequest, result: dict, alignment_meta: dict,
         "created_at": time.time(),
         "waypoints": result.get("merged_waypoints", []),
         "spray_flags": result.get("spray_flags", []),
+        "path_fingerprint": path_fingerprint,
         "configuration_revision": configuration_revision,
-        "spray_mode": req.spray_mode,
-        "dash_on_distance_m": req.dash_on_distance_m,
-        "dash_off_distance_m": req.dash_off_distance_m,
-        "dash_phase_reset": req.dash_phase_reset,
-        "point_default_dwell_s": req.point_default_dwell_s,
-        "point_arrival_tolerance_m": req.point_arrival_tolerance_m,
-        "point_settle_time_s": req.point_settle_time_s,
-        "point_leg_timeout_s": req.point_leg_timeout_s,
-        "point_settle_speed_mps": req.point_settle_speed_mps,
-        "point_settle_yaw_rate_rad_s": req.point_settle_yaw_rate_rad_s,
+        "spray_mode": _spray["spray_mode"],
+        "solenoid_open_delay_s": _spray.get("solenoid_open_delay_s", spray_defaults["solenoid_open_delay_s"]),
+        "solenoid_close_delay_s": _spray.get("solenoid_close_delay_s", spray_defaults["solenoid_close_delay_s"]),
+        "on_overspray_margin_m": _spray.get("on_overspray_margin_m", spray_defaults["on_overspray_margin_m"]),
+        "off_overspray_margin_m": _spray.get("off_overspray_margin_m", spray_defaults["off_overspray_margin_m"]),
+        "min_spray_speed_mps": _spray.get("min_spray_speed_mps", spray_defaults["min_spray_speed_mps"]),
+        "max_spray_speed_mps": _spray.get("max_spray_speed_mps", spray_defaults["max_spray_speed_mps"]),
+        "unsafe_speed_behavior": _spray.get("unsafe_speed_behavior", spray_defaults["unsafe_speed_behavior"]),
+        "max_xtrack_error_m": _spray.get("max_xtrack_error_m", spray_defaults["max_xtrack_error_m"]),
+        "nozzle_forward_offset_m": _spray.get("nozzle_forward_offset_m", spray_defaults["nozzle_forward_offset_m"]),
+        "nozzle_lateral_offset_m": _spray.get("nozzle_lateral_offset_m", spray_defaults["nozzle_lateral_offset_m"]),
+        "dash_on_distance_m": _spray["dash_on_distance_m"],
+        "dash_off_distance_m": _spray["dash_off_distance_m"],
+        "dash_phase_reset": _spray["dash_phase_reset"],
+        "point_default_dwell_s": _spray["point_default_dwell_s"],
+        "point_max_dwell_s": _spray["point_max_dwell_s"],
+        "point_arrival_tolerance_m": _spray["point_arrival_tolerance_m"],
+        "point_settle_time_s": _spray["point_settle_time_s"],
+        "point_leg_timeout_s": _spray["point_leg_timeout_s"],
+        "point_settle_speed_mps": _spray["point_settle_speed_mps"],
+        "point_settle_yaw_rate_rad_s": _spray["point_settle_yaw_rate_rad_s"],
+        "point_execution_mode": _spray["point_execution_mode"],
+        "point_leg_trajectory_mode": _spray["point_leg_trajectory_mode"],
+        "point_leg_spacing_m": _spray["point_leg_spacing_m"],
+        "point_hold_drift_tolerance_m": _spray["point_hold_drift_tolerance_m"],
+        "point_hold_drift_policy": _spray["point_hold_drift_policy"],
         "point_mission_points": point_rows,
         "point_mission_points_original": original_point_rows,
         "point_source_frame": point_source_frame,
+        "gps_required_fix_type": _spray["gps_required_fix_type"],
+        "gps_global_position_max_age_ms": _spray["gps_global_position_max_age_ms"],
+        "gps_local_pose_max_age_ms": _spray["gps_local_pose_max_age_ms"],
+        "gps_fix_max_age_ms": _spray["gps_fix_max_age_ms"],
+        "gps_max_pose_global_skew_ms": _spray["gps_max_pose_global_skew_ms"],
+        "gps_runtime_policy": _spray["gps_runtime_policy"],
+        "gps_resume_policy": _spray["gps_resume_policy"],
+        "gps_recovery_stable_s": _spray["gps_recovery_stable_s"],
+        "obstacle_integration_enabled": _spray.get("obstacle_integration_enabled", False),
+        "obstacle_signal_max_age_s": _spray.get("obstacle_signal_max_age_s", 2.0),
+        "calibration_profile_id": _spray.get("calibration_profile_id", spray_defaults["calibration_profile_id"]),
+        "calibration_profile_version": _spray.get("calibration_profile_version", spray_defaults["calibration_profile_version"]),
+        "target_paint_density": _spray.get("target_paint_density", spray_defaults["target_paint_density"]),
+        "speed_pwm_table": _spray.get("speed_pwm_table", spray_defaults["speed_pwm_table"]),
+        "actuator_min_pwm": _spray.get("actuator_min_pwm", spray_defaults["actuator_min_pwm"]),
+        "actuator_max_pwm": _spray.get("actuator_max_pwm", spray_defaults["actuator_max_pwm"]),
+        "actuator_off_pwm": _spray.get("actuator_off_pwm", spray_defaults["actuator_off_pwm"]),
+        "actuator_min_value": _spray.get("actuator_min_value", spray_defaults["actuator_min_value"]),
+        "actuator_max_value": _spray.get("actuator_max_value", spray_defaults["actuator_max_value"]),
+        "actuator_off_value": _spray.get("actuator_off_value", spray_defaults["actuator_off_value"]),
+        "timing_only_compatibility": _spray.get("timing_only_compatibility", spray_defaults["timing_only_compatibility"]),
+        "pump_inertia_enabled": _spray.get("pump_inertia_enabled", spray_defaults["pump_inertia_enabled"]),
+        "pwm_ramp_prediction_enabled": _spray.get("pwm_ramp_prediction_enabled", spray_defaults["pwm_ramp_prediction_enabled"]),
+        "pressure_stabilization_enabled": _spray.get("pressure_stabilization_enabled", spray_defaults["pressure_stabilization_enabled"]),
+        "temperature_viscosity_compensation_enabled": _spray.get(
+            "temperature_viscosity_compensation_enabled",
+            spray_defaults["temperature_viscosity_compensation_enabled"],
+        ),
         "alignment_metadata": alignment_meta,
         "metadata": {
             "source": result["source"],
@@ -1105,6 +1236,19 @@ async def load_mission_to_controller(req: LoadMissionRequest):
         raise HTTPException(422, "Staged mission has no waypoints.")
     if point_mode and not staged.get("point_mission_points"):
         raise HTTPException(422, "Point-mode staged mission has no point_mission_points.")
+    try:
+        from path_validation import normalize_path_points
+
+        if point_mode:
+            first = staged["point_mission_points"][0]
+            normalize_path_points(
+                [(first["north_m"], first["east_m"])],
+                label="point-mode staged mission",
+            )
+        else:
+            waypoints = normalize_path_points(waypoints, label="staged mission")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(422, f"Invalid staged geometry: {exc}") from exc
 
     anchor = staged.get("anchor")
     if anchor:
@@ -1137,20 +1281,33 @@ async def load_mission_to_controller(req: LoadMissionRequest):
         spray_flags = [bool(f) for f in staged.get("spray_flags", [])]
         if spray_config_degraded:
             spray_flags = [False] * len(waypoints)
+        # The staged fingerprint binds the staged geometry+flags. It is only valid
+        # to enforce when what we actually load is unchanged from staging. The
+        # degraded fallback zeroes spray_flags (and point-mode below synthesizes a
+        # 2-point hold), so in those cases the staged fingerprint legitimately does
+        # not match the loaded geometry — clear it and let load_path compute a fresh
+        # fingerprint for what is actually loaded instead of hard-failing the load.
+        load_fingerprint = str(staged.get("path_fingerprint", "") or "")
+        if spray_config_degraded:
+            load_fingerprint = ""
         origin_gps = None
         if anchor is not None:
             origin_gps = (anchor.get("lat"), anchor.get("lon"))
         source_name = (staged.get("metadata") or {}).get("source") or safe_id
 
         if point_mode:
-            if point_mission is not None and spray_config is not None:
-                await point_mission.replace_from_staged(staged, spray_config, ros_node)
+            if point_mission is None:
+                raise HTTPException(503, "Point mission orchestrator unavailable")
+            await point_mission.replace_from_staged(staged, spray_config, ros_node)
             first = staged["point_mission_points"][0]
             load_points = [
                 (float(first["north_m"]), float(first["east_m"])),
                 (float(first["north_m"]), float(first["east_m"])),
             ]
             spray_flags = [False, False]
+            # Synthetic 2-point hold geometry — not the staged path — so the staged
+            # fingerprint cannot apply.
+            load_fingerprint = ""
         else:
             if point_mission is not None:
                 await point_mission.cancel_and_drain(ros_node, reason="non_point_load")
@@ -1167,6 +1324,8 @@ async def load_mission_to_controller(req: LoadMissionRequest):
             is_staged=True,
             allow_replace_protected=True,
             spray_mode=staged.get("spray_mode", "continuous"),
+            path_fingerprint=load_fingerprint,
+            configuration_revision=int(staged.get("configuration_revision", 0)),
         )
     except HTTPException:
         raise
@@ -1519,10 +1678,37 @@ async def get_staged_mission(mission_id: str):
         spray_flags=[bool(f) for f in spray_flags],
         segment_runs=_spray_runs(wp_out, spray_flags),
         spray_mode=staged.get("spray_mode", spray_defaults["spray_mode"]),
+        path_fingerprint=str(staged.get("path_fingerprint", "")),
+        max_spray_speed_mps=float(
+            staged.get("max_spray_speed_mps", spray_defaults["max_spray_speed_mps"])
+        ),
+        unsafe_speed_behavior=str(
+            staged.get("unsafe_speed_behavior", spray_defaults["unsafe_speed_behavior"])
+        ),
+        calibration_profile_id=str(
+            staged.get("calibration_profile_id", spray_defaults["calibration_profile_id"])
+        ),
+        calibration_profile_version=int(
+            staged.get("calibration_profile_version", spray_defaults["calibration_profile_version"])
+        ),
+        target_paint_density=float(
+            staged.get("target_paint_density", spray_defaults["target_paint_density"])
+        ),
+        speed_pwm_table=list(staged.get("speed_pwm_table", spray_defaults["speed_pwm_table"])),
+        actuator_min_pwm=float(staged.get("actuator_min_pwm", spray_defaults["actuator_min_pwm"])),
+        actuator_max_pwm=float(staged.get("actuator_max_pwm", spray_defaults["actuator_max_pwm"])),
+        actuator_off_pwm=float(staged.get("actuator_off_pwm", spray_defaults["actuator_off_pwm"])),
+        actuator_min_value=float(staged.get("actuator_min_value", spray_defaults["actuator_min_value"])),
+        actuator_max_value=float(staged.get("actuator_max_value", spray_defaults["actuator_max_value"])),
+        actuator_off_value=float(staged.get("actuator_off_value", spray_defaults["actuator_off_value"])),
+        timing_only_compatibility=bool(
+            staged.get("timing_only_compatibility", spray_defaults["timing_only_compatibility"])
+        ),
         dash_on_distance_m=float(staged.get("dash_on_distance_m", spray_defaults["dash_on_distance_m"])),
         dash_off_distance_m=float(staged.get("dash_off_distance_m", spray_defaults["dash_off_distance_m"])),
         dash_phase_reset=staged.get("dash_phase_reset", spray_defaults["dash_phase_reset"]),
         point_default_dwell_s=float(staged.get("point_default_dwell_s", spray_defaults["point_default_dwell_s"])),
+        point_max_dwell_s=float(staged.get("point_max_dwell_s", spray_defaults["point_max_dwell_s"])),
         point_arrival_tolerance_m=float(
             staged.get("point_arrival_tolerance_m", spray_defaults["point_arrival_tolerance_m"])
         ),
@@ -1534,9 +1720,63 @@ async def get_staged_mission(mission_id: str):
         point_settle_yaw_rate_rad_s=float(
             staged.get("point_settle_yaw_rate_rad_s", spray_defaults["point_settle_yaw_rate_rad_s"])
         ),
+        point_execution_mode=str(
+            staged.get("point_execution_mode", spray_defaults["point_execution_mode"])
+        ),
+        point_leg_trajectory_mode=str(
+            staged.get(
+                "point_leg_trajectory_mode",
+                spray_defaults["point_leg_trajectory_mode"],
+            )
+        ),
+        point_leg_spacing_m=float(
+            staged.get("point_leg_spacing_m", spray_defaults["point_leg_spacing_m"])
+        ),
+        point_hold_drift_tolerance_m=float(
+            staged.get(
+                "point_hold_drift_tolerance_m",
+                spray_defaults["point_hold_drift_tolerance_m"],
+            )
+        ),
+        point_hold_drift_policy=str(
+            staged.get("point_hold_drift_policy", spray_defaults["point_hold_drift_policy"])
+        ),
         point_mission_points=list(staged.get("point_mission_points") or []),
         point_source_frame=str(staged.get("point_source_frame") or ""),
         point_mission_points_original=list(staged.get("point_mission_points_original") or []),
+        gps_required_fix_type=int(
+            staged.get("gps_required_fix_type", spray_defaults["gps_required_fix_type"])
+        ),
+        gps_global_position_max_age_ms=float(
+            staged.get(
+                "gps_global_position_max_age_ms",
+                spray_defaults["gps_global_position_max_age_ms"],
+            )
+        ),
+        gps_local_pose_max_age_ms=float(
+            staged.get(
+                "gps_local_pose_max_age_ms",
+                spray_defaults["gps_local_pose_max_age_ms"],
+            )
+        ),
+        gps_fix_max_age_ms=float(
+            staged.get("gps_fix_max_age_ms", spray_defaults["gps_fix_max_age_ms"])
+        ),
+        gps_max_pose_global_skew_ms=float(
+            staged.get(
+                "gps_max_pose_global_skew_ms",
+                spray_defaults["gps_max_pose_global_skew_ms"],
+            )
+        ),
+        gps_runtime_policy=str(
+            staged.get("gps_runtime_policy", spray_defaults["gps_runtime_policy"])
+        ),
+        gps_resume_policy=str(
+            staged.get("gps_resume_policy", spray_defaults["gps_resume_policy"])
+        ),
+        gps_recovery_stable_s=float(
+            staged.get("gps_recovery_stable_s", spray_defaults["gps_recovery_stable_s"])
+        ),
         configuration_revision=int(staged.get("configuration_revision", 0)),
         alignment_metadata=staged.get("alignment_metadata"),
         metadata=staged.get("metadata"),

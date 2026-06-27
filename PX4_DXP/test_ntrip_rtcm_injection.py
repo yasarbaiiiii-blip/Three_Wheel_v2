@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import json
+import time
 
 from rtcm3_parser import Rtcm3StreamParser, build_rtcm3_frame
 from rtk_transport import TransportRateTracker, configure_tcp_keepalive, redact_rtk_secrets
@@ -217,3 +218,86 @@ def test_destroy_node_reports_stopping_for_non_terminal(tmp_path):
     node.destroy_node()
 
     assert json.loads(status_path.read_text())["state"] == "stopping"
+
+
+def _make_health_node(age_s):
+    """Node fake configured for _check_stream_health with a given RTCM age."""
+    node = _make_node()
+    node._shutting_down = False
+    node._connected = True
+    node._no_rtcm_warn_s = 15.0
+    node._no_rtcm_reconnect_s = 45.0
+    node._no_rtcm_warned = False
+    node._handshake_complete_monotonic = time.monotonic() - age_s
+    node._force_reconnect = threading.Event()
+    node._close_active_socket = MagicMock()
+    return node
+
+
+def test_stream_watchdog_forces_reconnect_when_stale():
+    """No valid RTCM past the reconnect threshold must flag _force_reconnect and
+    close the socket (so the read thread treats it as an intentional reconnect,
+    not an [Errno 9] transport error)."""
+    node = _make_health_node(age_s=100.0)  # > no_rtcm_reconnect_s
+    node._check_stream_health()
+    assert node._force_reconnect.is_set()
+    node._close_active_socket.assert_called_once()
+
+
+def test_stream_watchdog_idle_when_fresh():
+    """A healthy stream must not force a reconnect."""
+    node = _make_health_node(age_s=1.0)  # < no_rtcm_warn_s
+    node._check_stream_health()
+    assert not node._force_reconnect.is_set()
+    node._close_active_socket.assert_not_called()
+
+
+def test_forced_reconnect_recv_oserror_not_transport_error():
+    """Watchdog-driven socket close must not log transport_error on recv() EBADF."""
+    node = _make_node()
+    node._stop_event = threading.Event()
+    node._force_reconnect = threading.Event()
+    node._reconnect_count = 0
+    node._reconnect_initial_s = 0.01
+    node._reconnect_max_s = 0.01
+    node._reconnect_jitter_frac = 0.0
+    node._handshake_complete_monotonic = time.monotonic()
+    node._clear_active_socket = MagicMock()
+    node._publish_frames = MagicMock()
+    node.get_logger = MagicMock(return_value=MagicMock())
+
+    fake_sock = MagicMock()
+    recv_calls = [0]
+
+    def on_recv(*_):
+        recv_calls[0] += 1
+        if recv_calls[0] == 1:
+            node._force_reconnect.set()
+            raise OSError(9, "Bad file descriptor")
+        node._stop_event.set()
+        return b""
+
+    fake_sock.recv.side_effect = on_recv
+
+    def fake_connect():
+        node._handshake_complete_monotonic = time.monotonic()
+        with node._stats_lock:
+            node._connected = True
+        return fake_sock, b""
+
+    node._connect = fake_connect
+    node._backoff_delay = lambda _attempt: 0.0
+    node._valid_rtcm_age_s = lambda _now, _stats: 0.0
+
+    thread = threading.Thread(target=node._run, daemon=True)
+    thread.start()
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+
+    reasons = [
+        call.kwargs.get("reason")
+        for call in node._set_lifecycle.call_args_list
+        if call.kwargs
+    ]
+    assert "transport_error" not in reasons
+    node.get_logger.return_value.error.assert_not_called()

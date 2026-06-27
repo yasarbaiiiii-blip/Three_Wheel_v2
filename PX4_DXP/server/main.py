@@ -49,6 +49,7 @@ from config import (
     SAFETY_STALE_GRACE_S,
     TELEMETRY_HZ,
 )
+from gps_safety import GpsSurveyedSafetyParams, evaluate_gps_surveyed_safety
 from logging_setup import configure_logging, get_logger
 from models import MissionState
 
@@ -74,6 +75,9 @@ bridge_health: Optional["object"] = None
 rtk_manager: Optional["object"] = None
 mission_capture: Optional["object"] = None
 point_mission: Optional["object"] = None
+hold_owner: Optional["object"] = None
+manual_gateway: Optional["object"] = None
+joystick_ctrl: Optional["object"] = None
 
 # Bounded, thread-safe ring buffer (deque maxlen). All log appends are atomic
 # under the GIL; bounded eviction is built in. Replaces the racy list+trim.
@@ -99,7 +103,7 @@ socket_app = socketio.ASGIApp(sio)
 async def lifespan(app: FastAPI):
     global ros_node, offboard_ctrl, path_mgr, emergency_handler
     global _executor, _beacon, _listener, _telemetry_task, bridge_health, rtk_manager
-    global mission_capture, point_mission
+    global mission_capture, point_mission, hold_owner, manual_gateway, joystick_ctrl
 
     configure_logging()
     init_auth()
@@ -140,12 +144,22 @@ async def lifespan(app: FastAPI):
     from path_manager import PathManager
     from rtk_manager import AsyncRTKManager
     from mission_debug_capture import MissionDebugCoordinator
+    from manual_control_gateway import ManualControlGateway, build_manual_transport
     from point_mission import PointMissionOrchestrator
+    from setpoint_hold import SetpointHoldOwner
 
     path_mgr = PathManager(MISSION_DIR)
     offboard_ctrl = OffboardController(ros_node, activity_log)
+    manual_gateway = ManualControlGateway(build_manual_transport(ros_node))
+    manual_gateway.start()
+    from joystick_controller import JoystickController
+
+    joystick_ctrl = JoystickController(ros_node, offboard_ctrl, manual_gateway)
+    hold_owner = SetpointHoldOwner()
     point_mission = PointMissionOrchestrator()
     point_mission.set_logger(_record)
+    if ros_node is not None:
+        ros_node.set_obstacle_callback(point_mission.set_obstacle_clear)
     mission_capture = MissionDebugCoordinator()
     emergency_handler = EmergencyHandler(
         ros_node, offboard_ctrl, activity_log, mission_capture
@@ -199,6 +213,12 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
     log.info("shutting down…")
+
+    if joystick_ctrl is not None:
+        try:
+            await joystick_ctrl.shutdown()
+        except Exception:
+            log.exception("joystick shutdown raised")
 
     if rtk_manager is not None:
         try:
@@ -271,12 +291,14 @@ def create_app() -> FastAPI:
     from routes.rtk import router as rtk_router
     from routes.spray import router as spray_router
     from routes.spray_params import router as spray_par_router
+    from routes.spray_mode import router as spray_mode_router
 
     app.include_router(sys_router, prefix="/api")
     app.include_router(veh_router, prefix="/api")
     app.include_router(mis_router, prefix="/api")
     app.include_router(paths_router, prefix="/api")  # → /api/paths
     app.include_router(path_router, prefix="/api")  # → /api/path/*
+    app.include_router(spray_mode_router, prefix="/api")  # → /api/path/{name}/spray-mode/*
     app.include_router(par_router, prefix="/api")
     app.include_router(rpp_par_router, prefix="/api")
     app.include_router(tel_router, prefix="/api")
@@ -313,6 +335,10 @@ async def _telemetry_loop() -> None:
     stale_since: Optional[float] = None
     consecutive_errors = 0
     _watchdog_counter = 0
+    # F-02: GPS_SURVEYED continuous/dash runtime gate state
+    gps_gate_seq = 0
+    gps_gate_fault_count = 0
+    gps_gate_last_fault_time: Optional[float] = None
     _WATCHDOG_EVERY_N = TELEMETRY_HZ * 3  # ping systemd every ~3s
 
     log.info("telemetry loop started @ %d Hz", TELEMETRY_HZ)
@@ -327,6 +353,7 @@ async def _telemetry_loop() -> None:
                 code = s.get("rpp_state", 0)
                 now = time.time()
                 spraying = bool(s.get("spraying", False))
+                spray_rt = ros_node.get_spray_runtime_status()
                 mission_running = (
                     offboard_ctrl is not None
                     and offboard_ctrl.state == MissionState.RUNNING
@@ -348,6 +375,7 @@ async def _telemetry_loop() -> None:
                     "heading_err_deg": s.get("heading_err_deg"),
                     "lookahead_m": s.get("lookahead_m"),
                     "speed_m_s": s.get("speed_m_s"),
+                    "measured_speed_m_s": s.get("measured_speed_m_s"),
                     "kappa": s.get("kappa"),
                     "dist_to_goal_m": s.get("dist_to_goal_m"),
                     "pose_age_ms": s.get("pose_age_ms"),
@@ -355,6 +383,14 @@ async def _telemetry_loop() -> None:
                     "rpp_state_name": RPP_STATE_NAMES.get(code, "UNKNOWN"),
                     "spraying": spraying,
                     "marking_state": marking_state,
+                    "commanded_on": spray_rt.get("commanded_on"),
+                    "confirmed_off": spray_rt.get("confirmed_off"),
+                    "spray_safety_reason": (
+                        spray_rt.get("gps_safety_reason")
+                        or spray_rt.get("safety_reason")
+                    ),
+                    "gps_safety_ok": spray_rt.get("gps_safety_ok"),
+                    "manual_resume_required": spray_rt.get("manual_resume_required"),
                     "armed": s.get("armed"),
                     "mode": s.get("mode"),
                     "connected": s.get("connected"),
@@ -369,6 +405,8 @@ async def _telemetry_loop() -> None:
                     "lon": s.get("lon"),
                     "alt": s.get("alt"),
                 }
+                if joystick_ctrl is not None:
+                    telem.update(joystick_ctrl.snapshot())
                 await sio.emit("telemetry", _sanitize(telem))
 
                 mission_status = {
@@ -378,6 +416,9 @@ async def _telemetry_loop() -> None:
                     "dist_to_goal": s.get("dist_to_goal_m"),
                     "speed": s.get("speed_m_s"),
                     "xtrack": s.get("xtrack_m"),
+                    "rpp_debug_age_ms": s.get("rpp_debug_age_ms"),
+                    "rpp_debug_fresh": s.get("rpp_debug_fresh"),
+                    "measured_speed_m_s": s.get("measured_speed_m_s"),
                 }
                 await sio.emit("mission_status", _sanitize(mission_status))
 
@@ -387,18 +428,25 @@ async def _telemetry_loop() -> None:
                     and offboard_ctrl.state == MissionState.RUNNING
                     and ros_node.get_rpp_monitor().is_done()
                 ):
-                    offboard_ctrl.mark_completed()
+                    completion = await offboard_ctrl.complete_async()
+                    completion_ok = bool(completion.get("success"))
+                    terminal_reason = (
+                        "mission_completed"
+                        if completion_ok else "mission_completion_degraded"
+                    )
                     if mission_capture is not None:
                         mission_capture.record_terminal(
                             None,
-                            "mission_completed",
+                            terminal_reason,
                             state=offboard_ctrl.state.value,
+                            details=completion,
                         )
                     await sio.emit(
-                        "mission_completed",
+                        terminal_reason,
                         {
                             "state": offboard_ctrl.state.value,
                             "name": offboard_ctrl.loaded_path_name,
+                            "terminal": completion,
                         },
                     )
 
@@ -415,6 +463,7 @@ async def _telemetry_loop() -> None:
                     code in RPP_UNHEALTHY_CODES
                     or pose_age > POSE_STALE_MS
                     or s.get("connected") is False
+                    or s.get("rpp_debug_fresh") is not True
                 )
                 if running and unhealthy:
                     if stale_since is None:
@@ -445,6 +494,86 @@ async def _telemetry_loop() -> None:
                         stale_since = None
                 else:
                     stale_since = None
+
+                # Joystick MANUAL mode has a 500 ms PX4 RC_LOSS fallback. On
+                # confirmed FCU/MAVROS disconnect, revoke ownership and run the
+                # established hard e-stop path.
+                if (
+                    joystick_ctrl is not None
+                    and joystick_ctrl.is_active
+                    and s.get("connected") is False
+                ):
+                    await joystick_ctrl.force_release(reason="fcu_disconnected")
+                    if emergency_handler is not None:
+                        await emergency_handler.estop_async()
+
+                # ── 3b. GPS_SURVEYED continuous/dash runtime gate (F-01/F-02) ──
+                # Point missions self-gate in the orchestrator; LOCAL_NED is
+                # never RTK-gated. For a RUNNING surveyed line/dash mission we
+                # re-evaluate GPS safety each tick, feed the result to the spray
+                # node's independent gate, and on fault force spray OFF + e-stop
+                # (the rover must not keep driving on degraded localization).
+                gps_gate_seq += 1
+                gctx = (
+                    offboard_ctrl.gps_surveyed_runtime_context()
+                    if offboard_ctrl is not None else None
+                )
+                if gctx is not None:
+                    verdict = evaluate_gps_surveyed_safety(
+                        s,
+                        gctx["origin_gps"],
+                        gctx["source_points"],
+                        GpsSurveyedSafetyParams(),
+                        recovery_since=None,
+                        fault_count=gps_gate_fault_count,
+                        last_fault_time_s=gps_gate_last_fault_time,
+                    )
+                    if not verdict.ok:
+                        gps_gate_fault_count += 1
+                        gps_gate_last_fault_time = now
+                        ros_node.publish_gps_gate(
+                            active=True, ok=False,
+                            reason=verdict.reason, seq=gps_gate_seq,
+                        )
+                        log.warning(
+                            "GPS_SURVEYED runtime fault (%s mission): %s",
+                            gctx["spray_mode"], verdict.reason,
+                        )
+                        try:
+                            ros_node.publish_spray_manual(False)
+                            await ros_node.cancel_spray_dwell_async()
+                        except Exception:
+                            log.exception("force spray OFF during GPS fault failed")
+                        if emergency_handler is not None:
+                            await emergency_handler.estop_async()
+                        if mission_capture is not None:
+                            mission_capture.record_terminal(
+                                None, "gps_safety_abort",
+                                state=offboard_ctrl.state.value,
+                                details={
+                                    "reason": verdict.reason,
+                                    "spray_mode": gctx["spray_mode"],
+                                },
+                            )
+                        await sio.emit(
+                            "gps_safety_abort",
+                            {
+                                "reason": verdict.reason,
+                                "spray_mode": gctx["spray_mode"],
+                                "gps_fix": verdict.current_fix_type,
+                                "manual_resume_required": True,
+                            },
+                        )
+                    else:
+                        gps_gate_fault_count = 0
+                        ros_node.publish_gps_gate(
+                            active=True, ok=True, reason="", seq=gps_gate_seq,
+                        )
+                else:
+                    gps_gate_fault_count = 0
+                    ros_node.publish_gps_gate(
+                        active=False, ok=True, reason="", seq=gps_gate_seq,
+                    )
 
                 # ── 4. Disconnect notification (transition: was connected) ─────
                 connected = bool(s.get("connected", False))

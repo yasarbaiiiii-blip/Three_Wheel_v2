@@ -9,6 +9,8 @@ from __future__ import annotations
 import datetime
 
 from auth import check_socket_token
+from control_arbiter import ControlArbiterError
+from joystick_controller import JoystickError
 from logging_setup import get_logger
 
 log = get_logger("server.socket")
@@ -28,6 +30,15 @@ async def _emit_unauth(sio, sid):
     await sio.emit("socket_error", {"reason": "unauthorised"}, to=sid)
 
 
+async def _emit_joystick_error(sio, sid, exc: Exception):
+    code = getattr(exc, "code", "error")
+    message = getattr(exc, "message", str(exc))
+    # Rejections were previously emitted only to the client and never logged,
+    # leaving no server-side trace when a joystick command stream is refused.
+    log.warning("joystick_error sid=%s code=%s msg=%s", sid, code, message)
+    await sio.emit("joystick_error", {"type": "joystick_error", "code": code, "message": message}, to=sid)
+
+
 def register_handlers(sio) -> None:
     """Attach all client → server event handlers to the given AsyncServer."""
 
@@ -39,9 +50,15 @@ def register_handlers(sio) -> None:
 
     @sio.event
     async def disconnect(sid):
-        from main import activity_log
+        from main import activity_log, joystick_ctrl
         activity_log.append({"timestamp": _now(), "level": "info",
                               "message": f"Socket disconnected: {sid}"})
+        if joystick_ctrl is not None and joystick_ctrl.owner_sid == sid:
+            try:
+                result = await joystick_ctrl.release(sid, reason="disconnect")
+                await sio.emit("joystick_released", result)
+            except Exception as exc:
+                log.warning("joystick release on disconnect failed: %s", exc)
 
     # ── Vehicle control ───────────────────────────────────────────────────────
 
@@ -70,6 +87,17 @@ def register_handlers(sio) -> None:
         if ros_node is None:
             return
         mode = data.get("mode", "MANUAL") if isinstance(data, dict) else str(data)
+        if str(mode).upper() == "OFFBOARD":
+            await sio.emit(
+                "mode_result",
+                {
+                    "success": False,
+                    "mode": mode,
+                    "message": "OFFBOARD transitions must use mission_start",
+                },
+                to=sid,
+            )
+            return
         ok, why = await ros_node.set_mode_async(mode)
         activity_log.append({"timestamp": _now(),
                               "level": "info" if ok else "error",
@@ -87,6 +115,58 @@ def register_handlers(sio) -> None:
             return
         result = await emergency_handler.estop_async()
         await sio.emit("estop_result", result, to=sid)
+
+    # ── Virtual joystick V2 ──────────────────────────────────────────────────
+
+    @sio.on("joystick_acquire")
+    async def on_joystick_acquire(sid, data):
+        from main import joystick_ctrl
+        if not _auth_ok(data):
+            return await _emit_unauth(sio, sid)
+        if joystick_ctrl is None:
+            return await _emit_joystick_error(
+                sio, sid, JoystickError("unavailable", "joystick controller unavailable")
+            )
+        try:
+            result = await joystick_ctrl.acquire(sid, data if isinstance(data, dict) else {})
+        except (JoystickError, ControlArbiterError) as exc:
+            return await _emit_joystick_error(sio, sid, exc)
+        await sio.emit("joystick_acquired", result, to=sid)
+
+    @sio.on("joystick_command")
+    async def on_joystick_command(sid, data):
+        from main import joystick_ctrl
+        if not _auth_ok(data):
+            return await _emit_unauth(sio, sid)
+        if joystick_ctrl is None:
+            return await _emit_joystick_error(
+                sio, sid, JoystickError("unavailable", "joystick controller unavailable")
+            )
+        try:
+            joystick_ctrl.handle_command(sid, data if isinstance(data, dict) else {})
+        except (JoystickError, ControlArbiterError) as exc:
+            return await _emit_joystick_error(sio, sid, exc)
+
+    @sio.on("joystick_release")
+    async def on_joystick_release(sid, data):
+        from main import joystick_ctrl
+        if not _auth_ok(data):
+            return await _emit_unauth(sio, sid)
+        if joystick_ctrl is None:
+            return await _emit_joystick_error(
+                sio, sid, JoystickError("unavailable", "joystick controller unavailable")
+            )
+        payload = data if isinstance(data, dict) else {}
+        try:
+            result = await joystick_ctrl.release(
+                sid,
+                session_id=payload.get("session_id"),
+                lease_id=payload.get("lease_id"),
+                reason="explicit",
+            )
+        except (JoystickError, ControlArbiterError) as exc:
+            return await _emit_joystick_error(sio, sid, exc)
+        await sio.emit("joystick_released", result, to=sid)
 
     # ── Mission control ───────────────────────────────────────────────────────
 
@@ -159,21 +239,29 @@ def register_handlers(sio) -> None:
 
     @sio.on("mission_stop")
     async def on_mission_stop(sid, data=None):
-        from main import mission_capture, offboard_ctrl
+        from main import hold_owner, mission_capture, offboard_ctrl, point_mission, ros_node
+        from mission_stop import stop_active_mission
         if not _auth_ok(data):
             return await _emit_unauth(sio, sid)
-        result = await offboard_ctrl.stop_async()
-        if result.get("success") and mission_capture is not None:
-            mission_capture.record_terminal(
-                None, "operator_stop", state=offboard_ctrl.state.value, details=result
-            )
+        result = await stop_active_mission(
+            offboard_ctrl,
+            point_mission,
+            ros_node,
+            hold_owner,
+            mission_capture=mission_capture,
+            transport="socket",
+        )
         await sio.emit("mission_status_update", result, to=sid)
 
     @sio.on("mission_abort")
     async def on_mission_abort(sid, data=None):
-        from main import mission_capture, offboard_ctrl
+        from main import hold_owner, mission_capture, offboard_ctrl, point_mission, ros_node
         if not _auth_ok(data):
             return await _emit_unauth(sio, sid)
+        if hold_owner is not None:
+            hold_owner.deactivate(ros_node)
+        if point_mission is not None:
+            await point_mission.abort(ros_node)
         result = await offboard_ctrl.abort_async()
         if mission_capture is not None:
             mission_capture.record_terminal(

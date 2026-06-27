@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Spray actuator controller for PX4 AUX outputs via MAVROS CommandLong.
 
-Subscribes to /spray/active (desired MARK state from RPP), applies debounce
-and safety gates, then commands MAV_CMD_DO_SET_ACTUATOR. The controller only
-drives an already-configured PX4 actuator set output; QGC remains the source
-of truth for AUX pin/function/PWM limits.
+Production distance-aware mode consumes `/rpp/conditioned_path` plus identity,
+owns timing/flow/safety compensation, applies debounce and safety gates, then
+commands MAV_CMD_DO_SET_ACTUATOR. `/spray/active` is retained only as a legacy
+fallback when distance-aware mode is disabled. The controller only drives an
+already-configured PX4 actuator set output; QGC remains the source of truth for
+AUX pin/function/PWM limits.
 
 Manual override (/spray/manual, std_msgs/Bool) lets the server bench-test the
 actuator: True holds spray ON for at most `manual_override_timeout_s`
@@ -19,9 +21,11 @@ and does not depend on the RPP stream). Actual override state is reported on
 from __future__ import annotations
 
 import math
+import json
 import signal
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import rclpy
@@ -52,11 +56,16 @@ from spray_runtime_protocol import (
     dwell_response_message,
     serialize_runtime_status,
 )
+from path_identity import (
+    CONDITIONED_PATH_IDENTITY_TOPIC,
+    parse_path_identity,
+)
 
 
 MAV_CMD_DO_SET_ACTUATOR = 187
 MAV_CMD_DO_SET_SERVO = 183
 _SERVO_PWM_MAX_US = 2200
+_VALID_ACTUATOR_BACKENDS = {"mavlink_servo_pwm", "mavlink_actuator"}
 from spray_path_model import (  # noqa: E402
     MARK_TO_TRANSIT,
     TRANSIT_TO_MARK,
@@ -72,6 +81,21 @@ from spray_path_model import (  # noqa: E402
     project_onto_path as _project_onto_path,
     yaw_ned_from_enu_quaternion as _yaw_ned_from_enu_quaternion,
 )
+
+
+@dataclass
+class ActuatorState:
+    commanded_on: bool = False
+    current_on: bool = False
+    debounce_state: str = "idle"
+    last_on_timestamp_s: float = 0.0
+    last_off_timestamp_s: float = 0.0
+    command_duration_s: float = 0.0
+    command_sequence: int = 0
+    current_pwm: float = 0.0
+    current_value: float = 0.0
+    last_command_failure: str = ""
+    off_confirmed: bool = False
 
 
 def _best_effort_qos(depth: int = 1) -> QoSProfile:
@@ -132,6 +156,8 @@ class SprayControllerNode(Node):
         self.declare_parameter("on_overspray_margin_m", 0.02)
         self.declare_parameter("off_overspray_margin_m", 0.0)
         self.declare_parameter("min_spray_speed_mps", 0.05)
+        self.declare_parameter("max_spray_speed_mps", 1.0)
+        self.declare_parameter("unsafe_speed_behavior", "BLOCK_SPRAY")
         self.declare_parameter("max_xtrack_error_m", 0.10)
         self.declare_parameter("pose_timeout_s", 0.5)
         self.declare_parameter("velocity_timeout_s", 0.5)
@@ -160,12 +186,56 @@ class SprayControllerNode(Node):
         self.declare_parameter("point_leg_timeout_s", 120.0)
         self.declare_parameter("point_settle_speed_mps", 0.05)
         self.declare_parameter("point_settle_yaw_rate_rad_s", 0.05)
+        self.declare_parameter("point_max_dwell_s", 60.0)
+        self.declare_parameter("point_leg_trajectory_mode", "two_point")
+        self.declare_parameter("point_leg_spacing_m", 0.08)
+        self.declare_parameter("point_hold_drift_tolerance_m", 0.08)
+        self.declare_parameter("point_hold_drift_policy", "fail")
+        # GPS-safety and obstacle gating fields are part of the mission spray
+        # configuration contract (configuration_to_param_dict). They are declared
+        # here so the runtime bulk-set is accepted; enforcement of this gating
+        # inside the node is not yet implemented (params currently unused).
+        self.declare_parameter("gps_required_fix_type", 6)
+        self.declare_parameter("gps_global_position_max_age_ms", 500.0)
+        self.declare_parameter("gps_local_pose_max_age_ms", 500.0)
+        self.declare_parameter("gps_fix_max_age_ms", 500.0)
+        self.declare_parameter("gps_max_pose_global_skew_ms", 100.0)
+        self.declare_parameter("gps_runtime_policy", "pause")
+        self.declare_parameter("gps_resume_policy", "manual")
+        self.declare_parameter("gps_recovery_stable_s", 2.0)
+        # F-01 (hybrid): the server feeds GPS_SURVEYED runtime safety to this
+        # node over /spray/gps_gate. This is the maximum age of that feed before
+        # the node treats it as stale and fail-closed blocks spray ON on its own
+        # (independent of the server watchdog — see _evaluate_gps_surveyed_runtime_safety).
+        self.declare_parameter("gps_runtime_gate_max_age_s", 3.0)
+        self.declare_parameter("obstacle_integration_enabled", False)
+        self.declare_parameter("obstacle_signal_max_age_s", 2.0)
         self.declare_parameter("configuration_revision", 0)
         self.declare_parameter("mission_config_mission_id", "")
+        self.declare_parameter("mission_config_path_fingerprint", "")
+        self.declare_parameter("calibration_profile_id", "factory_default")
+        self.declare_parameter("calibration_profile_version", 1)
+        self.declare_parameter("target_paint_density", 1.0)
+        self.declare_parameter(
+            "speed_pwm_table",
+            "[{\"speed_mps\":0.05,\"pwm\":1200.0},{\"speed_mps\":0.35,\"pwm\":1800.0}]",
+        )
+        self.declare_parameter("actuator_min_pwm", 0.0)
+        self.declare_parameter("actuator_max_pwm", 2200.0)
+        self.declare_parameter("actuator_off_pwm", 0.0)
+        self.declare_parameter("actuator_min_value", -1.0)
+        self.declare_parameter("actuator_max_value", 1.0)
+        self.declare_parameter("actuator_off_value", -1.0)
+        self.declare_parameter("timing_only_compatibility", False)
+        self.declare_parameter("pump_inertia_enabled", False)
+        self.declare_parameter("pwm_ramp_prediction_enabled", False)
+        self.declare_parameter("pressure_stabilization_enabled", False)
+        self.declare_parameter("temperature_viscosity_compensation_enabled", False)
         # One JSON envelope is one atomic ROS parameter transaction. Trigger
         # validates its revision; cancellation invalidates prepared envelopes.
         self.declare_parameter("pending_dwell_command_json", "")
         self.declare_parameter("dwell_cancel_revision", 0)
+        self._validate_actuator_backend()
 
         self._state_group = MutuallyExclusiveCallbackGroup()
         self._latency_group = self._state_group
@@ -203,7 +273,11 @@ class SprayControllerNode(Node):
         # at send time; _command_done ignores any result that is not the latest
         # so a late/out-of-order MAVROS reply cannot overwrite newer state.
         self._cmd_seq = 0
+        self._actuator_state = ActuatorState()
         self._path_model: Optional[SprayPathModel] = None
+        self._conditioned_path_identity: dict[str, object] = {}
+        self._conditioned_path_source = "none"
+        self._last_conditioned_identity_time = None
         self._pose_ned: Optional[tuple[float, float, float]] = None
         self._pose_recv_time = None
         self._vel_ned = (0.0, 0.0)
@@ -211,8 +285,21 @@ class SprayControllerNode(Node):
         self._last_auto_source = ""
         self._last_distance_event = ""
         self._last_safety_block_reason = ""
+        self._last_decision: Optional[SprayDecision] = None
+        self._target_flow = 0.0
+        self._current_pwm = 0.0
+        self._current_value = float(self.get_parameter("off_value").value)
         self._pose_stale_logged = False
         self._velocity_stale_logged = False
+        # F-01 (hybrid): GPS_SURVEYED runtime gate fed by the server watchdog.
+        # active=False (default) means the gate is disengaged — LOCAL_NED and
+        # non-surveyed missions are never RTK-gated here. _gps_gate_recv_time is
+        # the monotonic receive time used for the fail-closed staleness fallback.
+        self._gps_gate_active = False
+        self._gps_gate_ok = True
+        self._gps_gate_reason = ""
+        self._gps_gate_seq = 0
+        self._gps_gate_recv_time: Optional[float] = None
 
         command_service = str(self.get_parameter("command_service").value)
         self._command_cli = self.create_client(
@@ -246,8 +333,15 @@ class SprayControllerNode(Node):
         )
         self.create_subscription(
             Path,
-            "/path",
+            "/rpp/conditioned_path",
             self._path_cb,
+            _path_qos(),
+            callback_group=self._model_group,
+        )
+        self.create_subscription(
+            String,
+            CONDITIONED_PATH_IDENTITY_TOPIC,
+            self._conditioned_path_identity_cb,
             _path_qos(),
             callback_group=self._model_group,
         )
@@ -284,6 +378,14 @@ class SprayControllerNode(Node):
             "/mavros/state",
             self._state_cb,
             _state_qos(),
+            callback_group=self._latency_group,
+        )
+        # F-01 (hybrid): GPS_SURVEYED runtime safety feed from the server.
+        self.create_subscription(
+            String,
+            "/spray/gps_gate",
+            self._gps_gate_cb,
+            _best_effort_qos(),
             callback_group=self._latency_group,
         )
 
@@ -348,6 +450,12 @@ class SprayControllerNode(Node):
         self._send_command(False, reason="startup")
 
     def _configuration_from_node_parameters(self) -> SprayConfiguration:
+        speed_pwm_raw = self.get_parameter("speed_pwm_table").value
+        if isinstance(speed_pwm_raw, str):
+            try:
+                speed_pwm_raw = json.loads(speed_pwm_raw)
+            except ValueError:
+                pass
         raw = {
             "spray_mode": str(self.get_parameter("spray_mode").value),
             "solenoid_open_delay_s": float(self.get_parameter("solenoid_open_delay_s").value),
@@ -355,6 +463,8 @@ class SprayControllerNode(Node):
             "on_overspray_margin_m": float(self.get_parameter("on_overspray_margin_m").value),
             "off_overspray_margin_m": float(self.get_parameter("off_overspray_margin_m").value),
             "min_spray_speed_mps": float(self.get_parameter("min_spray_speed_mps").value),
+            "max_spray_speed_mps": float(self.get_parameter("max_spray_speed_mps").value),
+            "unsafe_speed_behavior": str(self.get_parameter("unsafe_speed_behavior").value),
             "max_xtrack_error_m": float(self.get_parameter("max_xtrack_error_m").value),
             "nozzle_forward_offset_m": float(self.get_parameter("nozzle_forward_offset_m").value),
             "nozzle_lateral_offset_m": float(self.get_parameter("nozzle_lateral_offset_m").value),
@@ -377,6 +487,24 @@ class SprayControllerNode(Node):
             "velocity_timeout_s": float(self.get_parameter("velocity_timeout_s").value),
             "configuration_revision": int(self.get_parameter("configuration_revision").value),
             "mission_id": str(self.get_parameter("mission_config_mission_id").value),
+            "path_fingerprint": str(self.get_parameter("mission_config_path_fingerprint").value),
+            "calibration_profile_id": str(self.get_parameter("calibration_profile_id").value),
+            "calibration_profile_version": int(self.get_parameter("calibration_profile_version").value),
+            "target_paint_density": float(self.get_parameter("target_paint_density").value),
+            "speed_pwm_table": speed_pwm_raw,
+            "actuator_min_pwm": float(self.get_parameter("actuator_min_pwm").value),
+            "actuator_max_pwm": float(self.get_parameter("actuator_max_pwm").value),
+            "actuator_off_pwm": float(self.get_parameter("actuator_off_pwm").value),
+            "actuator_min_value": float(self.get_parameter("actuator_min_value").value),
+            "actuator_max_value": float(self.get_parameter("actuator_max_value").value),
+            "actuator_off_value": float(self.get_parameter("actuator_off_value").value),
+            "timing_only_compatibility": bool(self.get_parameter("timing_only_compatibility").value),
+            "pump_inertia_enabled": bool(self.get_parameter("pump_inertia_enabled").value),
+            "pwm_ramp_prediction_enabled": bool(self.get_parameter("pwm_ramp_prediction_enabled").value),
+            "pressure_stabilization_enabled": bool(self.get_parameter("pressure_stabilization_enabled").value),
+            "temperature_viscosity_compensation_enabled": bool(
+                self.get_parameter("temperature_viscosity_compensation_enabled").value
+            ),
         }
         return validate_spray_configuration(raw)
 
@@ -426,6 +554,8 @@ class SprayControllerNode(Node):
         self._set_config_snapshot(config, ready=True, error="")
         with self._state_lock:
             self._path_model = None
+            self._conditioned_path_identity = {}
+            self._conditioned_path_source = "none"
             self._model_revision += 1
             self._reset_decision_state("mission_config_applied")
         self.get_logger().info(
@@ -556,12 +686,22 @@ class SprayControllerNode(Node):
                 if active_dwell and dwell is not None
                 else 0.0
             )
+            gps_gate_active = self._gps_gate_active
+            gps_gate_seq = self._gps_gate_seq
             snapshot = {
                 "model_revision": self._model_revision,
                 "commanded_on": self._commanded,
                 "confirmed_off": self._off_confirmed and not self._commanded,
                 "last_transition": self._last_transition,
+                "conditioned_path_source": self._conditioned_path_source,
+                "path_identity": dict(self._conditioned_path_identity),
+                "last_decision": self._last_decision,
+                "target_flow": self._target_flow,
+                "current_pwm": self._current_pwm,
+                "current_value": self._current_value,
+                "actuator": self._actuator_state,
             }
+        gps_eval_ok, gps_eval_reason = self._evaluate_gps_surveyed_runtime_safety()
         return {
             "timestamp_monotonic_s": now_ns * 1e-9,
             "spray_mode": config.mode.value,
@@ -579,6 +719,65 @@ class SprayControllerNode(Node):
             "dwell_remaining_s": dwell_remaining_s,
             "last_transition": snapshot["last_transition"],
             "last_error": self._config_error,
+            "actual_speed_mps": math.hypot(self._vel_ned[0], self._vel_ned[1]),
+            "target_speed_mps": None,
+            "target_speed_source": "unavailable",
+            "target_flow": snapshot["target_flow"],
+            "current_pwm": snapshot["current_pwm"],
+            "current_value": snapshot["current_value"],
+            "spray_state": "COMMAND_ON" if snapshot["commanded_on"] else "COMMAND_OFF",
+            "commanded_spray_state": "ON" if snapshot["commanded_on"] else "OFF",
+            "software_actuator_state": "ON" if snapshot["actuator"].current_on else "OFF",
+            "physical_actuator_state": "UNAVAILABLE",
+            "physical_confirmation_available": False,
+            "distance_to_next_boundary_m": (
+                snapshot["last_decision"].distance_to_boundary_m
+                if snapshot["last_decision"] is not None else None
+            ),
+            "current_segment_index": (
+                snapshot["last_decision"].projection.segment_index
+                if snapshot["last_decision"] is not None
+                and snapshot["last_decision"].projection is not None else None
+            ),
+            "current_segment_type": (
+                "MARK"
+                if snapshot["last_decision"] is not None
+                and snapshot["last_decision"].projection is not None
+                and snapshot["last_decision"].projection.current_flag
+                else "TRANSIT"
+            ),
+            "current_decision_event": (
+                snapshot["last_decision"].event
+                if snapshot["last_decision"] is not None else ""
+            ),
+            "safety_reason": (
+                snapshot["last_decision"].safety_reason
+                if snapshot["last_decision"] is not None else self._last_safety_block_reason
+            ),
+            "conditioned_path_source": snapshot["conditioned_path_source"],
+            "path_identity": snapshot["path_identity"],
+            "mission_id": config.mission_id,
+            "path_fingerprint": config.path_fingerprint,
+            # F-01/F-05: surveyed runtime-safety gate visibility
+            "gps_surveyed_active": gps_gate_active,
+            "gps_safety_ok": gps_eval_ok,
+            "gps_safety_reason": gps_eval_reason,
+            "gps_gate_seq": gps_gate_seq,
+            "manual_resume_required": bool(gps_gate_active and not gps_eval_ok),
+            "actuator_failure_state": snapshot["actuator"].last_command_failure,
+            "actuator": {
+                "commanded_on": snapshot["actuator"].commanded_on,
+                "current_on": snapshot["actuator"].current_on,
+                "debounce_state": snapshot["actuator"].debounce_state,
+                "last_on_timestamp_s": snapshot["actuator"].last_on_timestamp_s,
+                "last_off_timestamp_s": snapshot["actuator"].last_off_timestamp_s,
+                "command_duration_s": snapshot["actuator"].command_duration_s,
+                "command_sequence": snapshot["actuator"].command_sequence,
+                "current_pwm": snapshot["actuator"].current_pwm,
+                "current_value": snapshot["actuator"].current_value,
+                "last_command_failure": snapshot["actuator"].last_command_failure,
+                "off_confirmed": snapshot["actuator"].off_confirmed,
+            },
         }
 
     def _publish_runtime_status(self) -> None:
@@ -615,24 +814,89 @@ class SprayControllerNode(Node):
         ):
             self._set_auto_desired(self._legacy_active_raw, source="legacy")
 
+    def _conditioned_path_identity_cb(self, msg: String) -> None:
+        with self._state_lock:
+            self._conditioned_path_identity = parse_path_identity(msg.data)
+            self._conditioned_path_source = str(
+                self._conditioned_path_identity.get("source", "rpp_conditioned_path")
+                or "rpp_conditioned_path"
+            )
+            self._last_conditioned_identity_time = self.get_clock().now()
+            if self._conditioned_path_source == "clear":
+                self._path_model = None
+                self._model_revision += 1
+                self._last_safety_block_reason = "conditioned path cleared"
+                self._set_auto_desired(False, source="distance")
+                self._force_off("conditioned path cleared", force=True)
+                return
+            matches, why = self._conditioned_identity_matches_config(
+                self._get_config_snapshot()
+            )
+            if self._path_model is not None and not matches:
+                self._path_model = None
+                self._model_revision += 1
+                self._last_safety_block_reason = why
+                self._set_auto_desired(False, source="distance")
+                self._force_off(why, force=True)
+
+    def _conditioned_identity_matches_config(self, config: SprayConfiguration) -> tuple[bool, str]:
+        identity = dict(self._conditioned_path_identity or {})
+        expected_fp = config.path_fingerprint
+        actual_fp = str(identity.get("path_fingerprint", "") or "")
+        expected_mission = config.mission_id
+        actual_mission = str(identity.get("mission_id", "") or "")
+        expected_revision = int(config.revision or 0)
+        actual_revision = int(identity.get("configuration_revision", 0) or 0)
+        strict = bool(expected_mission and not config.calibration.timing_only_compatibility)
+        if strict and not identity:
+            return False, "missing conditioned path identity"
+        if expected_fp:
+            if not actual_fp:
+                return False, "missing conditioned path identity"
+            if actual_fp != expected_fp:
+                return False, "path identity mismatch"
+        elif strict:
+            return False, "mission path fingerprint missing"
+        if expected_mission:
+            if strict and not actual_mission:
+                return False, "missing mission identity"
+            if actual_mission and actual_mission != expected_mission:
+                return False, "mission identity mismatch"
+        if strict:
+            if expected_revision <= 0:
+                return False, "mission configuration revision missing"
+            if actual_revision <= 0:
+                return False, "conditioned path configuration revision missing"
+            if actual_revision != expected_revision:
+                return False, "conditioned path configuration revision mismatch"
+        return True, ""
+
+    def _reject_conditioned_path(self, reason: str) -> None:
+        with self._state_lock:
+            self._path_model = None
+            self._model_revision += 1
+            self._last_safety_block_reason = reason
+        self._set_auto_desired(False, source="distance")
+        self._force_off(reason, force=True)
+
     def _path_cb(self, msg: Path) -> None:
         points = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
         flags = [p.pose.position.z > 0.5 for p in msg.poses]
+        config = self._get_config_snapshot()
+        matches, why = self._conditioned_identity_matches_config(config)
+        if not matches:
+            self._reject_conditioned_path(why)
+            self.get_logger().warn(f"spray conditioned path rejected: {why}")
+            return
         if not points:
-            with self._state_lock:
-                self._path_model = None
-                self._model_revision += 1
-            self._set_auto_desired(False, source="distance")
-            self.get_logger().warn("spray path cleared: received empty /path")
+            self._reject_conditioned_path("conditioned path cleared")
+            self.get_logger().warn("spray path cleared: received empty /rpp/conditioned_path")
             return
         try:
             base_model = _build_path_model(points, flags)
-            config = self._get_config_snapshot()
             model = build_path_model_for_config(base_model, config)
         except ValueError as exc:
-            with self._state_lock:
-                self._path_model = None
-            self._set_auto_desired(False, source="distance")
+            self._reject_conditioned_path(f"invalid conditioned path: {exc}")
             self.get_logger().warn(f"spray path rejected: {exc}")
             return
         current = self._get_config_snapshot()
@@ -717,12 +981,14 @@ class SprayControllerNode(Node):
         if self._candidate is None or self._candidate != self._desired_raw:
             self._candidate = self._desired_raw
             self._candidate_count = 1
+            self._actuator_state.debounce_state = "collecting"
         else:
             self._candidate_count += 1
 
         debounce_samples = max(0, int(self.get_parameter("debounce_samples").value))
         if self._candidate_count < max(1, debounce_samples):
             return
+        self._actuator_state.debounce_state = "stable"
         if self._desired_debounced == self._candidate:
             if self._effective_desired() != self._commanded:
                 self._commit_desired_state()
@@ -816,12 +1082,17 @@ class SprayControllerNode(Node):
                 safety_reason=safety_reason,
                 config=config,
             )
+        with self._state_lock:
+            self._last_decision = decision
+            self._target_flow = float(decision.target_flow)
+            self._current_pwm = float(decision.target_pwm)
+            self._current_value = float(decision.actuator_value)
         self._publish_debug(decision.debug)
 
         if decision.event and decision.event != self._last_distance_event:
-            if decision.event == "on_early":
+            if decision.event == "ON_EARLY":
                 self.get_logger().info("Spray ON early before MARK start")
-            elif decision.event == "off_early":
+            elif decision.event == "OFF_EARLY":
                 self.get_logger().info("Spray OFF early before MARK end")
         self._last_distance_event = decision.event
 
@@ -868,6 +1139,61 @@ class SprayControllerNode(Node):
             timeout_s = config.safety.velocity_timeout_s
         return age_s <= timeout_s, age_s
 
+    def _gps_gate_cb(self, msg: String) -> None:
+        """Receive the server's GPS_SURVEYED runtime-safety feed (F-01 hybrid).
+
+        The server publishes {active, ok, reason, seq} on /spray/gps_gate. We
+        record it plus a monotonic receive time so the node can independently
+        fail-closed if the feed goes stale (server watchdog death)."""
+        try:
+            data = json.loads(msg.data)
+        except (TypeError, ValueError):
+            self.get_logger().warn("invalid /spray/gps_gate payload ignored")
+            return
+        active = bool(data.get("active", False))
+        ok = bool(data.get("ok", False))
+        reason = str(data.get("reason", ""))
+        try:
+            seq = int(data.get("seq", 0))
+        except (TypeError, ValueError):
+            seq = 0
+        with self._state_lock:
+            self._gps_gate_active = active
+            self._gps_gate_ok = ok
+            self._gps_gate_reason = reason
+            self._gps_gate_seq = seq
+            self._gps_gate_recv_time = time.monotonic()
+        # Drop spray immediately on a fault edge rather than waiting for the next
+        # decision tick — but only when spray is (or might be) ON, to avoid
+        # re-issuing OFF on every heartbeat while already safely off.
+        if active and not ok and (self._commanded or not self._off_confirmed):
+            self._force_off(f"GPS_SURVEYED safety: {reason or 'not ok'}", force=True)
+
+    def _evaluate_gps_surveyed_runtime_safety(self) -> tuple[bool, str]:
+        """Independent node-side GPS_SURVEYED gate (hybrid fallback for F-01).
+
+        Engages only when the server feeds an active surveyed gate, so ordinary
+        LOCAL_NED missions are never RTK-gated. Returns (False, reason) when the
+        server reports unsafe OR when the gate feed is stale/absent — the latter
+        keeps spray OFF even if the server watchdog dies (regression case #7)."""
+        with self._state_lock:
+            active = self._gps_gate_active
+            ok = self._gps_gate_ok
+            reason = self._gps_gate_reason
+            recv_time = self._gps_gate_recv_time
+        if not active:
+            return True, ""
+        max_age = float(self.get_parameter("gps_runtime_gate_max_age_s").value)
+        now = time.monotonic()
+        if recv_time is None or (now - recv_time) > max_age:
+            age = float("inf") if recv_time is None else (now - recv_time)
+            return False, (
+                f"GPS_SURVEYED gate feed stale/absent ({age:.1f}s > {max_age:.1f}s)"
+            )
+        if not ok:
+            return False, reason or "GPS_SURVEYED safety not satisfied"
+        return True, ""
+
     def _auto_safety_status(
         self,
         pose_fresh: bool,
@@ -878,7 +1204,7 @@ class SprayControllerNode(Node):
         config = self._get_config_snapshot()
         if not self._config_ready:
             return False, self._config_error or "spray configuration not ready"
-        return auto_safety_status(
+        ok, reason = auto_safety_status(
             config=config,
             armed=self._armed,
             mode=self._mode,
@@ -888,6 +1214,14 @@ class SprayControllerNode(Node):
             velocity_fresh=velocity_fresh,
             dwell_active=dwell_active,
         )
+        if not ok:
+            return ok, reason
+        # F-01 (hybrid): AND-in the independent GPS_SURVEYED gate last so a
+        # surveyed RTK fault/feed-loss blocks spray ON regardless of geometry.
+        gps_ok, gps_reason = self._evaluate_gps_surveyed_runtime_safety()
+        if not gps_ok:
+            return False, gps_reason
+        return True, reason
 
     def _reassert_tick(self) -> None:
         if self._effective_desired() and self._commanded and self._safety_allows_on():
@@ -959,6 +1293,8 @@ class SprayControllerNode(Node):
         # when the new intent cannot be dispatched.
         self._cmd_seq += 1
         seq = self._cmd_seq
+        self._actuator_state.commanded_on = bool(on)
+        self._actuator_state.command_sequence = seq
         if not self._service_ready:
             self.get_logger().warn(
                 "spray command service not ready; command suppressed",
@@ -966,37 +1302,50 @@ class SprayControllerNode(Node):
             )
             if not on:
                 self._off_confirmed = False
+                self._actuator_state.off_confirmed = False
+            self._actuator_state.last_command_failure = "service not ready"
             return
 
         if on:
             self._off_confirmed = False
+            self._actuator_state.off_confirmed = False
+            self._actuator_state.last_on_timestamp_s = self.get_clock().now().nanoseconds * 1e-9
         else:
             self._off_confirmed = False
+            self._actuator_state.off_confirmed = False
             self._last_off_send_time_ns = self.get_clock().now().nanoseconds
+            self._actuator_state.last_off_timestamp_s = self._last_off_send_time_ns * 1e-9
+        if on:
+            self._commanded = True
+            self._actuator_state.current_on = True
+            self._actuator_state.current_pwm = self._current_pwm
+            self._actuator_state.current_value = self._current_value
+            self._publish_state(True)
         req = self._build_command_request(on)
         future = self._command_cli.call_async(req)
         future.add_done_callback(
             lambda fut, requested=on, why=reason, s=seq: self._command_done(fut, requested, why, s)
         )
-        if on:
-            self._commanded = True
-            self._publish_state(True)
 
     def _build_command_request(self, on: bool) -> CommandLong.Request:
         req = CommandLong.Request()
         req.broadcast = False
         req.confirmation = 0
-        backend = str(self.get_parameter("actuator_backend").value)
+        backend = self._validate_actuator_backend()
         if backend == "mavlink_servo_pwm":
             return self._build_servo_pwm_request(req, on)
-        elif backend == "mavlink_actuator":
+        if backend == "mavlink_actuator":
             return self._build_actuator_request(req, on)
-        else:
-            self.get_logger().error(
-                f"Unknown actuator_backend={backend!r}; sending OFF via mavlink_servo_pwm",
-                throttle_duration_sec=5.0,
+        raise RuntimeError(f"unreachable actuator_backend={backend!r}")
+
+    def _validate_actuator_backend(self) -> str:
+        backend = str(self.get_parameter("actuator_backend").value)
+        if backend not in _VALID_ACTUATOR_BACKENDS:
+            raise ValueError(
+                "Unknown actuator_backend="
+                f"{backend!r}; expected one of {sorted(_VALID_ACTUATOR_BACKENDS)}"
             )
-            return self._build_servo_pwm_request(req, False)
+        return backend
 
     def _build_actuator_request(self, req: CommandLong.Request, on: bool) -> CommandLong.Request:
         set_index = int(self.get_parameter("actuator_set_index").value)
@@ -1006,11 +1355,22 @@ class SprayControllerNode(Node):
                 throttle_duration_sec=5.0,
             )
             set_index = 1
-        value = (
-            float(self.get_parameter("on_value").value)
-            if on else
-            float(self.get_parameter("off_value").value)
-        )
+        if on:
+            # Manual override is full configured ON — it must NOT reuse the
+            # autonomous decision value (self._current_value), which a latched
+            # continuous-mode path leaves at off_value whenever the rover is not
+            # in an active MARK zone. Using it silently turned manual /spray/on
+            # into a no-op (command accepted, actuator value = OFF).
+            if self._manual_active:
+                value = float(self.get_parameter("on_value").value)
+            elif self._last_decision is not None:
+                value = float(self._current_value)
+            else:
+                value = float(self.get_parameter("on_value").value)
+        else:
+            value = float(
+                self._get_config_snapshot().calibration.actuator_limits.off_value
+            )
         req.command = MAV_CMD_DO_SET_ACTUATOR
         params = [math.nan] * 6
         params[set_index - 1] = value
@@ -1022,10 +1382,16 @@ class SprayControllerNode(Node):
     def _build_servo_pwm_request(self, req: CommandLong.Request, on: bool) -> CommandLong.Request:
         instance = int(self.get_parameter("servo_instance").value)
         if on:
-            pwm = int(self.get_parameter("on_pwm_us").value)
+            pwm = int(round(
+                self._current_pwm
+                if self._last_decision is not None
+                else float(self.get_parameter("on_pwm_us").value)
+            ))
             pwm = max(0, min(pwm, _SERVO_PWM_MAX_US))
         else:
-            pwm = int(self.get_parameter("off_pwm_us").value)
+            pwm = int(round(self._get_config_snapshot().calibration.actuator_limits.off_pwm))
+        self._actuator_state.current_pwm = float(pwm)
+        self._actuator_state.current_value = float(pwm)
         self.get_logger().info(
             f"Sending spray {'ON' if on else 'OFF'} PWM {pwm}µs (instance={instance})",
             throttle_duration_sec=1.0,
@@ -1048,6 +1414,7 @@ class SprayControllerNode(Node):
         try:
             resp = future.result()
         except Exception as exc:
+            self._actuator_state.last_command_failure = str(exc)
             if not requested:
                 self._off_confirmed = False
                 self.get_logger().warn(
@@ -1055,10 +1422,14 @@ class SprayControllerNode(Node):
                 )
             else:
                 self.get_logger().warn(f"spray command {reason} failed: {exc}")
+                self._commanded = False
+                self._actuator_state.current_on = False
+                self._maybe_retry_off("ON command failure", force=True)
             return
         success = bool(getattr(resp, "success", False))
         result = getattr(resp, "result", None)
         if not success:
+            self._actuator_state.last_command_failure = f"result={result}"
             if not requested:
                 self._off_confirmed = False
                 self.get_logger().warn(
@@ -1068,11 +1439,31 @@ class SprayControllerNode(Node):
                 self.get_logger().warn(
                     f"spray command {reason} rejected: requested={requested} result={result}"
                 )
+                self._commanded = False
+                self._actuator_state.current_on = False
+                self._maybe_retry_off("ON command rejected", force=True)
             return
         if not requested:
             self._off_confirmed = True
+            self._actuator_state.off_confirmed = True
             self._commanded = False
+            self._actuator_state.current_on = False
+            self._actuator_state.current_pwm = (
+                self._get_config_snapshot().calibration.actuator_limits.off_pwm
+            )
+            self._actuator_state.current_value = (
+                self._get_config_snapshot().calibration.actuator_limits.off_value
+            )
             self._publish_state(False)
+        else:
+            self._actuator_state.last_command_failure = ""
+        now_s = self.get_clock().now().nanoseconds * 1e-9
+        started = (
+            self._actuator_state.last_on_timestamp_s
+            if requested else self._actuator_state.last_off_timestamp_s
+        )
+        if started:
+            self._actuator_state.command_duration_s = max(0.0, now_s - started)
 
     def _publish_state(self, active: bool) -> None:
         msg = Bool()
