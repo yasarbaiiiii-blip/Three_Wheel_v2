@@ -540,8 +540,8 @@ const LEAFLET_HTML = `
             [line.from.lat, line.from.lon],
             [line.to.lat, line.to.lon]
           ], {
-            color: '#16a34a',
-            weight: 2,
+            color: item.selected ? '#ef4444' : '#16a34a',
+            weight: item.selected ? 3 : 2,
             opacity: sketchMode && !item.selected ? 0.2 : (item.selected ? 1.0 : 0.8),
             lineCap: 'round',
             lineJoin: 'round',
@@ -550,20 +550,6 @@ const LEAFLET_HTML = `
           poly._itemId = item.id;
           itemLayersGroup.addLayer(poly);
         });
-
-        // Draw bounding box polygon
-        if (item.box && item.box.length >= 4) {
-          var boxPoly = L.polygon(item.box, {
-            color: item.selected ? '#ef4444' : '#3b82f6',
-            weight: 1.5,
-            fillColor: item.selected ? '#ef4444' : '#3b82f6',
-            fillOpacity: item.selected ? 0.05 : 0.02,
-            dashArray: item.selected ? '' : '4 4',
-            interactive: false
-          });
-          boxPoly._itemId = item.id;
-          itemLayersGroup.addLayer(boxPoly);
-        }
       });
     }
 
@@ -1492,15 +1478,10 @@ const LEAFLET_HTML = `
             itemLayersGroup.eachLayer(function(layer) {
               var item = currentItems.find(function(it) { return it.id === layer._itemId; });
               if (item) {
-                if (layer instanceof L.Polygon) {
+                if (layer instanceof L.Polyline) {
                   layer.setStyle({
-                    color: item.selected ? '#ef4444' : '#3b82f6',
-                    fillColor: item.selected ? '#ef4444' : '#3b82f6',
-                    fillOpacity: item.selected ? 0.05 : 0.02,
-                    dashArray: item.selected ? '' : '4 4'
-                  });
-                } else if (layer instanceof L.Polyline) {
-                  layer.setStyle({
+                    color: item.selected ? '#ef4444' : '#16a34a',
+                    weight: item.selected ? 3 : 2,
                     opacity: sketchMode && !item.selected ? 0.2 : (item.selected ? 1.0 : 0.8)
                   });
                 }
@@ -2098,7 +2079,7 @@ export function MapView({
     if (!visible || mode !== "templates") return;
     sendToWebView({
       type: "updateMultiTouchMode",
-      multiTouchMode,
+      multiTouchMode: multiTouchMode || "both",
     });
   }, [multiTouchMode, visible, mode, sendToWebView]);
 
@@ -2235,7 +2216,7 @@ export function MapView({
         webViewRef.current?.postMessage(
           JSON.stringify({
             type: "updateMultiTouchMode",
-            multiTouchMode,
+            multiTouchMode: multiTouchMode || "both",
           })
         );
       } catch (e) {}
