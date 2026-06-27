@@ -2,6 +2,7 @@
   "expo": {
     "name": "Rover Three Wheel",
     "slug": "rover-three-wheel-native",
+    "scheme": "roverthreewheel",
     "version": "1.0.0",
     "orientation": "default",
     "userInterfaceStyle": "automatic",
@@ -22,6 +23,7 @@
       "softwareKeyboardLayoutMode": "resize"
     },
     "plugins": [
+      "expo-dev-client",
       [
         "expo-build-properties",
         {
