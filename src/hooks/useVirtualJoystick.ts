@@ -33,8 +33,8 @@ import {
 } from "../utils/joystickFrontendSafety";
 import { processAxis } from "../utils/joystickMath";
 
-const DEFAULT_MAX_THROTTLE = 0.15;
-const DEFAULT_MAX_STEERING = 0.5;
+const DEFAULT_MAX_THROTTLE = 0.35;
+const DEFAULT_MAX_STEERING = 0.2;
 const DEFAULT_COMMAND_RATE_HZ = 20;
 const ACQUIRE_TIMEOUT_MS = 3800;
 const RELEASE_CONFIRM_TIMEOUT_MS = 1000;
