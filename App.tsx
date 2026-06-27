@@ -9691,6 +9691,7 @@ function PlanPreview({
             mode={visualAlignmentItem ? "templates" : "fields"}
             placedItems={visualAlignmentItem ? [visualAlignmentItem] : []}
             selectedItemIds={visualAlignmentItem ? ["visual-alignment-group"] : []}
+            multiTouchMode={visualAlignmentItem ? "rotate" : "both"}
             onUpdatePlacedItem={(id, updates) => {
               if (!isVisualAlignmentMode || id !== "visual-alignment-group") return;
               setVisualAlignmentItem?.((prev: PlacedItem | null) => {
