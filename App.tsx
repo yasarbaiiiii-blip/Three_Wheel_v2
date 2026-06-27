@@ -6,6 +6,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  Dimensions,
   FlatList,
   LogBox,
   Modal,
@@ -26,7 +27,7 @@ import * as DocumentPicker from "expo-document-picker";
 import * as Network from "expo-network";
 import { SafeAreaInsetsContext, SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView, TouchableOpacity as RNGHTouchableOpacity, GestureDetector, Gesture } from "react-native-gesture-handler";
-import AnimatedReanimated, { runOnJS, useSharedValue } from "react-native-reanimated";
+import AnimatedReanimated, { runOnJS, useAnimatedStyle, useSharedValue, withSpring } from "react-native-reanimated";
 
 import Svg, { Circle, G, Line, Path, Polygon, Text as SvgText } from "react-native-svg";
 import { io, Socket } from "socket.io-client";
@@ -510,6 +511,119 @@ type AppToast = {
   tone: ToastTone;
 };
 
+type RTKMode = "idle" | "ntrip" | "lora" | "stopping";
+
+function rtkModeFromStatus(data: any): Exclude<RTKMode, "stopping"> {
+  if (!data?.running) return "idle";
+  if (data.mode === "ntrip") return "ntrip";
+  if (data.mode === "lora") return "lora";
+  return "idle";
+}
+
+const FLOATING_ESTOP_SIZE = 74;
+const FLOATING_ESTOP_MARGIN = 18;
+
+function FloatingEStop({
+  visible,
+  onEStop,
+}: {
+  visible: boolean;
+  onEStop: () => Promise<void>;
+}) {
+  const screen = Dimensions.get("window");
+  const translateX = useSharedValue(screen.width - FLOATING_ESTOP_SIZE - FLOATING_ESTOP_MARGIN);
+  const translateY = useSharedValue(screen.height * 0.55);
+  const startX = useSharedValue(0);
+  const startY = useSharedValue(0);
+
+  const triggerEStop = useCallback(() => {
+    void onEStop();
+  }, [onEStop]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: translateX.value },
+      { translateY: translateY.value },
+    ],
+  }));
+
+  const panGesture = Gesture.Pan()
+    .onStart(() => {
+      startX.value = translateX.value;
+      startY.value = translateY.value;
+    })
+    .onUpdate((event) => {
+      translateX.value = startX.value + event.translationX;
+      translateY.value = startY.value + event.translationY;
+    })
+    .onEnd(() => {
+      const maxX = screen.width - FLOATING_ESTOP_SIZE - FLOATING_ESTOP_MARGIN;
+      const maxY = screen.height - FLOATING_ESTOP_SIZE - FLOATING_ESTOP_MARGIN;
+      const snapX = translateX.value > screen.width / 2 ? maxX : FLOATING_ESTOP_MARGIN;
+      const clampedY = Math.max(FLOATING_ESTOP_MARGIN, Math.min(translateY.value, maxY));
+      translateX.value = withSpring(snapX, { damping: 20, stiffness: 200 });
+      translateY.value = withSpring(clampedY, { damping: 20, stiffness: 200 });
+    });
+
+  const doubleTapGesture = Gesture.Tap()
+    .numberOfTaps(2)
+    .maxDelay(260)
+    .onEnd((_event, success) => {
+      if (success) runOnJS(triggerEStop)();
+    });
+
+  const composedGesture = Gesture.Exclusive(doubleTapGesture, panGesture);
+
+  if (!visible) return null;
+
+  return (
+    <View
+      pointerEvents="box-none"
+      style={{
+        position: "absolute",
+        top: 0,
+        right: 0,
+        bottom: 0,
+        left: 0,
+        zIndex: 99999,
+        elevation: 100,
+      }}
+    >
+      <GestureDetector gesture={composedGesture}>
+        <AnimatedReanimated.View
+          pointerEvents="auto"
+          style={[
+            {
+              position: "absolute",
+              width: FLOATING_ESTOP_SIZE,
+              height: FLOATING_ESTOP_SIZE,
+              borderRadius: FLOATING_ESTOP_SIZE / 2,
+              backgroundColor: "#dc2626",
+              borderWidth: 3,
+              borderColor: "#fee2e2",
+              alignItems: "center",
+              justifyContent: "center",
+              shadowColor: "#000",
+              shadowOffset: { width: 0, height: 8 },
+              shadowOpacity: 0.28,
+              shadowRadius: 14,
+              elevation: 100,
+            },
+            animatedStyle,
+          ]}
+        >
+          <Text style={{ color: "#ffffff", fontSize: 11, fontWeight: "900", textAlign: "center", lineHeight: 13 }}>
+            E-STOP
+          </Text>
+          <Text style={{ color: "#fecaca", fontSize: 8, fontWeight: "800", marginTop: 2 }}>
+            2 TAP
+          </Text>
+        </AnimatedReanimated.View>
+      </GestureDetector>
+    </View>
+  );
+}
+
 type StagedWorkflowStep = "upload" | "entities" | "order" | "alignment" | "spray" | "staged" | "loaded" | "started";
 type StagedWorkflowStatus = "pending" | "verified" | "failed";
 type StagedWorkflowState = Record<StagedWorkflowStep, StagedWorkflowStatus>;
@@ -683,8 +797,10 @@ export default function App() {
   const [rtkUsername, setRtkUsername] = useState("");
   const [rtkPassword, setRtkPassword] = useState("");
   const [rtkConnecting, setRtkConnecting] = useState(false);
-  const [rtkRunning, setRtkRunning] = useState(false);
+  const [rtkMode, setRtkMode] = useState<RTKMode>("idle");
   const [rtkHealthy, setRtkHealthy] = useState(false);
+  const [isFloatingEStopEnabled, setIsFloatingEStopEnabled] = useState(false);
+  const rtkRunning = rtkMode === "ntrip" || rtkMode === "lora" || rtkMode === "stopping";
   const [toggleA, setToggleA] = useState(false);
   const [toggleB, setToggleB] = useState(false);
   const [toggleC, setToggleC] = useState(true);
@@ -2110,6 +2226,7 @@ export default function App() {
 
   async function startNtrip() {
     if (!apiBaseUrl) return;
+    if (rtkRunning) return;
     setRtkConnecting(true);
     try {
       if (!rtkCaster || !rtkPort || !rtkMountPoint || !rtkUsername || !rtkPassword) {
@@ -2137,7 +2254,7 @@ export default function App() {
         throw new Error(txt || "NTRIP start failed.");
       }
       const data = await res.json();
-      setRtkRunning(data.running);
+      setRtkMode(rtkModeFromStatus(data) === "ntrip" ? "ntrip" : "idle");
       setRtkHealthy(data.healthy);
       logAction("RTK_CONNECT_SUCCESS", { caster: rtkCaster });
       Alert.alert("RTK Started", "NTRIP RTK caster started successfully.");
@@ -2154,6 +2271,7 @@ export default function App() {
 
   async function startLora() {
     if (!apiBaseUrl) return;
+    if (rtkRunning) return;
     setRtkConnecting(true);
     try {
       showToast("RTK Injection", "Starting LoRA...", "info");
@@ -2172,7 +2290,7 @@ export default function App() {
         throw new Error(txt || "LoRA start failed.");
       }
       const data = await res.json();
-      setRtkRunning(data.running);
+      setRtkMode(rtkModeFromStatus(data) === "lora" ? "lora" : "idle");
       setRtkHealthy(data.healthy);
       Alert.alert("LoRA Started", "LoRA RTK stream started successfully.");
       showToast("LoRA Started", "LoRA RTK stream active.", "success");
@@ -2187,6 +2305,8 @@ export default function App() {
 
   async function stopRtk() {
     if (!apiBaseUrl) return;
+    const previousMode = rtkMode;
+    setRtkMode("stopping");
     setRtkConnecting(true);
     try {
       showToast("RTK Injection", "Stopping RTK stream...", "warning");
@@ -2198,12 +2318,14 @@ export default function App() {
         const txt = await res.text();
         throw new Error(txt || "Failed to stop RTK correction stream.");
       }
-      setRtkRunning(false);
+      setRtkMode("idle");
+      setRtkHealthy(false);
       logAction("RTK_STOP_SUCCESS");
       Alert.alert("RTK Stopped", "RTK correction stream stopped successfully.");
       showToast("RTK Stopped", "RTK stream stopped.", "success");
       setRtkModalOpen(false);
     } catch (error) {
+      setRtkMode(previousMode);
       Alert.alert("Stop Failed", error instanceof Error ? error.message : "Failed to stop RTK action.");
       showToast("Stop Failed", error instanceof Error ? error.message : "Failed to stop RTK action.", "error");
     } finally {
@@ -2214,11 +2336,12 @@ export default function App() {
   useEffect(() => {
     if (!apiBaseUrl) return;
     const fetchRtkStatus = async () => {
+      if (rtkConnecting) return;
       try {
         const res = await fetch(`${apiBaseUrl}/api/rtk/status`);
         if (res.ok) {
           const data = await res.json();
-          setRtkRunning(data.running);
+          setRtkMode(rtkModeFromStatus(data));
           setRtkHealthy(data.healthy);
         }
       } catch (err) {
@@ -2228,7 +2351,7 @@ export default function App() {
     void fetchRtkStatus();
     const interval = setInterval(fetchRtkStatus, 3000);
     return () => clearInterval(interval);
-  }, [apiBaseUrl]);
+  }, [apiBaseUrl, rtkConnecting]);
 
   async function stopMissionOnBackend() {
     if (!apiBaseUrl) {
@@ -2899,6 +3022,8 @@ export default function App() {
                   setAlignedRefPoints={setAlignedRefPoints}
                   mapViewEnabled={mapViewEnabled}
                   setMapViewEnabled={setMapViewEnabled}
+                  isFloatingEStopEnabled={isFloatingEStopEnabled}
+                  setIsFloatingEStopEnabled={setIsFloatingEStopEnabled}
                 />
               )}
 
@@ -2959,6 +3084,7 @@ export default function App() {
           )}
         </SafeAreaInsetsContext.Consumer>
       </SafeAreaProvider>
+      <FloatingEStop visible={isFloatingEStopEnabled} onEStop={estopVehicle} />
     </GestureHandlerRootView>
   );
 }
@@ -6156,6 +6282,8 @@ function SectionScreen(props: {
   onConfirmVisualAlignment?: () => void;
   extractedCorners?: { dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>>;
+  isFloatingEStopEnabled: boolean;
+  setIsFloatingEStopEnabled: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
   const { title, page, onBack, mapViewEnabled, setMapViewEnabled } = props;
 
@@ -10152,6 +10280,8 @@ function SwoziPage({
   setToggleA,
   setToggleB,
   apiBaseUrl,
+  isFloatingEStopEnabled,
+  setIsFloatingEStopEnabled,
 }: {
   delayA: number;
   delayB: number;
@@ -10162,6 +10292,8 @@ function SwoziPage({
   setToggleA: (v: boolean) => void;
   setToggleB: (v: boolean) => void;
   apiBaseUrl?: string;
+  isFloatingEStopEnabled: boolean;
+  setIsFloatingEStopEnabled: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
   const [sprayDuration, setSprayDuration] = useState("2");
   const [sprayStatus, setSprayStatus] = useState(false);
@@ -10468,6 +10600,34 @@ function SwoziPage({
       <Text style={secH}>Pump</Text>
       <Text style={itemH}>Manual Control</Text>
       <Text style={itemT}>Disconnected</Text>
+
+      <View
+        style={{
+          marginTop: 14,
+          marginBottom: 12,
+          borderWidth: 1,
+          borderColor: "#cbd5e1",
+          borderRadius: 8,
+          backgroundColor: "#f8fafc",
+          paddingHorizontal: 14,
+          paddingVertical: 12,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <View style={{ flex: 1, paddingRight: 16 }}>
+            <Text style={{ color: "#334155", fontSize: 16, fontWeight: "700" }}>Enable Floating E-Stop</Text>
+            <Text style={{ color: "#64748b", fontSize: 12, marginTop: 4, lineHeight: 16 }}>
+              Persistent double-tap emergency shortcut for rover screens.
+            </Text>
+          </View>
+          <Switch
+            value={isFloatingEStopEnabled}
+            onValueChange={setIsFloatingEStopEnabled}
+            trackColor={{ false: "#cbd5e1", true: "#dc2626" }}
+            thumbColor="#ffffff"
+          />
+        </View>
+      </View>
 
       {/* Spray Test Section */}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginVertical: 12 }}>

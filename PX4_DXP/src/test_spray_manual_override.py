@@ -1,0 +1,530 @@
+#!/usr/bin/env python3
+"""Unit tests for the manual override logic in spray_controller_node.
+
+Runs without ROS2: rclpy / mavros_msgs / std_msgs are stubbed, and the node
+is instantiated without __init__ — only the pure decision logic is exercised
+(manual precedence, node-side expiry, fail-safe priority, staleness scoping).
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import types
+
+
+def _install_ros_stubs() -> None:
+    if "rclpy.callback_groups" in sys.modules:
+        return
+
+    rclpy = sys.modules.get("rclpy", types.ModuleType("rclpy"))
+    rclpy.init = lambda *a, **k: None
+    rclpy.spin = lambda *a, **k: None
+    rclpy.try_shutdown = lambda *a, **k: None
+    sys.modules["rclpy"] = rclpy
+
+    cbg = types.ModuleType("rclpy.callback_groups")
+    cbg.ReentrantCallbackGroup = object
+    cbg.MutuallyExclusiveCallbackGroup = object
+    sys.modules["rclpy.callback_groups"] = cbg
+
+    rclpy_exec = types.ModuleType("rclpy.executors")
+    rclpy_exec.MultiThreadedExecutor = object
+    sys.modules["rclpy.executors"] = rclpy_exec
+
+    rclpy_node = types.ModuleType("rclpy.node")
+    rclpy_node.Node = object
+    sys.modules["rclpy.node"] = rclpy_node
+
+    rclpy_qos = types.ModuleType("rclpy.qos")
+
+    class _Enum:
+        BEST_EFFORT = RELIABLE = VOLATILE = TRANSIENT_LOCAL = KEEP_LAST = 1
+
+    rclpy_qos.QoSProfile = lambda *a, **k: None
+    rclpy_qos.ReliabilityPolicy = _Enum
+    rclpy_qos.DurabilityPolicy = _Enum
+    rclpy_qos.HistoryPolicy = _Enum
+    sys.modules["rclpy.qos"] = rclpy_qos
+
+    mavros_msgs = types.ModuleType("mavros_msgs")
+    mavros_msg = types.ModuleType("mavros_msgs.msg")
+
+    class _State:
+        armed = False
+        mode = ""
+
+    mavros_msg.State = _State
+    mavros_srv = types.ModuleType("mavros_msgs.srv")
+
+    class _CommandLongRequest:
+        def __init__(self):
+            self.broadcast = False
+            self.command = 0
+            self.confirmation = 0
+            self.param1 = self.param2 = self.param3 = 0.0
+            self.param4 = self.param5 = self.param6 = self.param7 = 0.0
+
+    class _CommandLong:
+        Request = _CommandLongRequest
+
+    mavros_srv.CommandLong = _CommandLong
+    sys.modules["mavros_msgs"] = mavros_msgs
+    sys.modules["mavros_msgs.msg"] = mavros_msg
+    sys.modules["mavros_msgs.srv"] = mavros_srv
+
+    std_msgs = types.ModuleType("std_msgs")
+    std_msg = types.ModuleType("std_msgs.msg")
+
+    class _Bool:
+        def __init__(self):
+            self.data = False
+
+    class _Float32MultiArray:
+        def __init__(self):
+            self.data = []
+
+    class _String:
+        def __init__(self):
+            self.data = ""
+
+    std_msg.Bool = _Bool
+    std_msg.Float32MultiArray = _Float32MultiArray
+    std_msg.String = _String
+    sys.modules["std_msgs"] = std_msgs
+    sys.modules["std_msgs.msg"] = std_msg
+
+    geometry_msgs = types.ModuleType("geometry_msgs")
+    geometry_msg = types.ModuleType("geometry_msgs.msg")
+
+    class _PoseStamped:
+        pass
+
+    class _TwistStamped:
+        pass
+
+    geometry_msg.PoseStamped = _PoseStamped
+    geometry_msg.TwistStamped = _TwistStamped
+    sys.modules["geometry_msgs"] = geometry_msgs
+    sys.modules["geometry_msgs.msg"] = geometry_msg
+
+    nav_msgs = types.ModuleType("nav_msgs")
+    nav_msg = types.ModuleType("nav_msgs.msg")
+
+    class _Path:
+        pass
+
+    nav_msg.Path = _Path
+    sys.modules["nav_msgs"] = nav_msgs
+    sys.modules["nav_msgs.msg"] = nav_msg
+
+    std_srvs = types.ModuleType("std_srvs")
+    std_srv = types.ModuleType("std_srvs.srv")
+
+    class _Trigger:
+        class Request:
+            pass
+
+        class Response:
+            success = False
+            message = ""
+
+    std_srv.Trigger = _Trigger
+    sys.modules["std_srvs"] = std_srvs
+    sys.modules["std_srvs.srv"] = std_srv
+
+
+_install_ros_stubs()
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from spray_controller_node import SprayControllerNode  # noqa: E402
+from std_msgs.msg import Bool  # noqa: E402  (stubbed)
+
+
+# ── Test harness ──────────────────────────────────────────────────────────────
+
+class _Param:
+    def __init__(self, value):
+        self.value = value
+
+
+class _Clock:
+    def __init__(self):
+        self.ns = 1_000_000_000
+
+    def now(self):
+        clock = self
+
+        class _T:
+            nanoseconds = clock.ns
+
+            def __sub__(self, other):
+                class _D:
+                    nanoseconds = clock.ns - other.nanoseconds
+                return _D()
+
+        return _T()
+
+
+class _Logger:
+    def __init__(self):
+        self.records = []
+
+    def info(self, *a, **k):
+        self.records.append(("info", a, k))
+
+    def warn(self, *a, **k):
+        self.records.append(("warn", a, k))
+
+    def debug(self, *a, **k):
+        self.records.append(("debug", a, k))
+
+    def error(self, *a, **k):
+        self.records.append(("error", a, k))
+
+
+class _Pub:
+    def __init__(self):
+        self.msgs = []
+
+    def publish(self, msg):
+        self.msgs.append(getattr(msg, "data", msg))
+
+
+class _Future:
+    def __init__(self, success=True, result=0, exc=None, auto_complete=True):
+        self._success = success
+        self._result = result
+        self._exc = exc
+        self._auto_complete = auto_complete
+        self._cb = None
+
+    def add_done_callback(self, cb):
+        self._cb = cb
+        if self._auto_complete:
+            cb(self)
+
+    def fire(self, success=None, result=None, exc=None):
+        # Deliver a deferred result on demand so tests can model late /
+        # out-of-order MAVROS replies.
+        if success is not None:
+            self._success = success
+        if result is not None:
+            self._result = result
+        if exc is not None:
+            self._exc = exc
+        if self._cb is not None:
+            self._cb(self)
+
+    def result(self):
+        if self._exc is not None:
+            raise self._exc
+        return types.SimpleNamespace(success=self._success, result=self._result)
+
+
+class _Cli:
+    def __init__(self, responses=None, deferred=False):
+        self.requests = []
+        self.responses = list(responses or [])
+        self.deferred = deferred
+        self.futures = []
+
+    def call_async(self, req):
+        self.requests.append(req)
+        if self.deferred:
+            fut = _Future(auto_complete=False)
+            self.futures.append(fut)
+            return fut
+        if self.responses:
+            response = self.responses.pop(0)
+            if isinstance(response, Exception):
+                fut = _Future(exc=response)
+            elif isinstance(response, tuple):
+                fut = _Future(success=response[0], result=response[1])
+            else:
+                fut = _Future(success=bool(response))
+        else:
+            fut = _Future()
+        self.futures.append(fut)
+        return fut
+
+
+def make_node(armed=True, mode="OFFBOARD", require_offboard=True):
+    node = SprayControllerNode.__new__(SprayControllerNode)
+    node._params = {
+        "actuator_set_index": _Param(1),
+        "on_value": _Param(1.0),
+        "off_value": _Param(-1.0),
+        "debounce_samples": _Param(1),
+        "reassert_hz": _Param(0.0),
+        "require_offboard": _Param(require_offboard),
+        "active_timeout_s": _Param(0.5),
+        "manual_override_timeout_s": _Param(10.0),
+        "use_distance_aware_spray": _Param(False),
+        "nozzle_forward_offset_m": _Param(0.0),
+        "nozzle_lateral_offset_m": _Param(0.0),
+        "solenoid_open_delay_s": _Param(0.10),
+        "solenoid_close_delay_s": _Param(0.05),
+        "anticipatory_margin_m": _Param(0.02),
+        "on_overspray_margin_m": _Param(0.02),
+        "off_overspray_margin_m": _Param(0.0),
+        "min_spray_speed_mps": _Param(0.05),
+        "max_spray_speed_mps": _Param(1.0),
+        "unsafe_speed_behavior": _Param("BLOCK_SPRAY"),
+        "max_xtrack_error_m": _Param(0.10),
+        "pose_timeout_s": _Param(0.5),
+        "velocity_timeout_s": _Param(0.5),
+        "allow_legacy_spray_active_fallback": _Param(True),
+        "actuator_backend": _Param("mavlink_actuator"),
+        "servo_instance": _Param(1),
+        "off_pwm_us": _Param(0),
+        "on_pwm_us": _Param(1800),
+        "spray_enabled": _Param(True),
+        "spray_mode": _Param("continuous"),
+        "dash_on_distance_m": _Param(0.30),
+        "dash_off_distance_m": _Param(0.30),
+        "dash_phase_reset": _Param("per_mark_region"),
+        "point_default_dwell_s": _Param(2.0),
+        "point_arrival_tolerance_m": _Param(0.05),
+        "point_settle_time_s": _Param(0.10),
+        "point_leg_timeout_s": _Param(120.0),
+        "point_settle_speed_mps": _Param(0.05),
+        "point_settle_yaw_rate_rad_s": _Param(0.05),
+        "configuration_revision": _Param(0),
+        "mission_config_mission_id": _Param(""),
+        "mission_config_path_fingerprint": _Param(""),
+        "calibration_profile_id": _Param("factory_default"),
+        "calibration_profile_version": _Param(1),
+        "target_paint_density": _Param(1.0),
+        "speed_pwm_table": _Param('[{"speed_mps":0.05,"pwm":1200.0},{"speed_mps":0.35,"pwm":1800.0}]'),
+        "actuator_min_pwm": _Param(0.0),
+        "actuator_max_pwm": _Param(2200.0),
+        "actuator_off_pwm": _Param(0.0),
+        "actuator_min_value": _Param(-1.0),
+        "actuator_max_value": _Param(1.0),
+        "actuator_off_value": _Param(-1.0),
+        "timing_only_compatibility": _Param(False),
+        "pump_inertia_enabled": _Param(False),
+        "pwm_ramp_prediction_enabled": _Param(False),
+        "pressure_stabilization_enabled": _Param(False),
+        "temperature_viscosity_compensation_enabled": _Param(False),
+        "pending_dwell_command_json": _Param(""),
+        "dwell_cancel_revision": _Param(0),
+        "gps_runtime_gate_max_age_s": _Param(3.0),
+    }
+    node.get_parameter = lambda name: node._params[name]
+    node._clock = _Clock()
+    node.get_clock = lambda: node._clock
+    node._logger = _Logger()
+    node.get_logger = lambda: node._logger
+    node._command_cli = _Cli()
+    node._state_pub = _Pub()
+    node._desired_pub = _Pub()
+    node._commanded_pub = _Pub()
+    node._debug_pub = _Pub()
+    node._manual_state_pub = _Pub()
+    node._runtime_status_pub = _Pub()
+    node._desired_raw = False
+    node._candidate = None
+    node._candidate_count = 0
+    node._desired_debounced = False
+    node._commanded = False
+    node._last_active_time = None
+    node._legacy_active_raw = False
+    node._manual_active = False
+    node._manual_deadline_ns = None
+    node._armed = armed
+    node._mode = mode
+    node._service_ready = True
+    node._off_confirmed = True
+    node._last_off_send_time_ns = None
+    node._cmd_seq = 0
+    from spray_controller_node import ActuatorState
+    node._actuator_state = ActuatorState()
+    node._path_model = None
+    node._conditioned_path_identity = {}
+    node._conditioned_path_source = "none"
+    node._last_conditioned_identity_time = None
+    node._pose_ned = None
+    node._pose_recv_time = None
+    node._vel_ned = (0.0, 0.0)
+    node._vel_recv_time = None
+    node._last_auto_source = ""
+    node._last_distance_event = ""
+    node._last_safety_block_reason = ""
+    node._last_decision = None
+    node._target_flow = 0.0
+    node._current_pwm = 0.0
+    node._current_value = -1.0
+    node._pose_stale_logged = False
+    node._velocity_stale_logged = False
+    node._gps_gate_active = False
+    node._gps_gate_ok = True
+    node._gps_gate_reason = ""
+    node._gps_gate_seq = 0
+    node._gps_gate_recv_time = None
+    from spray_config import SprayConfiguration
+
+    node._config_lock = __import__("threading").Lock()
+    node._state_lock = __import__("threading").RLock()
+    node._config_ready = True
+    node._config_error = ""
+    node._active_config = SprayConfiguration()
+    node._model_revision = 0
+    node._dwell_state = None
+    node._last_dwell_revision = 0
+    node._invalidated_dwell_revision = 0
+    node._last_transition = "test"
+    return node
+
+
+def _bool_msg(data):
+    msg = Bool()
+    msg.data = data
+    return msg
+
+
+def _last_param1(node):
+    return node._command_cli.requests[-1].param1
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+def test_manual_on_commands_actuator_and_sets_deadline():
+    node = make_node()
+    node._manual_cb(_bool_msg(True))
+    assert node._manual_active is True
+    assert node._manual_deadline_ns == node._clock.ns + 10_000_000_000
+    assert node._commanded is True
+    assert _last_param1(node) == 1.0
+    assert node._manual_state_pub.msgs[-1] is True
+
+
+def test_manual_on_uses_on_value_despite_latched_stale_decision():
+    # Regression: a latched continuous-mode path leaves _last_decision non-None
+    # and _current_value at off_value (-1.0) whenever the rover is not in an
+    # active MARK zone. Manual /spray/on must still command the configured
+    # on_value (1.0); previously it reused _current_value and silently sent OFF
+    # (actuator value -1.0) while reporting commanded_on=True.
+    node = make_node()
+    node._last_decision = object()   # a decision exists (continuous mode running)
+    node._current_value = -1.0       # ...but its actuator value is OFF
+    node._manual_cb(_bool_msg(True))
+    assert node._manual_active is True
+    assert node._commanded is True
+    assert _last_param1(node) == 1.0, "manual ON must send on_value, not the stale decision value"
+
+
+def test_manual_on_rejected_when_disarmed():
+    node = make_node(armed=False)
+    node._manual_cb(_bool_msg(True))
+    assert node._manual_active is False
+    assert node._commanded is False
+    assert all(p.param1 != 1.0 for p in node._command_cli.requests)
+
+
+def test_spray_disabled_blocks_manual_on():
+    """Master enable gate: spray_enabled=False blocks manual ON from any source."""
+    node = make_node(armed=True, mode="OFFBOARD")
+    node._params["spray_enabled"] = _Param(False)
+    node._manual_cb(_bool_msg(True))
+    assert node._manual_active is False
+    assert node._commanded is False
+    assert all(p.param1 != 1.0 for p in node._command_cli.requests)
+
+
+def test_spray_disabled_blocks_auto_spray():
+    """spray_enabled=False causes _safety_allows_on() to block autonomous spray."""
+    node = make_node(armed=True, mode="OFFBOARD")
+    node._params["spray_enabled"] = _Param(False)
+    assert node._safety_allows_on() is False
+
+
+def test_spray_enabled_allows_manual_on():
+    """spray_enabled=True + armed → manual ON goes through."""
+    node = make_node(armed=True, mode="OFFBOARD")
+    node._params["spray_enabled"] = _Param(True)
+    node._manual_cb(_bool_msg(True))
+    assert node._manual_active is True
+    assert node._commanded is True
+
+
+def test_manual_on_allowed_when_not_offboard():
+    """Manual override does not require OFFBOARD — bench test works in any armed mode."""
+    node = make_node(mode="MANUAL", require_offboard=True)
+    node._manual_cb(_bool_msg(True))
+    assert node._manual_active is True
+    assert node._commanded is True
+    assert _last_param1(node) == 1.0
+
+
+def test_manual_off_cancels_and_reverts_to_auto_off():
+    node = make_node()
+    node._manual_cb(_bool_msg(True))
+    node._manual_cb(_bool_msg(False))
+    assert node._manual_active is False
+    assert node._commanded is False
+    assert _last_param1(node) == -1.0
+
+
+def test_manual_expires_via_watchdog():
+    node = make_node()
+    node._manual_cb(_bool_msg(True))
+    node._clock.ns += 10_500_000_000  # past the 10 s deadline
+    node._watchdog_tick()
+    assert node._manual_active is False
+    assert node._commanded is False
+    assert _last_param1(node) == -1.0
+
+
+def test_manual_survives_spray_active_staleness():
+    node = make_node()
+    node._active_cb(_bool_msg(False))  # auto stream alive, desires OFF
+    node._manual_cb(_bool_msg(True))
+    assert node._commanded is True
+    node._clock.ns += 1_000_000_000  # /spray/active now stale (>0.5 s)
+    node._watchdog_tick()
+    # Staleness clears the auto desire but not the (self-timed) manual hold.
+    assert node._manual_active is True
+    assert node._commanded is True
+
+
+def test_disarm_failsafe_outranks_manual():
+    node = make_node()
+    node._manual_cb(_bool_msg(True))
+    assert node._commanded is True
+    state = types.SimpleNamespace(armed=False, mode="OFFBOARD")
+    node._state_cb(state)
+    assert node._manual_active is False
+    assert node._commanded is False
+    assert _last_param1(node) == -1.0
+
+
+def test_auto_stream_off_does_not_override_manual_on():
+    node = make_node()
+    node._manual_cb(_bool_msg(True))
+    for _ in range(5):
+        node._active_cb(_bool_msg(False))  # RPP keeps saying TRANSIT
+    assert node._commanded is True  # manual still wins
+    node._manual_cb(_bool_msg(False))
+    assert node._commanded is False
+
+
+def test_shutdown_clears_manual_and_sends_off():
+    node = make_node()
+    node._manual_cb(_bool_msg(True))
+    node.shutdown_off()
+    assert node._manual_active is False
+    assert _last_param1(node) == -1.0
+
+
+def main():
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for t in tests:
+        t()
+        print(f"ok {t.__name__}")
+    print("PASS")
+
+
+if __name__ == "__main__":
+    main()
