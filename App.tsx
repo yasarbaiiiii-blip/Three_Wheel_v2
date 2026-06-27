@@ -1,6 +1,13 @@
 import "react-native-gesture-handler";
 import "./global.css";
 
+import { initMapbox } from "./src/config/mapbox";
+import { SMOKE_TEST_MAPBOX, SMOKE_TEST_CENTER } from "./src/config/featureFlags";
+import MapboxHelloMap from "./src/components/MapboxHelloMap";
+
+// Apply the Mapbox public access token once, before any map component mounts.
+initMapbox();
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -671,6 +678,14 @@ const MENU_ITEMS: Array<{ key: Page; label: string; icon: React.ReactNode }> = [
 ];
 
 export default function App() {
+  // TEMPORARY (Phase 0.1) on-device basemap smoke test. Flip SMOKE_TEST_MAPBOX
+  // in src/config/featureFlags.ts to true, rebuild, and confirm satellite tiles
+  // render. This early return is gated by a build-time constant so hook order
+  // stays stable. Remove this block once the smoke test is confirmed.
+  if (SMOKE_TEST_MAPBOX) {
+    return <MapboxHelloMap center={SMOKE_TEST_CENTER} zoomLevel={16} />;
+  }
+
   const [page, setPage] = useState<Page>("connection");
   const [menuOpen, setMenuOpen] = useState(true);
   const [selectedWs, setSelectedWs] = useState<string>("");
