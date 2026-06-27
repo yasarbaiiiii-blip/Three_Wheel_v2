@@ -23,6 +23,7 @@ import {
 import Slider from "@react-native-community/slider";
 import * as FileSystem from "expo-file-system/legacy";
 import * as DocumentPicker from "expo-document-picker";
+import * as Network from "expo-network";
 import { SafeAreaInsetsContext, SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView, TouchableOpacity as RNGHTouchableOpacity, GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { runOnJS, useSharedValue } from "react-native-reanimated";
@@ -833,6 +834,9 @@ export default function App() {
   const selectedWsRef = useRef(selectedWs);
   const manualHostRef = useRef(manualHost);
   const backendPinnedRef = useRef(backendPinned);
+  // Prevents overlapping discovery sweeps from piling up on a slow/lossy link
+  // (each full /24 sweep can outlast the 5s refresh interval).
+  const scanInFlightRef = useRef(false);
   const previousSelectedPathRef = useRef<string | null>(null);
 
   const activeMenu = useMemo(() => MENU_ITEMS.find((x) => x.key === page), [page]);
@@ -1182,6 +1186,21 @@ export default function App() {
   };
 
   const scanForWebsockets = async () => {
+    // Skip overlapping sweeps: on a lossy link a full /24 sweep can outlast the
+    // 5s refresh, and concurrent sweeps flood the radio and break the real WS
+    // handshake.
+    if (scanInFlightRef.current) {
+      return;
+    }
+    scanInFlightRef.current = true;
+    try {
+      await runWebsocketScan();
+    } finally {
+      scanInFlightRef.current = false;
+    }
+  };
+
+  const runWebsocketScan = async () => {
     const currentSelectedWs = selectedWsRef.current;
     const currentManualHost = manualHostRef.current;
     const isPinned = backendPinnedRef.current;
@@ -1189,29 +1208,55 @@ export default function App() {
     setWsStatus("scanning");
     setWsError("");
 
-    // Always probe the manual host directly with a fast dedicated request
-    // This ensures the "Connect" button works even if subnet sweep is slow
+    // Fast path: if the already-known target (selected or manual host) answers,
+    // present it and SKIP the expensive subnet sweep. This keeps the radio quiet
+    // so the Socket.IO handshake can succeed on flaky hotspots, and avoids
+    // flooding the network once a backend is known.
+    const knownTarget = currentSelectedWs || currentManualHost;
     let manualHostReachable = false;
-    if (currentManualHost) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 2000);
-        const pingRes = await fetch(`${currentManualHost}/api/ping`, { signal: controller.signal });
-        clearTimeout(timeout);
-        if (pingRes.ok) {
-          manualHostReachable = true;
-        }
-      } catch {
-        // manual host not reachable, fall through to subnet sweep
-      }
+    if (knownTarget) {
+      manualHostReachable = await probeHostReachable(knownTarget, 2500, 2);
     }
+    if (manualHostReachable && knownTarget) {
+      const entry = parseHost(knownTarget);
+      if (entry) {
+        setDiscoveredRovers([{
+          id: `${entry.host}-${entry.port}`,
+          name: `Rover ${entry.host.split(".").pop() ?? entry.host}`,
+          host: entry.host,
+          port: entry.port,
+          version: "manual",
+          responseTime: 0,
+        }]);
+      }
+      setSelectedWs(knownTarget);
+      setManualHost(knownTarget);
+      setWsStatus("ready");
+      setWsError("");
+      logAction("DISCOVERY_SCAN_TARGET_REACHABLE", { host: knownTarget });
+      return;
+    }
+
+    // Detect the device's own LAN IP so we sweep the network the tablet is
+    // actually on (e.g. a phone hotspot's 10.169.x.x), not just the hardcoded
+    // 192.168.x guesses. React Native has no window.location to derive this.
+    let deviceIp: string | null = null;
+    try {
+      const ip = await Network.getIpAddressAsync();
+      if (ip && ip !== "0.0.0.0") {
+        deviceIp = ip;
+      }
+    } catch (err) {
+      logAction("DISCOVERY_DEVICE_IP_FAILED", { error: err instanceof Error ? err.message : String(err) });
+    }
+    logAction("DISCOVERY_DEVICE_IP", { deviceIp });
 
     const candidateHosts = Array.from(
       new Set([
         ...priorityScanHosts(),
         ...LOCAL_WS_CANDIDATES,
         currentManualHost,
-        ...buildSubnetSweepCandidates(currentManualHost),
+        ...buildSubnetSweepCandidates(currentManualHost, deviceIp),
       ])
     );
 
@@ -1271,6 +1316,13 @@ export default function App() {
           setSelectedWs(bestHost);
           setManualHost(bestHost);
         }
+      } else if (!isPinned && !manualHostReachable) {
+        // The configured host is unreachable (e.g. stale Jetson IP) and the user
+        // hasn't pinned a manual choice — adopt the discovered backend so they can
+        // just hit Connect instead of retyping the IP.
+        setSelectedWs(bestHost);
+        setManualHost(bestHost);
+        logAction("DISCOVERY_SCAN_ADOPT_DISCOVERED", { host: bestHost });
       }
       setWsStatus("ready");
       setWsError("");
@@ -2464,6 +2516,24 @@ export default function App() {
     return PRIORITY_BACKEND_IPS.map((ip) => `http://${ip}:${DISCOVERY_PORT}`);
   }
 
+  // Probe a single host's /api/ping with retries. Lossy links (e.g. phone
+  // hotspots with packet loss) can drop a single request even when the host is
+  // reachable, so we retry before giving up.
+  async function probeHostReachable(host: string, timeoutMs = 2500, retries = 2) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), timeoutMs);
+        const res = await fetch(`${host}/api/ping`, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (res.ok) return true;
+      } catch {
+        // retry
+      }
+    }
+    return false;
+  }
+
   function parseHost(candidate: string) {
     try {
       const url = new URL(candidate);
@@ -2493,8 +2563,18 @@ export default function App() {
     return null;
   }
 
-  function buildSubnetSweepCandidates(seedHost: string) {
+  function buildSubnetSweepCandidates(seedHost: string, deviceIp?: string | null) {
     const prefixes = new Set<string>();
+
+    // 0. Device's own subnet first — this is the network the tablet is actually
+    //    on (e.g. a phone hotspot's 10.169.x.x), so the backend almost certainly
+    //    lives here. Added before everything else so it gets scanned first.
+    if (deviceIp && isPrivateLanIp(deviceIp)) {
+      const octets = deviceIp.split(".");
+      if (octets.length === 4) {
+        prefixes.add(octets.slice(0, 3).join("."));
+      }
+    }
 
     // 1. Check seed host if it's a private IP
     const parsed = parseHost(seedHost);

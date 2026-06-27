@@ -40,6 +40,7 @@ const ACQUIRE_TIMEOUT_MS = 3800;
 const RELEASE_CONFIRM_TIMEOUT_MS = 1000;
 const DEAD_ZONE = 0.03;
 const RESPONSE_CURVE = 1;
+const DISPLAY_INTENT_UPDATE_MS = 100;
 
 const ERROR_MESSAGES: Record<JoystickErrorCode, string> = {
   manual_control_disabled: "Manual control is disabled by deployment configuration",
@@ -73,6 +74,10 @@ function clientMonotonicMs(): number {
   const perf = globalThis.performance;
   if (perf && typeof perf.now === "function") return Math.floor(perf.now());
   return Date.now();
+}
+
+function joystickIntentEquals(a: JoystickIntent, b: JoystickIntent): boolean {
+  return a.throttle === b.throttle && a.steering === b.steering;
 }
 
 function isJoystickAcquiredPayload(data: unknown): data is JoystickAcquiredResponse {
@@ -139,12 +144,16 @@ export function useVirtualJoystick({
   const socketRef = useRef<Socket | null>(socket);
   const socketConnectedRef = useRef(socketConnected);
   const commandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const displayIntentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const acquireTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const releaseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const commandLoopRunningRef = useRef(false);
   const urgentNeutralPendingRef = useRef(false);
   const serializerRef = useRef(new JoystickCommandSerializer());
   const runCommandLoopRef = useRef<() => void>(() => {});
+  const displayedIntentRef = useRef<JoystickIntent>({ throttle: 0, steering: 0 });
+  const pendingDisplayIntentRef = useRef<JoystickIntent | null>(null);
+  const lastDisplayIntentUpdateMsRef = useRef(-DISPLAY_INTENT_UPDATE_MS);
 
   const setFrontendState = useCallback((next: FrontendJoystickState) => {
     stateRef.current = next;
@@ -176,6 +185,50 @@ export function useVirtualJoystick({
       releaseTimeoutRef.current = null;
     }
   }, []);
+
+  const clearDisplayIntentTimer = useCallback(() => {
+    if (displayIntentTimerRef.current !== null) {
+      clearTimeout(displayIntentTimerRef.current);
+      displayIntentTimerRef.current = null;
+    }
+  }, []);
+
+  const commitDisplayIntent = useCallback((intent: JoystickIntent) => {
+    lastDisplayIntentUpdateMsRef.current = clientMonotonicMs();
+    pendingDisplayIntentRef.current = null;
+    if (joystickIntentEquals(displayedIntentRef.current, intent)) return;
+
+    displayedIntentRef.current = intent;
+    setDisplayIntent(intent);
+  }, []);
+
+  const publishDisplayIntent = useCallback(
+    (intent: JoystickIntent, immediate = false) => {
+      pendingDisplayIntentRef.current = intent;
+
+      if (immediate) {
+        clearDisplayIntentTimer();
+        commitDisplayIntent(intent);
+        return;
+      }
+
+      const elapsed = clientMonotonicMs() - lastDisplayIntentUpdateMsRef.current;
+      if (elapsed >= DISPLAY_INTENT_UPDATE_MS) {
+        clearDisplayIntentTimer();
+        commitDisplayIntent(intent);
+        return;
+      }
+
+      if (displayIntentTimerRef.current !== null) return;
+
+      displayIntentTimerRef.current = setTimeout(() => {
+        displayIntentTimerRef.current = null;
+        const pending = pendingDisplayIntentRef.current;
+        if (pending) commitDisplayIntent(pending);
+      }, DISPLAY_INTENT_UPDATE_MS - elapsed);
+    },
+    [clearDisplayIntentTimer, commitDisplayIntent]
+  );
 
   const stopCommandSender = useCallback(() => {
     commandLoopRunningRef.current = false;
@@ -215,8 +268,8 @@ export function useVirtualJoystick({
     latestSteeringRef.current = 0;
     deadmanRef.current = false;
     setDeadmanPressed(false);
-    setDisplayIntent({ throttle: 0, steering: 0 });
-  }, []);
+    publishDisplayIntent({ throttle: 0, steering: 0 }, true);
+  }, [publishDisplayIntent]);
 
   const emitSerializedCommand = useCallback(
     (intent: { deadman: boolean; throttle: number; steering: number }) => {
@@ -617,12 +670,13 @@ export function useVirtualJoystick({
       const processed = processRawIntent(rawThrottle, rawSteering);
       latestThrottleRef.current = processed.throttle;
       latestSteeringRef.current = processed.steering;
-      setDisplayIntent(processed);
+      publishDisplayIntent(processed);
 
       const hasLease = Boolean(leaseIdRef.current);
       const shouldDrive = joystickIntentDeadman(hasLease, processed);
+      const wasDriving = deadmanRef.current;
       deadmanRef.current = shouldDrive;
-      setDeadmanPressed(shouldDrive);
+      if (wasDriving !== shouldDrive) setDeadmanPressed(shouldDrive);
 
       if (!hasLease) return;
 
@@ -643,17 +697,18 @@ export function useVirtualJoystick({
         if (stateRef.current === "ACTIVE") setFrontendState("HELD");
       }
     },
-    [processRawIntent, requestUrgentNeutralCommand, scheduleCommandLoop, setFrontendState]
+    [processRawIntent, publishDisplayIntent, requestUrgentNeutralCommand, scheduleCommandLoop, setFrontendState]
   );
 
   const setDeadman = useCallback(
     (pressed: boolean) => {
+      const wasPressed = deadmanRef.current;
       deadmanRef.current = pressed;
-      setDeadmanPressed(pressed);
+      if (wasPressed !== pressed) setDeadmanPressed(pressed);
       if (!pressed) {
         latestThrottleRef.current = 0;
         latestSteeringRef.current = 0;
-        setDisplayIntent({ throttle: 0, steering: 0 });
+        publishDisplayIntent({ throttle: 0, steering: 0 }, true);
         requestUrgentNeutralCommand();
         if (leaseIdRef.current) setFrontendState("HELD");
       } else if (leaseIdRef.current && !commandLoopRunningRef.current) {
@@ -662,7 +717,7 @@ export function useVirtualJoystick({
         scheduleCommandLoop(0);
       }
     },
-    [requestUrgentNeutralCommand, scheduleCommandLoop, setFrontendState]
+    [publishDisplayIntent, requestUrgentNeutralCommand, scheduleCommandLoop, setFrontendState]
   );
 
   const handleBackground = useCallback(() => {
