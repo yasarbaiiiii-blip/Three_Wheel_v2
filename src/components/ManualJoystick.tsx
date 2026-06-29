@@ -45,7 +45,15 @@ export function ManualJoystick({
   const emitValues = useCallback(
     (x: number, y: number) => {
       const forward = clamp(-y / radius, -1, 1);
-      const yaw = clamp(x / radius, -1, 1);
+      let yaw = clamp(x / radius, -1, 1);
+
+      // Suppress yaw when drag is within 10° of vertical to prevent
+      // accidental steering from small horizontal finger drift.
+      const STEER_LOCK_RAD = (10 * Math.PI) / 180;
+      if (Math.atan2(Math.abs(x), Math.abs(y)) < STEER_LOCK_RAD) {
+        yaw = 0;
+      }
+
       onChange({ forward, yaw });
     },
     [onChange, radius]
