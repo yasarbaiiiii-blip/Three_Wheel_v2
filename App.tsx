@@ -757,9 +757,7 @@ export default function App() {
     const { minX, minY, maxX, maxY } = computeLineBoundingBox(lines);
     const dxfCorners = [
       { x: minX, y: minY },
-      { x: maxX, y: minY },
       { x: maxX, y: maxY },
-      { x: minX, y: maxY },
     ];
 
     const baseLat = telemetrySnapshot?.lat ?? 28.6139;
@@ -9190,6 +9188,14 @@ function PlanPreview({
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
   mapMode?: "fields" | "templates";
 }) {
+  const [visualSelected, setVisualSelected] = useState(true);
+
+  useEffect(() => {
+    if (visualAlignmentItem) {
+      setVisualSelected(true);
+    }
+  }, [visualAlignmentItem]);
+
   const filtered = useMemo(
     () =>
       sanitizePlanLines(lines).filter((line) => {
@@ -9708,8 +9714,13 @@ function PlanPreview({
           <MapView
             mode={visualAlignmentItem ? "templates" : "fields"}
             placedItems={visualAlignmentItem ? [visualAlignmentItem] : []}
-            selectedItemIds={visualAlignmentItem ? ["visual-alignment-group"] : []}
+            selectedItemIds={visualAlignmentItem && visualSelected ? ["visual-alignment-group"] : []}
             multiTouchMode={visualAlignmentItem ? "rotate" : "both"}
+            onSelectionChange={(ids) => {
+              if (isVisualAlignmentMode) {
+                setVisualSelected(ids.includes("visual-alignment-group"));
+              }
+            }}
             onUpdatePlacedItem={(id, updates) => {
               if (!isVisualAlignmentMode || id !== "visual-alignment-group") return;
               setVisualAlignmentItem?.((prev: PlacedItem | null) => {

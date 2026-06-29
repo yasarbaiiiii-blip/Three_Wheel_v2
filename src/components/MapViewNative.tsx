@@ -1220,7 +1220,10 @@ export function MapViewNative(props: MapViewProps) {
         scrollEnabled={!lockPanDrag && !isGestureEditing}
         zoomEnabled={!lockZoom && !isGestureEditing}
       >
-        <Camera ref={cameraRef} />
+        <Camera 
+          ref={cameraRef} 
+          defaultSettings={roverGeo.center ? { centerCoordinate: roverGeo.center, zoomLevel: 19 } : undefined} 
+        />
 
         {/* ── Plan lines (Fields) ── */}
         <ShapeSource id="plan-lines" shape={planLinesFC}>
