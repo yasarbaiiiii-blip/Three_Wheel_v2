@@ -1027,16 +1027,16 @@ export function MapViewNative(props: MapViewProps) {
   // - "rotate": pan + rotation only (no pinch/scale)
   const composedGesture = useMemo(
     () => {
-      const gestures: any[] = [panGesture];
+      const gestures: any[] = [panGesture.enabled(!!hasEditableSelection)];
       if (multiTouchMode === "both" || multiTouchMode === "scale") {
-        gestures.push(pinchGesture);
+        gestures.push(pinchGesture.enabled(!!hasEditableSelection));
       }
       if (multiTouchMode === "both" || multiTouchMode === "rotate") {
-        gestures.push(rotationGesture);
+        gestures.push(rotationGesture.enabled(!!hasEditableSelection));
       }
       return Gesture.Simultaneous(...gestures);
     },
-    [panGesture, pinchGesture, rotationGesture, multiTouchMode]
+    [panGesture, pinchGesture, rotationGesture, multiTouchMode, hasEditableSelection]
   );
 
   // ── Camera helpers ──
@@ -1389,15 +1389,12 @@ export function MapViewNative(props: MapViewProps) {
     </View>
   );
 
-  // KEY ARBITRATION: Only mount GestureDetector when something is selected to
-  // edit. When nothing is selected, the plain View is returned and every touch
-  // event reaches the Mapbox map directly (normal pan/zoom/tap). This avoids:
-  //   - Map being blocked when not editing (Bug 1 fix).
-  //   - Gesture.enabled() / Gesture.Race approaches, which don't reliably
-  //     surrender touches to Mapbox's internal Android touch handling.
-  if (!hasEditableSelection) {
-    return mapContent;
-  }
+  // KEY ARBITRATION: The GestureDetector is always mounted, but the gestures
+  // inside it are conditionally enabled via `.enabled(hasEditableSelection)`.
+  // When disabled, RNGH passes all touch events to the Mapbox map directly 
+  // (normal pan/zoom/tap). This avoids:
+  //   - Map being blocked when not editing.
+  //   - Map remounting (losing camera/zoom state) when selection changes.
   return (
     <GestureDetector gesture={composedGesture}>
       {mapContent}

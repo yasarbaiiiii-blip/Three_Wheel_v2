@@ -757,7 +757,8 @@ export default function App() {
     const { minX, minY, maxX, maxY } = computeLineBoundingBox(lines);
     const dxfCorners = [
       { x: minX, y: minY },
-      { x: maxX, y: maxY },
+      { x: maxX, y: minY },
+      { x: minX, y: maxY },
     ];
 
     const baseLat = telemetrySnapshot?.lat ?? 28.6139;
