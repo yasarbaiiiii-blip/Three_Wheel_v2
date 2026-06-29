@@ -350,6 +350,17 @@ export function MapViewNative(props: MapViewProps) {
     [mapGeometryFrame, mode, previewAnchor, alignedRefPoints, stagedVerified, autoOriginReference, autoOriginEnabled]
   );
 
+  // Stable fallback origin so the plan doesn't jitter with every telemetry tick during preview
+  const [stableFallbackOrigin, setStableFallbackOrigin] = useState<{lat: number, lon: number} | null>(null);
+
+  useEffect(() => {
+    if (!stableFallbackOrigin && telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null) {
+      setStableFallbackOrigin({ lat: telemetrySnapshot.lat, lon: telemetrySnapshot.lon });
+    } else if (!stableFallbackOrigin && templatesFloatingOrigin) {
+      setStableFallbackOrigin(templatesFloatingOrigin);
+    }
+  }, [telemetrySnapshot?.lat, telemetrySnapshot?.lon, templatesFloatingOrigin, stableFallbackOrigin]);
+
   const projectionOrigin = useMemo((): MapProjectionOrigin | null => {
     const resolved = resolveMapProjectionOrigin(geometryFrame, {
       mode,
@@ -360,6 +371,7 @@ export function MapViewNative(props: MapViewProps) {
       autoOriginEnabled,
     });
     if (resolved) return resolved;
+
     if (mode === "templates" && templatesFloatingOrigin) {
       return {
         frame: "RAW_DESIGN",
@@ -369,6 +381,27 @@ export function MapViewNative(props: MapViewProps) {
         originDxfEast: 0,
       };
     }
+
+    // Fallback: If no origin is available (e.g. previewing unaligned plans in fields mode),
+    // place the plan at the first seen floating origin (rover's position) so it renders on map.
+    // If there is no rover telemetry, fallback to 0,0 (Null Island) so we can at least see the plan.
+    if (mode === "fields" && lines.length > 0) {
+      const fallback = stableFallbackOrigin || { lat: 0, lon: 0 };
+      const firstLine = lines[0];
+      const startN = firstLine?.from?.x ?? 0;
+      const startE = firstLine?.from?.y ?? 0;
+
+      // Offset the local origin by 2 meters so the plan is rendered
+      // 2 meters North and 2 meters East of the rover icon, rather than exactly on top of it.
+      return {
+        frame: "RAW_DESIGN",
+        originLat: fallback.lat,
+        originLon: fallback.lon,
+        originDxfNorth: startN - 2,
+        originDxfEast: startE - 2,
+      };
+    }
+
     return null;
   }, [
     geometryFrame,
@@ -379,6 +412,8 @@ export function MapViewNative(props: MapViewProps) {
     autoOriginReference,
     autoOriginEnabled,
     templatesFloatingOrigin,
+    stableFallbackOrigin,
+    lines, // We use lines to find the center/start
   ]);
 
   // ── Stable primitive signatures (perf) ──

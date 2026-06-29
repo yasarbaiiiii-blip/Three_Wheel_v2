@@ -9651,14 +9651,6 @@ function PlanPreview({
 
   const handleFocusPlan = () => {
     if (mapViewEnabled) {
-      const isFieldsMode = mapMode !== "templates";
-      const hasOrigin = mapGeometryFrame !== "NONE";
-      const hasLines = lines.length > 0;
-
-      if (isFieldsMode && !hasOrigin && hasLines) {
-        Alert.alert("Cannot Focus", "Alignment or telemetry required to project plan on map.");
-      }
-
       setRecenterPlanCount((c) => c + 1);
     } else {
       if (layoutSize.width <= 0 || layoutSize.height <= 0) return;
