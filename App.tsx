@@ -5115,65 +5115,70 @@ function HomeView({
               elevation: 20,
             }}
           >
-            {MENU_ITEMS.map((item) => (
-              <Pressable
-                key={item.key}
-                onPress={() => onNav(item.key)}
-                style={{ flexDirection: "row", alignItems: "center", gap: 14, marginBottom: 12 }}
-              >
-                <View
-                  style={{
-                    width: 68,
-                    height: 68,
-                    backgroundColor: "#111827",
-                    borderRadius: 12,
-                    borderWidth: 1,
-                    borderColor: "#334155",
-                    justifyContent: "center",
-                    alignItems: "center",
-                  }}
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={{ paddingBottom: 28 }}
+            >
+              {MENU_ITEMS.map((item) => (
+                <Pressable
+                  key={item.key}
+                  onPress={() => onNav(item.key)}
+                  style={{ flexDirection: "row", alignItems: "center", gap: 14, marginBottom: 12 }}
                 >
-                  {item.icon}
-                </View>
-                <Text style={{ color: "#f8fafc", fontSize: 34 / 2 }}>{item.label}</Text>
-              </Pressable>
-            ))}
-            <View style={{ marginTop: 4 }}>
-              <Pressable onPress={onOpenPasswordChange} style={{ flexDirection: "row", alignItems: "center", gap: 14, marginBottom: 12 }}>
-                <View
-                  style={{
-                    width: 68,
-                    height: 68,
-                    backgroundColor: "#111827",
-                    borderRadius: 12,
-                    borderWidth: 1,
-                    borderColor: "#334155",
-                    justifyContent: "center",
-                    alignItems: "center",
-                  }}
-                >
-                  <Settings size={22} color="#fff" />
-                </View>
-                <Text style={{ color: "#f8fafc", fontSize: 34 / 2 }}>Password</Text>
-              </Pressable>
-              <Pressable onPress={onDisconnect} style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
-                <View
-                  style={{
-                    width: 68,
-                    height: 68,
-                    backgroundColor: "#111827",
-                    borderRadius: 12,
-                    borderWidth: 1,
-                    borderColor: "#334155",
-                    justifyContent: "center",
-                    alignItems: "center",
-                  }}
-                >
-                  <LogOut size={22} color="#fff" />
-                </View>
-                <Text style={{ color: "#f8fafc", fontSize: 34 / 2 }}>Exit</Text>
-              </Pressable>
-            </View>
+                  <View
+                    style={{
+                      width: 68,
+                      height: 68,
+                      backgroundColor: "#111827",
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: "#334155",
+                      justifyContent: "center",
+                      alignItems: "center",
+                    }}
+                  >
+                    {item.icon}
+                  </View>
+                  <Text style={{ color: "#f8fafc", fontSize: 34 / 2 }}>{item.label}</Text>
+                </Pressable>
+              ))}
+              <View style={{ marginTop: 4 }}>
+                <Pressable onPress={onOpenPasswordChange} style={{ flexDirection: "row", alignItems: "center", gap: 14, marginBottom: 12 }}>
+                  <View
+                    style={{
+                      width: 68,
+                      height: 68,
+                      backgroundColor: "#111827",
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: "#334155",
+                      justifyContent: "center",
+                      alignItems: "center",
+                    }}
+                  >
+                    <Settings size={22} color="#fff" />
+                  </View>
+                  <Text style={{ color: "#f8fafc", fontSize: 34 / 2 }}>Password</Text>
+                </Pressable>
+                <Pressable onPress={onDisconnect} style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
+                  <View
+                    style={{
+                      width: 68,
+                      height: 68,
+                      backgroundColor: "#111827",
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: "#334155",
+                      justifyContent: "center",
+                      alignItems: "center",
+                    }}
+                  >
+                    <LogOut size={22} color="#fff" />
+                  </View>
+                  <Text style={{ color: "#f8fafc", fontSize: 34 / 2 }}>Exit</Text>
+                </Pressable>
+              </View>
+            </ScrollView>
           </View>
         ) : null}
       </View>
