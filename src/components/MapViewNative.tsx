@@ -260,6 +260,7 @@ export function MapViewNative(props: MapViewProps) {
     sketchMode,
     onUpdatePlacedItem,
     onUpdatePlacedItems,
+    multiTouchMode = "both",
   } = props;
 
   const cameraRef = useRef<Camera>(null);
@@ -288,9 +289,9 @@ export function MapViewNative(props: MapViewProps) {
   // (A plain useRef would trigger "tried to modify key `current`" in Reanimated.)
 
   // Starting positions snapshot — captured at gesture begin (JS thread only, no worklet).
-  // Maps itemId → { x, y } at drag start. Used to compute absolute final position from
-  // accumulated delta (avoids floating-point drift from incremental additions).
-  const dragStartPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
+  // Maps itemId → { x, y, rotation, scale } at drag start. Used to compute absolute final
+  // position from accumulated delta (avoids floating-point drift from incremental additions).
+  const dragStartPositionsRef = useRef<Record<string, { x: number; y: number; rotation: number; scale: number }>>({});
 
   // Preview FeatureCollection for live drag feedback (set via RAF-coalesced JS callback).
   // Null = use the normal committed sources (no active drag preview).
@@ -824,7 +825,7 @@ export function MapViewNative(props: MapViewProps) {
    * positions, rebuilds preview geometry, and sets previewItemsGeo state.
    */
   const onDragMove = useCallback(
-    (dN: number, dE: number) => {
+    (dN: number, dE: number, rotDeg: number, scaleF: number) => {
       if (!placedItems) return;
       const starts = dragStartPositionsRef.current;
       const ids = selectedItemIds ?? [];
@@ -835,16 +836,18 @@ export function MapViewNative(props: MapViewProps) {
         if (!start || !ids.includes(item.id)) return item;
         const newX = start.x + dE;
         const newY = start.y + dN;
+        const newRotation = start.rotation + rotDeg;
+        const newScale = start.scale * scaleF;
         if (indentRect) {
           const { east, north } = clampToIndent(
             newX, newY,
-            item.width  * item.scale / 2,
-            item.height * item.scale / 2,
+            item.width  * newScale / 2,
+            item.height * newScale / 2,
             indentRect
           );
-          return { ...item, x: east, y: north };
+          return { ...item, x: east, y: north, rotation: newRotation, scale: newScale };
         }
-        return { ...item, x: newX, y: newY };
+        return { ...item, x: newX, y: newY, rotation: newRotation, scale: newScale };
       });
 
       setPreviewItemsGeo(buildItemsGeoForItems(shifted));
@@ -857,7 +860,7 @@ export function MapViewNative(props: MapViewProps) {
    * Reads final deltas, applies clamp, commits to parent once, clears preview.
    */
   const onDragCommit = useCallback(
-    (finalDN: number, finalDE: number) => {
+    (finalDN: number, finalDE: number, finalRotDeg: number, finalScaleF: number) => {
       // Cancel any pending RAF preview update.
       if (previewRafRef.current !== null) {
         cancelAnimationFrame(previewRafRef.current);
@@ -877,16 +880,18 @@ export function MapViewNative(props: MapViewProps) {
         if (!start || !ids.includes(item.id)) return item;
         const newX = start.x + finalDE;
         const newY = start.y + finalDN;
+        const newRotation = start.rotation + finalRotDeg;
+        const newScale = start.scale * finalScaleF;
         if (indentRect) {
           const { east, north } = clampToIndent(
             newX, newY,
-            item.width  * item.scale / 2,
-            item.height * item.scale / 2,
+            item.width  * newScale / 2,
+            item.height * newScale / 2,
             indentRect
           );
-          return { ...item, x: east, y: north };
+          return { ...item, x: east, y: north, rotation: newRotation, scale: newScale };
         }
-        return { ...item, x: newX, y: newY };
+        return { ...item, x: newX, y: newY, rotation: newRotation, scale: newScale };
       });
 
       // Single commit to parent — parity with legacy itemsMoved handler.
@@ -895,8 +900,8 @@ export function MapViewNative(props: MapViewProps) {
       } else if (onUpdatePlacedItem) {
         updated.forEach((item) => {
           const orig = placedItems.find((it) => it.id === item.id);
-          if (orig && (item.x !== orig.x || item.y !== orig.y)) {
-            onUpdatePlacedItem(item.id, { x: item.x, y: item.y });
+          if (orig && (item.x !== orig.x || item.y !== orig.y || item.rotation !== orig.rotation || item.scale !== orig.scale)) {
+            onUpdatePlacedItem(item.id, { x: item.x, y: item.y, rotation: item.rotation, scale: item.scale });
           }
         });
       }
@@ -914,10 +919,10 @@ export function MapViewNative(props: MapViewProps) {
   const onDragBegin = useCallback(
     (touchX: number, touchY: number) => {
       const ids = selectedItemIds ?? [];
-      const snapshot: Record<string, { x: number; y: number }> = {};
+      const snapshot: Record<string, { x: number; y: number; rotation: number; scale: number }> = {};
       for (const item of placedItems ?? []) {
         if (ids.includes(item.id)) {
-          snapshot[item.id] = { x: item.x, y: item.y };
+          snapshot[item.id] = { x: item.x, y: item.y, rotation: item.rotation || 0, scale: item.scale || 1 };
         }
       }
       dragStartPositionsRef.current = snapshot;
@@ -952,19 +957,20 @@ export function MapViewNative(props: MapViewProps) {
           const mpp = metersPerPixelSV.value;
           panDeltaE.value += e.changeX * mpp;
           panDeltaN.value -= e.changeY * mpp;
-          // Kick off an RAF-coalesced preview update on the JS thread.
-          // Passing current values directly avoids a second shared-value read on JS.
-          runOnJS(onDragMove)(panDeltaN.value, panDeltaE.value);
+          // Pass all gesture values (pan + rotation + scale) for unified preview.
+          runOnJS(onDragMove)(panDeltaN.value, panDeltaE.value, rotationDelta.value, pinchScale.value);
         })
         .onFinalize((e, success) => {
           "worklet";
           // Commit with the final accumulated delta (regardless of success/cancel).
-          runOnJS(onDragCommit)(panDeltaN.value, panDeltaE.value);
+          runOnJS(onDragCommit)(panDeltaN.value, panDeltaE.value, rotationDelta.value, pinchScale.value);
           panDeltaN.value = 0;
           panDeltaE.value = 0;
+          pinchScale.value = 1;
+          rotationDelta.value = 0;
           runOnJS(setGestureEditType)(null);
         }),
-    [panDeltaN, panDeltaE, metersPerPixelSV, onDragBegin, onDragMove, onDragCommit]
+    [panDeltaN, panDeltaE, metersPerPixelSV, onDragBegin, onDragMove, onDragCommit, rotationDelta, pinchScale]
   );
 
   const pinchGesture = useMemo(
@@ -978,17 +984,17 @@ export function MapViewNative(props: MapViewProps) {
         .onUpdate((e) => {
           "worklet";
           pinchScale.value = e.scale;
+          // Live preview with current pan + rotation + scale deltas.
+          runOnJS(onDragMove)(panDeltaN.value, panDeltaE.value, rotationDelta.value, pinchScale.value);
         })
         .onEnd(() => {
           "worklet";
-          pinchScale.value = 1;
-          runOnJS(setGestureEditType)(null);
+          // Don't commit here — pan's onFinalize handles the unified commit.
         })
         .onFinalize(() => {
           "worklet";
-          runOnJS(setGestureEditType)(null);
         }),
-    [pinchScale]
+    [pinchScale, panDeltaN, panDeltaE, rotationDelta, onDragMove]
   );
 
   const rotationGesture = useMemo(
@@ -1002,22 +1008,35 @@ export function MapViewNative(props: MapViewProps) {
         .onUpdate((e) => {
           "worklet";
           rotationDelta.value = (e.rotation * 180) / Math.PI;
+          // Live preview with current pan + rotation + scale deltas.
+          runOnJS(onDragMove)(panDeltaN.value, panDeltaE.value, rotationDelta.value, pinchScale.value);
         })
         .onEnd(() => {
           "worklet";
-          rotationDelta.value = 0;
-          runOnJS(setGestureEditType)(null);
+          // Don't commit here — pan's onFinalize handles the unified commit.
         })
         .onFinalize(() => {
           "worklet";
-          runOnJS(setGestureEditType)(null);
         }),
-    [rotationDelta]
+    [rotationDelta, panDeltaN, panDeltaE, pinchScale, onDragMove]
   );
 
+  // Gate gestures based on multiTouchMode:
+  // - "both": pan + pinch + rotation
+  // - "scale": pan + pinch only (no rotation)
+  // - "rotate": pan + rotation only (no pinch/scale)
   const composedGesture = useMemo(
-    () => Gesture.Simultaneous(panGesture, pinchGesture, rotationGesture),
-    [panGesture, pinchGesture, rotationGesture]
+    () => {
+      const gestures: any[] = [panGesture];
+      if (multiTouchMode === "both" || multiTouchMode === "scale") {
+        gestures.push(pinchGesture);
+      }
+      if (multiTouchMode === "both" || multiTouchMode === "rotate") {
+        gestures.push(rotationGesture);
+      }
+      return Gesture.Simultaneous(...gestures);
+    },
+    [panGesture, pinchGesture, rotationGesture, multiTouchMode]
   );
 
   // ── Camera helpers ──
@@ -1302,9 +1321,10 @@ export function MapViewNative(props: MapViewProps) {
           <FillLayer
             id="placed-item-boxes-fill"
             style={{
-              fillColor: ["case", ["get", "selected"], "#ef4444", "#16a34a"],
-              fillOpacity: ["case", ["get", "selected"], 0.1, sketchMode ? 0.02 : 0.05],
-              fillOutlineColor: ["case", ["get", "selected"], "#ef4444", "#94a3b8"],
+              // Touch box is invisible but still catches taps via the ShapeSource onPress.
+              fillColor: "transparent",
+              fillOpacity: 0.01,
+              fillOutlineColor: "transparent",
             }}
           />
         </ShapeSource>
@@ -1312,6 +1332,7 @@ export function MapViewNative(props: MapViewProps) {
           <LineLayer
             id="placed-item-lines-layer"
             style={{
+              // Selected items turn red to indicate selection.
               lineColor: ["case", ["get", "selected"], "#ef4444", "#16a34a"],
               lineWidth: ["case", ["get", "selected"], 3, 2],
               // sketchMode dims unselected items (parity with legacy renderPlacedItems).
