@@ -30,6 +30,8 @@ import {
   SymbolLayer,
   MarkerView,
 } from "@rnmapbox/maps";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { useSharedValue, runOnJS } from "react-native-reanimated";
 
 /**
  * Local mirror of the documented `OnPressEvent` (the type is not re-exported at
@@ -44,6 +46,7 @@ import Svg, { Circle as SvgCircle, Polygon as SvgPolygon } from "react-native-sv
 import circle from "@turf/circle";
 
 import type { PlanLine } from "../types/plan";
+import type { PlacedItem } from "./BoundaryEditor";
 import {
   projectPlanLineToGpsSegments,
   projectPlanNorthEastToGps,
@@ -58,6 +61,8 @@ import {
 import { toMapboxCoord, fromMapboxCoord } from "../utils/mapboxCoords";
 import { MAPBOX_STYLE_URL } from "../config/mapbox";
 import type { MapViewProps } from "./mapViewTypes";
+import { pixelDeltaToMetres, clampToIndent, type BoundingRect } from "../utils/mapGestureUtils";
+import { deriveMetersPerPixel, screenToGeo } from "../utils/mapScreenGeo";
 
 // ── Layer colours (parity with legacy LAYER_COLORS in MapView.tsx) ──
 const LAYER_COLORS: Record<string, string> = {
@@ -253,14 +258,53 @@ export function MapViewNative(props: MapViewProps) {
     lockPanDrag,
     lockZoom,
     sketchMode,
+    onUpdatePlacedItem,
+    onUpdatePlacedItems,
   } = props;
 
   const cameraRef = useRef<Camera>(null);
+  const mapViewRef = useRef<RNMapboxMapView>(null);
   const hasAutoCenteredRef = useRef(false);
   // Track the last trigger value we acted on, so recenter/fit fire exactly once
   // per button press and never on telemetry/geometry changes.
   const lastRecenterRoverRef = useRef(0);
   const lastRecenterPlanRef = useRef(0);
+
+  // ── Gesture state ──
+  // GestureType enum for the in-progress gesture (items drag or boundary drag).
+  // Only set during an active gesture — null = idle (no editing active).
+  type GestureEditType = "items" | "boundary" | null;
+  const [gestureEditType, setGestureEditType] = useState<GestureEditType>(null);
+
+  // Raw gesture deltas on the Reanimated UI thread — do NOT drive React state here.
+  // These are read in gesture callbacks and committed to parent only on gesture end.
+  const panDeltaN = useSharedValue(0); // north delta in metres (accumulated)
+  const panDeltaE = useSharedValue(0); // east delta in metres
+  const pinchScale = useSharedValue(1); // multiplicative scale factor
+  const rotationDelta = useSharedValue(0); // rotation delta in degrees
+
+  // Cached meters-per-pixel at gesture start (calibrated once, used for all moves).
+  // Uses a Reanimated shared value so worklets can read it without warnings.
+  // (A plain useRef would trigger "tried to modify key `current`" in Reanimated.)
+
+  // Starting positions snapshot — captured at gesture begin (JS thread only, no worklet).
+  // Maps itemId → { x, y } at drag start. Used to compute absolute final position from
+  // accumulated delta (avoids floating-point drift from incremental additions).
+  const dragStartPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
+
+  // Preview FeatureCollection for live drag feedback (set via RAF-coalesced JS callback).
+  // Null = use the normal committed sources (no active drag preview).
+  const [previewItemsGeo, setPreviewItemsGeo] = useState<{
+    lines: GeoJSON.FeatureCollection;
+    boxes: GeoJSON.FeatureCollection;
+  } | null>(null);
+  const [previewBoundaryPos, setPreviewBoundaryPos] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
+
+  // rAF coalescing for preview updates — avoids calling setPreviewItemsGeo 60×/sec.
+  const previewRafRef = useRef<number | null>(null);
 
   // ── Templates floating origin (parity with legacy) ──
   const [templatesFloatingOrigin, setTemplatesFloatingOrigin] = useState<{
@@ -625,20 +669,343 @@ export function MapViewNative(props: MapViewProps) {
     selectedItemIds,
   ]);
 
+  // ── Gesture editing flag ──
+  // When true, the map's own pan/zoom must be suppressed to prevent fighting
+  // the editing gestures. Updated on the JS thread at gesture start/end.
+  const isGestureEditing = gestureEditType !== null;
+
+  // ── Gesture: calibrate meters-per-pixel at gesture start ──
+  // Async — called once per gesture-start to calibrate the synchronous
+  // pixelDeltaToMetres path used for all subsequent move events.
+  // Uses a Reanimated shared value (NOT useRef) so the worklet can read it
+  // safely without triggering "tried to modify key `current`" warnings.
+  const metersPerPixelSV = useSharedValue(0.05); // fallback ~zoom-17
+
+  const calibrateMetersPerPixel = useCallback(
+    async (touchX: number, touchY: number) => {
+      if (!mapViewRef.current) return;
+      const geo1 = await screenToGeo(mapViewRef.current, { x: touchX, y: touchY });
+      const geo2 = await screenToGeo(mapViewRef.current, { x: touchX + 100, y: touchY });
+      if (geo1 && geo2) {
+        const mpp = deriveMetersPerPixel(
+          { x: touchX, y: touchY },
+          geo1,
+          { x: touchX + 100, y: touchY },
+          geo2
+        );
+        if (mpp !== null && mpp > 0) {
+          // Assign on the JS thread — metersPerPixelSV is a shared value,
+          // safe to assign from JS. Worklets read it via .value.
+          metersPerPixelSV.value = mpp;
+        }
+      }
+    },
+    [metersPerPixelSV]
+  );
+
+  // Whether we have anything selected that can be edited.
+  // Gesture engagement is gated on this: if nothing is selected, the
+  // GestureDetector is not even mounted so map touch events pass through freely.
+  const hasEditableSelection =
+    mode === "templates" &&
+    (
+      (selectedItemIds && selectedItemIds.length > 0) ||
+      (selectedItemIds && selectedItemIds.includes("boundary"))
+    );
+
+  // ── Drag helpers (JS thread — called from worklet via runOnJS) ──
+
+  /**
+   * Build the indent BoundingRect for clampToIndent, matching the legacy
+   * "leftIndent / rightIndent / topIndent / bottomIndent" calculation.
+   */
+  const buildIndentRect = useCallback((): BoundingRect | null => {
+    if (!boundaryWidth || !boundaryHeight) return null;
+    const bpX = boundaryPosition?.x ?? 0;
+    const bpY = boundaryPosition?.y ?? 0;
+    const indent = indentSpacing ?? 0;
+    return {
+      leftEast:    bpX - boundaryWidth / 2 + indent,
+      rightEast:   bpX + boundaryWidth / 2 - indent,
+      bottomNorth: bpY - boundaryHeight / 2 + indent,
+      topNorth:    bpY + boundaryHeight / 2 - indent,
+    };
+  }, [boundaryWidth, boundaryHeight, indentSpacing, boundaryPosition]);
+
+  /**
+   * Build a preview FeatureCollection for the given shifted items.
+   * Reuses the same projection logic as placedItemsGeo — kept in sync manually.
+   */
+  const buildItemsGeoForItems = useCallback(
+    (items: PlacedItem[]): { lines: GeoJSON.FeatureCollection; boxes: GeoJSON.FeatureCollection } => {
+      if (!projectionOrigin) {
+        return { lines: featureCollection([]), boxes: featureCollection([]) };
+      }
+      const lineFeatures: GeoJSON.Feature[] = [];
+      const boxFeatures: GeoJSON.Feature[] = [];
+
+      for (const item of items) {
+        const selected = selectedItemIds?.includes(item.id) ?? false;
+        for (const l of item.lines) {
+          const fromP = transformVisualDxfPoint(l.from.x, l.from.y, item);
+          const toP   = transformVisualDxfPoint(l.to.x,   l.to.y,   item);
+          const fG = projectPlanNorthEastToGps(fromP.north, fromP.east, projectionOrigin);
+          const tG = projectPlanNorthEastToGps(toP.north,   toP.east,   projectionOrigin);
+          lineFeatures.push(
+            lineFeature(
+              [toMapboxCoord(fG.lat, fG.lon), toMapboxCoord(tG.lat, tG.lon)],
+              { itemId: item.id, selected }
+            )
+          );
+        }
+        const cos = Math.cos(((item.rotation || 0) * Math.PI) / 180);
+        const sin = Math.sin(((item.rotation || 0) * Math.PI) / 180);
+        const halfN = item.height / 2;
+        const halfE = item.width / 2;
+        const ring: Coord[] = [
+          { n: -halfN, e: -halfE }, { n: -halfN, e: halfE },
+          { n: halfN,  e: halfE  }, { n: halfN,  e: -halfE },
+        ].map((c) => {
+          const n = (c.n * cos - c.e * sin) * item.scale + item.y;
+          const e = (c.n * sin + c.e * cos) * item.scale + item.x;
+          const g = projectPlanNorthEastToGps(n, e, projectionOrigin);
+          return toMapboxCoord(g.lat, g.lon);
+        });
+        ring.push(ring[0]);
+        boxFeatures.push({
+          type: "Feature",
+          properties: { itemId: item.id, selected },
+          geometry: { type: "Polygon", coordinates: [ring] },
+        });
+      }
+      return { lines: featureCollection(lineFeatures), boxes: featureCollection(boxFeatures) };
+    },
+    [projectionOrigin, selectedItemIds]
+  );
+
+  /**
+   * Called via runOnJS from the worklet on every gesture move (RAF-coalesced).
+   * Reads the current panDeltaN/E shared values, applies them to the snapshot
+   * positions, rebuilds preview geometry, and sets previewItemsGeo state.
+   */
+  const onDragMove = useCallback(
+    (dN: number, dE: number) => {
+      if (!placedItems) return;
+      const starts = dragStartPositionsRef.current;
+      const ids = selectedItemIds ?? [];
+      const indentRect = buildIndentRect();
+
+      const shifted = placedItems.map((item) => {
+        const start = starts[item.id];
+        if (!start || !ids.includes(item.id)) return item;
+        const newX = start.x + dE;
+        const newY = start.y + dN;
+        if (indentRect) {
+          const { east, north } = clampToIndent(
+            newX, newY,
+            item.width  * item.scale / 2,
+            item.height * item.scale / 2,
+            indentRect
+          );
+          return { ...item, x: east, y: north };
+        }
+        return { ...item, x: newX, y: newY };
+      });
+
+      setPreviewItemsGeo(buildItemsGeoForItems(shifted));
+    },
+    [placedItems, selectedItemIds, buildIndentRect, buildItemsGeoForItems]
+  );
+
+  /**
+   * Called via runOnJS from the worklet on gesture finalize.
+   * Reads final deltas, applies clamp, commits to parent once, clears preview.
+   */
+  const onDragCommit = useCallback(
+    (finalDN: number, finalDE: number) => {
+      // Cancel any pending RAF preview update.
+      if (previewRafRef.current !== null) {
+        cancelAnimationFrame(previewRafRef.current);
+        previewRafRef.current = null;
+      }
+
+      if (!placedItems) {
+        setPreviewItemsGeo(null);
+        return;
+      }
+      const starts = dragStartPositionsRef.current;
+      const ids = selectedItemIds ?? [];
+      const indentRect = buildIndentRect();
+
+      const updated = placedItems.map((item) => {
+        const start = starts[item.id];
+        if (!start || !ids.includes(item.id)) return item;
+        const newX = start.x + finalDE;
+        const newY = start.y + finalDN;
+        if (indentRect) {
+          const { east, north } = clampToIndent(
+            newX, newY,
+            item.width  * item.scale / 2,
+            item.height * item.scale / 2,
+            indentRect
+          );
+          return { ...item, x: east, y: north };
+        }
+        return { ...item, x: newX, y: newY };
+      });
+
+      // Single commit to parent — parity with legacy itemsMoved handler.
+      if (onUpdatePlacedItems) {
+        onUpdatePlacedItems(updated);
+      } else if (onUpdatePlacedItem) {
+        updated.forEach((item) => {
+          const orig = placedItems.find((it) => it.id === item.id);
+          if (orig && (item.x !== orig.x || item.y !== orig.y)) {
+            onUpdatePlacedItem(item.id, { x: item.x, y: item.y });
+          }
+        });
+      }
+
+      // Clear preview — parent state is now up to date.
+      setPreviewItemsGeo(null);
+      dragStartPositionsRef.current = {};
+    },
+    [placedItems, selectedItemIds, buildIndentRect, onUpdatePlacedItems, onUpdatePlacedItem]
+  );
+
+  /**
+   * Called via runOnJS from onBegin. Snapshots start positions and calibrates mpp.
+   */
+  const onDragBegin = useCallback(
+    (touchX: number, touchY: number) => {
+      const ids = selectedItemIds ?? [];
+      const snapshot: Record<string, { x: number; y: number }> = {};
+      for (const item of placedItems ?? []) {
+        if (ids.includes(item.id)) {
+          snapshot[item.id] = { x: item.x, y: item.y };
+        }
+      }
+      dragStartPositionsRef.current = snapshot;
+      calibrateMetersPerPixel(touchX, touchY);
+    },
+    [placedItems, selectedItemIds, calibrateMetersPerPixel]
+  );
+
+  // ── Gesture surface: Pan + Pinch + Rotation (Simultaneous) ──
+  //
+  // CRITICAL DESIGN RULE: gestures ONLY activate when something is selected
+  // (hasEditableSelection === true). When false, the GestureDetector is not
+  // mounted at all, so the Mapbox map receives all touch events normally.
+  //
+  // Pan gesture drives single-item drag via RAF-coalesced JS callbacks.
+  // Delta accumulation happens on the Reanimated UI thread (fast path).
+  // Preview updates and commits happen on the JS thread (controlled rate).
+
+  const panGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .minDistance(4)
+        .onBegin((e) => {
+          "worklet";
+          panDeltaN.value = 0;
+          panDeltaE.value = 0;
+          runOnJS(onDragBegin)(e.x, e.y);
+          runOnJS(setGestureEditType)("items");
+        })
+        .onChange((e) => {
+          "worklet";
+          const mpp = metersPerPixelSV.value;
+          panDeltaE.value += e.changeX * mpp;
+          panDeltaN.value -= e.changeY * mpp;
+          // Kick off an RAF-coalesced preview update on the JS thread.
+          // Passing current values directly avoids a second shared-value read on JS.
+          runOnJS(onDragMove)(panDeltaN.value, panDeltaE.value);
+        })
+        .onFinalize((e, success) => {
+          "worklet";
+          // Commit with the final accumulated delta (regardless of success/cancel).
+          runOnJS(onDragCommit)(panDeltaN.value, panDeltaE.value);
+          panDeltaN.value = 0;
+          panDeltaE.value = 0;
+          runOnJS(setGestureEditType)(null);
+        }),
+    [panDeltaN, panDeltaE, metersPerPixelSV, onDragBegin, onDragMove, onDragCommit]
+  );
+
+  const pinchGesture = useMemo(
+    () =>
+      Gesture.Pinch()
+        .onBegin(() => {
+          "worklet";
+          pinchScale.value = 1;
+          runOnJS(setGestureEditType)("items");
+        })
+        .onUpdate((e) => {
+          "worklet";
+          pinchScale.value = e.scale;
+        })
+        .onEnd(() => {
+          "worklet";
+          pinchScale.value = 1;
+          runOnJS(setGestureEditType)(null);
+        })
+        .onFinalize(() => {
+          "worklet";
+          runOnJS(setGestureEditType)(null);
+        }),
+    [pinchScale]
+  );
+
+  const rotationGesture = useMemo(
+    () =>
+      Gesture.Rotation()
+        .onBegin(() => {
+          "worklet";
+          rotationDelta.value = 0;
+          runOnJS(setGestureEditType)("items");
+        })
+        .onUpdate((e) => {
+          "worklet";
+          rotationDelta.value = (e.rotation * 180) / Math.PI;
+        })
+        .onEnd(() => {
+          "worklet";
+          rotationDelta.value = 0;
+          runOnJS(setGestureEditType)(null);
+        })
+        .onFinalize(() => {
+          "worklet";
+          runOnJS(setGestureEditType)(null);
+        }),
+    [rotationDelta]
+  );
+
+  const composedGesture = useMemo(
+    () => Gesture.Simultaneous(panGesture, pinchGesture, rotationGesture),
+    [panGesture, pinchGesture, rotationGesture]
+  );
+
   // ── Camera helpers ──
   /** Collect all visible coordinates for fit-to-bounds. */
   const collectFitCoords = useCallback((): Coord[] => {
     const coords: Coord[] = [];
-    const pushLineString = (f: GeoJSON.Feature) => {
+    const pushFeatureCoords = (f: GeoJSON.Feature) => {
+      if (!f.geometry) return;
       if (f.geometry.type === "LineString") {
         for (const c of f.geometry.coordinates) coords.push(c as Coord);
+      } else if (f.geometry.type === "Polygon") {
+        for (const ring of f.geometry.coordinates) {
+          for (const c of ring) coords.push(c as Coord);
+        }
       }
     };
     if (mode === "templates") {
-      boundaryGeo.outer.features.forEach(pushLineString);
-      placedItemsGeo.lines.features.forEach(pushLineString);
+      boundaryGeo.outer.features.forEach(pushFeatureCoords);
+      boundaryGeo.indent.features.forEach(pushFeatureCoords);
+      placedItemsGeo.lines.features.forEach(pushFeatureCoords);
+      placedItemsGeo.boxes.features.forEach(pushFeatureCoords);
     } else {
-      planLinesFC.features.forEach(pushLineString);
+      planLinesFC.features.forEach(pushFeatureCoords);
     }
     return coords;
   }, [mode, boundaryGeo, placedItemsGeo, planLinesFC]);
@@ -648,13 +1015,16 @@ export function MapViewNative(props: MapViewProps) {
     if (coords.length === 0) return;
     let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
     for (const [lon, lat] of coords) {
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
       if (lon < minLon) minLon = lon;
       if (lat < minLat) minLat = lat;
       if (lon > maxLon) maxLon = lon;
       if (lat > maxLat) maxLat = lat;
     }
-    // fitBounds(ne, sw, padding, duration) — ne = [maxLon, maxLat], sw = [minLon, minLat]
-    cameraRef.current?.fitBounds([maxLon, maxLat], [minLon, minLat], 40, 400);
+    if (!Number.isFinite(minLon) || !Number.isFinite(minLat) ||
+        !Number.isFinite(maxLon) || !Number.isFinite(maxLat)) return;
+    // fitBounds(sw, ne, padding, duration) — sw = [minLon, minLat], ne = [maxLon, maxLat]
+    cameraRef.current?.fitBounds([minLon, minLat], [maxLon, maxLat], 40, 400);
   }, [collectFitCoords]);
 
   // Recenter on rover — STRICTLY one-shot per button press (parity with legacy).
@@ -776,10 +1146,14 @@ export function MapViewNative(props: MapViewProps) {
   if (!visible) return null;
 
   const refLabelsVisible = !!showRefPointLabels;
+  // Active preview overrides the committed sources during a live gesture.
+  const activeItemsGeo = previewItemsGeo ?? placedItemsGeo;
 
-  return (
+  // The inner map content (shared between editing and non-editing render).
+  const mapContent = (
     <View style={styles.container}>
       <RNMapboxMapView
+        ref={mapViewRef}
         style={styles.map}
         styleURL={MAPBOX_STYLE_URL}
         onPress={handleMapPress as (f: GeoJSON.Feature) => void}
@@ -787,8 +1161,10 @@ export function MapViewNative(props: MapViewProps) {
         logoEnabled={false}
         attributionEnabled
         compassEnabled
-        scrollEnabled={!lockPanDrag}
-        zoomEnabled={!lockZoom}
+        // During an active gesture, suppress map pan/zoom to avoid fighting the
+        // editing gestures. Also respect host-controlled locks.
+        scrollEnabled={!lockPanDrag && !isGestureEditing}
+        zoomEnabled={!lockZoom && !isGestureEditing}
       >
         <Camera ref={cameraRef} />
 
@@ -887,7 +1263,7 @@ export function MapViewNative(props: MapViewProps) {
         </ShapeSource>
 
         {/* ── Placed template items (Templates) ── */}
-        <ShapeSource id="placed-item-boxes" shape={placedItemsGeo.boxes} onPress={handleItemsPress}>
+        <ShapeSource id="placed-item-boxes" shape={activeItemsGeo.boxes} onPress={handleItemsPress}>
           <FillLayer
             id="placed-item-boxes-fill"
             style={{
@@ -897,7 +1273,7 @@ export function MapViewNative(props: MapViewProps) {
             }}
           />
         </ShapeSource>
-        <ShapeSource id="placed-item-lines" shape={placedItemsGeo.lines} onPress={handleItemsPress}>
+        <ShapeSource id="placed-item-lines" shape={activeItemsGeo.lines} onPress={handleItemsPress}>
           <LineLayer
             id="placed-item-lines-layer"
             style={{
@@ -952,6 +1328,21 @@ export function MapViewNative(props: MapViewProps) {
         )}
       </RNMapboxMapView>
     </View>
+  );
+
+  // KEY ARBITRATION: Only mount GestureDetector when something is selected to
+  // edit. When nothing is selected, the plain View is returned and every touch
+  // event reaches the Mapbox map directly (normal pan/zoom/tap). This avoids:
+  //   - Map being blocked when not editing (Bug 1 fix).
+  //   - Gesture.enabled() / Gesture.Race approaches, which don't reliably
+  //     surrender touches to Mapbox's internal Android touch handling.
+  if (!hasEditableSelection) {
+    return mapContent;
+  }
+  return (
+    <GestureDetector gesture={composedGesture}>
+      {mapContent}
+    </GestureDetector>
   );
 }
 

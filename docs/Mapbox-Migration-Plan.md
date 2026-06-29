@@ -131,6 +131,8 @@ These do not use GPS and have no Leaflet dependency, so they are unaffected.
 - **Boundary box dragging** + **snap-to-rover** (3 m) behaviour.
 - Offline region download for field areas (`offlineManager.createPack`).
 
+> Detailed Phase 2 tasks, acceptance criteria, and sequencing are documented in [docs/Phase2-Task-List.md](./Phase2-Task-List.md).
+
 **Phase 3 — Optional**
 - Evaluate whether `GeometryViewport`/`BoundaryEditor` benefit from migration onto the Mapbox canvas. Only if there is a concrete UX win; otherwise leave as-is.
 

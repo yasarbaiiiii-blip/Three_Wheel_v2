@@ -6318,6 +6318,7 @@ function SectionScreen(props: {
           renderPlanPreview={(previewProps) => (
             <PlanPreview
               {...previewProps}
+              mapMode="templates"
               alignedRefPoints={props.alignedRefPoints}
               telemetryPosN={props.telemetrySnapshot?.pos_n ?? null}
               telemetryPosE={props.telemetrySnapshot?.pos_e ?? null}
@@ -9156,6 +9157,7 @@ function PlanPreview({
   isVisualAlignmentMode,
   visualAlignmentItem,
   setVisualAlignmentItem,
+  mapMode = "fields",
 }: {
   lines: PlanLine[];
   mapSourceLines?: PlanLine[];
@@ -9186,6 +9188,7 @@ function PlanPreview({
   isVisualAlignmentMode?: boolean;
   visualAlignmentItem?: PlacedItem | null;
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
+  mapMode?: "fields" | "templates";
 }) {
   const filtered = useMemo(
     () =>
@@ -9648,6 +9651,14 @@ function PlanPreview({
 
   const handleFocusPlan = () => {
     if (mapViewEnabled) {
+      const isFieldsMode = mapMode !== "templates";
+      const hasOrigin = mapGeometryFrame !== "NONE";
+      const hasLines = lines.length > 0;
+
+      if (isFieldsMode && !hasOrigin && hasLines) {
+        Alert.alert("Cannot Focus", "Alignment or telemetry required to project plan on map.");
+      }
+
       setRecenterPlanCount((c) => c + 1);
     } else {
       if (layoutSize.width <= 0 || layoutSize.height <= 0) return;
