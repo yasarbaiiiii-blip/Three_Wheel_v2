@@ -16,7 +16,5 @@ Thumbs.db
 # Contains keystore passwords — keep local, do not commit
 CLAUDE.md
 
-# Local environment files (contain the Mapbox public token). Commit .env.example only.
-.env
 .env.local
 .env.*.local
