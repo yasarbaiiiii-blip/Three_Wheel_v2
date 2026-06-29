@@ -76,6 +76,7 @@ import { useVirtualJoystick } from "./src/hooks/useVirtualJoystick";
 import { readImportedPlanFile, normalizePlanLines } from "./src/utils/planImport";
 import type { ImportedPlan, PlanLine } from "./src/types/plan";
 import * as missionApi from "./src/api/missionApi";
+import * as authApi from "./src/api/authApi";
 import {
   buildMissionStartPayload,
   classifyMissionError,
@@ -663,9 +664,6 @@ const SUBNET_HOST_MIN = 1;
 const SUBNET_HOST_MAX = 254;
 const SUBNET_SCAN_CONCURRENCY = 24;
 const DEFAULT_ROVER_BACKEND = "http://192.168.1.102:5001";
-/** Set via Jetson ~/.rover_token when auth is enabled; empty when ROVER_DISABLE_AUTH=1 */
-const ROVER_AUTH_TOKEN = "";
-
 const MENU_ITEMS: Array<{ key: Page; label: string; icon: React.ReactNode }> = [
   { key: "fields", label: "Fields", icon: <File size={22} color="#fff" /> },
   { key: "templates", label: "Templates", icon: <LayoutTemplate size={22} color="#fff" /> },
@@ -701,6 +699,13 @@ export default function App() {
   const [wsStatus, setWsStatus] = useState<"idle" | "scanning" | "ready" | "connecting" | "connected" | "error">("idle");
   const [wsError, setWsError] = useState<string>("");
   const [socket, setSocket] = useState<Socket | null>(null);
+  const [operatorSession, setOperatorSession] = useState<authApi.OperatorSession | null>(null);
+  const [operatorPassword, setOperatorPassword] = useState("");
+  const [passwordChangeOpen, setPasswordChangeOpen] = useState(false);
+  const [currentPasswordInput, setCurrentPasswordInput] = useState("");
+  const [newPasswordInput, setNewPasswordInput] = useState("");
+  const [confirmPasswordInput, setConfirmPasswordInput] = useState("");
+  const [passwordChangeBusy, setPasswordChangeBusy] = useState(false);
   const [discoveredRovers, setDiscoveredRovers] = useState<DiscoveredRover[]>([]);
   const [backendPinned, setBackendPinned] = useState(false);
   const [fieldGeneratorOpen, setFieldGeneratorOpen] = useState(false);
@@ -977,6 +982,32 @@ export default function App() {
   const isOffline = wsError.startsWith("Offline");
   const apiBaseUrl = selectedWs || manualHost;
 
+  useEffect(() => {
+    authApi.installAuthenticatedFetch();
+    void authApi.loadStoredSession().then((stored) => {
+      if (stored) setOperatorSession(stored);
+    });
+  }, []);
+
+  const handleInvalidSession = useCallback(() => {
+    setOperatorSession(null);
+    setOperatorPassword("");
+    void authApi.saveStoredSession(null);
+    socket?.disconnect();
+    setSocket(null);
+    setWsStatus("idle");
+    setPage("connection");
+    setWsError("Session expired. Enter the rover password again.");
+  }, [socket]);
+
+  useEffect(() => {
+    authApi.setAuthRuntime({
+      token: operatorSession?.token ?? null,
+      baseUrl: apiBaseUrl || null,
+      onInvalidSession: handleInvalidSession,
+    });
+  }, [apiBaseUrl, handleInvalidSession, operatorSession?.token]);
+
   const logAction = useCallback((action: string, details?: Record<string, unknown>) => {
     const stamp = new Date().toISOString();
     if (details && Object.keys(details).length > 0) {
@@ -999,7 +1030,7 @@ export default function App() {
 
   const virtualJoystick = useVirtualJoystick({
     socket,
-    authToken: ROVER_AUTH_TOKEN,
+    authToken: operatorSession?.token ?? "",
     socketConnected: wsStatus === "connected",
     onErrorMessage: (title, message) => showToast(title, message, "error"),
   });
@@ -1142,15 +1173,30 @@ export default function App() {
   const connectSelectedWebsocket = async () => {
     const target = selectedWs || manualHost;
     if (!target) return;
+    if (!operatorSession && !operatorPassword.trim()) {
+      setWsError("Enter the rover password to connect.");
+      return;
+    }
     logAction("WS_CONNECT", { selectedWs: target });
     setWsStatus("connecting");
     setWsError("");
 
     try {
+      const session = operatorSession ?? await authApi.login(target, operatorPassword);
+      setOperatorSession(session);
+      setOperatorPassword("");
+      await authApi.saveStoredSession(session);
+      authApi.setAuthRuntime({
+        token: session.token,
+        baseUrl: target,
+        onInvalidSession: handleInvalidSession,
+      });
+
       const nextSocket = io(target, {
         transports: ["websocket"], // Use websocket ONLY - polling is unreliable in APK builds
         timeout: 20000, // Increase to 20 seconds
         forceNew: true,
+        auth: { token: session.token },
       });
 
       await new Promise<void>((resolve, reject) => {
@@ -1164,6 +1210,10 @@ export default function App() {
 
       nextSocket.on("disconnect", (reason) => {
         console.log(`[SOCKET] Disconnected from ${target} — reason: ${reason}`);
+      });
+
+      nextSocket.on("auth_revoked", () => {
+        handleInvalidSession();
       });
 
       nextSocket.on("error", (err) => {
@@ -1287,6 +1337,10 @@ export default function App() {
       setMenuOpen(true);
       logAction("WS_CONNECTED", { apiBaseUrl: target });
     } catch (error) {
+      if (operatorSession && !operatorPassword.trim()) {
+        setOperatorSession(null);
+        await authApi.saveStoredSession(null);
+      }
       setWsStatus("error");
       setWsError(error instanceof Error ? error.message : "Unable to connect");
       logAction("WS_CONNECT_FAILED", { error: error instanceof Error ? error.message : String(error) });
@@ -1301,6 +1355,53 @@ export default function App() {
     setBackendPinned(false);
     setPage("connection");
     setMenuOpen(true);
+  };
+
+  const logoutToConnectionScreen = async () => {
+    logAction("LOGOUT");
+    if (apiBaseUrl && operatorSession) {
+      await authApi.logout(apiBaseUrl);
+    }
+    await authApi.saveStoredSession(null);
+    setOperatorSession(null);
+    setOperatorPassword("");
+    disconnectToConnectionScreen();
+  };
+
+  const submitPasswordChange = async () => {
+    if (!apiBaseUrl) return;
+    if (newPasswordInput !== confirmPasswordInput) {
+      Alert.alert("Password", "New passwords do not match.");
+      return;
+    }
+    if (newPasswordInput.length < 8) {
+      Alert.alert("Password", "Use at least 8 characters.");
+      return;
+    }
+    setPasswordChangeBusy(true);
+    try {
+      const nextSession = await authApi.changePassword(
+        apiBaseUrl,
+        currentPasswordInput,
+        newPasswordInput
+      );
+      setOperatorSession(nextSession);
+      await authApi.saveStoredSession(nextSession);
+      authApi.setAuthRuntime({
+        token: nextSession.token,
+        baseUrl: apiBaseUrl,
+        onInvalidSession: handleInvalidSession,
+      });
+      setCurrentPasswordInput("");
+      setNewPasswordInput("");
+      setConfirmPasswordInput("");
+      setPasswordChangeOpen(false);
+      showToast("Password updated", "Other operator sessions were signed out.", "success");
+    } catch (err: any) {
+      Alert.alert("Password", err?.message || "Password change failed.");
+    } finally {
+      setPasswordChangeBusy(false);
+    }
   };
 
   const enterOfflinePreview = () => {
@@ -2836,12 +2937,82 @@ export default function App() {
                 paddingLeft: insets?.left ?? 0,
               }}
             >
+              <Modal transparent visible={passwordChangeOpen} animationType="fade" onRequestClose={() => setPasswordChangeOpen(false)}>
+                <Pressable
+                  onPress={() => setPasswordChangeOpen(false)}
+                  style={{
+                    flex: 1,
+                    backgroundColor: "rgba(15,23,42,0.45)",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: 24,
+                    zIndex: 100,
+                  }}
+                >
+                  <Pressable
+                    onPress={() => {}}
+                    style={{
+                      width: "100%",
+                      maxWidth: 420,
+                      borderRadius: 18,
+                      backgroundColor: "#ffffff",
+                      padding: 18,
+                      gap: 12,
+                    }}
+                  >
+                    <Text style={{ color: "#0f172a", fontSize: 20, fontWeight: "900" }}>Change rover password</Text>
+                    <TextInput
+                      value={currentPasswordInput}
+                      onChangeText={setCurrentPasswordInput}
+                      placeholder="Current password"
+                      placeholderTextColor="#94a3b8"
+                      secureTextEntry
+                      style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 12, padding: 12, color: "#0f172a" }}
+                    />
+                    <TextInput
+                      value={newPasswordInput}
+                      onChangeText={setNewPasswordInput}
+                      placeholder="New password"
+                      placeholderTextColor="#94a3b8"
+                      secureTextEntry
+                      style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 12, padding: 12, color: "#0f172a" }}
+                    />
+                    <TextInput
+                      value={confirmPasswordInput}
+                      onChangeText={setConfirmPasswordInput}
+                      placeholder="Confirm new password"
+                      placeholderTextColor="#94a3b8"
+                      secureTextEntry
+                      style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 12, padding: 12, color: "#0f172a" }}
+                    />
+                    <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end" }}>
+                      <Pressable
+                        onPress={() => setPasswordChangeOpen(false)}
+                        style={{ paddingHorizontal: 14, paddingVertical: 12, borderRadius: 12, backgroundColor: "#e2e8f0" }}
+                      >
+                        <Text style={{ color: "#0f172a", fontWeight: "800" }}>Cancel</Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={submitPasswordChange}
+                        disabled={passwordChangeBusy}
+                        style={{ paddingHorizontal: 14, paddingVertical: 12, borderRadius: 12, backgroundColor: passwordChangeBusy ? "#94a3b8" : "#2563eb" }}
+                      >
+                        <Text style={{ color: "#fff", fontWeight: "800" }}>{passwordChangeBusy ? "Saving..." : "Save"}</Text>
+                      </Pressable>
+                    </View>
+                  </Pressable>
+                </Pressable>
+              </Modal>
+
               {page === "connection" ? (
                 <ConnectionView
                   selectedWs={selectedWs}
                   manualHost={manualHost}
                   wsError={wsError}
                   wsStatus={wsStatus}
+                  password={operatorPassword}
+                  onPasswordChange={setOperatorPassword}
+                  hasStoredSession={Boolean(operatorSession)}
                   isOffline={isOffline}
                   discoveredRovers={discoveredRovers}
                   onRefresh={scanForWebsockets}
@@ -2880,7 +3051,8 @@ export default function App() {
                     setPage(p);
                     setMenuOpen(false);
                   }}
-                  onDisconnect={disconnectToConnectionScreen}
+                  onDisconnect={() => void logoutToConnectionScreen()}
+                  onOpenPasswordChange={() => setPasswordChangeOpen(true)}
                   layerVisibility={layerVisibility}
                   setLayerVisibility={setLayerVisibility}
                   onStopPlan={stopMissionOnBackend}
@@ -3216,6 +3388,7 @@ function HomeView({
   onToggleMenu,
   onNav,
   onDisconnect,
+  onOpenPasswordChange,
   layerVisibility,
   setLayerVisibility,
   onStopPlan,
@@ -3298,6 +3471,7 @@ function HomeView({
   onToggleMenu: () => void;
   onNav: (p: Page) => void;
   onDisconnect: () => void;
+  onOpenPasswordChange: () => void;
   layerVisibility: LayerVisibility;
   setLayerVisibility: React.Dispatch<React.SetStateAction<LayerVisibility>>;
   onStopPlan: () => Promise<void>;
@@ -4965,6 +5139,23 @@ function HomeView({
               </Pressable>
             ))}
             <View style={{ marginTop: 4 }}>
+              <Pressable onPress={onOpenPasswordChange} style={{ flexDirection: "row", alignItems: "center", gap: 14, marginBottom: 12 }}>
+                <View
+                  style={{
+                    width: 68,
+                    height: 68,
+                    backgroundColor: "#111827",
+                    borderRadius: 12,
+                    borderWidth: 1,
+                    borderColor: "#334155",
+                    justifyContent: "center",
+                    alignItems: "center",
+                  }}
+                >
+                  <Settings size={22} color="#fff" />
+                </View>
+                <Text style={{ color: "#f8fafc", fontSize: 34 / 2 }}>Password</Text>
+              </Pressable>
               <Pressable onPress={onDisconnect} style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
                 <View
                   style={{
@@ -6350,6 +6541,9 @@ function ConnectionView({
   manualHost,
   wsError,
   wsStatus,
+  password,
+  onPasswordChange,
+  hasStoredSession,
   isOffline,
   discoveredRovers,
   onRefresh,
@@ -6362,6 +6556,9 @@ function ConnectionView({
   manualHost: string;
   wsError: string;
   wsStatus: string;
+  password: string;
+  onPasswordChange: (value: string) => void;
+  hasStoredSession: boolean;
   isOffline: boolean;
   discoveredRovers: Array<{ id: string; name: string; host: string; port: number; version?: string; responseTime?: number }>;
   onRefresh: () => void;
@@ -6509,6 +6706,25 @@ function ConnectionView({
                 onChangeText={onManualHostChange}
                 placeholder="http://192.168.1.102:5001"
                 placeholderTextColor="#94a3b8"
+                autoCapitalize="none"
+                autoCorrect={false}
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#cbd5e1",
+                  borderRadius: 16,
+                  paddingHorizontal: 14,
+                  paddingVertical: 14,
+                  color: "#0f172a",
+                  backgroundColor: "#f8fafc",
+                }}
+              />
+
+              <TextInput
+                value={password}
+                onChangeText={onPasswordChange}
+                placeholder={hasStoredSession ? "Saved session token will be tried" : "Rover password"}
+                placeholderTextColor="#94a3b8"
+                secureTextEntry
                 autoCapitalize="none"
                 autoCorrect={false}
                 style={{
