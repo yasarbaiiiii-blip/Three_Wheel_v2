@@ -44,6 +44,27 @@ test("waypointsToPlanLines skips invalid coordinate pairs", () => {
   assert.equal(lines.length, 0);
 });
 
+test("waypointsToPlanLines compacts staged straight waypoint runs", () => {
+  const waypoints = [];
+  for (let i = 0; i <= 20; i++) waypoints.push([0, i * 0.1]);
+  for (let i = 1; i <= 20; i++) waypoints.push([i * 0.1, 2]);
+  for (let i = 1; i <= 20; i++) waypoints.push([2, 2 - i * 0.1]);
+  for (let i = 1; i <= 20; i++) waypoints.push([2 - i * 0.1, 0]);
+
+  const lines = waypointsToPlanLines(waypoints, waypoints.map(() => true));
+
+  assert.equal(lines.length, 4);
+  assert.deepEqual(
+    lines.map((line) => [line.from.x, line.from.y, line.to.x, line.to.y]),
+    [
+      [0, 0, 0, 2],
+      [0, 2, 2, 2],
+      [2, 2, 2, 0],
+      [2, 0, 0, 0],
+    ]
+  );
+});
+
 test("anchorToAlignedRefPoints exposes GPS anchor at local NED origin", () => {
   assert.deepEqual(
     anchorToAlignedRefPoints({ lat: 37.7749, lon: -122.4194, rotation_deg: 12 }),
