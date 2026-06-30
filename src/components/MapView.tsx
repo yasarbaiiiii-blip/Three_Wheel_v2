@@ -31,13 +31,11 @@ import { USE_NATIVE_MAPBOX } from "../config/featureFlags";
 export type { MapViewProps } from "./mapViewTypes";
 
 const MapViewNativeLazy = React.lazy(() => import("./MapViewNative"));
-const MapViewLeafletLazy = React.lazy(() => import("./MapViewLeaflet"));
 
 export function MapView(props: MapViewProps) {
-  const Impl = USE_NATIVE_MAPBOX ? MapViewNativeLazy : MapViewLeafletLazy;
   return (
     <Suspense fallback={null}>
-      <Impl {...props} />
+      <MapViewNativeLazy {...props} />
     </Suspense>
   );
 }
