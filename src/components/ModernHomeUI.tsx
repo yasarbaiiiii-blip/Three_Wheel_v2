@@ -6,6 +6,7 @@ import AnimatedReanimated, { useSharedValue, useAnimatedStyle, withSpring, runOn
 import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Zap, Hexagon, Circle, ShieldAlert, Check, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay } from "lucide-react-native";
 import { ManualJoystick } from "./ManualJoystick";
 import { pauseMission, nextMission, exportLog } from "../api/missionApi";
+import { MapView } from "./MapView";
 
 // Using 127.0.0.1:5001 as fallback if window location is unavailable
 const getApiBase = () => {
@@ -108,8 +109,11 @@ export default function ModernHomeUI(props) {
   const [showMissionControl, setShowMissionControl] = useState(true);
   const [navExpanded, setNavExpanded] = useState(false);
   const [isArmed, setIsArmed] = useState(systemHealth?.armed || false);
+  const [visualSelected, setVisualSelected] = useState(false);
 
-  const mode = systemHealth?.mode?.toUpperCase() || "MANUAL";
+  let mode = systemHealth?.mode?.toUpperCase() || "MANUAL";
+  if (mode === "AUTO") mode = "MISSION"; // Map legacy 'AUTO' to 'MISSION' just in case
+
   const batteryPct = telemetrySnapshot?.battery_pct ?? 0;
   const missionProgress = lines.length > 0 ? Math.min(100, Math.round(((telemetrySnapshot?.projection_segment_index || 0) / lines.length) * 100)) : 0;
 
@@ -170,10 +174,18 @@ export default function ModernHomeUI(props) {
 
       <View style={styles.topBarCenter}>
         <Pressable 
-          style={[styles.pillButton, mode === "AUTO" ? styles.pillActiveBrand : styles.pillActiveSecondary]}
-          onPress={() => onSetMode && onSetMode(mode === "AUTO" ? "MANUAL" : "AUTO")}
+          style={[styles.pillButton, mode === "MISSION" ? styles.pillActiveBrand : styles.pillActiveSecondary]}
+          onPress={() => {
+            const newMode = mode === "MISSION" ? "MANUAL" : "MISSION";
+            if (onSetMode) onSetMode(newMode);
+            fetch(`${getApiBase()}/api/set_mode`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ mode: newMode })
+            }).catch(console.error);
+          }}
         >
-          <Hexagon color="#fff" size={16} fill={mode === "AUTO" ? "#fff" : "transparent"} />
+          <Hexagon color="#fff" size={16} fill={mode === "MISSION" ? "#fff" : "transparent"} />
           <Text style={styles.pillText}>{mode}</Text>
         </Pressable>
 
@@ -411,7 +423,46 @@ export default function ModernHomeUI(props) {
 
   return (
     <GestureHandlerRootView style={styles.container}>
-      {props.children}
+      {/* Map Layer */}
+      <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1 }}>
+        <MapView
+          mode={visualAlignmentItem ? "templates" : "fields"}
+          placedItems={visualAlignmentItem ? [visualAlignmentItem] : []}
+          selectedItemIds={visualAlignmentItem && visualSelected ? ["visual-alignment-group"] : []}
+          multiTouchMode={visualAlignmentItem ? "rotate" : "both"}
+          onSelectionChange={(ids) => {
+            if (isVisualAlignmentMode) {
+              setVisualSelected(ids.includes("visual-alignment-group"));
+            }
+          }}
+          onUpdatePlacedItem={(id, updates) => {
+            if (!isVisualAlignmentMode || id !== "visual-alignment-group") return;
+            if (props.setVisualAlignmentItem) {
+              props.setVisualAlignmentItem((prev) => {
+                if (!prev) return prev;
+                return { ...prev, ...updates };
+              });
+            }
+          }}
+          telemetrySnapshot={telemetrySnapshot}
+          lines={
+            visualAlignmentItem
+              ? []
+              : autoOriginEnabled && mapSourceLines
+                ? mapSourceLines
+                : lines
+          }
+          alignedRefPoints={alignedRefPoints}
+          autoOriginReference={autoOriginReference}
+          mapGeometryFrame={mapGeometryFrame}
+          autoOriginEnabled={autoOriginEnabled}
+          stagedVerified={false}
+          visible={true}
+          recenterRoverTrigger={props.recenterRoverCount}
+          recenterPlanTrigger={props.recenterPlanCount}
+          onSelectPoint={props.onSelectPoint}
+        />
+      </View>
       
       {/* HUD Layer */}
       <View style={styles.hudLayer} pointerEvents="box-none">
