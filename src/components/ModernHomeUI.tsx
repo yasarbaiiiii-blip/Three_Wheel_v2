@@ -22,7 +22,7 @@ const getApiBase = () => {
 // Theme Constants
 const COLORS = {
   bgBase: "#09090b",
-  panelBg: "rgba(9, 9, 11, 0.75)",
+  panelBg: "#18181b",
   panelBorder: "rgba(255, 255, 255, 0.08)",
   textMain: "#f8fafc",
   textMuted: "#94a3b8",
@@ -110,8 +110,6 @@ export default function ModernHomeUI(props) {
   const [navExpanded, setNavExpanded] = useState(false);
   const [isArmed, setIsArmed] = useState(systemHealth?.armed || false);
   const [visualSelected, setVisualSelected] = useState(false);
-  const [modeModalOpen, setModeModalOpen] = useState(false);
-  const [modeInput, setModeInput] = useState("");
 
   let mode = systemHealth?.mode?.toUpperCase() || "MANUAL";
   if (mode === "AUTO" || mode === "MISSION") mode = "OFFBOARD"; // Map legacy 'AUTO'/'MISSION' to 'OFFBOARD'
@@ -169,17 +167,22 @@ export default function ModernHomeUI(props) {
   };
 
   const renderTopBar = () => (
-    <View style={styles.topBar}>
+    <View style={styles.topBar} pointerEvents="box-none">
       <Pressable style={styles.navToggle} onPress={() => setNavExpanded(!navExpanded)}>
         <Menu color="#fff" size={24} />
       </Pressable>
 
-      <View style={styles.topBarCenter}>
+      <View style={styles.topBarCenterWrapper} pointerEvents="box-none">
+        <View style={styles.topBarCenter}>
         <Pressable 
           style={[styles.pillButton, mode === "OFFBOARD" ? styles.pillActiveBrand : styles.pillActiveSecondary]}
           onPress={() => {
-            setModeInput(mode);
-            setModeModalOpen(true);
+            if (onSetMode) onSetMode("MANUAL");
+            fetch(`${getApiBase()}/api/set_mode`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ mode: "MANUAL" })
+            }).catch(console.error);
           }}
         >
           <Hexagon color="#fff" size={16} fill={mode === "OFFBOARD" ? "#fff" : "transparent"} />
@@ -218,87 +221,13 @@ export default function ModernHomeUI(props) {
           <MonitorPlay color="#fff" size={16} />
           <Text style={styles.pillText}>Telemetry</Text>
         </Pressable>
-      </View>
-
-      {/* Mode Select Modal */}
-      <Modal
-        visible={modeModalOpen}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setModeModalOpen(false)}
-      >
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.6)" }}>
-          <View style={{ width: 300, backgroundColor: "#1a1a2e", borderRadius: 20, padding: 24, borderWidth: 1, borderColor: "rgba(255,255,255,0.1)", gap: 16 }}>
-            <Text style={{ color: "#fff", fontSize: 18, fontWeight: "700", textAlign: "center" }}>Select Mode</Text>
-            <Text style={{ color: "#94a3b8", fontSize: 13, textAlign: "center" }}>Choose the rover control mode:</Text>
-
-            <Pressable
-              onPress={() => {
-                const selected = "MANUAL";
-                if (onSetMode) onSetMode(selected);
-                fetch(`${getApiBase()}/api/set_mode`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ mode: selected })
-                }).catch(console.error);
-                setModeModalOpen(false);
-              }}
-              style={{
-                height: 56,
-                borderRadius: 14,
-                alignItems: "center",
-                justifyContent: "center",
-                backgroundColor: mode === "MANUAL" ? "#3b82f6" : "rgba(255,255,255,0.1)",
-                borderWidth: mode === "MANUAL" ? 0 : 1,
-                borderColor: "rgba(255,255,255,0.15)",
-              }}
-            >
-              <Text style={{ color: "#fff", fontWeight: "700", fontSize: 16, letterSpacing: 0.5 }}>MANUAL</Text>
-            </Pressable>
-
-            <Pressable
-              onPress={() => {
-                const selected = "OFFBOARD";
-                if (onSetMode) onSetMode(selected);
-                fetch(`${getApiBase()}/api/set_mode`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ mode: selected })
-                }).catch(console.error);
-                setModeModalOpen(false);
-              }}
-              style={{
-                height: 56,
-                borderRadius: 14,
-                alignItems: "center",
-                justifyContent: "center",
-                backgroundColor: mode === "OFFBOARD" ? "#3b82f6" : "rgba(255,255,255,0.1)",
-                borderWidth: mode === "OFFBOARD" ? 0 : 1,
-                borderColor: "rgba(255,255,255,0.15)",
-              }}
-            >
-              <Text style={{ color: "#fff", fontWeight: "700", fontSize: 16, letterSpacing: 0.5 }}>OFFBOARD</Text>
-            </Pressable>
-
-            <Pressable
-              onPress={() => setModeModalOpen(false)}
-              style={{ height: 48, borderRadius: 12, alignItems: "center", justifyContent: "center" }}
-            >
-              <Text style={{ color: "#94a3b8", fontWeight: "600", fontSize: 14 }}>Cancel</Text>
-            </Pressable>
-          </View>
         </View>
-      </Modal>
-
-      <View style={styles.batteryIndicator}>
-        <Zap color={batteryPct > 20 ? COLORS.success : COLORS.danger} size={18} />
-        <Text style={styles.batteryText}>{batteryPct}%</Text>
       </View>
     </View>
   );
 
   const renderNavbar = () => (
-    <AnimatedReanimated.View style={[styles.navbar, { width: navExpanded ? 200 : 70 }]}>
+    <AnimatedReanimated.View style={[styles.navbar, { width: navExpanded ? 320 : 70 }]}>
       {[
         { id: "main", icon: Crosshair, label: "Main Screen" },
         { id: "fields", icon: LocateFixed, label: "Fields" },
@@ -329,7 +258,7 @@ export default function ModernHomeUI(props) {
   const renderTelemetrySection = () => {
     if (!showTelemetry) return null;
     return (
-      <View style={[styles.rightPanelBase, styles.telemetryPanel, !showMissionControl && { bottom: 20 }]}>
+      <View style={[styles.rightPanelBase, styles.telemetryPanel]}>
         <View style={styles.panelHeader}>
           <Text style={styles.panelTitle}>Telemetry Data</Text>
           <Pressable onPress={() => setShowTelemetry(false)}>
@@ -387,60 +316,59 @@ export default function ModernHomeUI(props) {
     );
   };
 
-  const renderMissionControl = () => {
-    if (!showMissionControl) return null;
+  const renderJoystickPanel = () => {
+    // Hidden if not MANUAL mode, or if mission is running
+    if (mode !== "MANUAL" || missionRunning) return null;
     
-    if (mode === "MANUAL" || mode === "OFFBOARD") {
-      return (
-        <View style={[styles.rightPanelBase, styles.missionPanel, !showTelemetry && { top: 90 }]}>
-          <View style={styles.panelHeader}>
-            <Text style={styles.panelTitle}>Manual Control</Text>
-            {!missionRunning && (
-              <Pressable onPress={() => setShowMissionControl(false)}>
-                <X color={COLORS.textMuted} size={18} />
-              </Pressable>
-            )}
-          </View>
-          <View style={styles.joystickContainer}>
-            <ManualJoystick 
-              onChange={(vals) => {
-                if (virtualJoystick) virtualJoystick.setIntent(vals.forward, vals.yaw);
-              }}
-              onRelease={() => {
-                if (virtualJoystick) virtualJoystick.setIntent(0, 0);
-              }}
-              size={180}
-              knobSize={65}
-              disabled={!isArmed}
-            />
-          </View>
-          <View style={styles.manualActions}>
-            <View style={{ flexDirection: "row", gap: 10, marginBottom: 12 }}>
-              <Pressable style={styles.actionBtnSecondary} onPress={handleAcquire}>
-                <Text style={styles.actionBtnTextSec}>Acquire</Text>
-              </Pressable>
-              <Pressable style={styles.actionBtnSecondary} onPress={handleRelease}>
-                <Text style={styles.actionBtnTextSec}>Release</Text>
-              </Pressable>
-            </View>
-            <Pressable 
-              style={[styles.armButton, isArmed ? styles.armActive : styles.armInactive]}
-              onPress={() => {
-                onArmVehicle(!isArmed);
-                setIsArmed(!isArmed);
-              }}
-            >
-              <ShieldAlert color="#fff" size={20} />
-              <Text style={styles.armBtnText}>{isArmed ? "DISARM VEHICLE" : "ARM VEHICLE"}</Text>
+    return (
+      <View style={[styles.rightPanelBase, styles.joystickPanel]}>
+        <View style={styles.panelHeader}>
+          <Text style={styles.panelTitle}>Manual Control</Text>
+          {/* No X button needed since it sits underneath Mission Control or is toggled by Mode */}
+        </View>
+        <View style={styles.joystickContainer}>
+          <ManualJoystick 
+            onChange={(vals) => {
+              if (virtualJoystick) virtualJoystick.setIntent(vals.forward, vals.yaw);
+            }}
+            onRelease={() => {
+              if (virtualJoystick) virtualJoystick.setIntent(0, 0);
+            }}
+            size={180}
+            knobSize={65}
+            disabled={!isArmed}
+          />
+        </View>
+        <View style={styles.manualActions}>
+          <View style={{ flexDirection: "row", gap: 10, marginBottom: 12 }}>
+            <Pressable style={[styles.actionBtnSolid, { backgroundColor: COLORS.accentBrand }]} onPress={handleAcquire}>
+              <Text style={[styles.actionBtnTextSec, { color: "#fff" }]}>ACQUIRE</Text>
+            </Pressable>
+            <Pressable style={[styles.actionBtnSolid, { backgroundColor: COLORS.danger }]} onPress={handleRelease}>
+              <Text style={[styles.actionBtnTextSec, { color: "#fff" }]}>RELEASE</Text>
             </Pressable>
           </View>
+          <Pressable 
+            style={[styles.armButton, isArmed ? styles.armActive : styles.armInactive]}
+            onPress={() => {
+              onArmVehicle(!isArmed);
+              setIsArmed(!isArmed);
+            }}
+          >
+            <ShieldAlert color="#fff" size={20} />
+            <Text style={styles.armBtnText}>{isArmed ? "DISARM VEHICLE" : "ARM VEHICLE"}</Text>
+          </Pressable>
         </View>
-      );
-    }
+      </View>
+    );
+  };
+
+  const renderMissionControl = () => {
+    if (!showMissionControl) return null;
 
     // Auto Mode Mission Control
     return (
-      <View style={[styles.rightPanelBase, styles.missionPanel, !showTelemetry && { top: 90 }]}>
+      <View style={[styles.rightPanelBase, styles.missionPanel]}>
         <View style={styles.panelHeader}>
           <Text style={styles.panelTitle}>Mission Progress</Text>
           {!missionRunning && (
@@ -536,6 +464,7 @@ export default function ModernHomeUI(props) {
         {renderTopBar()}
         {renderNavbar()}
         {renderTelemetrySection()}
+        {renderJoystickPanel()}
         {renderMissionControl()}
         <FloatingEStop visible={missionRunning || isArmed} onTrigger={handleEStop} />
       </View>
@@ -557,6 +486,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     zIndex: 100,
+  },
+  topBarCenterWrapper: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
   },
   topBarCenter: {
     flexDirection: "row",
@@ -593,20 +531,6 @@ const styles = StyleSheet.create({
   pillInactive: { backgroundColor: "transparent" },
   pillText: { color: "#fff", fontWeight: "600", fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5 },
   divider: { width: 1, height: 20, backgroundColor: "rgba(255, 255, 255, 0.2)", marginHorizontal: 4 },
-  
-  batteryIndicator: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: COLORS.panelBg,
-    paddingHorizontal: 16,
-    height: 48,
-    borderRadius: 24,
-    gap: 8,
-    borderWidth: 1,
-    borderColor: COLORS.panelBorder,
-    ...SHADOWS.panel,
-  },
-  batteryText: { color: "#fff", fontWeight: "700", fontSize: 15 },
 
   navbar: {
     position: "absolute",
@@ -619,15 +543,17 @@ const styles = StyleSheet.create({
     borderColor: COLORS.panelBorder,
     paddingVertical: 20,
     alignItems: "center",
+    justifyContent: "center",
     gap: 20,
     ...SHADOWS.panel,
     overflow: "hidden",
+    zIndex: 90,
   },
   navItem: {
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "center",
     width: "100%",
-    paddingHorizontal: 22,
     paddingVertical: 12,
     gap: 16,
   },
@@ -650,8 +576,9 @@ const styles = StyleSheet.create({
     ...SHADOWS.panel,
     overflow: "hidden",
   },
-  telemetryPanel: { top: 90, height: "55%" },
-  missionPanel: { bottom: 20, height: "35%" },
+  telemetryPanel: { top: 20, height: "58%" },
+  missionPanel: { bottom: 20, height: "38%" },
+  joystickPanel: { bottom: 20, height: "38%" },
   
   panelHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 16 },
   panelTitle: { color: "#fff", fontSize: 16, fontWeight: "700", letterSpacing: 0.5 },
@@ -675,7 +602,8 @@ const styles = StyleSheet.create({
   joystickContainer: { flex: 1, alignItems: "center", justifyContent: "center", minHeight: 180 },
   manualActions: { marginTop: 10 },
   actionBtnSecondary: { flex: 1, backgroundColor: "rgba(255, 255, 255, 0.1)", height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center" },
-  actionBtnTextSec: { color: "#fff", fontWeight: "600", fontSize: 13 },
+  actionBtnSolid: { flex: 1, height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  actionBtnTextSec: { color: "#fff", fontWeight: "800", fontSize: 13, letterSpacing: 1 },
   armButton: { flexDirection: "row", height: 50, borderRadius: 16, alignItems: "center", justifyContent: "center", gap: 10 },
   armActive: { backgroundColor: COLORS.danger },
   armInactive: { backgroundColor: "rgba(255, 255, 255, 0.1)" },
