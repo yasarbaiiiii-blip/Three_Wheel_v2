@@ -3212,6 +3212,19 @@ export default function App() {
                   setMapViewEnabled={setMapViewEnabled}
                   isFloatingEStopEnabled={isFloatingEStopEnabled}
                   setIsFloatingEStopEnabled={setIsFloatingEStopEnabled}
+                  rtkCaster={rtkCaster}
+                  setRtkCaster={setRtkCaster}
+                  rtkPort={rtkPort}
+                  setRtkPort={setRtkPort}
+                  rtkMountPoint={rtkMountPoint}
+                  setRtkMountPoint={setRtkMountPoint}
+                  rtkUsername={rtkUsername}
+                  setRtkUsername={setRtkUsername}
+                  rtkPassword={rtkPassword}
+                  setRtkPassword={setRtkPassword}
+                  rtkRunning={rtkRunning}
+                  rtkHealthy={rtkHealthy}
+                  rtkMode={rtkMode}
                 />
               )}
 
@@ -3811,9 +3824,50 @@ function HomeView({
     telemetrySnapshot?.measured_speed_m_s ??
     telemetrySnapshot?.speed_m_s;
 
+  const [recenterRoverCount, setRecenterRoverCount] = useState(0);
+  const [recenterPlanCount, setRecenterPlanCount] = useState(0);
+
   return (
-    <ModernHomeUI 
-      {...arguments[0]} 
+    <ModernHomeUI
+      {...arguments[0]}
+      onFocusRover={() => setRecenterRoverCount((c) => c + 1)}
+      onFocusPlan={() => setRecenterPlanCount((c) => c + 1)}
+      recenterRoverCount={recenterRoverCount}
+      recenterPlanCount={recenterPlanCount}
+      renderPlanPreview={() => (
+        <PlanPreview
+          lines={lines}
+          mapSourceLines={mapSourceLines}
+          autoOriginReference={autoOriginReference}
+          mapGeometryFrame={mapGeometryFrame}
+          autoOriginEnabled={autoOriginEnabled}
+          stagedVerified={stagedWorkflow.staged === "verified"}
+          visibility={layerVisibility}
+          selectedLineId={selectedLineId}
+          onSelectLine={onSelectLine}
+          originShiftKey={originShiftKey}
+          roverPosN={previewRoverPoint?.north ?? null}
+          roverPosE={previewRoverPoint?.east ?? null}
+          roverHeadingDeg={telemetrySnapshot?.heading_ned_deg ?? null}
+          missionRunning={missionRunning}
+          alignedRefPoints={alignedRefPoints}
+          telemetryPosN={telemetrySnapshot?.pos_n ?? null}
+          telemetryPosE={telemetrySnapshot?.pos_e ?? null}
+          telemetryPosLat={telemetrySnapshot?.lat ?? null}
+          telemetryPosLon={telemetrySnapshot?.lon ?? null}
+          telemetryPosAlt={telemetrySnapshot?.alt ?? null}
+          mapViewEnabled={false}
+          showRefPointLabels={showRefPointLabels}
+          activeRefPointLabelIndex={activeRefPointLabelIndex}
+          onToggleRefPointLabel={setActiveRefPointLabelIndex}
+          isVisualAlignmentMode={isVisualAlignmentMode}
+          visualAlignmentItem={visualAlignmentItem}
+          setVisualAlignmentItem={setVisualAlignmentItem}
+          recenterRoverTrigger={recenterRoverCount}
+          recenterPlanTrigger={recenterPlanCount}
+          hideRefocusControls
+        />
+      )}
     />
   );
 }
@@ -4645,6 +4699,17 @@ function SectionScreen(props: {
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>>;
   isFloatingEStopEnabled: boolean;
   setIsFloatingEStopEnabled: React.Dispatch<React.SetStateAction<boolean>>;
+  rtkCaster: string;
+  setRtkCaster: React.Dispatch<React.SetStateAction<string>>;
+  rtkPort: string;
+  setRtkPort: React.Dispatch<React.SetStateAction<string>>;
+  rtkMountPoint: string;
+  setRtkMountPoint: React.Dispatch<React.SetStateAction<string>>;
+  rtkUsername: string;
+  setRtkUsername: React.Dispatch<React.SetStateAction<string>>;
+  rtkPassword: string;
+  setRtkPassword: React.Dispatch<React.SetStateAction<string>>;
+  rtkRunning: boolean;
 }) {
   const { title, page, onBack, mapViewEnabled, setMapViewEnabled } = props;
 
@@ -7529,6 +7594,9 @@ function PlanPreview({
   visualAlignmentItem,
   setVisualAlignmentItem,
   mapMode = "fields",
+  recenterRoverTrigger,
+  recenterPlanTrigger,
+  hideRefocusControls = false,
 }: {
   lines: PlanLine[];
   mapSourceLines?: PlanLine[];
@@ -7560,6 +7628,9 @@ function PlanPreview({
   visualAlignmentItem?: PlacedItem | null;
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
   mapMode?: "fields" | "templates";
+  recenterRoverTrigger?: number;
+  recenterPlanTrigger?: number;
+  hideRefocusControls?: boolean;
 }) {
   const [visualSelected, setVisualSelected] = useState(true);
 
@@ -8050,6 +8121,21 @@ function PlanPreview({
     }
   };
 
+  const lastExternalRoverTriggerRef = useRef(0);
+  const lastExternalPlanTriggerRef = useRef(0);
+
+  useEffect(() => {
+    if (!recenterRoverTrigger || recenterRoverTrigger <= lastExternalRoverTriggerRef.current) return;
+    lastExternalRoverTriggerRef.current = recenterRoverTrigger;
+    if (!mapViewEnabled) focusRover();
+  }, [recenterRoverTrigger, mapViewEnabled, focusRover]);
+
+  useEffect(() => {
+    if (!recenterPlanTrigger || recenterPlanTrigger <= lastExternalPlanTriggerRef.current) return;
+    lastExternalPlanTriggerRef.current = recenterPlanTrigger;
+    if (!mapViewEnabled) handleFocusPlan();
+  }, [recenterPlanTrigger, mapViewEnabled, handleFocusPlan]);
+
   const roverDisplayPose = displayRoverPose ?? {
     north: roverN,
     east: roverE,
@@ -8464,123 +8550,61 @@ function PlanPreview({
         )}
       </View>
 
-      {/* ── Single Heading Compass (always shown) ── */}
-      <View
-        style={{
-          position: "absolute",
-          top: 14,
-          right: 14,
-          width: 62,
-          height: 62,
-          zIndex: 40,
-          elevation: 40,
-          backgroundColor: "transparent",
-        }}
-      >
-        <Svg width={62} height={62} viewBox="0 0 62 62">
-          {/* Outer ring */}
-          <Circle cx={31} cy={31} r={28} fill="rgba(15,23,42,0.88)" stroke="#38bdf8" strokeWidth={1.5} />
-          {/* Cardinal labels — fixed */}
-          <SvgText x={31} y={13} fontSize={8} fill="#ef4444" fontWeight="900" textAnchor="middle">N</SvgText>
-          <SvgText x={31} y={55} fontSize={7} fill="#94a3b8" fontWeight="700" textAnchor="middle">S</SvgText>
-          <SvgText x={54} y={34} fontSize={7} fill="#94a3b8" fontWeight="700" textAnchor="middle">E</SvgText>
-          <SvgText x={8} y={34} fontSize={7} fill="#94a3b8" fontWeight="700" textAnchor="middle">W</SvgText>
-          {/* Tick marks */}
-          {[0, 45, 90, 135, 180, 225, 270, 315].map((deg) => {
-            const r = (deg % 90 === 0) ? 3.5 : 2;
-            const rad = (deg * Math.PI) / 180;
-            const inner = 22;
-            const outer = inner + r;
-            return (
-              <Line
-                key={deg}
-                x1={31 + inner * Math.sin(rad)}
-                y1={31 - inner * Math.cos(rad)}
-                x2={31 + outer * Math.sin(rad)}
-                y2={31 - outer * Math.cos(rad)}
-                stroke="#475569"
-                strokeWidth={deg % 90 === 0 ? 1.5 : 1}
-              />
-            );
-          })}
-          {/* Rotating needle — points to rover heading (defaults to 0 / static North if no telemetry) */}
-          <G transform={`rotate(${hasRover ? roverDisplayPose.headingDeg : 0} 31 31)`}>
-            {/* North pointer (direction rover nose points) */}
-            <Polygon points="31,17 34.5,31 27.5,31" fill="#38bdf8" />
-            {/* South pointer */}
-            <Polygon points="31,45 34.5,31 27.5,31" fill="#475569" />
-            {/* Center dot */}
-            <Circle cx={31} cy={31} r={3} fill="#0f172a" stroke="#fff" strokeWidth={1.2} />
-          </G>
-        </Svg>
-        {/* Heading label below compass — only shown when telemetry is active */}
-        {hasRover && (
-          <View style={{ alignItems: "center", marginTop: 3 }}>
-            <Text style={{ color: "#0f172a", fontSize: 9.5, fontWeight: "800", backgroundColor: "rgba(255,255,255,0.85)", paddingHorizontal: 5, paddingVertical: 1, borderRadius: 6 }}>
-              {roverDisplayPose.headingDeg.toFixed(1)}°
-            </Text>
-          </View>
-        )}
-      </View>
-
-      {/* ── Map Refocus Controls ── */}
-      <View
-        style={{
-          position: "absolute",
-          bottom: 14,
-          right: 14,
-          flexDirection: "column",
-          gap: 8,
-          zIndex: 40,
-          elevation: 40,
-        }}
-      >
-        {/* Focus Plan Button */}
-        <Pressable
-          onPress={handleFocusPlan}
-          style={({ pressed }) => ({
-            width: 48,
-            height: 48,
-            borderRadius: 24,
-            backgroundColor: pressed ? "rgba(15,23,42,0.95)" : "rgba(15,23,42,0.85)",
-            borderWidth: 1.2,
-            borderColor: "#10b981",
-            alignItems: "center",
-            justifyContent: "center",
-            shadowColor: "#000",
-            shadowOffset: { width: 0, height: 2 },
-            shadowOpacity: 0.25,
-            shadowRadius: 3.84,
-            elevation: 5,
-          })}
+      {!hideRefocusControls ? (
+        <View
+          style={{
+            position: "absolute",
+            bottom: 14,
+            right: 14,
+            flexDirection: "column",
+            gap: 8,
+            zIndex: 40,
+            elevation: 40,
+          }}
         >
-          <MapIcon size={24} color="#10b981" />
-        </Pressable>
+          <Pressable
+            onPress={handleFocusPlan}
+            style={({ pressed }) => ({
+              width: 48,
+              height: 48,
+              borderRadius: 24,
+              backgroundColor: pressed ? "rgba(15,23,42,0.95)" : "rgba(15,23,42,0.85)",
+              borderWidth: 1.2,
+              borderColor: "#10b981",
+              alignItems: "center",
+              justifyContent: "center",
+              shadowColor: "#000",
+              shadowOffset: { width: 0, height: 2 },
+              shadowOpacity: 0.25,
+              shadowRadius: 3.84,
+              elevation: 5,
+            })}
+          >
+            <MapIcon size={24} color="#10b981" />
+          </Pressable>
 
-        {/* Focus Rover Button */}
-        <Pressable
-          onPress={handleFocusRover}
-          style={({ pressed }) => ({
-            width: 48,
-            height: 48,
-            borderRadius: 24,
-            backgroundColor: pressed ? "rgba(15,23,42,0.95)" : "rgba(15,23,42,0.85)",
-            borderWidth: 1.2,
-            borderColor: "#0ea5e9",
-            alignItems: "center",
-            justifyContent: "center",
-            shadowColor: "#000",
-            shadowOffset: { width: 0, height: 2 },
-            shadowOpacity: 0.25,
-            shadowRadius: 3.84,
-            elevation: 5,
-          })}
-        >
-          <Tractor size={26} color="#0ea5e9" />
-        </Pressable>
-
-
-      </View>
+          <Pressable
+            onPress={handleFocusRover}
+            style={({ pressed }) => ({
+              width: 48,
+              height: 48,
+              borderRadius: 24,
+              backgroundColor: pressed ? "rgba(15,23,42,0.95)" : "rgba(15,23,42,0.85)",
+              borderWidth: 1.2,
+              borderColor: "#0ea5e9",
+              alignItems: "center",
+              justifyContent: "center",
+              shadowColor: "#000",
+              shadowOffset: { width: 0, height: 2 },
+              shadowOpacity: 0.25,
+              shadowRadius: 3.84,
+              elevation: 5,
+            })}
+          >
+            <Tractor size={26} color="#0ea5e9" />
+          </Pressable>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -9272,30 +9296,30 @@ function PositioningPage({
   );
 }
 
-function SettingsPage({
-  toggleA,
-  toggleB,
-  toggleC,
-  delayA,
-  setToggleA,
-  setToggleB,
-  setToggleC,
-  setDelayA,
-}: {
+function SettingsPage(props: {
   toggleA: boolean;
   toggleB: boolean;
   toggleC: boolean;
-  delayA: number;
   setToggleA: (v: boolean) => void;
   setToggleB: (v: boolean) => void;
   setToggleC: (v: boolean) => void;
-  setDelayA: (v: number) => void;
+  rtkCaster?: string;
+  setRtkCaster?: React.Dispatch<React.SetStateAction<string>>;
+  rtkPort?: string;
+  setRtkPort?: React.Dispatch<React.SetStateAction<string>>;
+  rtkMountPoint?: string;
+  setRtkMountPoint?: React.Dispatch<React.SetStateAction<string>>;
+  rtkUsername?: string;
+  setRtkUsername?: React.Dispatch<React.SetStateAction<string>>;
+  rtkPassword?: string;
+  setRtkPassword?: React.Dispatch<React.SetStateAction<string>>;
+  rtkRunning?: boolean;
+  rtkHealthy?: boolean;
+  rtkMode?: string;
+  apiBaseUrl?: string;
+  selectedPathName?: string | null;
 }) {
-  return (
-    <ModernSettingsPage 
-      {...arguments[0]} 
-    />
-  );
+  return <ModernSettingsPage {...props} />;
 }
 
 function HowToPage() {

@@ -1213,8 +1213,8 @@ export function MapViewNative(props: MapViewProps) {
         onPress={handleMapPress as (f: GeoJSON.Feature) => void}
         scaleBarEnabled={false}
         logoEnabled={false}
-        attributionEnabled
-        compassEnabled
+        attributionEnabled={false}
+        compassEnabled={false}
         // During an active gesture, suppress map pan/zoom to avoid fighting the
         // editing gestures. Also respect host-controlled locks.
         scrollEnabled={!lockPanDrag && !isGestureEditing}

@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo } from "react";
-import { View } from "react-native";
+import { View, StyleSheet } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   runOnJS,
@@ -7,7 +7,6 @@ import Animated, {
   useSharedValue,
   withSpring,
 } from "react-native-reanimated";
-import { Navigation } from "lucide-react-native";
 
 export type JoystickValues = {
   forward: number;
@@ -22,19 +21,16 @@ type ManualJoystickProps = {
   onRelease?: () => void;
 };
 
+const ACCENT = "#f4c10c";
+const SPRING_CONFIG = { damping: 26, stiffness: 300, mass: 0.35 };
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-const SPRING_CONFIG = {
-  damping: 22,
-  stiffness: 320,
-  mass: 0.35,
-};
-
 export function ManualJoystick({
-  size = 180,
-  knobSize = 65,
+  size = 168,
+  knobSize = 52,
   disabled = false,
   onChange,
   onRelease,
@@ -48,8 +44,6 @@ export function ManualJoystick({
       const forward = clamp(-y / radius, -1, 1);
       let yaw = clamp(x / radius, -1, 1);
 
-      // Suppress yaw when drag is within 10° of vertical to prevent
-      // accidental steering from small horizontal finger drift.
       const STEER_LOCK_RAD = (10 * Math.PI) / 180;
       if (Math.atan2(Math.abs(x), Math.abs(y)) < STEER_LOCK_RAD) {
         yaw = 0;
@@ -101,87 +95,104 @@ export function ManualJoystick({
   const knobBaseLeft = size / 2 - knobSize / 2;
   const knobBaseTop = size / 2 - knobSize / 2;
 
-  // Modern UI Colors
-  const baseRingColor = disabled ? "rgba(255,255,255,0.05)" : "rgba(59, 130, 246, 0.15)";
-  const innerRingColor = disabled ? "rgba(255,255,255,0.02)" : "rgba(59, 130, 246, 0.08)";
-  const knobColor = disabled ? "#475569" : "#3b82f6";
-
   return (
-    <View
-      style={{
-        width: size,
-        height: size,
-        borderRadius: size / 2,
-        backgroundColor: "rgba(9, 9, 11, 0.8)",
-        borderWidth: 2,
-        borderColor: disabled ? "rgba(255,255,255,0.1)" : "rgba(59, 130, 246, 0.4)",
-        alignItems: "center",
-        justifyContent: "center",
-        opacity: disabled ? 0.6 : 1,
-        shadowColor: "#000",
-        shadowOpacity: 0.5,
-        shadowRadius: 15,
-        shadowOffset: { width: 0, height: 10 },
-        elevation: 8,
-      }}
-    >
-      {/* Outer Glow / Guide Ring */}
+    <View style={[styles.wrapper, { width: size, height: size, opacity: disabled ? 0.5 : 1 }]}>
       <View
-        style={{
-          position: "absolute",
-          width: size * 0.85,
-          height: size * 0.85,
-          borderRadius: (size * 0.85) / 2,
-          backgroundColor: baseRingColor,
-        }}
-      />
-      {/* Inner Target Ring */}
-      <View
-        style={{
-          position: "absolute",
-          width: size * 0.45,
-          height: size * 0.45,
-          borderRadius: (size * 0.45) / 2,
-          borderWidth: 1,
-          borderColor: disabled ? "rgba(255,255,255,0.1)" : "rgba(59, 130, 246, 0.3)",
-          backgroundColor: innerRingColor,
-        }}
-      />
-
-      {/* Axis markers */}
-      <View style={{ position: "absolute", width: 2, height: size * 0.9, backgroundColor: "rgba(255,255,255,0.05)" }} />
-      <View style={{ position: "absolute", height: 2, width: size * 0.9, backgroundColor: "rgba(255,255,255,0.05)" }} />
-
-      <GestureDetector gesture={panGesture}>
-        <Animated.View
+        style={[
+          styles.base,
+          {
+            width: size,
+            height: size,
+            borderRadius: size / 2,
+          },
+        ]}
+      >
+        <View
           style={[
+            styles.travelRing,
             {
-              position: "absolute",
-              left: knobBaseLeft,
-              top: knobBaseTop,
-              width: knobSize,
-              height: knobSize,
-              borderRadius: knobSize / 2,
-              backgroundColor: knobColor,
-              borderWidth: 4,
-              borderColor: "#ffffff",
-              shadowColor: "#000",
-              shadowOpacity: 0.4,
-              shadowRadius: 8,
-              shadowOffset: { width: 0, height: 4 },
-              elevation: 8,
-              alignItems: "center",
-              justifyContent: "center",
+              width: size * 0.72,
+              height: size * 0.72,
+              borderRadius: (size * 0.72) / 2,
+              borderColor: disabled ? "rgba(255,255,255,0.08)" : "rgba(244, 193, 12, 0.22)",
             },
-            knobAnimatedStyle,
           ]}
-        >
-          {/* Knob Icon */}
-          <View style={{ transform: [{ rotate: "45deg" }] }}>
-            <Navigation color="#ffffff" size={24} fill="#ffffff" />
-          </View>
-        </Animated.View>
-      </GestureDetector>
+        />
+
+        <View style={[styles.axisV, { height: size * 0.55 }]} />
+        <View style={[styles.axisH, { width: size * 0.55 }]} />
+
+        <GestureDetector gesture={panGesture}>
+          <Animated.View
+            style={[
+              styles.knob,
+              {
+                left: knobBaseLeft,
+                top: knobBaseTop,
+                width: knobSize,
+                height: knobSize,
+                borderRadius: knobSize / 2,
+                backgroundColor: disabled ? "#52525b" : ACCENT,
+              },
+              knobAnimatedStyle,
+            ]}
+          >
+            <View
+              style={[
+                styles.knobInner,
+                {
+                  width: knobSize * 0.36,
+                  height: knobSize * 0.36,
+                  borderRadius: knobSize * 0.18,
+                },
+              ]}
+            />
+          </Animated.View>
+        </GestureDetector>
+      </View>
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  wrapper: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  base: {
+    backgroundColor: "rgba(255, 255, 255, 0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.08)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  travelRing: {
+    position: "absolute",
+    borderWidth: 1,
+  },
+  axisV: {
+    position: "absolute",
+    width: 1,
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
+  },
+  axisH: {
+    position: "absolute",
+    height: 1,
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
+  },
+  knob: {
+    position: "absolute",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: "rgba(255, 255, 255, 0.9)",
+    shadowColor: "#000",
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
+  },
+  knobInner: {
+    backgroundColor: "rgba(255, 255, 255, 0.35)",
+  },
+});
