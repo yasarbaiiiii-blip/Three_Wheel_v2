@@ -1,6 +1,6 @@
 // @ts-nocheck
 import React, { useState, useEffect } from "react";
-import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform } from "react-native";
+import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform, Modal, TextInput } from "react-native";
 import { GestureHandlerRootView, GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { useSharedValue, useAnimatedStyle, withSpring, runOnJS } from "react-native-reanimated";
 import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Zap, Hexagon, Circle, ShieldAlert, Check, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay } from "lucide-react-native";
@@ -110,9 +110,11 @@ export default function ModernHomeUI(props) {
   const [navExpanded, setNavExpanded] = useState(false);
   const [isArmed, setIsArmed] = useState(systemHealth?.armed || false);
   const [visualSelected, setVisualSelected] = useState(false);
+  const [modeModalOpen, setModeModalOpen] = useState(false);
+  const [modeInput, setModeInput] = useState("");
 
   let mode = systemHealth?.mode?.toUpperCase() || "MANUAL";
-  if (mode === "AUTO") mode = "MISSION"; // Map legacy 'AUTO' to 'MISSION' just in case
+  if (mode === "AUTO" || mode === "MISSION") mode = "OFFBOARD"; // Map legacy 'AUTO'/'MISSION' to 'OFFBOARD'
 
   const batteryPct = telemetrySnapshot?.battery_pct ?? 0;
   const missionProgress = lines.length > 0 ? Math.min(100, Math.round(((telemetrySnapshot?.projection_segment_index || 0) / lines.length) * 100)) : 0;
@@ -174,18 +176,13 @@ export default function ModernHomeUI(props) {
 
       <View style={styles.topBarCenter}>
         <Pressable 
-          style={[styles.pillButton, mode === "MISSION" ? styles.pillActiveBrand : styles.pillActiveSecondary]}
+          style={[styles.pillButton, mode === "OFFBOARD" ? styles.pillActiveBrand : styles.pillActiveSecondary]}
           onPress={() => {
-            const newMode = mode === "MISSION" ? "MANUAL" : "MISSION";
-            if (onSetMode) onSetMode(newMode);
-            fetch(`${getApiBase()}/api/set_mode`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ mode: newMode })
-            }).catch(console.error);
+            setModeInput(mode);
+            setModeModalOpen(true);
           }}
         >
-          <Hexagon color="#fff" size={16} fill={mode === "MISSION" ? "#fff" : "transparent"} />
+          <Hexagon color="#fff" size={16} fill={mode === "OFFBOARD" ? "#fff" : "transparent"} />
           <Text style={styles.pillText}>{mode}</Text>
         </Pressable>
 
@@ -222,6 +219,76 @@ export default function ModernHomeUI(props) {
           <Text style={styles.pillText}>Telemetry</Text>
         </Pressable>
       </View>
+
+      {/* Mode Select Modal */}
+      <Modal
+        visible={modeModalOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setModeModalOpen(false)}
+      >
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.6)" }}>
+          <View style={{ width: 300, backgroundColor: "#1a1a2e", borderRadius: 20, padding: 24, borderWidth: 1, borderColor: "rgba(255,255,255,0.1)", gap: 16 }}>
+            <Text style={{ color: "#fff", fontSize: 18, fontWeight: "700", textAlign: "center" }}>Select Mode</Text>
+            <Text style={{ color: "#94a3b8", fontSize: 13, textAlign: "center" }}>Choose the rover control mode:</Text>
+
+            <Pressable
+              onPress={() => {
+                const selected = "MANUAL";
+                if (onSetMode) onSetMode(selected);
+                fetch(`${getApiBase()}/api/set_mode`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ mode: selected })
+                }).catch(console.error);
+                setModeModalOpen(false);
+              }}
+              style={{
+                height: 56,
+                borderRadius: 14,
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: mode === "MANUAL" ? "#3b82f6" : "rgba(255,255,255,0.1)",
+                borderWidth: mode === "MANUAL" ? 0 : 1,
+                borderColor: "rgba(255,255,255,0.15)",
+              }}
+            >
+              <Text style={{ color: "#fff", fontWeight: "700", fontSize: 16, letterSpacing: 0.5 }}>MANUAL</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => {
+                const selected = "OFFBOARD";
+                if (onSetMode) onSetMode(selected);
+                fetch(`${getApiBase()}/api/set_mode`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ mode: selected })
+                }).catch(console.error);
+                setModeModalOpen(false);
+              }}
+              style={{
+                height: 56,
+                borderRadius: 14,
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: mode === "OFFBOARD" ? "#3b82f6" : "rgba(255,255,255,0.1)",
+                borderWidth: mode === "OFFBOARD" ? 0 : 1,
+                borderColor: "rgba(255,255,255,0.15)",
+              }}
+            >
+              <Text style={{ color: "#fff", fontWeight: "700", fontSize: 16, letterSpacing: 0.5 }}>OFFBOARD</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => setModeModalOpen(false)}
+              style={{ height: 48, borderRadius: 12, alignItems: "center", justifyContent: "center" }}
+            >
+              <Text style={{ color: "#94a3b8", fontWeight: "600", fontSize: 14 }}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
 
       <View style={styles.batteryIndicator}>
         <Zap color={batteryPct > 20 ? COLORS.success : COLORS.danger} size={18} />
@@ -323,7 +390,7 @@ export default function ModernHomeUI(props) {
   const renderMissionControl = () => {
     if (!showMissionControl) return null;
     
-    if (mode === "MANUAL") {
+    if (mode === "MANUAL" || mode === "OFFBOARD") {
       return (
         <View style={[styles.rightPanelBase, styles.missionPanel, !showTelemetry && { top: 90 }]}>
           <View style={styles.panelHeader}>
