@@ -74,6 +74,7 @@ import {
 import { BoundaryEditor, PlacedItem } from "./src/components/BoundaryEditor";
 import { DeadmanButton } from "./src/components/DeadmanButton";
 import { ManualJoystick } from "./src/components/ManualJoystick";
+import { useImmersiveMode } from "./src/hooks/useImmersiveMode";
 import { useVirtualJoystick } from "./src/hooks/useVirtualJoystick";
 import { readImportedPlanFile, normalizePlanLines } from "./src/utils/planImport";
 import type { ImportedPlan, PlanLine } from "./src/types/plan";
@@ -685,6 +686,8 @@ export default function App() {
   if (SMOKE_TEST_MAPBOX) {
     return <MapboxHelloMap center={SMOKE_TEST_CENTER} zoomLevel={16} />;
   }
+
+  useImmersiveMode();
 
   const [page, setPage] = useState<Page>("connection");
   const [menuOpen, setMenuOpen] = useState(true);
