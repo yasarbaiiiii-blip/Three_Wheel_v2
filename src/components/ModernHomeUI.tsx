@@ -174,6 +174,68 @@ const QuickChip = ({ icon: Icon, label, value, tone = COLORS.textMain }) => (
   </View>
 );
 
+const normalizeVehicleMode = (raw) => {
+  const upper = (raw || "MANUAL").toUpperCase();
+  if (upper === "AUTO" || upper === "MISSION") return "OFFBOARD";
+  return upper;
+};
+
+const VehicleModePill = ({ mode, onPress }) => {
+  const isManual = mode === "MANUAL";
+  const isOffboard = mode === "OFFBOARD";
+  const isOther = !isManual && !isOffboard;
+  const Icon = isManual ? Gamepad2 : isOffboard ? Hexagon : Zap;
+
+  const pillStyle = isOffboard
+    ? styles.pillActiveBrand
+    : isOther
+      ? styles.pillActiveWarn
+      : styles.pillManualIdle;
+
+  const iconColor = isOffboard
+    ? COLORS.accentText
+    : isOther
+      ? COLORS.warning
+      : COLORS.textMuted;
+
+  const textStyle = isOffboard
+    ? styles.pillTextActive
+    : isOther
+      ? styles.pillTextWarn
+      : styles.pillTextIdle;
+
+  return (
+    <Pressable
+      style={[styles.pillButton, pillStyle, isManual && styles.pillButtonDisabled]}
+      onPress={onPress}
+      disabled={isManual}
+    >
+      <Icon
+        color={iconColor}
+        size={16}
+        strokeWidth={2.2}
+        fill={isOffboard ? COLORS.accentText : "transparent"}
+      />
+      <Text style={[styles.pillText, textStyle]}>{mode}</Text>
+      {isOffboard ? (
+        <View style={styles.pillOnBadge}>
+          <Text style={styles.pillOnBadgeText}>ON</Text>
+        </View>
+      ) : null}
+      {isManual ? (
+        <View style={styles.pillReadyBadge}>
+          <Text style={styles.pillReadyBadgeText}>READY</Text>
+        </View>
+      ) : null}
+      {isOther ? (
+        <View style={styles.pillTapBadge}>
+          <Text style={styles.pillTapBadgeText}>→ MANUAL</Text>
+        </View>
+      ) : null}
+    </Pressable>
+  );
+};
+
 const TopBarTogglePill = ({ icon: Icon, label, active, onPress, iconFill }) => (
   <Pressable
     style={[styles.pillButton, active ? styles.pillActiveBrand : styles.pillInactive]}
@@ -548,7 +610,17 @@ export default function ModernHomeUI(props) {
     mapViewEnabled = false, setMapViewEnabled, renderPlanPreview,
     onFocusRover, onFocusPlan,
     recenterRoverCount, recenterPlanCount,
+    currentPage = "home",
+    renderSectionContent,
   } = props;
+
+  const isHomePage = currentPage === "home";
+  const PAGE_TO_NAV = {
+    home: "main",
+    fields: "fields",
+    settings: "settings",
+    howto: "howto",
+  };
 
   // Local UI State
   const [showTelemetry, setShowTelemetry] = useState(true);
@@ -556,7 +628,7 @@ export default function ModernHomeUI(props) {
   const [mapFullscreen, setMapFullscreen] = useState(false);
   const [navExpanded, setNavExpanded] = useState(false);
   const [navIconsVisible, setNavIconsVisible] = useState(true);
-  const [activeNav, setActiveNav] = useState("main");
+  const [activeNav, setActiveNav] = useState(PAGE_TO_NAV[currentPage] || "main");
   const lastMenuTapRef = useRef(0);
   const lastNavTapRef = useRef({ id: null, time: 0 });
   const navWidth = useSharedValue(NAV_WIDTH_COLLAPSED);
@@ -566,8 +638,7 @@ export default function ModernHomeUI(props) {
   const [isArmed, setIsArmed] = useState(systemHealth?.armed || false);
   const [visualSelected, setVisualSelected] = useState(false);
 
-  let mode = systemHealth?.mode?.toUpperCase() || "MANUAL";
-  if (mode === "AUTO" || mode === "MISSION") mode = "OFFBOARD"; // Map legacy 'AUTO'/'MISSION' to 'OFFBOARD'
+  const vehicleMode = normalizeVehicleMode(telemetrySnapshot?.mode ?? systemHealth?.mode);
 
   const batteryPct = telemetrySnapshot?.battery_pct ?? 0;
   const missionProgress = lines.length > 0 ? Math.min(100, Math.round(((telemetrySnapshot?.projection_segment_index || 0) / lines.length) * 100)) : 0;
@@ -626,6 +697,10 @@ export default function ModernHomeUI(props) {
     if (!mapViewEnabled && mapFullscreen) setMapFullscreen(false);
   }, [mapViewEnabled, mapFullscreen]);
 
+  useEffect(() => {
+    if (!isHomePage && mapFullscreen) setMapFullscreen(false);
+  }, [isHomePage, mapFullscreen]);
+
   const collapseNavbar = useCallback(() => {
     setNavIconsVisible(false);
     setNavExpanded(false);
@@ -646,11 +721,19 @@ export default function ModernHomeUI(props) {
   }, [navExpanded, navIconsVisible, navWidth, navHeight, navBgOpacity]);
 
   useEffect(() => {
+    setActiveNav(PAGE_TO_NAV[currentPage] || "main");
+  }, [currentPage]);
+
+  useEffect(() => {
+    if (!isHomePage) {
+      topBarRightInset.value = withTiming(HUD_PAD, NAV_TIMING);
+      return;
+    }
     topBarRightInset.value = withTiming(
       showTelemetry ? HUD_PAD + RIGHT_PANEL_WIDTH + SIDE_GAP : HUD_PAD,
       NAV_TIMING
     );
-  }, [showTelemetry, topBarRightInset]);
+  }, [isHomePage, showTelemetry, topBarRightInset]);
 
   const navAnimatedStyle = useAnimatedStyle(() => ({
     width: navWidth.value,
@@ -662,6 +745,13 @@ export default function ModernHomeUI(props) {
   const topBarAnimatedStyle = useAnimatedStyle(() => ({
     left: HUD_PAD + navWidth.value + SIDE_GAP,
     right: topBarRightInset.value,
+  }));
+
+  const sectionContentAnimatedStyle = useAnimatedStyle(() => ({
+    left: HUD_PAD + navWidth.value + SIDE_GAP,
+    right: HUD_PAD,
+    top: HUD_PAD + 56 + SIDE_GAP,
+    bottom: HUD_PAD,
   }));
 
   const handleMenuPress = useCallback(() => {
@@ -717,12 +807,10 @@ export default function ModernHomeUI(props) {
           <View style={styles.divider} />
 
           <View style={styles.topBarPills}>
-          <TopBarTogglePill
-            icon={Hexagon}
-            label={mode}
-            active={mode === "OFFBOARD"}
-            iconFill={mode === "OFFBOARD" ? COLORS.accentText : "transparent"}
+          <VehicleModePill
+            mode={vehicleMode}
             onPress={() => {
+              if (vehicleMode === "MANUAL") return;
               if (onSetMode) onSetMode("MANUAL");
               fetch(`${getApiBase()}/api/set_mode`, {
                 method: "POST",
@@ -744,23 +832,27 @@ export default function ModernHomeUI(props) {
             }}
           />
 
-          <View style={styles.divider} />
+          {isHomePage ? (
+            <>
+              <View style={styles.divider} />
 
-          <TopBarTogglePill
-            icon={Route}
-            label="Mission Control"
-            active={showMissionControl}
-            onPress={() => setShowMissionControl(!showMissionControl)}
-          />
+              <TopBarTogglePill
+                icon={Route}
+                label="Mission Control"
+                active={showMissionControl}
+                onPress={() => setShowMissionControl(!showMissionControl)}
+              />
 
-          <View style={styles.divider} />
+              <View style={styles.divider} />
 
-          <TopBarTogglePill
-            icon={MonitorPlay}
-            label="Telemetry"
-            active={showTelemetry}
-            onPress={() => setShowTelemetry(!showTelemetry)}
-          />
+              <TopBarTogglePill
+                icon={MonitorPlay}
+                label="Telemetry"
+                active={showTelemetry}
+                onPress={() => setShowTelemetry(!showTelemetry)}
+              />
+            </>
+          ) : null}
           </View>
         </View>
       </View>
@@ -769,6 +861,7 @@ export default function ModernHomeUI(props) {
 
   const handleNavPress = (id) => {
     setActiveNav(id);
+    if (id === "main") onNav("home");
     if (id === "settings") onNav("settings");
     if (id === "fields") onNav("fields");
     if (id === "howto") onNav("howto");
@@ -858,49 +951,53 @@ export default function ModernHomeUI(props) {
 
           <View style={{ flex: 1 }} />
 
-          <View style={styles.navDivider} />
+          {isHomePage ? (
+            <>
+              <View style={styles.navDivider} />
 
-          <View style={styles.navToolsSection}>
-            <NavBarItem
-              icon={MapIcon}
-              label="Focus Plan"
-              active={false}
-              expanded={navExpanded}
-              onPress={() => onFocusPlan?.()}
-            />
-            <NavBarItem
-              icon={Tractor}
-              label="Focus Rover"
-              active={false}
-              expanded={navExpanded}
-              onPress={() => onFocusRover?.()}
-            />
-            {setMapViewEnabled ? (
-              <>
-                <NavBarItem
-                  icon={Maximize2}
-                  label="Fullscreen Map"
-                  active={mapFullscreen}
-                  expanded={navExpanded}
-                  onPress={() => {
-                    if (!mapViewEnabled) {
-                      setMapViewEnabled(true);
-                      setMapFullscreen(true);
-                      return;
-                    }
-                    setMapFullscreen((v) => !v);
-                  }}
-                />
+              <View style={styles.navToolsSection}>
                 <NavBarItem
                   icon={MapIcon}
-                  label={mapViewEnabled ? "Map On" : "Map Off"}
-                  active={mapViewEnabled}
+                  label="Focus Plan"
+                  active={false}
                   expanded={navExpanded}
-                  onPress={() => setMapViewEnabled((v) => !v)}
+                  onPress={() => onFocusPlan?.()}
                 />
-              </>
-            ) : null}
-          </View>
+                <NavBarItem
+                  icon={Tractor}
+                  label="Focus Rover"
+                  active={false}
+                  expanded={navExpanded}
+                  onPress={() => onFocusRover?.()}
+                />
+                {setMapViewEnabled ? (
+                  <>
+                    <NavBarItem
+                      icon={Maximize2}
+                      label="Fullscreen Map"
+                      active={mapFullscreen}
+                      expanded={navExpanded}
+                      onPress={() => {
+                        if (!mapViewEnabled) {
+                          setMapViewEnabled(true);
+                          setMapFullscreen(true);
+                          return;
+                        }
+                        setMapFullscreen((v) => !v);
+                      }}
+                    />
+                    <NavBarItem
+                      icon={MapIcon}
+                      label={mapViewEnabled ? "Map On" : "Map Off"}
+                      active={mapViewEnabled}
+                      expanded={navExpanded}
+                      onPress={() => setMapViewEnabled((v) => !v)}
+                    />
+                  </>
+                ) : null}
+              </View>
+            </>
+          ) : null}
 
           <View style={styles.navDivider} />
 
@@ -1010,7 +1107,7 @@ export default function ModernHomeUI(props) {
   };
 
   const renderJoystickPanel = () => {
-    if (mode !== "MANUAL" || missionRunning) return null;
+    if (vehicleMode !== "MANUAL" || missionRunning) return null;
 
     const statusLabel = joystickActive
       ? "Driving"
@@ -1140,7 +1237,8 @@ export default function ModernHomeUI(props) {
 
   return (
     <GestureHandlerRootView style={styles.container}>
-      {/* Map Layer */}
+      {/* Map / home canvas layer */}
+      {isHomePage ? (
       <View style={{ ...StyleSheet.absoluteFillObject, zIndex: mapFullscreen ? 200 : 1, backgroundColor: COLORS.bgBase }}>
         {mapViewEnabled ? (
         <MapView
@@ -1192,16 +1290,28 @@ export default function ModernHomeUI(props) {
           </View>
         )}
       </View>
+      ) : (
+        <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1, backgroundColor: COLORS.bgBase }} />
+      )}
+
+      {!isHomePage && renderSectionContent ? (
+        <AnimatedReanimated.View
+          style={[styles.sectionContent, sectionContentAnimatedStyle]}
+          pointerEvents="box-none"
+        >
+          {renderSectionContent()}
+        </AnimatedReanimated.View>
+      ) : null}
       
       {/* HUD Layer */}
       {hudVisible ? (
         <View style={styles.hudLayer} pointerEvents="box-none">
           {renderTopBar()}
           {renderNavbar()}
-          {renderTelemetrySection()}
-          {renderJoystickPanel()}
-          {renderMissionControl()}
-          <FloatingEStop visible={missionRunning || isArmed} onTrigger={handleEStop} />
+          {isHomePage ? renderTelemetrySection() : null}
+          {isHomePage ? renderJoystickPanel() : null}
+          {isHomePage ? renderMissionControl() : null}
+          {isHomePage ? <FloatingEStop visible={missionRunning || isArmed} onTrigger={handleEStop} /> : null}
         </View>
       ) : null}
 
@@ -1220,6 +1330,11 @@ export default function ModernHomeUI(props) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#000" },
+  sectionContent: {
+    position: "absolute",
+    zIndex: 5,
+    overflow: "hidden",
+  },
   canvasContainer: {
     flex: 1,
     backgroundColor: "#f0f4f8",
@@ -1385,6 +1500,49 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surfaceSolid,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
+  },
+  pillManualIdle: {
+    backgroundColor: COLORS.surfaceSolid,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+  },
+  pillActiveWarn: {
+    backgroundColor: COLORS.warningMuted,
+    borderWidth: 1,
+    borderColor: COLORS.warningBorder,
+  },
+  pillButtonDisabled: {
+    opacity: 0.92,
+  },
+  pillTextWarn: {
+    color: COLORS.warning,
+    fontWeight: "800",
+  },
+  pillReadyBadge: {
+    backgroundColor: COLORS.cardSolid,
+    borderRadius: 6,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+  },
+  pillReadyBadgeText: {
+    color: COLORS.textMuted,
+    fontSize: 8,
+    fontWeight: "800",
+    letterSpacing: 0.4,
+  },
+  pillTapBadge: {
+    backgroundColor: COLORS.warning,
+    borderRadius: 6,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+  },
+  pillTapBadgeText: {
+    color: COLORS.accentText,
+    fontSize: 8,
+    fontWeight: "800",
+    letterSpacing: 0.3,
   },
   pillText: { fontWeight: "600", fontSize: 12, textTransform: "uppercase", letterSpacing: 0.4 },
   divider: { width: 1, height: TOP_BAR_ITEM_HEIGHT - 8, backgroundColor: COLORS.panelBorder, marginHorizontal: 2, alignSelf: "center" },

@@ -1020,28 +1020,29 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
 const styles = StyleSheet.create({
   page: {
     flex: 1,
+    minHeight: 0,
     backgroundColor: COLORS.bgBase,
-    padding: 20,
-    gap: 16,
+    padding: 14,
+    gap: 12,
   },
   pageHeader: {
-    gap: 4,
-    paddingBottom: 4,
+    gap: 2,
+    paddingBottom: 2,
   },
   pageTitle: {
     color: COLORS.textMain,
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: "800",
     letterSpacing: 0.2,
   },
   pageSubtitle: {
     color: COLORS.textMuted,
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: "500",
   },
   columns: {
     flex: 1,
-    gap: 16,
+    gap: 12,
     minHeight: 0,
   },
   columnsRow: {

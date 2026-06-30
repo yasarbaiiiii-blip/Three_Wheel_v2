@@ -3023,8 +3023,9 @@ export default function App() {
                   onConnect={connectSelectedWebsocket}
                   onOfflinePreview={enterOfflinePreview}
                 />
-              ) : page === "home" ? (
+              ) : (
                 <HomeView
+                  page={page}
                   autoOrigin={autoOrigin}
                   onToggleAutoOrigin={toggleAutoOrigin}
                   previewRoverPoint={previewRoverPoint}
@@ -3114,117 +3115,120 @@ export default function App() {
                   setShowRefPointLabels={setShowRefPointLabels}
                   activeRefPointLabelIndex={activeRefPointLabelIndex}
                   setActiveRefPointLabelIndex={setActiveRefPointLabelIndex}
-                />
-              ) : (
-                <SectionScreen
-                  telemetrySnapshot={telemetrySnapshot}
-                  missionRunning={missionRunning}
-                  previewRoverPoint={previewRoverPoint}
-                  title={sectionTitle}
-                  page={page}
-                  importedPlan={importedPlan}
-                  lines={displayedLines}
-                  mapSourceLines={mapSourceLines}
-                  autoOriginReference={autoOriginReference}
-                  mapGeometryFrame={mapGeometryFrame}
-                  autoOriginEnabled={autoOriginEligible}
-                  setLines={setLines}
-                  selectedLineId={selectedLineId}
-                  backendPaths={backendPaths}
-                  selectedPathName={selectedPathName}
-                  onSelectPath={previewSelectedPath}
-                  onLoadSelectedPath={loadMissionOnBackend}
-                  missionActionBusy={missionActionBusy}
-                  apiBaseUrl={apiBaseUrl}
-                  onRefreshPaths={fetchBackendPaths}
-                  onBack={() => setPage("home")}
-                  showRefPointLabels={showRefPointLabels}
-                  setShowRefPointLabels={setShowRefPointLabels}
-                  activeRefPointLabelIndex={activeRefPointLabelIndex}
-                  setActiveRefPointLabelIndex={setActiveRefPointLabelIndex}
-                  isVisualAlignmentMode={isVisualAlignmentMode}
-                  visualAlignmentItem={visualAlignmentItem}
-                  setVisualAlignmentItem={setVisualAlignmentItem}
-                  onStartVisualAlignment={startVisualAlignment}
-                  onConfirmVisualAlignment={handleConfirmVisualAlignment}
-                  extractedCorners={extractedCorners}
-                  setExtractedCorners={setExtractedCorners}
-                  onNav={(p) => setPage(p)}
-                  onSelectLine={setSelectedLineId}
-                  onGenerateTemplate={(name, generatedLines) => {
-                    if (protectedMissionResident) {
-                      Alert.alert("Mission conflict", "Generating a new template is blocked while a protected surveyed mission is resident.");
-                      return;
-                    }
-                    const safeGeneratedLines = sanitizePlanLines(generatedLines);
-                    setImportedPlan({ fileName: `${name}.dxf`, uri: "", fileType: "dxf", source: "generated" });
-                    setLines(safeGeneratedLines);
-                    setSelectedLineId(safeGeneratedLines[0]?.id ?? null);
-                    setMissionFileReady(false);
-                    setMissionLoaded(false);
-                    setMissionRunning(false);
-                    setPage("home");
-                    showToast("Template ready", `${name}.dxf is ready to upload.`, "success");
-                  }}
-                  layerVisibility={layerVisibility}
-                  setLayerVisibility={setLayerVisibility}
-                  setImportedPlan={setImportedPlan}
-                  onRunTemplate={runTemplateOnBackend}
-                  extensionsEnabled={extensionsEnabled}
-                  setExtensionsEnabled={setExtensionsEnabled}
-                  extPre={extPre}
-                  setExtPre={setExtPre}
-                  extAft={extAft}
-                  setExtAft={setExtAft}
-                  missionFileReady={missionFileReady}
-                  toggleA={toggleA}
-                  toggleB={toggleB}
-                  toggleC={toggleC}
-                  toggleD={toggleD}
-                  delayA={delayA}
-                  delayB={delayB}
-                  setToggleA={setToggleA}
-                  setToggleB={setToggleB}
-                  setToggleC={setToggleC}
-                  setToggleD={setToggleD}
-                  setDelayA={setDelayA}
-                  setDelayB={setDelayB}
-                  onParsePlan={parseDxfPlan}
-                  onWorkflowStep={setWorkflowStep}
-                  stagedWorkflow={stagedWorkflow}
-                  alignmentResult={alignmentResult}
-                  setAlignmentResult={setAlignmentResult}
-                  verifiedAlignmentRequest={verifiedAlignmentRequest}
-                  setVerifiedAlignmentRequest={setVerifiedAlignmentRequest}
-                  segmentVerification={segmentVerification}
-                  setSegmentVerification={setSegmentVerification}
-                  stagedPlanResult={stagedPlanResult}
-                  setStagedPlanResult={setStagedPlanResult}
-                  stagedMissionInspection={stagedMissionInspection}
-                  setStagedMissionInspection={setStagedMissionInspection}
-                  stagedMissionId={stagedMissionId}
-                  setStagedMissionId={setStagedMissionId}
-                  loadedPathInspection={loadedPathInspection}
-                  onInvalidateWorkflow={invalidateStagedWorkflowFrom}
-                  alignedRefPoints={alignedRefPoints}
-                  setAlignedRefPoints={setAlignedRefPoints}
-                  mapViewEnabled={mapViewEnabled}
-                  setMapViewEnabled={setMapViewEnabled}
-                  isFloatingEStopEnabled={isFloatingEStopEnabled}
-                  setIsFloatingEStopEnabled={setIsFloatingEStopEnabled}
-                  rtkCaster={rtkCaster}
-                  setRtkCaster={setRtkCaster}
-                  rtkPort={rtkPort}
-                  setRtkPort={setRtkPort}
-                  rtkMountPoint={rtkMountPoint}
-                  setRtkMountPoint={setRtkMountPoint}
-                  rtkUsername={rtkUsername}
-                  setRtkUsername={setRtkUsername}
-                  rtkPassword={rtkPassword}
-                  setRtkPassword={setRtkPassword}
-                  rtkRunning={rtkRunning}
-                  rtkHealthy={rtkHealthy}
-                  rtkMode={rtkMode}
+                  renderSectionContent={
+                    page !== "home"
+                      ? () => (
+                          <SectionPages
+                            telemetrySnapshot={telemetrySnapshot}
+                            missionRunning={missionRunning}
+                            previewRoverPoint={previewRoverPoint}
+                            page={page}
+                            importedPlan={importedPlan}
+                            lines={displayedLines}
+                            mapSourceLines={mapSourceLines}
+                            autoOriginReference={autoOriginReference}
+                            mapGeometryFrame={mapGeometryFrame}
+                            autoOriginEnabled={autoOriginEligible}
+                            setLines={setLines}
+                            selectedLineId={selectedLineId}
+                            backendPaths={backendPaths}
+                            selectedPathName={selectedPathName}
+                            onSelectPath={previewSelectedPath}
+                            onLoadSelectedPath={loadMissionOnBackend}
+                            missionActionBusy={missionActionBusy}
+                            apiBaseUrl={apiBaseUrl}
+                            onRefreshPaths={fetchBackendPaths}
+                            showRefPointLabels={showRefPointLabels}
+                            setShowRefPointLabels={setShowRefPointLabels}
+                            activeRefPointLabelIndex={activeRefPointLabelIndex}
+                            setActiveRefPointLabelIndex={setActiveRefPointLabelIndex}
+                            isVisualAlignmentMode={isVisualAlignmentMode}
+                            visualAlignmentItem={visualAlignmentItem}
+                            setVisualAlignmentItem={setVisualAlignmentItem}
+                            onStartVisualAlignment={startVisualAlignment}
+                            onConfirmVisualAlignment={handleConfirmVisualAlignment}
+                            extractedCorners={extractedCorners}
+                            setExtractedCorners={setExtractedCorners}
+                            onNav={(p) => setPage(p)}
+                            onSelectLine={setSelectedLineId}
+                            onGenerateTemplate={(name, generatedLines) => {
+                              if (protectedMissionResident) {
+                                Alert.alert("Mission conflict", "Generating a new template is blocked while a protected surveyed mission is resident.");
+                                return;
+                              }
+                              const safeGeneratedLines = sanitizePlanLines(generatedLines);
+                              setImportedPlan({ fileName: `${name}.dxf`, uri: "", fileType: "dxf", source: "generated" });
+                              setLines(safeGeneratedLines);
+                              setSelectedLineId(safeGeneratedLines[0]?.id ?? null);
+                              setMissionFileReady(false);
+                              setMissionLoaded(false);
+                              setMissionRunning(false);
+                              setPage("home");
+                              showToast("Template ready", `${name}.dxf is ready to upload.`, "success");
+                            }}
+                            layerVisibility={layerVisibility}
+                            setLayerVisibility={setLayerVisibility}
+                            setImportedPlan={setImportedPlan}
+                            onRunTemplate={runTemplateOnBackend}
+                            extensionsEnabled={extensionsEnabled}
+                            setExtensionsEnabled={setExtensionsEnabled}
+                            extPre={extPre}
+                            setExtPre={setExtPre}
+                            extAft={extAft}
+                            setExtAft={setExtAft}
+                            missionFileReady={missionFileReady}
+                            toggleA={toggleA}
+                            toggleB={toggleB}
+                            toggleC={toggleC}
+                            toggleD={toggleD}
+                            delayA={delayA}
+                            delayB={delayB}
+                            setToggleA={setToggleA}
+                            setToggleB={setToggleB}
+                            setToggleC={setToggleC}
+                            setToggleD={setToggleD}
+                            setDelayA={setDelayA}
+                            setDelayB={setDelayB}
+                            onParsePlan={parseDxfPlan}
+                            onWorkflowStep={setWorkflowStep}
+                            stagedWorkflow={stagedWorkflow}
+                            alignmentResult={alignmentResult}
+                            setAlignmentResult={setAlignmentResult}
+                            verifiedAlignmentRequest={verifiedAlignmentRequest}
+                            setVerifiedAlignmentRequest={setVerifiedAlignmentRequest}
+                            segmentVerification={segmentVerification}
+                            setSegmentVerification={setSegmentVerification}
+                            stagedPlanResult={stagedPlanResult}
+                            setStagedPlanResult={setStagedPlanResult}
+                            stagedMissionInspection={stagedMissionInspection}
+                            setStagedMissionInspection={setStagedMissionInspection}
+                            stagedMissionId={stagedMissionId}
+                            setStagedMissionId={setStagedMissionId}
+                            loadedPathInspection={loadedPathInspection}
+                            onInvalidateWorkflow={invalidateStagedWorkflowFrom}
+                            alignedRefPoints={alignedRefPoints}
+                            setAlignedRefPoints={setAlignedRefPoints}
+                            mapViewEnabled={mapViewEnabled}
+                            setMapViewEnabled={setMapViewEnabled}
+                            isFloatingEStopEnabled={isFloatingEStopEnabled}
+                            setIsFloatingEStopEnabled={setIsFloatingEStopEnabled}
+                            rtkCaster={rtkCaster}
+                            setRtkCaster={setRtkCaster}
+                            rtkPort={rtkPort}
+                            setRtkPort={setRtkPort}
+                            rtkMountPoint={rtkMountPoint}
+                            setRtkMountPoint={setRtkMountPoint}
+                            rtkUsername={rtkUsername}
+                            setRtkUsername={setRtkUsername}
+                            rtkPassword={rtkPassword}
+                            setRtkPassword={setRtkPassword}
+                            rtkRunning={rtkRunning}
+                            rtkHealthy={rtkHealthy}
+                            rtkMode={rtkMode}
+                          />
+                        )
+                      : undefined
+                  }
                 />
               )}
 
@@ -3827,14 +3831,26 @@ function HomeView({
   const [recenterRoverCount, setRecenterRoverCount] = useState(0);
   const [recenterPlanCount, setRecenterPlanCount] = useState(0);
 
+  const {
+    page = "home",
+    renderSectionContent,
+    ...homeProps
+  } = arguments[0] as {
+    page?: Page;
+    renderSectionContent?: () => React.ReactNode;
+    [key: string]: unknown;
+  };
+
   return (
     <ModernHomeUI
-      {...arguments[0]}
+      {...homeProps}
+      currentPage={page}
+      renderSectionContent={renderSectionContent}
       onFocusRover={() => setRecenterRoverCount((c) => c + 1)}
       onFocusPlan={() => setRecenterPlanCount((c) => c + 1)}
       recenterRoverCount={recenterRoverCount}
       recenterPlanCount={recenterPlanCount}
-      renderPlanPreview={() => (
+      renderPlanPreview={page === "home" ? () => (
         <PlanPreview
           lines={lines}
           mapSourceLines={mapSourceLines}
@@ -3867,7 +3883,7 @@ function HomeView({
           recenterPlanTrigger={recenterPlanCount}
           hideRefocusControls
         />
-      )}
+      ) : undefined}
     />
   );
 }
@@ -4617,7 +4633,7 @@ function DetailLine({ label, value }: { label: string; value: string }) {
     </View>
   );
 }
-function SectionScreen(props: {
+function SectionPages(props: {
   title: string;
   page: Page;
   telemetrySnapshot: TelemetrySnapshot | null;
@@ -4711,17 +4727,10 @@ function SectionScreen(props: {
   setRtkPassword: React.Dispatch<React.SetStateAction<string>>;
   rtkRunning: boolean;
 }) {
-  const { title, page, onBack, mapViewEnabled, setMapViewEnabled } = props;
+  const { page, mapViewEnabled, setMapViewEnabled } = props;
 
   return (
-    <View style={{ flex: 1, backgroundColor: BG }}>
-      <TopBar
-        title={title}
-        onBack={onBack}
-        mapViewEnabled={mapViewEnabled}
-        setMapViewEnabled={setMapViewEnabled}
-      />
-
+    <View style={{ flex: 1, backgroundColor: "#09090b" }}>
       {page === "fields" ? <FieldsPage {...props} /> : null}
       {page === "templates" ? (
         <TemplatesPage
@@ -9333,13 +9342,28 @@ function HowToPage() {
     "How does the SWOZI terrain correction work? (Beta)",
   ];
   return (
-    <ScrollView style={{ flex: 1, padding: 18 }}>
-      <Text style={{ fontSize: 64 / 2, color: "#2c2c2d", fontWeight: "500", marginBottom: 10 }}>
-        Welcome to the SWOZI knowledge base
+    <ScrollView style={{ flex: 1, padding: 14 }} contentContainerStyle={{ gap: 8, paddingBottom: 20 }}>
+      <Text style={{ fontSize: 18, color: "#f8fafc", fontWeight: "800", marginBottom: 4 }}>
+        How to
+      </Text>
+      <Text style={{ fontSize: 12, color: "#94a3b8", fontWeight: "500", marginBottom: 8 }}>
+        SWOZI knowledge base
       </Text>
       {items.map((x) => (
-        <View key={x} style={{ height: 62 / 2, backgroundColor: "#d7d7d8", borderWidth: 1, borderColor: "#c8c9ca", borderRadius: 4, justifyContent: "center", paddingHorizontal: 12, marginBottom: 8 }}>
-          <Text style={{ fontSize: 36 / 2, color: "#2e2f30" }}>{x}</Text>
+        <View
+          key={x}
+          style={{
+            minHeight: 44,
+            backgroundColor: "#1f1f24",
+            borderWidth: 1,
+            borderColor: "#2e2e34",
+            borderRadius: 10,
+            justifyContent: "center",
+            paddingHorizontal: 14,
+            paddingVertical: 10,
+          }}
+        >
+          <Text style={{ fontSize: 13, color: "#f8fafc", fontWeight: "600" }}>{x}</Text>
         </View>
       ))}
     </ScrollView>
