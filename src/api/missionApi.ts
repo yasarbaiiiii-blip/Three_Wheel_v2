@@ -95,6 +95,18 @@ export function clearMission(apiBaseUrl: string): Promise<Response> {
   return postJson(apiBaseUrl, "/api/mission/clear");
 }
 
+export function pauseMission(apiBaseUrl: string): Promise<Response> {
+  return postJson(apiBaseUrl, "/api/mission/pause");
+}
+
+export function nextMission(apiBaseUrl: string): Promise<Response> {
+  return postJson(apiBaseUrl, "/api/mission/next");
+}
+
+export function exportLog(apiBaseUrl: string): Promise<Response> {
+  return postJson(apiBaseUrl, "/api/mission/export");
+}
+
 export async function getMissionStatus(apiBaseUrl: string, init?: RequestInit): Promise<MissionStatus> {
   const res = await fetch(apiUrl(apiBaseUrl, "/api/mission/status"), init);
   if (!res.ok) {

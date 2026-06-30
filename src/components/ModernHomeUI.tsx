@@ -1,434 +1,585 @@
 // @ts-nocheck
-import React, { useState } from "react";
-import { View, Text, Pressable, StyleSheet, ScrollView, Animated } from "react-native";
+import React, { useState, useEffect } from "react";
+import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform } from "react-native";
 import { GestureHandlerRootView, GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { useSharedValue, useAnimatedStyle, withSpring, runOnJS } from "react-native-reanimated";
-import { Menu, Map as MapIcon, Upload, Shield, Play, Square, Settings, Radio, Route, Grid, MapPin, Search, X, Target, List, Pause, ChevronRightCircle, Download, LogOut, Info, PauseCircle, ChevronRight } from "lucide-react-native";
-import MapView from "./MapView";
+import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Zap, Hexagon, Circle, ShieldAlert, Check, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay } from "lucide-react-native";
+import { ManualJoystick } from "./ManualJoystick";
+import { pauseMission, nextMission, exportLog } from "../api/missionApi";
 
+// Using 127.0.0.1:5001 as fallback if window location is unavailable
+const getApiBase = () => {
+  if (typeof window !== "undefined" && window.location && window.location.hostname) {
+    const host = window.location.hostname;
+    if (host && host !== "localhost" && host !== "127.0.0.1") {
+      return `http://${host}:5001`;
+    }
+  }
+  return "http://127.0.0.1:5001";
+};
+
+// Theme Constants
 const COLORS = {
-  bg: "#1c1c1c",
-  surface: "#2b2b2b",
-  surfaceLight: "rgba(43,43,43,0.88)",
-  primary: "#f4c10c",
-  primaryDim: "rgba(244,193,12,0.2)",
-  textMain: "#f5f5f0",
-  textMuted: "#7a7a72",
-  danger: "#cc1f1f",
-  dangerBg: "#f5d9d9",
-  success: "#3aa15a",
-  border: "rgba(255,255,255,0.1)",
+  bgBase: "#09090b",
+  panelBg: "rgba(9, 9, 11, 0.75)",
+  panelBorder: "rgba(255, 255, 255, 0.08)",
+  textMain: "#f8fafc",
+  textMuted: "#94a3b8",
+  accentBrand: "#3b82f6",
+  accentHover: "#2563eb",
+  danger: "#ef4444",
+  success: "#10b981",
+  warning: "#f59e0b",
+  overlay: "rgba(0, 0, 0, 0.4)",
 };
 
-const SHADOW = {
-  shadowColor: "#000",
-  shadowOffset: { width: 0, height: 4 },
-  shadowOpacity: 0.3,
-  shadowRadius: 5,
-  elevation: 6,
+const SHADOWS = {
+  glow: {
+    shadowColor: COLORS.accentBrand,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  panel: {
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.5,
+    shadowRadius: 16,
+    elevation: 10,
+  }
 };
 
-export default function ModernHomeUI(props: any) {
+const FloatingEStop = ({ visible, onTrigger }) => {
+  const scale = useSharedValue(1);
+  const progress = useSharedValue(0);
+  
+  const holdGesture = Gesture.Pan()
+    .onBegin(() => {
+      scale.value = withSpring(1.1);
+      progress.value = withSpring(1, { duration: 1500 });
+    })
+    .onTouchesUp(() => {
+      if (progress.value > 0.95) {
+        runOnJS(onTrigger)();
+      }
+      scale.value = withSpring(1);
+      progress.value = withSpring(0);
+    });
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }]
+  }));
+
+  const progressStyle = useAnimatedStyle(() => ({
+    height: `${progress.value * 100}%`,
+    opacity: progress.value
+  }));
+
+  if (!visible) return null;
+
+  return (
+    <View style={styles.estopContainer} pointerEvents="box-none">
+      <GestureDetector gesture={holdGesture}>
+        <AnimatedReanimated.View style={[styles.estopButton, animatedStyle]}>
+          <AnimatedReanimated.View style={[styles.estopProgressFill, progressStyle]} />
+          <ShieldAlert size={36} color="#fff" strokeWidth={2.5} style={{ zIndex: 10 }} />
+          <Text style={styles.estopText}>E-STOP</Text>
+          <Text style={styles.estopSubText}>HOLD 1.5s</Text>
+        </AnimatedReanimated.View>
+      </GestureDetector>
+    </View>
+  );
+};
+
+export default function ModernHomeUI(props) {
   const {
-    lines, importedPlan, systemHealth, telemetrySnapshot, missionRunning,
+    lines = [], importedPlan, systemHealth, telemetrySnapshot, missionRunning,
     onNav, onToggleMenu, onArmVehicle, onSetMode, onEstopVehicle,
     onStartPlan, onStopPlan, onClearMission, rtkRunning, rtkHealthy,
     startNtrip, startLora, stopRtk, selectedLineId, onSelectLine,
     autoOriginEnabled, mapSourceLines, alignedRefPoints, autoOriginReference,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
-    rtkDefaultMode = "NTRIP" // we'll use this from props or default to NTRIP
+    rtkDefaultMode = "NTRIP", virtualJoystick, onPausePlan
   } = props;
 
-  const [telemetryOpen, setTelemetryOpen] = useState(false);
-  const [missionControlOpen, setMissionControlOpen] = useState(false);
+  // Local UI State
+  const [showTelemetry, setShowTelemetry] = useState(true);
+  const [showMissionControl, setShowMissionControl] = useState(true);
   const [navExpanded, setNavExpanded] = useState(false);
-  const [isEStopHeld, setIsEStopHeld] = useState(false);
-  
-  // Progress Ring Animation for E-Stop
-  const estopProgress = useSharedValue(0);
+  const [isArmed, setIsArmed] = useState(systemHealth?.armed || false);
 
-  const triggerEStop = () => {
-    // E-Stop API Post based on user feedback
-    fetch("http://127.0.0.1:5000/api/rover/estop", { method: "POST" }).catch(() => {});
+  const mode = systemHealth?.mode?.toUpperCase() || "MANUAL";
+  const batteryPct = telemetrySnapshot?.battery_pct ?? 0;
+  const missionProgress = lines.length > 0 ? Math.min(100, Math.round(((telemetrySnapshot?.projection_segment_index || 0) / lines.length) * 100)) : 0;
+
+  // Derived Telemetry Values
+  const lat = telemetrySnapshot?.lat?.toFixed(6) ?? "N/A";
+  const lon = telemetrySnapshot?.lon?.toFixed(6) ?? "N/A";
+  const gpsFix = telemetrySnapshot?.gps_fix_name ?? "No Fix";
+  const sats = telemetrySnapshot?.gps_sat ?? 0;
+  const hrms = telemetrySnapshot?.hrms?.toFixed(2) ?? "0.00";
+  const vrms = telemetrySnapshot?.vrms?.toFixed(2) ?? "0.00";
+  const missionStateStr = telemetrySnapshot?.state ?? (missionRunning ? "running" : "idle");
+  const xtrack = telemetrySnapshot?.xtrack_m?.toFixed(2) ?? "0.00";
+  const headingErr = telemetrySnapshot?.heading_err_deg?.toFixed(1) ?? "0.0";
+  const distGoal = telemetrySnapshot?.dist_to_goal_m?.toFixed(1) ?? "0.0";
+  const speed = telemetrySnapshot?.speed_m_s?.toFixed(2) ?? "0.00";
+  const rppState = telemetrySnapshot?.rpp_state_name ?? "N/A";
+  const fcuConn = systemHealth?.fcu_connected ? "Connected" : "Disconnected";
+  const poseAge = telemetrySnapshot?.pose_age_ms ?? 0;
+  const battV = telemetrySnapshot?.battery_v?.toFixed(1) ?? "0.0";
+  // Ampere not explicitly in schema, show N/A
+  const battA = "N/A";
+
+  useEffect(() => {
+    if (systemHealth?.armed !== undefined) setIsArmed(systemHealth.armed);
+  }, [systemHealth?.armed]);
+
+  const handleEStop = () => {
     if (onEstopVehicle) onEstopVehicle();
+    fetch(`${getApiBase()}/api/rover/estop`, { method: "POST" }).catch(console.error);
   };
 
-  const eStopGesture = Gesture.Pan()
-    .onBegin(() => {
-      runOnJS(setIsEStopHeld)(true);
-      estopProgress.value = withSpring(100, { damping: 20, stiffness: 90 });
-    })
-    .onEnd(() => {
-      runOnJS(setIsEStopHeld)(false);
-      estopProgress.value = withSpring(0);
-      if (estopProgress.value > 90) {
-        runOnJS(triggerEStop)();
-      }
-    });
+  const handlePause = () => {
+    if (onPausePlan) onPausePlan();
+    else pauseMission(getApiBase()).catch(console.error);
+  };
 
-  const animatedEstopStyle = useAnimatedStyle(() => {
-    return {
-      borderWidth: 3,
-      borderColor: COLORS.textMain,
-      transform: [{ scale: 1 + estopProgress.value / 500 }]
-    };
-  });
+  const handleNext = () => {
+    nextMission(getApiBase()).catch(console.error);
+  };
 
-  const totalLines = lines?.length || 0;
-  const battery = telemetrySnapshot?.battery_percentage ?? "--";
-  const mode = systemHealth?.mode || "MANUAL";
-  const isArmed = systemHealth?.armed || false;
+  const handleExport = () => {
+    exportLog(getApiBase()).catch(console.error);
+  };
 
-  const rightPanelWidth = (telemetryOpen || missionControlOpen) ? "25%" : 0;
+  const handleAcquire = () => {
+    if (virtualJoystick) virtualJoystick.acquire();
+  };
+
+  const handleRelease = () => {
+    if (virtualJoystick) virtualJoystick.release();
+  };
+
+  const renderTopBar = () => (
+    <View style={styles.topBar}>
+      <Pressable style={styles.navToggle} onPress={() => setNavExpanded(!navExpanded)}>
+        <Menu color="#fff" size={24} />
+      </Pressable>
+
+      <View style={styles.topBarCenter}>
+        <Pressable 
+          style={[styles.pillButton, mode === "AUTO" ? styles.pillActiveBrand : styles.pillActiveSecondary]}
+          onPress={() => onSetMode && onSetMode(mode === "AUTO" ? "MANUAL" : "AUTO")}
+        >
+          <Hexagon color="#fff" size={16} fill={mode === "AUTO" ? "#fff" : "transparent"} />
+          <Text style={styles.pillText}>{mode}</Text>
+        </Pressable>
+
+        <View style={styles.divider} />
+
+        <Pressable 
+          style={[styles.pillButton, rtkRunning ? styles.pillActiveSuccess : styles.pillInactive]}
+          onPress={() => {
+            if (rtkRunning) stopRtk && stopRtk();
+            else rtkDefaultMode.toLowerCase() === "lora" ? startLora && startLora() : startNtrip && startNtrip();
+          }}
+        >
+          <Wifi color={rtkHealthy ? COLORS.success : "#fff"} size={16} />
+          <Text style={styles.pillText}>RTK: {rtkDefaultMode}</Text>
+        </Pressable>
+
+        <View style={styles.divider} />
+
+        <Pressable 
+          style={[styles.pillButton, showMissionControl ? styles.pillActiveBrand : styles.pillInactive]}
+          onPress={() => setShowMissionControl(!showMissionControl)}
+        >
+          <Route color="#fff" size={16} />
+          <Text style={styles.pillText}>Mission Control</Text>
+        </Pressable>
+
+        <View style={styles.divider} />
+
+        <Pressable 
+          style={[styles.pillButton, showTelemetry ? styles.pillActiveBrand : styles.pillInactive]}
+          onPress={() => setShowTelemetry(!showTelemetry)}
+        >
+          <MonitorPlay color="#fff" size={16} />
+          <Text style={styles.pillText}>Telemetry</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.batteryIndicator}>
+        <Zap color={batteryPct > 20 ? COLORS.success : COLORS.danger} size={18} />
+        <Text style={styles.batteryText}>{batteryPct}%</Text>
+      </View>
+    </View>
+  );
+
+  const renderNavbar = () => (
+    <AnimatedReanimated.View style={[styles.navbar, { width: navExpanded ? 200 : 70 }]}>
+      {[
+        { id: "main", icon: Crosshair, label: "Main Screen" },
+        { id: "fields", icon: LocateFixed, label: "Fields" },
+        { id: "settings", icon: Navigation, label: "Settings" },
+        { id: "howto", icon: Circle, label: "How to" }
+      ].map(item => (
+        <Pressable 
+          key={item.id} 
+          style={[styles.navItem, item.id === "main" && styles.navItemActive]}
+          onPress={() => {
+            if (item.id === "settings") onNav("settings");
+            if (item.id === "fields") onNav("fields");
+            if (item.id === "howto") onNav("howto");
+          }}
+        >
+          <item.icon color={item.id === "main" ? COLORS.accentBrand : COLORS.textMuted} size={24} />
+          {navExpanded && <Text style={[styles.navLabel, item.id === "main" && { color: COLORS.textMain }]}>{item.label}</Text>}
+        </Pressable>
+      ))}
+      <View style={{ flex: 1 }} />
+      <Pressable style={styles.navItem} onPress={() => onNav("connection")}>
+        <X color={COLORS.danger} size={24} />
+        {navExpanded && <Text style={[styles.navLabel, { color: COLORS.danger }]}>Exit</Text>}
+      </Pressable>
+    </AnimatedReanimated.View>
+  );
+
+  const renderTelemetrySection = () => {
+    if (!showTelemetry) return null;
+    return (
+      <View style={[styles.rightPanelBase, styles.telemetryPanel, !showMissionControl && { bottom: 20 }]}>
+        <View style={styles.panelHeader}>
+          <Text style={styles.panelTitle}>Telemetry Data</Text>
+          <Pressable onPress={() => setShowTelemetry(false)}>
+            <X color={COLORS.textMuted} size={18} />
+          </Pressable>
+        </View>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 10 }} showsVerticalScrollIndicator={false}>
+          {/* Section 1: Robot Status */}
+          <View style={styles.telemetrySection}>
+            <Text style={styles.sectionHeader}>Robot Status</Text>
+            <View style={styles.dataGrid}>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>LAT</Text><Text style={styles.dataVal}>{lat}</Text></View>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>LON</Text><Text style={styles.dataVal}>{lon}</Text></View>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>GPS FIX</Text><Text style={styles.dataVal}>{gpsFix}</Text></View>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>SATS</Text><Text style={styles.dataVal}>{sats}</Text></View>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>HRMS</Text><Text style={styles.dataVal}>{hrms}m</Text></View>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>VRMS</Text><Text style={styles.dataVal}>{vrms}m</Text></View>
+            </View>
+          </View>
+
+          {/* Section 2: Mission State */}
+          <View style={styles.telemetrySection}>
+            <Text style={styles.sectionHeader}>Mission State</Text>
+            <View style={styles.stateWrapper}>
+              <View style={[styles.stateIndicator, { backgroundColor: missionStateStr === 'running' ? COLORS.success : COLORS.warning }]} />
+              <Text style={styles.stateText}>{missionStateStr.toUpperCase()}</Text>
+            </View>
+          </View>
+
+          {/* Section 3: Mission Status */}
+          <View style={styles.telemetrySection}>
+            <Text style={styles.sectionHeader}>Mission Status</Text>
+            <View style={styles.dataGrid}>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>X-TRACK</Text><Text style={styles.dataVal}>{xtrack}m</Text></View>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>HDG ERR</Text><Text style={styles.dataVal}>{headingErr}°</Text></View>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>DIST GOAL</Text><Text style={styles.dataVal}>{distGoal}m</Text></View>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>SPEED</Text><Text style={styles.dataVal}>{speed}m/s</Text></View>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>RPP STATE</Text><Text style={styles.dataVal}>{rppState}</Text></View>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>FCU CONN</Text><Text style={styles.dataVal}>{fcuConn}</Text></View>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>POSE AGE</Text><Text style={styles.dataVal}>{poseAge}ms</Text></View>
+            </View>
+          </View>
+
+          {/* Section 4: Battery */}
+          <View style={[styles.telemetrySection, { borderBottomWidth: 0 }]}>
+            <Text style={styles.sectionHeader}>Battery Health</Text>
+            <View style={styles.dataGrid}>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>VOLTAGE</Text><Text style={styles.dataVal}>{battV}v</Text></View>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>AMPERE</Text><Text style={styles.dataVal}>{battA}</Text></View>
+              <View style={styles.dataCell}><Text style={styles.dataLabel}>LEVEL</Text><Text style={styles.dataVal}>{batteryPct}%</Text></View>
+            </View>
+          </View>
+        </ScrollView>
+      </View>
+    );
+  };
+
+  const renderMissionControl = () => {
+    if (!showMissionControl) return null;
+    
+    if (mode === "MANUAL") {
+      return (
+        <View style={[styles.rightPanelBase, styles.missionPanel, !showTelemetry && { top: 90 }]}>
+          <View style={styles.panelHeader}>
+            <Text style={styles.panelTitle}>Manual Control</Text>
+            {!missionRunning && (
+              <Pressable onPress={() => setShowMissionControl(false)}>
+                <X color={COLORS.textMuted} size={18} />
+              </Pressable>
+            )}
+          </View>
+          <View style={styles.joystickContainer}>
+            <ManualJoystick 
+              onChange={(vals) => {
+                if (virtualJoystick) virtualJoystick.setIntent(vals.forward, vals.yaw);
+              }}
+              onRelease={() => {
+                if (virtualJoystick) virtualJoystick.setIntent(0, 0);
+              }}
+              size={180}
+              knobSize={65}
+              disabled={!isArmed}
+            />
+          </View>
+          <View style={styles.manualActions}>
+            <View style={{ flexDirection: "row", gap: 10, marginBottom: 12 }}>
+              <Pressable style={styles.actionBtnSecondary} onPress={handleAcquire}>
+                <Text style={styles.actionBtnTextSec}>Acquire</Text>
+              </Pressable>
+              <Pressable style={styles.actionBtnSecondary} onPress={handleRelease}>
+                <Text style={styles.actionBtnTextSec}>Release</Text>
+              </Pressable>
+            </View>
+            <Pressable 
+              style={[styles.armButton, isArmed ? styles.armActive : styles.armInactive]}
+              onPress={() => {
+                onArmVehicle(!isArmed);
+                setIsArmed(!isArmed);
+              }}
+            >
+              <ShieldAlert color="#fff" size={20} />
+              <Text style={styles.armBtnText}>{isArmed ? "DISARM VEHICLE" : "ARM VEHICLE"}</Text>
+            </Pressable>
+          </View>
+        </View>
+      );
+    }
+
+    // Auto Mode Mission Control
+    return (
+      <View style={[styles.rightPanelBase, styles.missionPanel, !showTelemetry && { top: 90 }]}>
+        <View style={styles.panelHeader}>
+          <Text style={styles.panelTitle}>Mission Progress</Text>
+          {!missionRunning && (
+            <Pressable onPress={() => setShowMissionControl(false)}>
+              <X color={COLORS.textMuted} size={18} />
+            </Pressable>
+          )}
+        </View>
+        
+        <View style={styles.progressSection}>
+          <View style={styles.progressHeader}>
+            <Text style={styles.progressLabel}>Rover completed {missionProgress}%</Text>
+            <Text style={styles.progressTime}>--:-- ETA</Text>
+          </View>
+          <View style={styles.progressBarTrack}>
+            <View style={[styles.progressBarFill, { width: `${missionProgress}%` }]} />
+          </View>
+        </View>
+
+        <View style={styles.missionActionsGrid}>
+          <Pressable 
+            style={[styles.gridBtn, missionRunning ? styles.gridBtnDanger : styles.gridBtnBrand]}
+            onPress={missionRunning ? onStopPlan : onStartPlan}
+          >
+            {missionRunning ? <Square color="#fff" size={22} /> : <Play color="#fff" size={22} />}
+            <Text style={styles.gridBtnText}>{missionRunning ? "STOP" : "START"}</Text>
+          </Pressable>
+
+          <Pressable style={styles.gridBtnSecondary} onPress={handlePause}>
+            <Pause color="#fff" size={22} />
+            <Text style={styles.gridBtnText}>PAUSE</Text>
+          </Pressable>
+
+          <Pressable style={styles.gridBtnSecondary} onPress={handleNext}>
+            <SkipForward color="#fff" size={22} />
+            <Text style={styles.gridBtnText}>NEXT</Text>
+          </Pressable>
+
+          <Pressable style={styles.gridBtnSecondary} onPress={handleExport}>
+            <Download color="#fff" size={22} />
+            <Text style={styles.gridBtnText}>EXPORT LOG</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  };
 
   return (
-    <View style={styles.container}>
-      {/* 1. Map Canvas (Full Screen) */}
-      <View style={[styles.mapContainer, { right: rightPanelWidth }]}>
-        <MapView
-          mode={visualAlignmentItem ? "templates" : "fields"}
-          placedItems={visualAlignmentItem ? [visualAlignmentItem] : []}
-          selectedItemIds={visualAlignmentItem && props.visualSelected ? ["visual-alignment-group"] : []}
-          multiTouchMode={visualAlignmentItem ? "rotate" : "both"}
-          onSelectionChange={(ids) => {
-            if (isVisualAlignmentMode) {
-              props.setVisualSelected?.(ids.includes("visual-alignment-group"));
-            }
-          }}
-          onUpdatePlacedItem={(id, updates) => {
-            if (!isVisualAlignmentMode || id !== "visual-alignment-group") return;
-            props.setVisualAlignmentItem?.((prev) => prev ? { ...prev, ...updates } : prev);
-          }}
-          telemetrySnapshot={{
-            lat: telemetrySnapshot?.lat,
-            lon: telemetrySnapshot?.lon,
-            alt: telemetrySnapshot?.alt,
-            heading_ned_deg: telemetrySnapshot?.heading_ned_deg,
-            pos_n: telemetrySnapshot?.pos_n,
-            pos_e: telemetrySnapshot?.pos_e,
-          }}
-          lines={visualAlignmentItem ? [] : autoOriginEnabled && mapSourceLines ? mapSourceLines : lines}
-          alignedRefPoints={alignedRefPoints}
-          autoOriginReference={autoOriginReference}
-          mapGeometryFrame={mapGeometryFrame}
-          autoOriginEnabled={autoOriginEnabled}
-          stagedVerified={false}
-          visible={true}
-          recenterRoverTrigger={0}
-          recenterPlanTrigger={0}
-          onSelectPoint={() => {}}
-          onSelectLine={onSelectLine}
-          selectedLineId={selectedLineId}
-          showCornerPoints={true}
-        />
+    <GestureHandlerRootView style={styles.container}>
+      {props.children}
+      
+      {/* HUD Layer */}
+      <View style={styles.hudLayer} pointerEvents="box-none">
+        {renderTopBar()}
+        {renderNavbar()}
+        {renderTelemetrySection()}
+        {renderMissionControl()}
+        <FloatingEStop visible={missionRunning || isArmed} onTrigger={handleEStop} />
       </View>
-
-      {/* 2. Top Bar (Centered) */}
-      <View style={styles.topBarContainer}>
-         <View style={styles.topBar}>
-            <Pressable onPress={() => onSetMode(mode === "AUTO" ? "MANUAL" : "AUTO")} style={styles.topBtn}>
-               <Settings size={16} color={COLORS.primary} />
-               <Text style={[styles.topBtnText, { color: COLORS.primary }]}>Mode: {mode}</Text>
-            </Pressable>
-            
-            <View style={styles.divider} />
-            
-            <Pressable onPress={() => rtkRunning ? stopRtk() : (rtkDefaultMode === "Lora" ? startLora() : startNtrip())} style={styles.topBtn}>
-               <Radio size={16} color={rtkRunning ? COLORS.success : COLORS.textMuted} />
-               <Text style={styles.topBtnText}>RTK: {rtkDefaultMode}</Text>
-               {rtkRunning && (
-                  <View style={styles.rtkConnecting}>
-                     <View style={styles.rtkDot} />
-                     <Text style={styles.rtkBytes}>12 kb/s</Text>
-                  </View>
-               )}
-            </Pressable>
-
-            <View style={styles.divider} />
-            
-            <Pressable onPress={() => setMissionControlOpen(!missionControlOpen)} style={styles.topBtn}>
-               <Target size={16} color={missionControlOpen ? COLORS.primary : COLORS.textMain} />
-               <Text style={styles.topBtnText}>Mission Control</Text>
-            </Pressable>
-            
-            <View style={styles.divider} />
-            
-            <Pressable onPress={() => setTelemetryOpen(!telemetryOpen)} style={styles.topBtn}>
-               <List size={16} color={telemetryOpen ? COLORS.primary : COLORS.textMain} />
-               <Text style={styles.topBtnText}>Telemetry</Text>
-            </Pressable>
-         </View>
-      </View>
-
-      {/* 3. Left Navbar (Top Left) */}
-      <View style={styles.leftNavContainer}>
-         <Pressable style={styles.leftNav} onPress={() => setNavExpanded(!navExpanded)}>
-            <View style={styles.navItem}>
-               <Menu size={24} color={COLORS.primary} />
-            </View>
-            <Pressable onPress={() => onNav("home")} style={styles.navItem}>
-               <MapIcon size={20} color={COLORS.textMain} />
-               {navExpanded && <Text style={styles.navText}>Main Screen</Text>}
-            </Pressable>
-            <Pressable onPress={() => onNav("fields")} style={styles.navItem}>
-               <Grid size={20} color={COLORS.textMain} />
-               {navExpanded && <Text style={styles.navText}>Field</Text>}
-            </Pressable>
-            <Pressable onPress={() => onNav("settings")} style={styles.navItem}>
-               <Settings size={20} color={COLORS.textMain} />
-               {navExpanded && <Text style={styles.navText}>Settings</Text>}
-            </Pressable>
-            <Pressable onPress={() => {}} style={styles.navItem}>
-               <Info size={20} color={COLORS.textMain} />
-               {navExpanded && <Text style={styles.navText}>How to</Text>}
-            </Pressable>
-            <Pressable onPress={() => {}} style={styles.navItem}>
-               <LogOut size={20} color={COLORS.danger} />
-               {navExpanded && <Text style={[styles.navText, { color: COLORS.danger }]}>Exit</Text>}
-            </Pressable>
-         </Pressable>
-      </View>
-
-      {/* 4. Right Overlays (Telemetry 60%, Mission Control 40%) */}
-      {telemetryOpen && (
-         <View style={styles.telemetryPanel}>
-            <View style={styles.panelHeader}>
-               <Text style={styles.panelTitle}>Telemetry</Text>
-               <Pressable onPress={() => setTelemetryOpen(false)}>
-                  <X size={20} color={COLORS.textMuted} />
-               </Pressable>
-            </View>
-            <ScrollView style={styles.panelScroll}>
-               <View style={styles.telemetryCard}>
-                  <Text style={styles.cardLabel}>System Status</Text>
-                  <Text style={[styles.cardValue, { color: COLORS.success }]}>Healthy Green</Text>
-               </View>
-               <View style={styles.telemetryCard}>
-                  <Text style={styles.cardLabel}>Battery</Text>
-                  <Text style={styles.cardValue}>{battery}%</Text>
-               </View>
-               <View style={styles.telemetryCard}>
-                  <Text style={styles.cardLabel}>GPS Fix</Text>
-                  <Text style={[styles.cardValue, { color: rtkHealthy ? COLORS.success : COLORS.primary }]}>
-                     {rtkRunning ? (rtkHealthy ? "RTK Fixed" : "RTK Float") : "No Fix"}
-                  </Text>
-               </View>
-               <View style={{ marginTop: 10 }}>
-                  <Text style={styles.panelTitle}>Line Details</Text>
-                  {lines?.slice(0, 10).map(l => (
-                     <Pressable key={l.id} style={styles.lineItem}>
-                        <Text style={styles.lineText}>{l.label}</Text>
-                        <ChevronRight size={16} color={COLORS.textMuted} />
-                     </Pressable>
-                  ))}
-               </View>
-            </ScrollView>
-         </View>
-      )}
-
-      {missionControlOpen && (
-         <View style={styles.missionControlPanel}>
-            {mode === "AUTO" ? (
-               // Auto Mission Control
-               <View style={styles.fullFlex}>
-                  <View style={styles.panelHeader}>
-                     <Text style={styles.panelTitle}>Mission Control</Text>
-                     {!missionRunning && (
-                        <Pressable onPress={() => setMissionControlOpen(false)}>
-                           <X size={20} color={COLORS.textMuted} />
-                        </Pressable>
-                     )}
-                  </View>
-                  <View style={styles.missionProgressBox}>
-                     <View style={styles.progressBarBg}>
-                        <View style={[styles.progressBarFill, { width: '45%' }]} />
-                     </View>
-                     <View style={styles.progressTextRow}>
-                        <Text style={styles.progressText}>Rover completed 45%</Text>
-                        <Text style={styles.progressText}>Est. 12 mins left</Text>
-                     </View>
-                  </View>
-                  <View style={styles.missionActions}>
-                     <Pressable style={styles.missionActionBtn} onPress={missionRunning ? onStopPlan : onStartPlan}>
-                        {missionRunning ? <Square size={20} color="#fff" fill="#fff" /> : <Play size={20} color="#fff" fill="#fff" />}
-                        <Text style={styles.missionActionText}>{missionRunning ? "Stop" : "Start"}</Text>
-                     </Pressable>
-                     <Pressable style={styles.missionActionBtn}>
-                        <Pause size={20} color="#fff" fill="#fff" />
-                        <Text style={styles.missionActionText}>Pause</Text>
-                     </Pressable>
-                  </View>
-                  <View style={[styles.missionActions, { marginTop: 12 }]}>
-                     <Pressable style={styles.secondaryActionBtn}>
-                        <ChevronRightCircle size={18} color={COLORS.textMain} />
-                        <Text style={styles.secondaryActionText}>Next</Text>
-                     </Pressable>
-                     <Pressable style={styles.secondaryActionBtn}>
-                        <Download size={18} color={COLORS.textMain} />
-                        <Text style={styles.secondaryActionText}>Export Log</Text>
-                     </Pressable>
-                  </View>
-               </View>
-            ) : (
-               // Manual Joystick Layout
-               <View style={styles.fullFlex}>
-                  <View style={styles.panelHeader}>
-                     <Text style={styles.panelTitle}>Manual Control</Text>
-                     <Pressable onPress={() => setMissionControlOpen(false)}>
-                        <X size={20} color={COLORS.textMuted} />
-                     </Pressable>
-                  </View>
-                  <View style={styles.joystickLayout}>
-                     <View style={styles.analogStickBase}>
-                        <View style={styles.analogStickKnob} />
-                     </View>
-                     <View style={styles.joystickBtns}>
-                        <Pressable style={styles.joyBtn}>
-                           <Text style={styles.joyBtnText}>Acquire</Text>
-                        </Pressable>
-                        <Pressable style={styles.joyBtn}>
-                           <Text style={styles.joyBtnText}>Release</Text>
-                        </Pressable>
-                        <Pressable style={[styles.joyBtn, isArmed && { backgroundColor: COLORS.danger }]} onPress={() => onArmVehicle(!isArmed)}>
-                           <Text style={styles.joyBtnText}>{isArmed ? "Disarm" : "Arm"}</Text>
-                        </Pressable>
-                     </View>
-                  </View>
-               </View>
-            )}
-         </View>
-      )}
-
-      {/* Floating E-Stop (Visible only during mission) */}
-      {missionRunning && (
-         <View style={styles.actionZone}>
-            <GestureDetector gesture={eStopGesture}>
-               <AnimatedReanimated.View style={[styles.estopBtn, animatedEstopStyle]}>
-                  <Text style={styles.estopText}>E-STOP</Text>
-                  <Text style={styles.estopSub}>HOLD 1.5s</Text>
-               </AnimatedReanimated.View>
-            </GestureDetector>
-         </View>
-      )}
-
-    </View>
+    </GestureHandlerRootView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bg },
-  mapContainer: { position: "absolute", top: 0, bottom: 0, left: 0 },
-  topBarContainer: {
-     position: "absolute",
-     top: 16,
-     left: 0,
-     right: 0,
-     alignItems: "center",
-     zIndex: 50,
-  },
+  container: { flex: 1, backgroundColor: "#000" },
+  hudLayer: { ...StyleSheet.absoluteFillObject, zIndex: 10, padding: 20 },
+  
   topBar: {
-     flexDirection: "row",
-     alignItems: "center",
-     backgroundColor: COLORS.surfaceLight,
-     borderWidth: 1,
-     borderColor: COLORS.primaryDim,
-     borderRadius: 999,
-     paddingHorizontal: 16,
-     paddingVertical: 8,
-     ...SHADOW,
+    position: "absolute",
+    top: 20,
+    left: 20,
+    right: 20,
+    height: 56,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    zIndex: 100,
   },
-  topBtn: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 8 },
-  topBtnText: { color: COLORS.textMain, fontSize: 13, fontWeight: "600" },
-  divider: { width: 1, height: 14, backgroundColor: COLORS.border, marginHorizontal: 4 },
-  rtkConnecting: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: COLORS.success + "20", paddingHorizontal: 6, borderRadius: 12 },
-  rtkDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: COLORS.success },
-  rtkBytes: { color: COLORS.success, fontSize: 10, fontWeight: "bold" },
+  topBarCenter: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.panelBg,
+    borderRadius: 30,
+    padding: 6,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    ...SHADOWS.panel,
+  },
+  navToggle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: COLORS.panelBg,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    ...SHADOWS.panel,
+  },
+  pillButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 24,
+    gap: 8,
+  },
+  pillActiveBrand: { backgroundColor: COLORS.accentBrand },
+  pillActiveSuccess: { backgroundColor: "rgba(16, 185, 129, 0.2)", borderWidth: 1, borderColor: "rgba(16, 185, 129, 0.5)" },
+  pillActiveSecondary: { backgroundColor: "rgba(255, 255, 255, 0.15)" },
+  pillInactive: { backgroundColor: "transparent" },
+  pillText: { color: "#fff", fontWeight: "600", fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5 },
+  divider: { width: 1, height: 20, backgroundColor: "rgba(255, 255, 255, 0.2)", marginHorizontal: 4 },
   
-  leftNavContainer: {
-     position: "absolute",
-     top: 16,
-     left: 16,
-     zIndex: 60,
+  batteryIndicator: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.panelBg,
+    paddingHorizontal: 16,
+    height: 48,
+    borderRadius: 24,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    ...SHADOWS.panel,
   },
-  leftNav: {
-     backgroundColor: COLORS.surfaceLight,
-     borderWidth: 1,
-     borderColor: COLORS.primaryDim,
-     borderRadius: 16,
-     paddingVertical: 8,
-     ...SHADOW,
-  },
-  navItem: { flexDirection: "row", alignItems: "center", paddingVertical: 12, paddingHorizontal: 16, gap: 12 },
-  navText: { color: COLORS.textMain, fontSize: 14, fontWeight: "600" },
+  batteryText: { color: "#fff", fontWeight: "700", fontSize: 15 },
 
-  telemetryPanel: {
-     position: "absolute",
-     right: 0,
-     top: 0,
-     height: "60%",
-     width: "25%",
-     backgroundColor: COLORS.surface,
-     borderLeftWidth: 1,
-     borderBottomWidth: 1,
-     borderColor: COLORS.primaryDim,
-     padding: 16,
-     zIndex: 100,
+  navbar: {
+    position: "absolute",
+    left: 20,
+    top: 90,
+    bottom: 20,
+    backgroundColor: COLORS.panelBg,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    paddingVertical: 20,
+    alignItems: "center",
+    gap: 20,
+    ...SHADOWS.panel,
+    overflow: "hidden",
   },
-  missionControlPanel: {
-     position: "absolute",
-     right: 0,
-     bottom: 0,
-     height: "40%",
-     width: "25%",
-     backgroundColor: COLORS.surface,
-     borderLeftWidth: 1,
-     borderTopWidth: 1,
-     borderColor: COLORS.primaryDim,
-     padding: 16,
-     zIndex: 100,
+  navItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    width: "100%",
+    paddingHorizontal: 22,
+    paddingVertical: 12,
+    gap: 16,
   },
-  fullFlex: { flex: 1 },
+  navItemActive: {
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.accentBrand,
+    backgroundColor: "rgba(59, 130, 246, 0.1)",
+  },
+  navLabel: { color: COLORS.textMuted, fontSize: 14, fontWeight: "600" },
+
+  rightPanelBase: {
+    position: "absolute",
+    right: 20,
+    width: 320,
+    backgroundColor: COLORS.panelBg,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    padding: 20,
+    ...SHADOWS.panel,
+    overflow: "hidden",
+  },
+  telemetryPanel: { top: 90, height: "55%" },
+  missionPanel: { bottom: 20, height: "35%" },
+  
   panelHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 16 },
-  panelTitle: { color: COLORS.textMain, fontSize: 16, fontWeight: "800" },
-  panelScroll: { flex: 1 },
-  
-  telemetryCard: {
-     backgroundColor: COLORS.bg,
-     borderRadius: 8,
-     padding: 12,
-     marginBottom: 8,
-     borderWidth: 1,
-     borderColor: COLORS.border,
+  panelTitle: { color: "#fff", fontSize: 16, fontWeight: "700", letterSpacing: 0.5 },
+
+  telemetrySection: {
+    marginBottom: 16,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255, 255, 255, 0.1)",
   },
-  cardLabel: { color: COLORS.textMuted, fontSize: 12, fontWeight: "600" },
-  cardValue: { color: COLORS.textMain, fontSize: 18, fontWeight: "800", marginTop: 4 },
-  
-  lineItem: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 10, borderBottomWidth: 1, borderColor: COLORS.border },
-  lineText: { color: COLORS.textMain, fontSize: 13 },
+  sectionHeader: { color: COLORS.textMuted, fontSize: 11, fontWeight: "800", textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 },
+  dataGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
+  dataCell: { width: "45%" },
+  dataLabel: { color: "rgba(255, 255, 255, 0.5)", fontSize: 10, fontWeight: "700", marginBottom: 4 },
+  dataVal: { color: "#fff", fontSize: 14, fontWeight: "600", fontFamily: Platform.OS === "ios" ? "Courier" : "monospace" },
 
-  missionProgressBox: { backgroundColor: COLORS.bg, borderRadius: 8, padding: 12, marginBottom: 16, borderWidth: 1, borderColor: COLORS.border },
-  progressBarBg: { height: 8, backgroundColor: COLORS.surface, borderRadius: 4, marginBottom: 8, overflow: "hidden" },
-  progressBarFill: { height: "100%", backgroundColor: COLORS.primary },
-  progressTextRow: { flexDirection: "row", justifyContent: "space-between" },
-  progressText: { color: COLORS.textMuted, fontSize: 11 },
+  stateWrapper: { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "rgba(255, 255, 255, 0.05)", padding: 12, borderRadius: 12 },
+  stateIndicator: { width: 10, height: 10, borderRadius: 5 },
+  stateText: { color: "#fff", fontSize: 14, fontWeight: "700", letterSpacing: 1 },
 
-  missionActions: { flexDirection: "row", gap: 12 },
-  missionActionBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: COLORS.primary, paddingVertical: 12, borderRadius: 8 },
-  missionActionText: { color: COLORS.bg, fontSize: 14, fontWeight: "bold" },
-  
-  secondaryActionBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: COLORS.bg, paddingVertical: 10, borderRadius: 8, borderWidth: 1, borderColor: COLORS.border },
-  secondaryActionText: { color: COLORS.textMain, fontSize: 13 },
+  joystickContainer: { flex: 1, alignItems: "center", justifyContent: "center", minHeight: 180 },
+  manualActions: { marginTop: 10 },
+  actionBtnSecondary: { flex: 1, backgroundColor: "rgba(255, 255, 255, 0.1)", height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  actionBtnTextSec: { color: "#fff", fontWeight: "600", fontSize: 13 },
+  armButton: { flexDirection: "row", height: 50, borderRadius: 16, alignItems: "center", justifyContent: "center", gap: 10 },
+  armActive: { backgroundColor: COLORS.danger },
+  armInactive: { backgroundColor: "rgba(255, 255, 255, 0.1)" },
+  armBtnText: { color: "#fff", fontWeight: "800", fontSize: 14, letterSpacing: 1 },
 
-  joystickLayout: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 10 },
-  analogStickBase: { width: 100, height: 100, borderRadius: 50, backgroundColor: COLORS.bg, borderWidth: 2, borderColor: COLORS.border, alignItems: "center", justifyContent: "center" },
-  analogStickKnob: { width: 40, height: 40, borderRadius: 20, backgroundColor: COLORS.surfaceLight, borderWidth: 1, borderColor: COLORS.primaryDim },
-  
-  joystickBtns: { gap: 12, flex: 1, marginLeft: 20 },
-  joyBtn: { backgroundColor: COLORS.bg, paddingVertical: 12, borderRadius: 8, alignItems: "center", borderWidth: 1, borderColor: COLORS.border },
-  joyBtnText: { color: COLORS.textMain, fontSize: 13, fontWeight: "bold" },
+  progressSection: { marginBottom: 20 },
+  progressHeader: { flexDirection: "row", justifyContent: "space-between", marginBottom: 8 },
+  progressLabel: { color: "#fff", fontSize: 13, fontWeight: "600" },
+  progressTime: { color: COLORS.textMuted, fontSize: 12, fontWeight: "500" },
+  progressBarTrack: { height: 8, backgroundColor: "rgba(255, 255, 255, 0.1)", borderRadius: 4, overflow: "hidden" },
+  progressBarFill: { height: "100%", backgroundColor: COLORS.accentBrand },
 
-  actionZone: { position: "absolute", right: "27%", bottom: 32, alignItems: "center" },
-  estopBtn: { width: 86, height: 86, borderRadius: 43, backgroundColor: COLORS.danger, alignItems: "center", justifyContent: "center", ...SHADOW },
-  estopText: { color: "#fff", fontSize: 14, fontWeight: "900" },
-  estopSub: { color: COLORS.dangerBg, fontSize: 10, fontWeight: "700" },
+  missionActionsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  gridBtn: { width: "48%", height: 60, borderRadius: 16, alignItems: "center", justifyContent: "center", gap: 6 },
+  gridBtnBrand: { backgroundColor: COLORS.accentBrand },
+  gridBtnDanger: { backgroundColor: COLORS.danger },
+  gridBtnSecondary: { width: "48%", height: 60, backgroundColor: "rgba(255, 255, 255, 0.1)", borderRadius: 16, alignItems: "center", justifyContent: "center", gap: 6 },
+  gridBtnText: { color: "#fff", fontSize: 11, fontWeight: "800", letterSpacing: 0.5 },
+
+  estopContainer: { position: "absolute", bottom: 40, alignSelf: "center", alignItems: "center", zIndex: 9999 },
+  estopButton: { width: 100, height: 100, borderRadius: 50, backgroundColor: "rgba(220, 38, 38, 0.8)", borderWidth: 4, borderColor: "#fecaca", alignItems: "center", justifyContent: "center", overflow: "hidden", ...SHADOWS.glow },
+  estopProgressFill: { position: "absolute", bottom: 0, left: 0, right: 0, backgroundColor: COLORS.danger },
+  estopText: { color: "#fff", fontSize: 16, fontWeight: "900", marginTop: 4 },
+  estopSubText: { color: "rgba(255, 255, 255, 0.7)", fontSize: 10, fontWeight: "700" }
 });

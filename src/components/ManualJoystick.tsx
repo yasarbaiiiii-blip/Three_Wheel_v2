@@ -7,6 +7,7 @@ import Animated, {
   useSharedValue,
   withSpring,
 } from "react-native-reanimated";
+import { Navigation } from "lucide-react-native";
 
 export type JoystickValues = {
   forward: number;
@@ -32,8 +33,8 @@ const SPRING_CONFIG = {
 };
 
 export function ManualJoystick({
-  size = 168,
-  knobSize = 56,
+  size = 180,
+  knobSize = 65,
   disabled = false,
   onChange,
   onRelease,
@@ -100,30 +101,57 @@ export function ManualJoystick({
   const knobBaseLeft = size / 2 - knobSize / 2;
   const knobBaseTop = size / 2 - knobSize / 2;
 
+  // Modern UI Colors
+  const baseRingColor = disabled ? "rgba(255,255,255,0.05)" : "rgba(59, 130, 246, 0.15)";
+  const innerRingColor = disabled ? "rgba(255,255,255,0.02)" : "rgba(59, 130, 246, 0.08)";
+  const knobColor = disabled ? "#475569" : "#3b82f6";
+
   return (
     <View
       style={{
         width: size,
         height: size,
         borderRadius: size / 2,
-        backgroundColor: "rgba(15, 23, 42, 0.65)",
+        backgroundColor: "rgba(9, 9, 11, 0.8)",
         borderWidth: 2,
-        borderColor: disabled ? "rgba(71, 85, 105, 0.5)" : "rgba(59, 130, 246, 0.45)",
+        borderColor: disabled ? "rgba(255,255,255,0.1)" : "rgba(59, 130, 246, 0.4)",
         alignItems: "center",
         justifyContent: "center",
-        opacity: disabled ? 0.55 : 1,
+        opacity: disabled ? 0.6 : 1,
+        shadowColor: "#000",
+        shadowOpacity: 0.5,
+        shadowRadius: 15,
+        shadowOffset: { width: 0, height: 10 },
+        elevation: 8,
       }}
     >
+      {/* Outer Glow / Guide Ring */}
       <View
         style={{
           position: "absolute",
-          width: size * 0.72,
-          height: size * 0.72,
-          borderRadius: (size * 0.72) / 2,
-          borderWidth: 1,
-          borderColor: "rgba(148, 163, 184, 0.18)",
+          width: size * 0.85,
+          height: size * 0.85,
+          borderRadius: (size * 0.85) / 2,
+          backgroundColor: baseRingColor,
         }}
       />
+      {/* Inner Target Ring */}
+      <View
+        style={{
+          position: "absolute",
+          width: size * 0.45,
+          height: size * 0.45,
+          borderRadius: (size * 0.45) / 2,
+          borderWidth: 1,
+          borderColor: disabled ? "rgba(255,255,255,0.1)" : "rgba(59, 130, 246, 0.3)",
+          backgroundColor: innerRingColor,
+        }}
+      />
+
+      {/* Axis markers */}
+      <View style={{ position: "absolute", width: 2, height: size * 0.9, backgroundColor: "rgba(255,255,255,0.05)" }} />
+      <View style={{ position: "absolute", height: 2, width: size * 0.9, backgroundColor: "rgba(255,255,255,0.05)" }} />
+
       <GestureDetector gesture={panGesture}>
         <Animated.View
           style={[
@@ -134,18 +162,25 @@ export function ManualJoystick({
               width: knobSize,
               height: knobSize,
               borderRadius: knobSize / 2,
-              backgroundColor: disabled ? "#475569" : "#3b82f6",
-              borderWidth: 3,
+              backgroundColor: knobColor,
+              borderWidth: 4,
               borderColor: "#ffffff",
               shadowColor: "#000",
-              shadowOpacity: 0.25,
-              shadowRadius: 6,
-              shadowOffset: { width: 0, height: 2 },
-              elevation: 4,
+              shadowOpacity: 0.4,
+              shadowRadius: 8,
+              shadowOffset: { width: 0, height: 4 },
+              elevation: 8,
+              alignItems: "center",
+              justifyContent: "center",
             },
             knobAnimatedStyle,
           ]}
-        />
+        >
+          {/* Knob Icon */}
+          <View style={{ transform: [{ rotate: "45deg" }] }}>
+            <Navigation color="#ffffff" size={24} fill="#ffffff" />
+          </View>
+        </Animated.View>
       </GestureDetector>
     </View>
   );
