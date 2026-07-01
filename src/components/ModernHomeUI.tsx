@@ -4,7 +4,7 @@ import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform, Moda
 import { GestureHandlerRootView, GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps, withSpring, withTiming, cancelAnimation, Easing, runOnJS } from "react-native-reanimated";
 import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText } from "react-native-svg";
-import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2 } from "lucide-react-native";
+import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut } from "lucide-react-native";
 import { ManualJoystick } from "./ManualJoystick";
 import { pauseMission, nextMission, exportLog } from "../api/missionApi";
 import { MapView } from "./MapView";
@@ -625,6 +625,8 @@ export default function ModernHomeUI(props) {
   // Local UI State
   const [showTelemetry, setShowTelemetry] = useState(true);
   const [showMissionControl, setShowMissionControl] = useState(true);
+  const [showJoystick, setShowJoystick] = useState(false);
+  const [quickAccessExpanded, setQuickAccessExpanded] = useState(false);
   const [mapFullscreen, setMapFullscreen] = useState(false);
   const [navExpanded, setNavExpanded] = useState(false);
   const [navIconsVisible, setNavIconsVisible] = useState(true);
@@ -634,7 +636,6 @@ export default function ModernHomeUI(props) {
   const navWidth = useSharedValue(NAV_WIDTH_COLLAPSED);
   const navHeight = useSharedValue(NAV_HEIGHT_FULL);
   const navBgOpacity = useSharedValue(1);
-  const topBarRightInset = useSharedValue(HUD_PAD);
   const [isArmed, setIsArmed] = useState(systemHealth?.armed || false);
   const [visualSelected, setVisualSelected] = useState(false);
 
@@ -704,6 +705,7 @@ export default function ModernHomeUI(props) {
   const collapseNavbar = useCallback(() => {
     setNavIconsVisible(false);
     setNavExpanded(false);
+    setQuickAccessExpanded(false);
   }, []);
 
   useEffect(() => {
@@ -725,15 +727,14 @@ export default function ModernHomeUI(props) {
   }, [currentPage]);
 
   useEffect(() => {
-    if (!isHomePage) {
-      topBarRightInset.value = withTiming(HUD_PAD, NAV_TIMING);
-      return;
+    if (vehicleMode !== "MANUAL" || missionRunning) {
+      setShowJoystick(false);
     }
-    topBarRightInset.value = withTiming(
-      showTelemetry ? HUD_PAD + RIGHT_PANEL_WIDTH + SIDE_GAP : HUD_PAD,
-      NAV_TIMING
-    );
-  }, [isHomePage, showTelemetry, topBarRightInset]);
+  }, [vehicleMode, missionRunning]);
+
+  useEffect(() => {
+    if (!showMissionControl) setShowJoystick(false);
+  }, [showMissionControl]);
 
   const navAnimatedStyle = useAnimatedStyle(() => ({
     width: navWidth.value,
@@ -742,15 +743,15 @@ export default function ModernHomeUI(props) {
     borderColor: navBgOpacity.value > 0.01 ? COLORS.panelBorder : "transparent",
   }));
 
-  const topBarAnimatedStyle = useAnimatedStyle(() => ({
+  const compassAnimatedStyle = useAnimatedStyle(() => ({
     left: HUD_PAD + navWidth.value + SIDE_GAP,
-    right: topBarRightInset.value,
+    top: HUD_PAD,
   }));
 
   const sectionContentAnimatedStyle = useAnimatedStyle(() => ({
     left: HUD_PAD + navWidth.value + SIDE_GAP,
     right: HUD_PAD,
-    top: HUD_PAD + 56 + SIDE_GAP,
+    top: HUD_PAD + SIDE_GAP,
     bottom: HUD_PAD,
   }));
 
@@ -798,66 +799,40 @@ export default function ModernHomeUI(props) {
     if (virtualJoystick) virtualJoystick.release();
   };
 
-  const renderTopBar = () => (
-    <AnimatedReanimated.View style={[styles.topBar, topBarAnimatedStyle]} pointerEvents="box-none">
-      <View style={styles.topBarCenterWrapper} pointerEvents="box-none">
-        <View style={styles.topBarCenter}>
+  const handleSetManualMode = useCallback(() => {
+    if (vehicleMode === "MANUAL") return;
+    if (onSetMode) onSetMode("MANUAL");
+    fetch(`${getApiBase()}/api/set_mode`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "MANUAL" }),
+    }).catch(console.error);
+  }, [vehicleMode, onSetMode]);
+
+  const handleToggleRtk = useCallback(() => {
+    if (rtkRunning) stopRtk && stopRtk();
+    else rtkDefaultMode.toLowerCase() === "lora" ? startLora && startLora() : startNtrip && startNtrip();
+  }, [rtkRunning, rtkDefaultMode, stopRtk, startLora, startNtrip]);
+
+  const handleQuickAccessPress = useCallback(() => {
+    if (!navIconsVisible) {
+      setNavIconsVisible(true);
+      setQuickAccessExpanded(true);
+      return;
+    }
+    setQuickAccessExpanded((v) => !v);
+  }, [navIconsVisible]);
+
+  const renderCompassAnchor = () => {
+    if (!isHomePage || !navIconsVisible) return null;
+    return (
+      <AnimatedReanimated.View style={[styles.compassAnchor, compassAnimatedStyle]} pointerEvents="none">
+        <View style={styles.compassAnchorInner}>
           <TopBarCompass headingDeg={roverHeadingDeg ?? 0} hasRoverHeading={hasRoverHeading} />
-
-          <View style={styles.divider} />
-
-          <View style={styles.topBarPills}>
-          <VehicleModePill
-            mode={vehicleMode}
-            onPress={() => {
-              if (vehicleMode === "MANUAL") return;
-              if (onSetMode) onSetMode("MANUAL");
-              fetch(`${getApiBase()}/api/set_mode`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ mode: "MANUAL" }),
-              }).catch(console.error);
-            }}
-          />
-
-          <View style={styles.divider} />
-
-          <RtkStreamPill
-            mode={rtkDefaultMode}
-            streaming={rtkRunning}
-            healthy={rtkHealthy}
-            onPress={() => {
-              if (rtkRunning) stopRtk && stopRtk();
-              else rtkDefaultMode.toLowerCase() === "lora" ? startLora && startLora() : startNtrip && startNtrip();
-            }}
-          />
-
-          {isHomePage ? (
-            <>
-              <View style={styles.divider} />
-
-              <TopBarTogglePill
-                icon={Route}
-                label="Mission Control"
-                active={showMissionControl}
-                onPress={() => setShowMissionControl(!showMissionControl)}
-              />
-
-              <View style={styles.divider} />
-
-              <TopBarTogglePill
-                icon={MonitorPlay}
-                label="Telemetry"
-                active={showTelemetry}
-                onPress={() => setShowTelemetry(!showTelemetry)}
-              />
-            </>
-          ) : null}
-          </View>
         </View>
-      </View>
-    </AnimatedReanimated.View>
-  );
+      </AnimatedReanimated.View>
+    );
+  };
 
   const handleNavPress = (id) => {
     setActiveNav(id);
@@ -931,6 +906,52 @@ export default function ModernHomeUI(props) {
 
       {navIconsVisible && (
         <>
+          {isHomePage ? (
+            <>
+              <View style={styles.navGroupSeparator} />
+              <NavBarItem
+                icon={LayoutGrid}
+                label="Quick Access"
+                active={quickAccessExpanded}
+                expanded={navExpanded}
+                onPress={handleQuickAccessPress}
+              />
+              {quickAccessExpanded ? (
+                <View style={styles.quickAccessSection}>
+                  <NavBarItem
+                    icon={vehicleMode === "MANUAL" ? Gamepad2 : vehicleMode === "OFFBOARD" ? Hexagon : Zap}
+                    label={`Mode · ${vehicleMode}`}
+                    active={vehicleMode === "MANUAL"}
+                    expanded={navExpanded}
+                    onPress={handleSetManualMode}
+                  />
+                  <NavBarItem
+                    icon={RadioTower}
+                    label={rtkRunning ? `RTK · ${rtkDefaultMode}` : `RTK · Off`}
+                    active={rtkRunning}
+                    expanded={navExpanded}
+                    onPress={handleToggleRtk}
+                  />
+                  <NavBarItem
+                    icon={Route}
+                    label="Mission Control"
+                    active={showMissionControl}
+                    expanded={navExpanded}
+                    onPress={() => setShowMissionControl((v) => !v)}
+                  />
+                  <NavBarItem
+                    icon={MonitorPlay}
+                    label="Telemetry"
+                    active={showTelemetry}
+                    expanded={navExpanded}
+                    onPress={() => setShowTelemetry((v) => !v)}
+                  />
+                </View>
+              ) : null}
+              <View style={styles.navGroupSeparator} />
+            </>
+          ) : null}
+
           <View style={styles.navSection}>
             {[
               { id: "main", icon: Crosshair, label: "Main Screen" },
@@ -951,64 +972,86 @@ export default function ModernHomeUI(props) {
 
           <View style={{ flex: 1 }} />
 
-          {isHomePage ? (
+          {isHomePage && setMapViewEnabled ? (
             <>
               <View style={styles.navDivider} />
-
               <View style={styles.navToolsSection}>
                 <NavBarItem
-                  icon={MapIcon}
-                  label="Focus Plan"
-                  active={false}
+                  icon={Maximize2}
+                  label="Fullscreen Map"
+                  active={mapFullscreen}
                   expanded={navExpanded}
-                  onPress={() => onFocusPlan?.()}
+                  onPress={() => {
+                    if (!mapViewEnabled) {
+                      setMapViewEnabled(true);
+                      setMapFullscreen(true);
+                      return;
+                    }
+                    setMapFullscreen((v) => !v);
+                  }}
                 />
                 <NavBarItem
-                  icon={Tractor}
-                  label="Focus Rover"
-                  active={false}
+                  icon={MapIcon}
+                  label={mapViewEnabled ? "Map On" : "Map Off"}
+                  active={mapViewEnabled}
                   expanded={navExpanded}
-                  onPress={() => onFocusRover?.()}
+                  onPress={() => setMapViewEnabled((v) => !v)}
                 />
-                {setMapViewEnabled ? (
-                  <>
-                    <NavBarItem
-                      icon={Maximize2}
-                      label="Fullscreen Map"
-                      active={mapFullscreen}
-                      expanded={navExpanded}
-                      onPress={() => {
-                        if (!mapViewEnabled) {
-                          setMapViewEnabled(true);
-                          setMapFullscreen(true);
-                          return;
-                        }
-                        setMapFullscreen((v) => !v);
-                      }}
-                    />
-                    <NavBarItem
-                      icon={MapIcon}
-                      label={mapViewEnabled ? "Map On" : "Map Off"}
-                      active={mapViewEnabled}
-                      expanded={navExpanded}
-                      onPress={() => setMapViewEnabled((v) => !v)}
-                    />
-                  </>
-                ) : null}
               </View>
             </>
           ) : null}
 
           <View style={styles.navDivider} />
 
-          <NavBarItem
-            icon={X}
-            label="Exit Session"
-            active={false}
-            expanded={navExpanded}
-            danger
-            onPress={() => onNav("connection")}
-          />
+          <View style={[styles.bottomActionRow, navExpanded ? styles.bottomActionRowExpanded : styles.bottomActionRowCollapsed]}>
+            {isHomePage ? (
+              <>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.bottomActionBtn,
+                    !navExpanded && styles.bottomActionBtnCollapsed,
+                    pressed && styles.bottomActionBtnPressed,
+                  ]}
+                  onPress={() => onFocusPlan?.()}
+                  accessibilityLabel="Focus Plan"
+                >
+                  <View style={styles.bottomActionIconWrap}>
+                    <MapIcon color={COLORS.textMuted} size={18} strokeWidth={2.2} />
+                  </View>
+                  {navExpanded ? <Text style={styles.bottomActionLabel}>Focus Plan</Text> : null}
+                </Pressable>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.bottomActionBtn,
+                    !navExpanded && styles.bottomActionBtnCollapsed,
+                    pressed && styles.bottomActionBtnPressed,
+                  ]}
+                  onPress={() => onFocusRover?.()}
+                  accessibilityLabel="Focus Rover"
+                >
+                  <View style={styles.bottomActionIconWrap}>
+                    <Tractor color={COLORS.textMuted} size={18} strokeWidth={2.2} />
+                  </View>
+                  {navExpanded ? <Text style={styles.bottomActionLabel}>Focus Rover</Text> : null}
+                </Pressable>
+              </>
+            ) : null}
+            <Pressable
+              style={({ pressed }) => [
+                styles.bottomActionBtn,
+                !navExpanded && styles.bottomActionBtnCollapsed,
+                styles.bottomActionBtnDanger,
+                pressed && styles.bottomActionBtnDangerPressed,
+              ]}
+              onPress={() => onNav("connection")}
+              accessibilityLabel="Exit Session"
+            >
+              <View style={[styles.bottomActionIconWrap, styles.bottomActionIconWrapDanger]}>
+                <LogOut color={COLORS.danger} size={18} strokeWidth={2.2} />
+              </View>
+              {navExpanded ? <Text style={[styles.bottomActionLabel, styles.bottomActionLabelDanger]}>Exit Session</Text> : null}
+            </Pressable>
+          </View>
         </>
       )}
     </AnimatedReanimated.View>
@@ -1107,7 +1150,7 @@ export default function ModernHomeUI(props) {
   };
 
   const renderJoystickPanel = () => {
-    if (vehicleMode !== "MANUAL" || missionRunning) return null;
+    if (!showJoystick || vehicleMode !== "MANUAL" || missionRunning) return null;
 
     const statusLabel = joystickActive
       ? "Driving"
@@ -1121,6 +1164,7 @@ export default function ModernHomeUI(props) {
           icon={Gamepad2}
           title="Manual Control"
           subtitle={isArmed ? "Ready to drive" : "Arm vehicle first"}
+          onClose={() => setShowJoystick(false)}
         />
         <ScrollView
           style={styles.panelScroll}
@@ -1216,6 +1260,34 @@ export default function ModernHomeUI(props) {
             </View>
           </View>
 
+          {vehicleMode === "MANUAL" && !missionRunning ? (
+            <Pressable
+              style={[styles.joystickLaunchBtn, showJoystick && styles.joystickLaunchBtnActive]}
+              onPress={() => setShowJoystick((v) => !v)}
+            >
+              <View style={[styles.joystickLaunchIcon, showJoystick && styles.joystickLaunchIconActive]}>
+                <Gamepad2
+                  color={showJoystick ? COLORS.accentText : COLORS.accentBrand}
+                  size={20}
+                  strokeWidth={2.2}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.joystickLaunchTitle, showJoystick && styles.joystickLaunchTitleActive]}>
+                  {showJoystick ? "Joystick Open" : "Open Joystick"}
+                </Text>
+                <Text style={[styles.joystickLaunchSub, showJoystick && styles.joystickLaunchSubActive]}>
+                  {showJoystick ? "Tap to hide manual drive controls" : "Manual mode — tap to drive"}
+                </Text>
+              </View>
+              {showJoystick ? (
+                <View style={styles.joystickLaunchClose}>
+                  <X color={COLORS.accentText} size={14} strokeWidth={2.4} />
+                </View>
+              ) : null}
+            </Pressable>
+          ) : null}
+
           <View style={styles.missionActionsGrid}>
             <MissionActionBtn
               icon={missionRunning ? Square : Play}
@@ -1306,11 +1378,11 @@ export default function ModernHomeUI(props) {
       {/* HUD Layer */}
       {hudVisible ? (
         <View style={styles.hudLayer} pointerEvents="box-none">
-          {renderTopBar()}
           {renderNavbar()}
+          {renderCompassAnchor()}
           {isHomePage ? renderTelemetrySection() : null}
-          {isHomePage ? renderJoystickPanel() : null}
           {isHomePage ? renderMissionControl() : null}
+          {isHomePage ? renderJoystickPanel() : null}
           {isHomePage ? <FloatingEStop visible={missionRunning || isArmed} onTrigger={handleEStop} /> : null}
         </View>
       ) : null}
@@ -1350,36 +1422,28 @@ const styles = StyleSheet.create({
   mapOffSub: { color: COLORS.textDim, fontSize: 12, fontWeight: "500" },
   hudLayer: { ...StyleSheet.absoluteFillObject, zIndex: 10, padding: 20 },
   
-  topBar: {
+  compassAnchor: {
     position: "absolute",
-    top: HUD_PAD,
-    height: 56,
-    zIndex: 100,
+    zIndex: 95,
   },
-  topBarCenterWrapper: {
-    flex: 1,
-    height: "100%",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  topBarCenter: {
+  compassAnchorInner: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: COLORS.panelSolid,
-    borderRadius: 30,
+    borderRadius: 16,
     paddingVertical: 4,
-    paddingHorizontal: 6,
-    gap: 2,
+    paddingHorizontal: 8,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
-    ...SHADOWS.panel,
-    maxWidth: "100%",
+    ...SHADOWS.card,
   },
-  topBarPills: {
-    flexDirection: "row",
-    alignItems: "center",
+  quickAccessSection: {
     gap: 2,
-    flexShrink: 1,
+    paddingLeft: 4,
+    borderLeftWidth: 2,
+    borderLeftColor: COLORS.accentBorder,
+    marginLeft: 8,
+    marginVertical: 2,
   },
   topBarCompass: {
     flexDirection: "row",
@@ -1696,6 +1760,76 @@ const styles = StyleSheet.create({
     gap: 4,
     width: "100%",
   },
+  bottomActionRow: {
+    alignItems: "stretch",
+    justifyContent: "center",
+    gap: 6,
+    paddingHorizontal: 4,
+    paddingTop: 4,
+  },
+  bottomActionRowExpanded: {
+    flexDirection: "row",
+  },
+  bottomActionRowCollapsed: {
+    flexDirection: "column",
+  },
+  bottomActionBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    backgroundColor: COLORS.cardSolid,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    minHeight: 44,
+  },
+  bottomActionBtnCollapsed: {
+    flex: 0,
+    flexDirection: "column",
+    gap: 0,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+    minHeight: 42,
+  },
+  bottomActionBtnPressed: {
+    backgroundColor: COLORS.surfaceSolid,
+    transform: [{ scale: 0.96 }],
+  },
+  bottomActionBtnDanger: {
+    backgroundColor: COLORS.dangerMuted,
+    borderColor: COLORS.dangerBorder,
+  },
+  bottomActionBtnDangerPressed: {
+    backgroundColor: "#4a1f1f",
+  },
+  bottomActionIconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: COLORS.surfaceSolid,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  bottomActionIconWrapDanger: {
+    backgroundColor: COLORS.dangerMuted,
+    borderColor: COLORS.dangerBorder,
+  },
+  bottomActionLabel: {
+    color: COLORS.textMuted,
+    fontSize: 9,
+    fontWeight: "700",
+    letterSpacing: 0.3,
+    textAlign: "center",
+  },
+  bottomActionLabelDanger: {
+    color: COLORS.danger,
+  },
   fullscreenCloseBtn: {
     position: "absolute",
     top: HUD_PAD,
@@ -1725,9 +1859,71 @@ const styles = StyleSheet.create({
     ...SHADOWS.panel,
     overflow: "hidden",
   },
-  telemetryPanel: { top: 20, height: "50%" },
+  telemetryPanel: { top: HUD_PAD, height: "50%" },
   missionPanel: { bottom: HUD_PAD, height: `${BOTTOM_PANEL_HEIGHT_RATIO * 100}%` },
-  joystickPanel: { bottom: HUD_PAD, height: `${BOTTOM_PANEL_HEIGHT_RATIO * 100}%` },
+  joystickPanel: {
+    bottom: HUD_PAD,
+    left: HUD_PAD + NAV_WIDTH_COLLAPSED + SIDE_GAP + 8,
+    right: undefined,
+    width: 300,
+    maxHeight: "58%",
+    zIndex: 110,
+  },
+  joystickLaunchBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 12,
+    marginBottom: 12,
+    borderRadius: 14,
+    backgroundColor: COLORS.cardSolid,
+    borderWidth: 1,
+    borderColor: COLORS.accentBorder,
+  },
+  joystickLaunchBtnActive: {
+    backgroundColor: COLORS.accentBrand,
+    borderColor: COLORS.accentBorder,
+  },
+  joystickLaunchIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 11,
+    backgroundColor: COLORS.accentMuted,
+    borderWidth: 1,
+    borderColor: COLORS.accentBorder,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  joystickLaunchIconActive: {
+    backgroundColor: COLORS.accentText,
+    borderColor: COLORS.accentText,
+  },
+  joystickLaunchTitle: {
+    color: COLORS.textMain,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  joystickLaunchTitleActive: {
+    color: COLORS.accentText,
+  },
+  joystickLaunchSub: {
+    color: COLORS.textDim,
+    fontSize: 10,
+    fontWeight: "500",
+    marginTop: 2,
+  },
+  joystickLaunchSubActive: {
+    color: COLORS.accentText,
+    opacity: 0.75,
+  },
+  joystickLaunchClose: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    backgroundColor: COLORS.accentText,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   panelScroll: { flex: 1 },
   panelScrollContent: { paddingBottom: 8, gap: 4 },
 
