@@ -428,14 +428,15 @@ const NavBarItem = ({ icon: Icon, label, active, expanded, onPress, danger = fal
   </Pressable>
 );
 
-const MissionActionBtn = ({ icon: Icon, label, onPress, variant = "secondary", fullWidth = false }) => {
+const MissionActionBtn = ({ icon: Icon, label, onPress, variant = "secondary", fullWidth = false, big = false }) => {
   const isPrimary = variant === "primary";
   const isDanger = variant === "danger";
   return (
     <Pressable
       style={[
         styles.missionActionBtn,
-        fullWidth && styles.missionActionFull,
+        fullWidth ? styles.missionActionFull : { flex: 1 },
+        big && styles.missionActionBig,
         isPrimary && styles.missionActionPrimary,
         isDanger && styles.missionActionDanger,
         !isPrimary && !isDanger && styles.missionActionSecondary,
@@ -444,13 +445,14 @@ const MissionActionBtn = ({ icon: Icon, label, onPress, variant = "secondary", f
     >
       <View style={[
         styles.missionActionIconWrap,
+        big && styles.missionActionIconWrapBig,
         isPrimary && { backgroundColor: COLORS.accentText + "1f" },
         isDanger && { backgroundColor: COLORS.pillSecondary },
         !isPrimary && !isDanger && { backgroundColor: COLORS.surfaceSolid },
       ]}>
-        <Icon color={isPrimary ? COLORS.accentText : "#fff"} size={18} strokeWidth={2.2} />
+        <Icon color={isPrimary ? COLORS.accentText : "#fff"} size={big ? 20 : 16} strokeWidth={2.2} />
       </View>
-      <Text style={[styles.missionActionLabel, isPrimary && styles.missionActionLabelDark]}>{label}</Text>
+      <Text style={[styles.missionActionLabel, big && styles.missionActionLabelBig, isPrimary && styles.missionActionLabelDark]} numberOfLines={1}>{label}</Text>
     </Pressable>
   );
 };
@@ -1259,34 +1261,6 @@ export default function ModernHomeUI(props) {
           showsVerticalScrollIndicator={false}
           nestedScrollEnabled
         >
-          {!showJoystick && vehicleMode === "MANUAL" && !missionRunning ? (
-            <Pressable
-              style={[styles.joystickLaunchBtn, showJoystick && styles.joystickLaunchBtnActive]}
-              onPress={() => setShowJoystick((v) => !v)}
-            >
-              <View style={[styles.joystickLaunchIcon, showJoystick && styles.joystickLaunchIconActive]}>
-                <Gamepad2
-                  color={showJoystick ? COLORS.accentText : COLORS.accentBrand}
-                  size={20}
-                  strokeWidth={2.2}
-                />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.joystickLaunchTitle, showJoystick && styles.joystickLaunchTitleActive]}>
-                  {showJoystick ? "Joystick Open" : "Open Joystick"}
-                </Text>
-                <Text style={[styles.joystickLaunchSub, showJoystick && styles.joystickLaunchSubActive]}>
-                  {showJoystick ? "Tap to hide manual drive controls" : "Manual mode — tap to drive"}
-                </Text>
-              </View>
-              {showJoystick ? (
-                <View style={styles.joystickLaunchClose}>
-                  <X color={COLORS.accentText} size={14} strokeWidth={2.4} />
-                </View>
-              ) : null}
-            </Pressable>
-          ) : null}
-
           {showJoystick && vehicleMode === "MANUAL" && !missionRunning ? (
             <>
               <View style={styles.manualStatusBar}>
@@ -1352,11 +1326,23 @@ export default function ModernHomeUI(props) {
                   label={missionRunning ? "Stop Mission" : "Start Mission"}
                   variant={missionRunning ? "danger" : "primary"}
                   fullWidth
+                  big
                   onPress={missionRunning ? onStopPlan : onStartPlan}
                 />
-                <MissionActionBtn icon={Pause} label="Pause" onPress={handlePause} />
-                <MissionActionBtn icon={SkipForward} label="Next" onPress={handleNext} />
-                <MissionActionBtn icon={Download} label="Export Log" onPress={handleExport} />
+                <MissionActionBtn
+                  icon={Pause}
+                  label="Pause"
+                  fullWidth
+                  big
+                  onPress={handlePause}
+                />
+                <View style={styles.missionSubActionsRow}>
+                  <MissionActionBtn icon={SkipForward} label="Next" onPress={handleNext} />
+                  <MissionActionBtn icon={Download} label="Export Log" onPress={handleExport} />
+                  {vehicleMode === "MANUAL" && !missionRunning ? (
+                    <MissionActionBtn icon={Gamepad2} label="Joystick" onPress={() => setShowJoystick(true)} />
+                  ) : null}
+                </View>
               </View>
             </>
           )}
@@ -2034,61 +2020,6 @@ const styles = StyleSheet.create({
     maxHeight: "58%",
     zIndex: 110,
   },
-  joystickLaunchBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    padding: 12,
-    marginBottom: 12,
-    borderRadius: 14,
-    backgroundColor: COLORS.cardSolid,
-    borderWidth: 1,
-    borderColor: COLORS.accentBorder,
-  },
-  joystickLaunchBtnActive: {
-    backgroundColor: COLORS.accentBrand,
-    borderColor: COLORS.accentBorder,
-  },
-  joystickLaunchIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 11,
-    backgroundColor: COLORS.accentMuted,
-    borderWidth: 1,
-    borderColor: COLORS.accentBorder,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  joystickLaunchIconActive: {
-    backgroundColor: COLORS.accentText,
-    borderColor: COLORS.accentText,
-  },
-  joystickLaunchTitle: {
-    color: COLORS.textMain,
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  joystickLaunchTitleActive: {
-    color: COLORS.accentText,
-  },
-  joystickLaunchSub: {
-    color: COLORS.textDim,
-    fontSize: 10,
-    fontWeight: "500",
-    marginTop: 2,
-  },
-  joystickLaunchSubActive: {
-    color: COLORS.accentText,
-    opacity: 0.75,
-  },
-  joystickLaunchClose: {
-    width: 28,
-    height: 28,
-    borderRadius: 8,
-    backgroundColor: COLORS.accentText,
-    alignItems: "center",
-    justifyContent: "center",
-  },
   panelScroll: { flex: 1 },
   panelScrollContent: { paddingBottom: 8, gap: 4 },
 
@@ -2437,17 +2368,17 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.cardSolid,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 14,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
   },
-  progressTopRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 12 },
-  progressPercent: { color: COLORS.accentBrand, fontSize: 28, fontWeight: "800", lineHeight: 30 },
-  progressLabel: { color: COLORS.textMuted, fontSize: 11, fontWeight: "600", marginTop: 2 },
+  progressTopRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+  progressPercent: { color: COLORS.accentBrand, fontSize: 20, fontWeight: "800", lineHeight: 22 },
+  progressLabel: { color: COLORS.textMuted, fontSize: 11, fontWeight: "600", marginTop: 1 },
   progressEtaBox: { alignItems: "flex-end" },
   progressEtaLabel: { color: COLORS.textMuted, fontSize: 9, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase" },
-  progressTime: { color: "#fff", fontSize: 16, fontWeight: "700", marginTop: 2 },
-  progressBarTrack: { height: 10, backgroundColor: COLORS.surfaceSolid, borderRadius: 999, overflow: "hidden", position: "relative" },
+  progressTime: { color: "#fff", fontSize: 14, fontWeight: "700", marginTop: 1 },
+  progressBarTrack: { height: 6, backgroundColor: COLORS.surfaceSolid, borderRadius: 999, overflow: "hidden", position: "relative" },
   progressBarFill: { height: "100%", backgroundColor: COLORS.accentBrand, borderRadius: 999 },
   progressBarGlow: {
     position: "absolute",
@@ -2458,31 +2389,43 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
 
-  missionActionsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  missionActionsGrid: { flexDirection: "column", gap: 8 },
+  missionSubActionsRow: { flexDirection: "row", width: "100%", gap: 8 },
   missionActionBtn: {
-    width: "48%",
-    minHeight: 56,
-    borderRadius: 14,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    minHeight: 48,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
+    gap: 8,
     borderWidth: 1,
   },
   missionActionFull: { width: "100%" },
+  missionActionBig: {
+    minHeight: 60,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+  },
   missionActionPrimary: { backgroundColor: COLORS.accentBrand, borderColor: COLORS.accentBorder },
   missionActionLabelDark: { color: COLORS.accentText },
   missionActionDanger: { backgroundColor: COLORS.danger, borderColor: COLORS.dangerBorder },
   missionActionSecondary: { backgroundColor: COLORS.cardSolid, borderColor: COLORS.panelBorder },
   missionActionIconWrap: {
-    width: 32,
-    height: 32,
-    borderRadius: 9,
+    width: 28,
+    height: 28,
+    borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
   },
+  missionActionIconWrapBig: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+  },
   missionActionLabel: { color: "#fff", fontSize: 11, fontWeight: "700", letterSpacing: 0.2, flex: 1 },
+  missionActionLabelBig: { fontSize: 13, fontWeight: "800" },
 
   estopLayer: {
     ...StyleSheet.absoluteFillObject,
