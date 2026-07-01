@@ -371,6 +371,8 @@ const RIGHT_PANEL_WIDTH = 340;
 const SIDE_GAP = 14;
 const BOTTOM_PANEL_HEIGHT_RATIO = 0.46;
 const NAV_TIMING = { duration: 420, easing: Easing.bezier(0.4, 0, 0.2, 1) };
+const QUICK_ACCESS_ANCHOR_FALLBACK = { top: HUD_PAD + 96, height: 58 };
+const QUICK_ACCESS_SUBNAV_OFFSET = 24;
 const SCREEN_WIDTH = Dimensions.get("window").width;
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 const NAV_HEIGHT_FULL = SCREEN_HEIGHT - HUD_PAD * 2 - 55;
@@ -633,9 +635,13 @@ export default function ModernHomeUI(props) {
   const [activeNav, setActiveNav] = useState(PAGE_TO_NAV[currentPage] || "main");
   const lastMenuTapRef = useRef(0);
   const lastNavTapRef = useRef({ id: null, time: 0 });
+  const hudLayerRef = useRef(null);
+  const quickAccessAnchorRef = useRef(null);
+  const [quickAccessAnchor, setQuickAccessAnchor] = useState(QUICK_ACCESS_ANCHOR_FALLBACK);
   const navWidth = useSharedValue(NAV_WIDTH_COLLAPSED);
   const navHeight = useSharedValue(NAV_HEIGHT_FULL);
   const navBgOpacity = useSharedValue(1);
+  const quickAccessSubNavProgress = useSharedValue(0);
   const [isArmed, setIsArmed] = useState(systemHealth?.armed || false);
   const [visualSelected, setVisualSelected] = useState(false);
 
@@ -736,6 +742,49 @@ export default function ModernHomeUI(props) {
     if (!showMissionControl) setShowJoystick(false);
   }, [showMissionControl]);
 
+  useEffect(() => {
+    quickAccessSubNavProgress.value = withTiming(quickAccessExpanded ? 1 : 0, { duration: 220 });
+  }, [quickAccessExpanded, quickAccessSubNavProgress]);
+
+  const updateQuickAccessAnchor = useCallback(() => {
+    const hudNode = hudLayerRef.current;
+    const anchorNode = quickAccessAnchorRef.current;
+    if (!hudNode || !anchorNode) return;
+
+    const applyPosition = (top, height) => {
+      if (Number.isFinite(top) && Number.isFinite(height) && height > 0) {
+        setQuickAccessAnchor({ top, height });
+      }
+    };
+
+    if (typeof anchorNode.measureLayout === "function") {
+      anchorNode.measureLayout(
+        hudNode,
+        (_x, y, _w, height) => applyPosition(y, height),
+        () => {
+          hudNode.measureInWindow((hx, hy) => {
+            anchorNode.measureInWindow((_qx, qy, _qw, qh) => applyPosition(qy - hy, qh));
+          });
+        }
+      );
+      return;
+    }
+
+    hudNode.measureInWindow((hx, hy) => {
+      anchorNode.measureInWindow((_qx, qy, _qw, qh) => applyPosition(qy - hy, qh));
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isHomePage || !navIconsVisible) return undefined;
+    const frame = requestAnimationFrame(updateQuickAccessAnchor);
+    const timer = setTimeout(updateQuickAccessAnchor, NAV_TIMING.duration + 40);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+    };
+  }, [isHomePage, navIconsVisible, navExpanded, quickAccessExpanded, updateQuickAccessAnchor]);
+
   const navAnimatedStyle = useAnimatedStyle(() => ({
     width: navWidth.value,
     height: navHeight.value,
@@ -746,6 +795,12 @@ export default function ModernHomeUI(props) {
   const compassAnimatedStyle = useAnimatedStyle(() => ({
     left: HUD_PAD + navWidth.value + SIDE_GAP,
     top: HUD_PAD,
+  }));
+
+  const quickAccessSubNavAnimatedStyle = useAnimatedStyle(() => ({
+    left: HUD_PAD + navWidth.value - 1,
+    opacity: quickAccessSubNavProgress.value,
+    transform: [{ translateX: (1 - quickAccessSubNavProgress.value) * -10 }],
   }));
 
   const sectionContentAnimatedStyle = useAnimatedStyle(() => ({
@@ -823,12 +878,90 @@ export default function ModernHomeUI(props) {
     setQuickAccessExpanded((v) => !v);
   }, [navIconsVisible]);
 
-  const renderCompassAnchor = () => {
+  const QuickSubNavItem = ({ icon: Icon, label, active, onPress }) => (
+    <Pressable
+      style={[styles.quickSubNavItem, active && styles.quickSubNavItemActive]}
+      onPress={onPress}
+    >
+      <View style={[styles.quickSubNavIconWrap, active && styles.quickSubNavIconWrapActive]}>
+        <Icon color={active ? COLORS.accentText : COLORS.textMuted} size={15} strokeWidth={2.2} />
+      </View>
+      <Text style={[styles.quickSubNavLabel, active && styles.quickSubNavLabelActive]} numberOfLines={1}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+
+  const renderMapToolsColumn = () => {
     if (!isHomePage || !navIconsVisible) return null;
     return (
-      <AnimatedReanimated.View style={[styles.compassAnchor, compassAnimatedStyle]} pointerEvents="none">
-        <View style={styles.compassAnchorInner}>
+      <AnimatedReanimated.View style={[styles.mapToolsColumn, compassAnimatedStyle]} pointerEvents="box-none">
+        <View style={styles.compassCard}>
           <TopBarCompass headingDeg={roverHeadingDeg ?? 0} hasRoverHeading={hasRoverHeading} />
+        </View>
+
+        <View style={styles.focusToolsRow} pointerEvents="auto">
+          <Pressable
+            style={({ pressed }) => [styles.focusToolBtn, pressed && styles.focusToolBtnPressed]}
+            onPress={() => onFocusPlan?.()}
+            accessibilityLabel="Focus Plan"
+          >
+            <MapIcon color={COLORS.accentBrand} size={18} strokeWidth={2.2} />
+            <Text style={styles.focusToolLabel}>Plan</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.focusToolBtn, pressed && styles.focusToolBtnPressed]}
+            onPress={() => onFocusRover?.()}
+            accessibilityLabel="Focus Rover"
+          >
+            <Tractor color={COLORS.accentBrand} size={18} strokeWidth={2.2} />
+            <Text style={styles.focusToolLabel}>Rover</Text>
+          </Pressable>
+        </View>
+
+      </AnimatedReanimated.View>
+    );
+  };
+
+  const renderQuickAccessSubNav = () => {
+    if (!isHomePage || !navIconsVisible || !quickAccessExpanded) return null;
+    return (
+      <AnimatedReanimated.View
+        style={[
+          styles.quickAccessSubNav,
+          quickAccessSubNavAnimatedStyle,
+          { top: quickAccessAnchor.top + QUICK_ACCESS_SUBNAV_OFFSET, height: quickAccessAnchor.height },
+        ]}
+        pointerEvents="box-none"
+      >
+        <View style={styles.quickAccessSubNavInner} pointerEvents="auto">
+          <View style={[styles.quickAccessSubNavBridge, { height: quickAccessAnchor.height }]} />
+          <View style={styles.quickAccessSubNavRow}>
+            <QuickSubNavItem
+              icon={vehicleMode === "MANUAL" ? Gamepad2 : vehicleMode === "OFFBOARD" ? Hexagon : Zap}
+              label={vehicleMode}
+              active={vehicleMode === "MANUAL"}
+              onPress={handleSetManualMode}
+            />
+            <QuickSubNavItem
+              icon={RadioTower}
+              label={rtkRunning ? `RTK ${rtkDefaultMode}` : "RTK Off"}
+              active={rtkRunning}
+              onPress={handleToggleRtk}
+            />
+            <QuickSubNavItem
+              icon={Route}
+              label="Mission"
+              active={showMissionControl}
+              onPress={() => setShowMissionControl((v) => !v)}
+            />
+            <QuickSubNavItem
+              icon={MonitorPlay}
+              label="Telemetry"
+              active={showTelemetry}
+              onPress={() => setShowTelemetry((v) => !v)}
+            />
+          </View>
         </View>
       </AnimatedReanimated.View>
     );
@@ -909,45 +1042,20 @@ export default function ModernHomeUI(props) {
           {isHomePage ? (
             <>
               <View style={styles.navGroupSeparator} />
-              <NavBarItem
-                icon={LayoutGrid}
-                label="Quick Access"
-                active={quickAccessExpanded}
-                expanded={navExpanded}
-                onPress={handleQuickAccessPress}
-              />
-              {quickAccessExpanded ? (
-                <View style={styles.quickAccessSection}>
-                  <NavBarItem
-                    icon={vehicleMode === "MANUAL" ? Gamepad2 : vehicleMode === "OFFBOARD" ? Hexagon : Zap}
-                    label={`Mode · ${vehicleMode}`}
-                    active={vehicleMode === "MANUAL"}
-                    expanded={navExpanded}
-                    onPress={handleSetManualMode}
-                  />
-                  <NavBarItem
-                    icon={RadioTower}
-                    label={rtkRunning ? `RTK · ${rtkDefaultMode}` : `RTK · Off`}
-                    active={rtkRunning}
-                    expanded={navExpanded}
-                    onPress={handleToggleRtk}
-                  />
-                  <NavBarItem
-                    icon={Route}
-                    label="Mission Control"
-                    active={showMissionControl}
-                    expanded={navExpanded}
-                    onPress={() => setShowMissionControl((v) => !v)}
-                  />
-                  <NavBarItem
-                    icon={MonitorPlay}
-                    label="Telemetry"
-                    active={showTelemetry}
-                    expanded={navExpanded}
-                    onPress={() => setShowTelemetry((v) => !v)}
-                  />
-                </View>
-              ) : null}
+              <View
+                ref={quickAccessAnchorRef}
+                collapsable={false}
+                onLayout={updateQuickAccessAnchor}
+                style={styles.quickAccessAnchor}
+              >
+                <NavBarItem
+                  icon={LayoutGrid}
+                  label="Quick Access"
+                  active={quickAccessExpanded}
+                  expanded={navExpanded}
+                  onPress={handleQuickAccessPress}
+                />
+              </View>
               <View style={styles.navGroupSeparator} />
             </>
           ) : null}
@@ -1003,55 +1111,20 @@ export default function ModernHomeUI(props) {
 
           <View style={styles.navDivider} />
 
-          <View style={[styles.bottomActionRow, navExpanded ? styles.bottomActionRowExpanded : styles.bottomActionRowCollapsed]}>
-            {isHomePage ? (
-              <>
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.bottomActionBtn,
-                    !navExpanded && styles.bottomActionBtnCollapsed,
-                    pressed && styles.bottomActionBtnPressed,
-                  ]}
-                  onPress={() => onFocusPlan?.()}
-                  accessibilityLabel="Focus Plan"
-                >
-                  <View style={styles.bottomActionIconWrap}>
-                    <MapIcon color={COLORS.textMuted} size={18} strokeWidth={2.2} />
-                  </View>
-                  {navExpanded ? <Text style={styles.bottomActionLabel}>Focus Plan</Text> : null}
-                </Pressable>
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.bottomActionBtn,
-                    !navExpanded && styles.bottomActionBtnCollapsed,
-                    pressed && styles.bottomActionBtnPressed,
-                  ]}
-                  onPress={() => onFocusRover?.()}
-                  accessibilityLabel="Focus Rover"
-                >
-                  <View style={styles.bottomActionIconWrap}>
-                    <Tractor color={COLORS.textMuted} size={18} strokeWidth={2.2} />
-                  </View>
-                  {navExpanded ? <Text style={styles.bottomActionLabel}>Focus Rover</Text> : null}
-                </Pressable>
-              </>
-            ) : null}
-            <Pressable
-              style={({ pressed }) => [
-                styles.bottomActionBtn,
-                !navExpanded && styles.bottomActionBtnCollapsed,
-                styles.bottomActionBtnDanger,
-                pressed && styles.bottomActionBtnDangerPressed,
-              ]}
-              onPress={() => onNav("connection")}
-              accessibilityLabel="Exit Session"
-            >
-              <View style={[styles.bottomActionIconWrap, styles.bottomActionIconWrapDanger]}>
-                <LogOut color={COLORS.danger} size={18} strokeWidth={2.2} />
-              </View>
-              {navExpanded ? <Text style={[styles.bottomActionLabel, styles.bottomActionLabelDanger]}>Exit Session</Text> : null}
-            </Pressable>
-          </View>
+          <Pressable
+            style={({ pressed }) => [
+              styles.exitSessionBtn,
+              !navExpanded && styles.exitSessionBtnCollapsed,
+              pressed && styles.bottomActionBtnDangerPressed,
+            ]}
+            onPress={() => onNav("connection")}
+            accessibilityLabel="Exit Session"
+          >
+            <View style={[styles.bottomActionIconWrap, styles.bottomActionIconWrapDanger]}>
+              <LogOut color={COLORS.danger} size={18} strokeWidth={2.2} />
+            </View>
+            {navExpanded ? <Text style={[styles.bottomActionLabel, styles.bottomActionLabelDanger]}>Exit Session</Text> : null}
+          </Pressable>
         </>
       )}
     </AnimatedReanimated.View>
@@ -1377,9 +1450,10 @@ export default function ModernHomeUI(props) {
       
       {/* HUD Layer */}
       {hudVisible ? (
-        <View style={styles.hudLayer} pointerEvents="box-none">
+        <View ref={hudLayerRef} style={styles.hudLayer} pointerEvents="box-none" collapsable={false}>
           {renderNavbar()}
-          {renderCompassAnchor()}
+          {renderQuickAccessSubNav()}
+          {renderMapToolsColumn()}
           {isHomePage ? renderTelemetrySection() : null}
           {isHomePage ? renderMissionControl() : null}
           {isHomePage ? renderJoystickPanel() : null}
@@ -1422,11 +1496,13 @@ const styles = StyleSheet.create({
   mapOffSub: { color: COLORS.textDim, fontSize: 12, fontWeight: "500" },
   hudLayer: { ...StyleSheet.absoluteFillObject, zIndex: 10, padding: 20 },
   
-  compassAnchor: {
+  mapToolsColumn: {
     position: "absolute",
     zIndex: 95,
+    gap: 8,
+    maxWidth: 280,
   },
-  compassAnchorInner: {
+  compassCard: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: COLORS.panelSolid,
@@ -1436,14 +1512,131 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
     ...SHADOWS.card,
+    alignSelf: "flex-start",
   },
-  quickAccessSection: {
-    gap: 2,
-    paddingLeft: 4,
-    borderLeftWidth: 2,
-    borderLeftColor: COLORS.accentBorder,
-    marginLeft: 8,
-    marginVertical: 2,
+  focusToolsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    alignSelf: "flex-start",
+  },
+  focusToolBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: COLORS.cardSolid,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    ...SHADOWS.card,
+  },
+  focusToolBtnPressed: {
+    backgroundColor: COLORS.surfaceSolid,
+    transform: [{ scale: 0.97 }],
+  },
+  focusToolLabel: {
+    color: COLORS.textMain,
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.3,
+  },
+  quickAccessAnchor: {
+    width: "100%",
+  },
+  quickAccessSubNav: {
+    position: "absolute",
+    zIndex: 92,
+    maxWidth: SCREEN_WIDTH - HUD_PAD * 2 - NAV_WIDTH_EXPANDED - 40,
+    justifyContent: "center",
+  },
+  quickAccessSubNavInner: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.navSolid,
+    borderTopRightRadius: 14,
+    borderBottomRightRadius: 14,
+    borderTopLeftRadius: 0,
+    borderBottomLeftRadius: 0,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    borderLeftWidth: 0,
+    paddingVertical: 0,
+    paddingHorizontal: 10,
+    paddingLeft: 0,
+    ...SHADOWS.panel,
+  },
+  quickAccessSubNavBridge: {
+    width: 8,
+    backgroundColor: COLORS.navSolid,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: COLORS.panelBorder,
+  },
+  quickAccessSubNavRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "nowrap",
+    gap: 6,
+  },
+  quickSubNavItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    backgroundColor: COLORS.cardSolid,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    height: 42,
+  },
+  quickSubNavItemActive: {
+    backgroundColor: COLORS.accentMuted,
+    borderColor: COLORS.accentBorder,
+  },
+  quickSubNavIconWrap: {
+    width: 24,
+    height: 24,
+    borderRadius: 8,
+    backgroundColor: COLORS.surfaceSolid,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  quickSubNavIconWrapActive: {
+    backgroundColor: COLORS.accentBrand,
+  },
+  quickSubNavLabel: {
+    color: COLORS.textMuted,
+    fontSize: 10,
+    fontWeight: "700",
+    maxWidth: 72,
+  },
+  quickSubNavLabelActive: {
+    color: COLORS.textMain,
+  },
+  exitSessionBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    marginHorizontal: 4,
+    marginTop: 4,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    backgroundColor: COLORS.dangerMuted,
+    borderWidth: 1,
+    borderColor: COLORS.dangerBorder,
+    minHeight: 44,
+  },
+  exitSessionBtnCollapsed: {
+    flexDirection: "column",
+    gap: 0,
+    paddingVertical: 6,
+    minHeight: 42,
   },
   topBarCompass: {
     flexDirection: "row",
@@ -1759,49 +1952,6 @@ const styles = StyleSheet.create({
   navToolsSection: {
     gap: 4,
     width: "100%",
-  },
-  bottomActionRow: {
-    alignItems: "stretch",
-    justifyContent: "center",
-    gap: 6,
-    paddingHorizontal: 4,
-    paddingTop: 4,
-  },
-  bottomActionRowExpanded: {
-    flexDirection: "row",
-  },
-  bottomActionRowCollapsed: {
-    flexDirection: "column",
-  },
-  bottomActionBtn: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    borderRadius: 12,
-    backgroundColor: COLORS.cardSolid,
-    borderWidth: 1,
-    borderColor: COLORS.panelBorder,
-    minHeight: 44,
-  },
-  bottomActionBtnCollapsed: {
-    flex: 0,
-    flexDirection: "column",
-    gap: 0,
-    paddingVertical: 6,
-    paddingHorizontal: 4,
-    minHeight: 42,
-  },
-  bottomActionBtnPressed: {
-    backgroundColor: COLORS.surfaceSolid,
-    transform: [{ scale: 0.96 }],
-  },
-  bottomActionBtnDanger: {
-    backgroundColor: COLORS.dangerMuted,
-    borderColor: COLORS.dangerBorder,
   },
   bottomActionBtnDangerPressed: {
     backgroundColor: "#4a1f1f",
