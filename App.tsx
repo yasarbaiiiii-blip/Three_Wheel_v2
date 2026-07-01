@@ -334,9 +334,13 @@ type AppToast = {
 type RTKMode = "idle" | "ntrip" | "lora" | "stopping";
 
 function rtkModeFromStatus(data: any): Exclude<RTKMode, "stopping"> {
-  if (!data?.running) return "idle";
-  if (data.mode === "ntrip") return "ntrip";
-  if (data.mode === "lora") return "lora";
+  if (!data) return "idle";
+  const isRunning = data.running === true || data.status === "running" || data.state === "running" || data.active === true || data.success === true;
+  if (!isRunning && data.running !== undefined) return "idle";
+  const modeStr = (data.mode || data.type || "").toString().toLowerCase();
+  if (modeStr.includes("ntrip") || modeStr === "ntrip") return "ntrip";
+  if (modeStr.includes("lora") || modeStr === "lora") return "lora";
+  if (isRunning) return "ntrip";
   return "idle";
 }
 
@@ -616,6 +620,7 @@ export default function App() {
   const [rtkPassword, setRtkPassword] = useState("");
   const [rtkConnecting, setRtkConnecting] = useState(false);
   const [rtkMode, setRtkMode] = useState<RTKMode>("idle");
+  const [rtkDefaultMode, setRtkDefaultMode] = useState("NTRIP");
   const [rtkHealthy, setRtkHealthy] = useState(false);
   const [isFloatingEStopEnabled, setIsFloatingEStopEnabled] = useState(false);
   const rtkRunning = rtkMode === "ntrip" || rtkMode === "lora" || rtkMode === "stopping";
@@ -2139,16 +2144,24 @@ export default function App() {
   }
 
   async function startNtrip() {
-    if (!apiBaseUrl) return;
+    if (!apiBaseUrl) {
+      Alert.alert("No backend", "Connect to a backend before starting RTK.");
+      return;
+    }
     if (rtkRunning) return;
     setRtkConnecting(true);
     try {
       if (!rtkCaster || !rtkPort || !rtkMountPoint || !rtkUsername || !rtkPassword) {
-        Alert.alert("Missing fields", "Please fill in all 5 RTK caster credentials.");
+        Alert.alert("Credentials needed", "Please fill in all RTK NTRIP credentials in Settings before connecting.");
         setRtkConnecting(false);
         return;
       }
-      logAction("RTK_CONNECT_REQUEST", { caster: rtkCaster, port: rtkPort, mountpoint: rtkMountPoint });
+      const host = rtkCaster;
+      const port = parseInt(rtkPort, 10);
+      const mountpoint = rtkMountPoint;
+      const user = rtkUsername;
+      const pass = rtkPassword;
+      logAction("RTK_CONNECT_REQUEST", { caster: host, port, mountpoint });
       showToast("RTK Injection", "Connecting to NTRIP caster...", "info");
       const res = await fetch(`${apiBaseUrl}/api/rtk/ntrip/start`, {
         method: "POST",
@@ -2156,20 +2169,20 @@ export default function App() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          host: rtkCaster,
-          port: parseInt(rtkPort, 10),
-          mountpoint: rtkMountPoint,
-          user: rtkUsername,
-          pass: rtkPassword,
+          host,
+          port,
+          mountpoint,
+          user,
+          pass,
         }),
       });
       if (!res.ok) {
         const txt = await res.text();
         throw new Error(txt || "NTRIP start failed.");
       }
-      const data = await res.json();
-      setRtkMode(rtkModeFromStatus(data) === "ntrip" ? "ntrip" : "idle");
-      setRtkHealthy(data.healthy);
+      const data = await res.json().catch(() => ({}));
+      setRtkMode("ntrip");
+      setRtkHealthy(data?.healthy ?? true);
       logAction("RTK_CONNECT_SUCCESS", { caster: rtkCaster });
       Alert.alert("RTK Started", "NTRIP RTK caster started successfully.");
       showToast("RTK Started", "NTRIP RTK stream active.", "success");
@@ -2184,7 +2197,10 @@ export default function App() {
   }
 
   async function startLora() {
-    if (!apiBaseUrl) return;
+    if (!apiBaseUrl) {
+      Alert.alert("No backend", "Connect to a backend before starting RTK.");
+      return;
+    }
     if (rtkRunning) return;
     setRtkConnecting(true);
     try {
@@ -2203,9 +2219,9 @@ export default function App() {
         const txt = await res.text();
         throw new Error(txt || "LoRA start failed.");
       }
-      const data = await res.json();
-      setRtkMode(rtkModeFromStatus(data) === "lora" ? "lora" : "idle");
-      setRtkHealthy(data.healthy);
+      const data = await res.json().catch(() => ({}));
+      setRtkMode("lora");
+      setRtkHealthy(data?.healthy ?? true);
       Alert.alert("LoRA Started", "LoRA RTK stream started successfully.");
       showToast("LoRA Started", "LoRA RTK stream active.", "success");
       setRtkModalOpen(false);
@@ -2218,7 +2234,10 @@ export default function App() {
   }
 
   async function stopRtk() {
-    if (!apiBaseUrl) return;
+    if (!apiBaseUrl) {
+      Alert.alert("No backend", "Connect to a backend before stopping RTK.");
+      return;
+    }
     const previousMode = rtkMode;
     setRtkMode("stopping");
     setRtkConnecting(true);
@@ -2889,6 +2908,7 @@ export default function App() {
                   setRtkPassword={setRtkPassword}
                   rtkConnecting={rtkConnecting}
                   rtkMode={rtkMode}
+                  rtkDefaultMode={rtkDefaultMode}
                   startNtrip={startNtrip}
                   startLora={startLora}
                   stopRtk={stopRtk}
@@ -3026,6 +3046,8 @@ export default function App() {
                             rtkRunning={rtkRunning}
                             rtkHealthy={rtkHealthy}
                             rtkMode={rtkMode}
+                            rtkDefaultMode={rtkDefaultMode}
+                            setRtkDefaultMode={setRtkDefaultMode}
                           />
                         )
                       : undefined
@@ -3248,6 +3270,7 @@ type HomeViewProps = {
   setRtkPassword: React.Dispatch<React.SetStateAction<string>>;
   rtkConnecting: boolean;
   rtkMode: RTKMode;
+  rtkDefaultMode?: string;
   startNtrip: () => Promise<void>;
   startLora: () => Promise<void>;
   stopRtk: () => Promise<void>;
@@ -3336,6 +3359,7 @@ function HomeView(props: HomeViewProps) {
     setRtkPassword,
     rtkConnecting,
     rtkMode,
+    rtkDefaultMode,
     startNtrip,
     startLora,
     stopRtk,
@@ -4531,6 +4555,8 @@ function SectionPages(props: {
   rtkRunning: boolean;
   rtkHealthy?: boolean;
   rtkMode?: string;
+  rtkDefaultMode?: string;
+  setRtkDefaultMode?: React.Dispatch<React.SetStateAction<string>>;
   onClearMission: () => Promise<void>;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
@@ -7301,6 +7327,8 @@ function SettingsPage(props: {
   rtkRunning?: boolean;
   rtkHealthy?: boolean;
   rtkMode?: string;
+  rtkDefaultMode?: string;
+  setRtkDefaultMode?: React.Dispatch<React.SetStateAction<string>>;
   apiBaseUrl?: string;
   selectedPathName?: string | null;
 }) {

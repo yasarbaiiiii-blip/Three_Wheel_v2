@@ -81,6 +81,7 @@ type ModernSettingsPageProps = {
   rtkRunning?: boolean;
   rtkHealthy?: boolean;
   rtkMode?: string;
+  rtkDefaultMode?: string;
   setRtkDefaultMode?: (mode: string) => void;
   toggleA?: boolean;
   toggleB?: boolean;
@@ -414,6 +415,7 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
     rtkRunning = false,
     rtkHealthy = false,
     rtkMode = "idle",
+    rtkDefaultMode = "NTRIP",
     setRtkDefaultMode,
     toggleA = false,
     toggleB = false,
@@ -429,14 +431,15 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
   const twoColumn = width >= 900;
 
   const [localRtkMode, setLocalRtkMode] = useState(
-    rtkMode === "lora" ? "Lora" : "NTRIP"
+    rtkDefaultMode ? rtkDefaultMode : (rtkMode === "lora" ? "Lora" : "NTRIP")
   );
   const [importedFileName, setImportedFileName] = useState<string | null>(null);
 
   useEffect(() => {
-    if (rtkMode === "lora") setLocalRtkMode("Lora");
+    if (rtkDefaultMode) setLocalRtkMode(rtkDefaultMode);
+    else if (rtkMode === "lora") setLocalRtkMode("Lora");
     else if (rtkMode === "ntrip") setLocalRtkMode("NTRIP");
-  }, [rtkMode]);
+  }, [rtkDefaultMode, rtkMode]);
 
   const [isSprayMasterEnabled, setIsSprayMasterEnabled] = useState(false);
   const [isSprayMasterChanging, setIsSprayMasterChanging] = useState(false);
@@ -648,7 +651,7 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
 
   const handleSetDefaultRtk = () => {
     if (setRtkDefaultMode) setRtkDefaultMode(localRtkMode);
-    else Alert.alert("Saved", `${localRtkMode} set as default RTK mode.`);
+    Alert.alert("Saved", `${localRtkMode} set as default RTK mode.`);
   };
 
   const handleImportRtkTxt = async () => {

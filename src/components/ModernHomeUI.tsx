@@ -1,8 +1,8 @@
 // @ts-nocheck
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform, Modal, TextInput, Dimensions } from "react-native";
+import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform, Modal, TextInput, Dimensions, Alert, useWindowDimensions } from "react-native";
 import { GestureHandlerRootView, GestureDetector, Gesture } from "react-native-gesture-handler";
-import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps, withSpring, withTiming, cancelAnimation, Easing, runOnJS } from "react-native-reanimated";
+import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps, withSpring, withTiming, cancelAnimation, Easing, runOnJS, Keyframe } from "react-native-reanimated";
 import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText } from "react-native-svg";
 import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut } from "lucide-react-native";
 import { ManualJoystick } from "./ManualJoystick";
@@ -371,10 +371,15 @@ const RIGHT_PANEL_WIDTH = 340;
 const SIDE_GAP = 14;
 const BOTTOM_PANEL_HEIGHT_RATIO = 0.46;
 const NAV_TIMING = { duration: 420, easing: Easing.bezier(0.4, 0, 0.2, 1) };
+const PANEL_TIMING = { duration: 260, easing: Easing.bezier(0.4, 0, 0.2, 1) };
 const QUICK_ACCESS_ANCHOR_FALLBACK = { top: HUD_PAD + 96, height: 58 };
 const QUICK_ACCESS_SUBNAV_OFFSET = 24;
 const SCREEN_WIDTH = Dimensions.get("window").width;
 const SCREEN_HEIGHT = Dimensions.get("window").height;
+const PANEL_SLIDE_IN = new Keyframe({
+  0: { opacity: 1, transform: [{ translateX: 44 }] },
+  100: { opacity: 1, transform: [{ translateX: 0 }] },
+}).duration(PANEL_TIMING.duration);
 const NAV_HEIGHT_FULL = SCREEN_HEIGHT - HUD_PAD * 2 - 55;
 const ESTOP_SIZE = 96;
 const ESTOP_RING_GAP = 4;
@@ -609,6 +614,8 @@ export default function ModernHomeUI(props) {
     lines = [], importedPlan, systemHealth, telemetrySnapshot, missionRunning,
     onNav, onToggleMenu, onArmVehicle, onSetMode, onEstopVehicle,
     onStartPlan, onStopPlan, onClearMission, rtkRunning, rtkHealthy, rtkMode = "idle",
+    rtkDefaultMode = "NTRIP",
+    rtkCaster = "", rtkPort = "", rtkMountPoint = "", rtkUsername = "", rtkPassword = "",
     rtkConnecting = false, startNtrip, startLora, stopRtk, selectedLineId, onSelectLine,
     autoOriginEnabled, mapSourceLines, alignedRefPoints, autoOriginReference,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
@@ -630,8 +637,8 @@ export default function ModernHomeUI(props) {
   };
 
   // Local UI State
-  const [showTelemetry, setShowTelemetry] = useState(true);
-  const [showMissionControl, setShowMissionControl] = useState(true);
+  const [showTelemetry, setShowTelemetry] = useState(false);
+  const [showMissionControl, setShowMissionControl] = useState(false);
   const [showJoystick, setShowJoystick] = useState(false);
   const [quickAccessExpanded, setQuickAccessExpanded] = useState(false);
   const [mapFullscreen, setMapFullscreen] = useState(false);
@@ -647,6 +654,9 @@ export default function ModernHomeUI(props) {
   const navHeight = useSharedValue(NAV_HEIGHT_FULL);
   const navBgOpacity = useSharedValue(1);
   const quickAccessSubNavProgress = useSharedValue(0);
+  const { height: windowHeight } = useWindowDimensions();
+  const telemetryPanelHeight = Math.max(280, windowHeight * 0.44 - HUD_PAD);
+  const missionPanelHeight = Math.max(300, windowHeight * BOTTOM_PANEL_HEIGHT_RATIO - HUD_PAD * 2);
   const [isArmed, setIsArmed] = useState(systemHealth?.armed || false);
   const [visualSelected, setVisualSelected] = useState(false);
 
@@ -748,7 +758,7 @@ export default function ModernHomeUI(props) {
   }, [showMissionControl]);
 
   useEffect(() => {
-    quickAccessSubNavProgress.value = withTiming(quickAccessExpanded ? 1 : 0, { duration: 220 });
+    quickAccessSubNavProgress.value = withTiming(quickAccessExpanded ? 1 : 0, PANEL_TIMING);
   }, [quickAccessExpanded, quickAccessSubNavProgress]);
 
   const updateQuickAccessAnchor = useCallback(() => {
@@ -860,18 +870,43 @@ export default function ModernHomeUI(props) {
   };
 
   const handleSetManualMode = useCallback(() => {
-    if (onSetMode) onSetMode("MANUAL");
-    fetch(`${getApiBase()}/api/set_mode`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "MANUAL" }),
-    }).catch(console.error);
+    if (onSetMode) {
+      onSetMode("MANUAL");
+    } else {
+      fetch(`${getApiBase()}/api/set_mode`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "MANUAL" }),
+      }).catch(console.error);
+    }
   }, [onSetMode]);
+
+  const hasNtripCredentials = Boolean(
+    rtkCaster?.trim() && rtkPort?.trim() && rtkMountPoint?.trim()
+  );
 
   const handleStartNtrip = useCallback(() => {
     if (rtkConnecting || rtkRunning) return;
+    if (!hasNtripCredentials) {
+      if (Platform.OS === "web") {
+        const openSettings = window.confirm(
+          "Credentials needed.\n\nPlease fill in all RTK NTRIP credentials in Settings before connecting.\n\nOpen Settings now?"
+        );
+        if (openSettings) onNav?.("settings");
+      } else {
+        Alert.alert(
+          "Credentials needed",
+          "Please fill in all RTK NTRIP credentials in Settings before connecting.",
+          [
+            { text: "Cancel", style: "cancel" },
+            { text: "Open Settings", onPress: () => onNav?.("settings") },
+          ]
+        );
+      }
+      return;
+    }
     if (startNtrip) startNtrip();
-  }, [rtkConnecting, rtkRunning, startNtrip]);
+  }, [rtkConnecting, rtkRunning, hasNtripCredentials, startNtrip, onNav]);
 
   const handleStartLora = useCallback(() => {
     if (rtkConnecting || rtkRunning) return;
@@ -891,6 +926,14 @@ export default function ModernHomeUI(props) {
     }
     setQuickAccessExpanded((v) => !v);
   }, [navIconsVisible]);
+
+  const handleToggleMissionPanel = useCallback(() => {
+    setShowMissionControl((v) => !v);
+  }, []);
+
+  const handleToggleTelemetryPanel = useCallback(() => {
+    setShowTelemetry((v) => !v);
+  }, []);
 
   const QuickSubNavSectionLabel = ({ label }) => (
     <Text style={styles.quickSubNavSectionLabel}>{label}</Text>
@@ -1032,30 +1075,23 @@ export default function ModernHomeUI(props) {
             <QuickSubNavDivider />
             <QuickSubNavSectionLabel label="RTK" />
             <QuickSubNavItem
-              icon={RadioTower}
-              label="Start NTRIP"
-              active={rtkMode === "ntrip"}
+              icon={rtkRunning ? Square : RadioTower}
+              label={rtkRunning ? `Stop ${rtkDefaultMode || "NTRIP"}` : `RTK: ${rtkDefaultMode || "NTRIP"}`}
+              active={rtkRunning}
+              danger={rtkRunning && rtkMode === "stopping"}
               signal
               healthy={rtkHealthy}
-              disabled={rtkConnecting || (rtkRunning && rtkMode !== "ntrip")}
-              onPress={handleStartNtrip}
-            />
-            <QuickSubNavItem
-              icon={Radio}
-              label="Start LoRa"
-              active={rtkMode === "lora"}
-              signal
-              healthy={rtkHealthy}
-              disabled={rtkConnecting || (rtkRunning && rtkMode !== "lora")}
-              onPress={handleStartLora}
-            />
-            <QuickSubNavItem
-              icon={Square}
-              label="Stop RTK"
-              danger
-              active={rtkMode === "stopping"}
-              disabled={rtkConnecting || !rtkRunning}
-              onPress={handleStopRtk}
+              disabled={rtkConnecting}
+              onPress={() => {
+                if (rtkConnecting) return;
+                if (rtkRunning) {
+                  handleStopRtk();
+                } else if ((rtkDefaultMode || "").toLowerCase() === "lora") {
+                  handleStartLora();
+                } else {
+                  handleStartNtrip();
+                }
+              }}
             />
 
             <QuickSubNavDivider />
@@ -1064,13 +1100,13 @@ export default function ModernHomeUI(props) {
               icon={Route}
               label="Mission"
               active={showMissionControl}
-              onPress={() => setShowMissionControl((v) => !v)}
+              onPress={handleToggleMissionPanel}
             />
             <QuickSubNavItem
               icon={MonitorPlay}
               label="Telemetry"
               active={showTelemetry}
-              onPress={() => setShowTelemetry((v) => !v)}
+              onPress={handleToggleTelemetryPanel}
             />
           </View>
         </View>
@@ -1237,11 +1273,14 @@ export default function ModernHomeUI(props) {
 
   const renderTelemetrySection = () => {
     if (!showTelemetry) return null;
+
     const battPctClamped = Math.min(100, Math.max(0, batteryPct));
     const fcuTone = systemHealth?.fcu_connected ? COLORS.success : COLORS.danger;
 
     return (
-      <View style={[styles.rightPanelBase, styles.telemetryPanel]}>
+      <AnimatedReanimated.View
+        style={[styles.rightPanelBase, styles.telemetryPanel, { height: telemetryPanelHeight, opacity: 1 }]}
+      >
         <PanelHeader
           icon={Activity}
           title="Telemetry"
@@ -1323,7 +1362,7 @@ export default function ModernHomeUI(props) {
             </View>
           </TelemetryBlock>
         </ScrollView>
-      </View>
+      </AnimatedReanimated.View>
     );
   };
 
@@ -1341,7 +1380,14 @@ export default function ModernHomeUI(props) {
         : joystickState.replace(/_/g, " ").toLowerCase();
 
     return (
-      <View style={[styles.rightPanelBase, styles.missionPanel, showJoystick && styles.missionPanelJoystick]}>
+      <AnimatedReanimated.View
+        style={[
+          styles.rightPanelBase,
+          styles.missionPanel,
+          showJoystick && styles.missionPanelJoystick,
+          { height: showJoystick ? undefined : missionPanelHeight, opacity: 1 },
+        ]}
+      >
         <PanelHeader
           icon={showJoystick ? Gamepad2 : Route}
           title={showJoystick ? "Manual Control" : "Mission Control"}
@@ -1468,7 +1514,7 @@ export default function ModernHomeUI(props) {
             </>
           )}
         </ScrollView>
-      </View>
+      </AnimatedReanimated.View>
     );
   };
 
@@ -1548,8 +1594,12 @@ export default function ModernHomeUI(props) {
           {renderNavbar()}
           {renderQuickAccessSubNav()}
           {renderMapToolsColumn()}
-          {isHomePage ? renderTelemetrySection() : null}
-          {isHomePage ? renderMissionControl() : null}
+          {isHomePage ? (
+            <View style={styles.rightPanelRail} pointerEvents="box-none">
+              {renderTelemetrySection()}
+              {renderMissionControl()}
+            </View>
+          ) : null}
           {isHomePage ? <FloatingEStop visible={missionRunning || isArmed} onTrigger={handleEStop} /> : null}
         </View>
       ) : null}
@@ -1587,7 +1637,15 @@ const styles = StyleSheet.create({
   },
   mapOffTitle: { color: COLORS.textMuted, fontSize: 16, fontWeight: "700", letterSpacing: 0.3 },
   mapOffSub: { color: COLORS.textDim, fontSize: 12, fontWeight: "500" },
-  hudLayer: { ...StyleSheet.absoluteFillObject, zIndex: 10, padding: 20 },
+  hudLayer: { ...StyleSheet.absoluteFillObject, zIndex: 100, padding: HUD_PAD },
+  rightPanelRail: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: RIGHT_PANEL_WIDTH,
+    zIndex: 120,
+  },
   
   mapToolsColumn: {
     position: "absolute",
@@ -2186,8 +2244,9 @@ const styles = StyleSheet.create({
 
   rightPanelBase: {
     position: "absolute",
-    right: 20,
-    width: 340,
+    right: 0,
+    width: RIGHT_PANEL_WIDTH,
+    zIndex: 1,
     flexDirection: "column",
     backgroundColor: COLORS.panelSolid,
     borderRadius: 20,
@@ -2197,8 +2256,8 @@ const styles = StyleSheet.create({
     ...SHADOWS.panel,
     overflow: "hidden",
   },
-  telemetryPanel: { top: HUD_PAD, height: "50%" },
-  missionPanel: { bottom: HUD_PAD, height: `${BOTTOM_PANEL_HEIGHT_RATIO * 100}%` },
+  telemetryPanel: { top: 0 },
+  missionPanel: { bottom: 0 },
   missionPanelJoystick: { maxHeight: "68%", height: "auto" },
   joystickPanel: {
     bottom: HUD_PAD,
