@@ -2888,6 +2888,7 @@ export default function App() {
                   rtkPassword={rtkPassword}
                   setRtkPassword={setRtkPassword}
                   rtkConnecting={rtkConnecting}
+                  rtkMode={rtkMode}
                   startNtrip={startNtrip}
                   startLora={startLora}
                   stopRtk={stopRtk}
@@ -3246,6 +3247,7 @@ type HomeViewProps = {
   rtkPassword: string;
   setRtkPassword: React.Dispatch<React.SetStateAction<string>>;
   rtkConnecting: boolean;
+  rtkMode: RTKMode;
   startNtrip: () => Promise<void>;
   startLora: () => Promise<void>;
   stopRtk: () => Promise<void>;
@@ -3333,6 +3335,7 @@ function HomeView(props: HomeViewProps) {
     rtkPassword,
     setRtkPassword,
     rtkConnecting,
+    rtkMode,
     startNtrip,
     startLora,
     stopRtk,

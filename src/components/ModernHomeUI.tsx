@@ -431,6 +431,7 @@ const NavBarItem = ({ icon: Icon, label, active, expanded, onPress, danger = fal
 const MissionActionBtn = ({ icon: Icon, label, onPress, variant = "secondary", fullWidth = false, big = false }) => {
   const isPrimary = variant === "primary";
   const isDanger = variant === "danger";
+  const isWarning = variant === "warning";
   return (
     <Pressable
       style={[
@@ -439,7 +440,8 @@ const MissionActionBtn = ({ icon: Icon, label, onPress, variant = "secondary", f
         big && styles.missionActionBig,
         isPrimary && styles.missionActionPrimary,
         isDanger && styles.missionActionDanger,
-        !isPrimary && !isDanger && styles.missionActionSecondary,
+        isWarning && styles.missionActionWarning,
+        !isPrimary && !isDanger && !isWarning && styles.missionActionSecondary,
       ]}
       onPress={onPress}
     >
@@ -606,11 +608,11 @@ export default function ModernHomeUI(props) {
   const {
     lines = [], importedPlan, systemHealth, telemetrySnapshot, missionRunning,
     onNav, onToggleMenu, onArmVehicle, onSetMode, onEstopVehicle,
-    onStartPlan, onStopPlan, onClearMission, rtkRunning, rtkHealthy,
-    startNtrip, startLora, stopRtk, selectedLineId, onSelectLine,
+    onStartPlan, onStopPlan, onClearMission, rtkRunning, rtkHealthy, rtkMode = "idle",
+    rtkConnecting = false, startNtrip, startLora, stopRtk, selectedLineId, onSelectLine,
     autoOriginEnabled, mapSourceLines, alignedRefPoints, autoOriginReference,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
-    rtkDefaultMode = "NTRIP", virtualJoystick, onPausePlan,
+    virtualJoystick, onPausePlan,
     mapViewEnabled = false, setMapViewEnabled, renderPlanPreview,
     onFocusRover, onFocusPlan,
     recenterRoverCount, recenterPlanCount,
@@ -858,19 +860,28 @@ export default function ModernHomeUI(props) {
   };
 
   const handleSetManualMode = useCallback(() => {
-    if (vehicleMode === "MANUAL") return;
     if (onSetMode) onSetMode("MANUAL");
     fetch(`${getApiBase()}/api/set_mode`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mode: "MANUAL" }),
     }).catch(console.error);
-  }, [vehicleMode, onSetMode]);
+  }, [onSetMode]);
 
-  const handleToggleRtk = useCallback(() => {
-    if (rtkRunning) stopRtk && stopRtk();
-    else rtkDefaultMode.toLowerCase() === "lora" ? startLora && startLora() : startNtrip && startNtrip();
-  }, [rtkRunning, rtkDefaultMode, stopRtk, startLora, startNtrip]);
+  const handleStartNtrip = useCallback(() => {
+    if (rtkConnecting || rtkRunning) return;
+    if (startNtrip) startNtrip();
+  }, [rtkConnecting, rtkRunning, startNtrip]);
+
+  const handleStartLora = useCallback(() => {
+    if (rtkConnecting || rtkRunning) return;
+    if (startLora) startLora();
+  }, [rtkConnecting, rtkRunning, startLora]);
+
+  const handleStopRtk = useCallback(() => {
+    if (rtkConnecting || !rtkRunning) return;
+    if (stopRtk) stopRtk();
+  }, [rtkConnecting, rtkRunning, stopRtk]);
 
   const handleQuickAccessPress = useCallback(() => {
     if (!navIconsVisible) {
@@ -881,17 +892,85 @@ export default function ModernHomeUI(props) {
     setQuickAccessExpanded((v) => !v);
   }, [navIconsVisible]);
 
-  const QuickSubNavItem = ({ icon: Icon, label, active, onPress }) => (
+  const QuickSubNavSectionLabel = ({ label }) => (
+    <Text style={styles.quickSubNavSectionLabel}>{label}</Text>
+  );
+
+  const QuickSubNavDivider = () => <View style={styles.quickSubNavDivider} />;
+
+  const QuickSubNavItem = ({
+    icon: Icon,
+    label,
+    active,
+    onPress,
+    signal = false,
+    healthy = false,
+    danger = false,
+    disabled = false,
+    compact = false,
+  }) => (
     <Pressable
-      style={[styles.quickSubNavItem, active && styles.quickSubNavItemActive]}
+      style={[
+        styles.quickSubNavItem,
+        compact && styles.quickSubNavItemCompact,
+        active && !danger && styles.quickSubNavItemActive,
+        active && danger && styles.quickSubNavItemDangerActive,
+        danger && !active && styles.quickSubNavItemDanger,
+        disabled && styles.quickSubNavItemDisabled,
+      ]}
       onPress={onPress}
+      disabled={disabled}
     >
-      <View style={[styles.quickSubNavIconWrap, active && styles.quickSubNavIconWrapActive]}>
-        <Icon color={active ? COLORS.accentText : COLORS.textMuted} size={18} strokeWidth={2.2} />
+      <View style={[
+        styles.quickSubNavIconWrap,
+        compact && styles.quickSubNavIconWrapCompact,
+        active && !danger && styles.quickSubNavIconWrapActive,
+        active && danger && styles.quickSubNavIconWrapDangerActive,
+        danger && !active && styles.quickSubNavIconWrapDanger,
+      ]}>
+        <Icon
+          color={active ? (danger ? "#fff" : COLORS.accentText) : danger ? COLORS.danger : COLORS.textMuted}
+          size={compact ? 16 : 18}
+          strokeWidth={2.2}
+        />
       </View>
-      <Text style={[styles.quickSubNavLabel, active && styles.quickSubNavLabelActive]} numberOfLines={1}>
-        {label}
-      </Text>
+      <View style={styles.quickSubNavItemBody}>
+        <Text
+          style={[
+            styles.quickSubNavLabel,
+            compact && styles.quickSubNavLabelCompact,
+            active && !danger && styles.quickSubNavLabelActive,
+            danger && styles.quickSubNavLabelDanger,
+            disabled && styles.quickSubNavLabelDisabled,
+          ]}
+          numberOfLines={1}
+        >
+          {label}
+        </Text>
+        {signal ? (
+          <View style={styles.quickSubNavSignalBars}>
+            {[4, 7, 10, 12].map((h, i) => {
+              const barActive = active && (healthy ? true : i < 2);
+              return (
+                <View
+                  key={i}
+                  style={{
+                    width: 2.5,
+                    height: h,
+                    borderRadius: 1,
+                    backgroundColor: barActive
+                      ? healthy
+                        ? COLORS.success
+                        : COLORS.warning
+                      : COLORS.textMuted,
+                    opacity: barActive ? 1 : 0.3,
+                  }}
+                />
+              );
+            })}
+          </View>
+        ) : null}
+      </View>
     </Pressable>
   );
 
@@ -942,18 +1021,45 @@ export default function ModernHomeUI(props) {
         <View style={styles.quickAccessSubNavInner} pointerEvents="auto">
           <View style={styles.quickAccessSubNavBridge} />
           <View style={styles.quickAccessSubNavRow}>
+            <QuickSubNavSectionLabel label="Vehicle" />
             <QuickSubNavItem
               icon={vehicleMode === "MANUAL" ? Gamepad2 : vehicleMode === "OFFBOARD" ? Hexagon : Zap}
-              label={vehicleMode}
+              label={vehicleMode || "MANUAL"}
               active={vehicleMode === "MANUAL"}
               onPress={handleSetManualMode}
             />
+
+            <QuickSubNavDivider />
+            <QuickSubNavSectionLabel label="RTK" />
             <QuickSubNavItem
               icon={RadioTower}
-              label={rtkRunning ? `RTK ${rtkDefaultMode}` : "RTK Off"}
-              active={rtkRunning}
-              onPress={handleToggleRtk}
+              label="Start NTRIP"
+              active={rtkMode === "ntrip"}
+              signal
+              healthy={rtkHealthy}
+              disabled={rtkConnecting || (rtkRunning && rtkMode !== "ntrip")}
+              onPress={handleStartNtrip}
             />
+            <QuickSubNavItem
+              icon={Radio}
+              label="Start LoRa"
+              active={rtkMode === "lora"}
+              signal
+              healthy={rtkHealthy}
+              disabled={rtkConnecting || (rtkRunning && rtkMode !== "lora")}
+              onPress={handleStartLora}
+            />
+            <QuickSubNavItem
+              icon={Square}
+              label="Stop RTK"
+              danger
+              active={rtkMode === "stopping"}
+              disabled={rtkConnecting || !rtkRunning}
+              onPress={handleStopRtk}
+            />
+
+            <QuickSubNavDivider />
+            <QuickSubNavSectionLabel label="Panels" />
             <QuickSubNavItem
               icon={Route}
               label="Mission"
@@ -1303,20 +1409,43 @@ export default function ModernHomeUI(props) {
             </>
           ) : (
             <>
+              <View style={styles.missionStatusStrip}>
+                <View style={styles.missionStatusCopy}>
+                  <Text style={styles.missionStatusLabel}>Mission state</Text>
+                  <Text style={styles.missionStatusHint}>
+                    {missionRunning ? "Guidance active" : "Awaiting start"}
+                  </Text>
+                </View>
+                <StatusPill
+                  label={missionStateStr.toUpperCase()}
+                  tone={missionStateTone}
+                  pulse={missionStateStr === "running"}
+                />
+              </View>
+
               <View style={styles.progressCard}>
                 <View style={styles.progressTopRow}>
-                  <View>
-                    <Text style={styles.progressPercent}>{missionProgress}%</Text>
-                    <Text style={styles.progressLabel}>Route completed</Text>
-                  </View>
-                  <View style={styles.progressEtaBox}>
-                    <Text style={styles.progressEtaLabel}>ETA</Text>
-                    <Text style={styles.progressTime}>--:--</Text>
-                  </View>
+                  <Text style={styles.progressTitle}>Route Completed</Text>
+                  <Text style={styles.progressPercent}>{missionProgress}%</Text>
                 </View>
                 <View style={styles.progressBarTrack}>
                   <View style={[styles.progressBarFill, { width: `${missionProgress}%` }]} />
-                  <View style={[styles.progressBarGlow, { left: `${Math.max(0, missionProgress - 2)}%` }]} />
+                </View>
+                <View style={styles.progressMetaRow}>
+                  <View style={styles.progressMetaItem}>
+                    <Text style={styles.progressMetaLabel}>X-Track</Text>
+                    <Text style={styles.progressMetaValue}>{xtrack} m</Text>
+                  </View>
+                  <View style={styles.progressMetaDivider} />
+                  <View style={styles.progressMetaItem}>
+                    <Text style={styles.progressMetaLabel}>Speed</Text>
+                    <Text style={styles.progressMetaValue}>{speed} m/s</Text>
+                  </View>
+                  <View style={styles.progressMetaDivider} />
+                  <View style={styles.progressMetaItem}>
+                    <Text style={styles.progressMetaLabel}>ETA</Text>
+                    <Text style={styles.progressMetaValue}>--:--</Text>
+                  </View>
                 </View>
               </View>
 
@@ -1332,6 +1461,7 @@ export default function ModernHomeUI(props) {
                 <MissionActionBtn
                   icon={Pause}
                   label="Pause"
+                  variant="warning"
                   fullWidth
                   big
                   onPress={handlePause}
@@ -1562,8 +1692,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
     borderLeftWidth: 0,
-    paddingVertical: 4,
-    paddingHorizontal: 12,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
     paddingLeft: 0,
     ...SHADOWS.panel,
   },
@@ -1576,26 +1706,71 @@ const styles = StyleSheet.create({
     flexDirection: "column",
     alignItems: "stretch",
     justifyContent: "center",
-    gap: 8,
-    paddingVertical: 10,
+    gap: 6,
+    paddingVertical: 14,
+    paddingHorizontal: 8,
+    minWidth: 188,
+  },
+  quickSubNavSectionLabel: {
+    color: COLORS.textDim,
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+    textTransform: "uppercase",
     paddingHorizontal: 4,
-    minWidth: 140,
+    marginTop: 2,
+    marginBottom: 2,
+  },
+  quickSubNavDivider: {
+    height: 1,
+    backgroundColor: COLORS.panelBorder,
+    marginVertical: 6,
+    marginHorizontal: 2,
   },
   quickSubNavItem: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 14,
+    gap: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
     backgroundColor: COLORS.cardSolid,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
-    height: 48,
+    minHeight: 46,
+  },
+  quickSubNavItemCompact: {
+    minHeight: 42,
+    paddingVertical: 8,
   },
   quickSubNavItemActive: {
     backgroundColor: COLORS.accentMuted,
     borderColor: COLORS.accentBorder,
+  },
+  quickSubNavItemDanger: {
+    backgroundColor: COLORS.dangerMuted,
+    borderColor: COLORS.dangerBorder,
+  },
+  quickSubNavItemDangerActive: {
+    backgroundColor: COLORS.danger,
+    borderColor: COLORS.dangerBorder,
+  },
+  quickSubNavItemDisabled: {
+    opacity: 0.45,
+  },
+  quickSubNavItemBody: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  quickSubNavSignalBars: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 2,
+    height: 12,
+    paddingBottom: 1,
   },
   quickSubNavIconWrap: {
     width: 32,
@@ -1605,17 +1780,39 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  quickSubNavIconWrapCompact: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+  },
   quickSubNavIconWrapActive: {
     backgroundColor: COLORS.accentBrand,
+  },
+  quickSubNavIconWrapDanger: {
+    backgroundColor: COLORS.dangerMuted,
+  },
+  quickSubNavIconWrapDangerActive: {
+    backgroundColor: "rgba(255,255,255,0.18)",
   },
   quickSubNavLabel: {
     color: COLORS.textMuted,
     fontSize: 12,
     fontWeight: "700",
+    flex: 1,
+  },
+  quickSubNavLabelCompact: {
+    fontSize: 11,
   },
   quickSubNavLabelActive: {
     color: COLORS.textMain,
     fontWeight: "800",
+  },
+  quickSubNavLabelDanger: {
+    color: COLORS.danger,
+    fontWeight: "800",
+  },
+  quickSubNavLabelDisabled: {
+    color: COLORS.textDim,
   },
   exitSessionBtn: {
     flexDirection: "row",
@@ -2021,7 +2218,7 @@ const styles = StyleSheet.create({
     zIndex: 110,
   },
   panelScroll: { flex: 1 },
-  panelScrollContent: { paddingBottom: 8, gap: 4 },
+  panelScrollContent: { paddingBottom: 10, gap: 12 },
 
   panelHeader: {
     flexDirection: "row",
@@ -2364,32 +2561,73 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
 
-  progressCard: {
+  missionStatusStrip: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
     backgroundColor: COLORS.cardSolid,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
     borderRadius: 12,
-    padding: 12,
-    marginBottom: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
   },
-  progressTopRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
-  progressPercent: { color: COLORS.accentBrand, fontSize: 20, fontWeight: "800", lineHeight: 22 },
-  progressLabel: { color: COLORS.textMuted, fontSize: 11, fontWeight: "600", marginTop: 1 },
-  progressEtaBox: { alignItems: "flex-end" },
-  progressEtaLabel: { color: COLORS.textMuted, fontSize: 9, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase" },
-  progressTime: { color: "#fff", fontSize: 14, fontWeight: "700", marginTop: 1 },
-  progressBarTrack: { height: 6, backgroundColor: COLORS.surfaceSolid, borderRadius: 999, overflow: "hidden", position: "relative" },
-  progressBarFill: { height: "100%", backgroundColor: COLORS.accentBrand, borderRadius: 999 },
-  progressBarGlow: {
-    position: "absolute",
-    top: 0,
-    width: "6%",
-    height: "100%",
-    backgroundColor: COLORS.pillSecondary,
-    borderRadius: 999,
+  missionStatusCopy: { flex: 1, gap: 2 },
+  missionStatusLabel: {
+    color: COLORS.textDim,
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+  },
+  missionStatusHint: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  progressCard: {
+    backgroundColor: COLORS.cardSolid,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    borderRadius: 14,
+    padding: 16,
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.accentBrand,
+  },
+  progressTopRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  progressTitle: { color: COLORS.textMain, fontSize: 13, fontWeight: "700" },
+  progressPercent: { color: COLORS.accentBrand, fontSize: 16, fontWeight: "800" },
+  progressBarTrack: { height: 8, backgroundColor: COLORS.surfaceSolid, borderRadius: 4, marginTop: 14, overflow: "hidden" },
+  progressBarFill: { height: "100%", backgroundColor: COLORS.accentBrand, borderRadius: 4 },
+  progressMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.panelBorder,
+  },
+  progressMetaItem: { flex: 1, alignItems: "center", gap: 3 },
+  progressMetaLabel: {
+    color: COLORS.textDim,
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+  },
+  progressMetaValue: {
+    color: COLORS.textMain,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  progressMetaDivider: {
+    width: 1,
+    height: 28,
+    backgroundColor: COLORS.panelBorder,
   },
 
-  missionActionsGrid: { flexDirection: "column", gap: 8 },
+  missionActionsGrid: { flexDirection: "column", gap: 12 },
   missionSubActionsRow: { flexDirection: "row", width: "100%", gap: 8 },
   missionActionBtn: {
     minHeight: 48,
@@ -2398,6 +2636,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "center",
     gap: 8,
     borderWidth: 1,
   },
@@ -2411,6 +2650,7 @@ const styles = StyleSheet.create({
   missionActionPrimary: { backgroundColor: COLORS.accentBrand, borderColor: COLORS.accentBorder },
   missionActionLabelDark: { color: COLORS.accentText },
   missionActionDanger: { backgroundColor: COLORS.danger, borderColor: COLORS.dangerBorder },
+  missionActionWarning: { backgroundColor: "#27272a", borderColor: "#3f3f46" },
   missionActionSecondary: { backgroundColor: COLORS.cardSolid, borderColor: COLORS.panelBorder },
   missionActionIconWrap: {
     width: 28,
@@ -2424,7 +2664,7 @@ const styles = StyleSheet.create({
     height: 36,
     borderRadius: 10,
   },
-  missionActionLabel: { color: "#fff", fontSize: 11, fontWeight: "700", letterSpacing: 0.2, flex: 1 },
+  missionActionLabel: { color: "#f8fafc", fontSize: 11, fontWeight: "700", letterSpacing: 0.2, flexShrink: 1, textAlign: "center" },
   missionActionLabelBig: { fontSize: 13, fontWeight: "800" },
 
   estopLayer: {
