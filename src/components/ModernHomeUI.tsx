@@ -1409,23 +1409,14 @@ export default function ModernHomeUI(props) {
             </>
           ) : (
             <>
-              <View style={styles.missionStatusStrip}>
-                <View style={styles.missionStatusCopy}>
-                  <Text style={styles.missionStatusLabel}>Mission state</Text>
-                  <Text style={styles.missionStatusHint}>
-                    {missionRunning ? "Guidance active" : "Awaiting start"}
-                  </Text>
-                </View>
-                <StatusPill
-                  label={missionStateStr.toUpperCase()}
-                  tone={missionStateTone}
-                  pulse={missionStateStr === "running"}
-                />
-              </View>
-
               <View style={styles.progressCard}>
                 <View style={styles.progressTopRow}>
-                  <Text style={styles.progressTitle}>Route Completed</Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <Text style={styles.progressTitle}>Route Completed</Text>
+                    <Text style={{ color: missionStateTone, fontSize: 11, fontWeight: "700", textTransform: "lowercase" }}>
+                      • {missionStateStr || "idle"}
+                    </Text>
+                  </View>
                   <Text style={styles.progressPercent}>{missionProgress}%</Text>
                 </View>
                 <View style={styles.progressBarTrack}>
@@ -2646,6 +2637,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderRadius: 14,
+    justifyContent: "flex-start",
   },
   missionActionPrimary: { backgroundColor: COLORS.accentBrand, borderColor: COLORS.accentBorder },
   missionActionLabelDark: { color: COLORS.accentText },
@@ -2665,7 +2657,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   missionActionLabel: { color: "#f8fafc", fontSize: 11, fontWeight: "700", letterSpacing: 0.2, flexShrink: 1, textAlign: "center" },
-  missionActionLabelBig: { fontSize: 13, fontWeight: "800" },
+  missionActionLabelBig: { fontSize: 13, fontWeight: "800", textAlign: "left", flex: 1 },
 
   estopLayer: {
     ...StyleSheet.absoluteFillObject,
