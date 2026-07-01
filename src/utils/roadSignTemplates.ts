@@ -22,7 +22,7 @@ export const ROAD_SIGN_LABELS: Record<RoadSignType, string> = {
 };
 
 // Pre-computed normalized line segments [x1, y1, x2, y2][]
-const SIGN_DATA: Record<RoadSignType, number[][]> = {
+export const SIGN_DATA: Record<RoadSignType, number[][]> = {
     "am_01": [
         [-0.042857, -0.5, 0.042857, -0.5],
         [-0.042857, -0.5, -0.032919, -0.271429],
