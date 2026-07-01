@@ -1278,7 +1278,8 @@ export default function ModernHomeUI(props) {
     const fcuTone = systemHealth?.fcu_connected ? COLORS.success : COLORS.danger;
 
     return (
-      <AnimatedReanimated.View
+      <View
+        pointerEvents="auto"
         style={[styles.rightPanelBase, styles.telemetryPanel, { height: telemetryPanelHeight, opacity: 1 }]}
       >
         <PanelHeader
@@ -1362,7 +1363,7 @@ export default function ModernHomeUI(props) {
             </View>
           </TelemetryBlock>
         </ScrollView>
-      </AnimatedReanimated.View>
+      </View>
     );
   };
 
@@ -1380,7 +1381,8 @@ export default function ModernHomeUI(props) {
         : joystickState.replace(/_/g, " ").toLowerCase();
 
     return (
-      <AnimatedReanimated.View
+      <View
+        pointerEvents="auto"
         style={[
           styles.rightPanelBase,
           styles.missionPanel,
@@ -1514,7 +1516,7 @@ export default function ModernHomeUI(props) {
             </>
           )}
         </ScrollView>
-      </AnimatedReanimated.View>
+      </View>
     );
   };
 
@@ -2256,8 +2258,8 @@ const styles = StyleSheet.create({
     ...SHADOWS.panel,
     overflow: "hidden",
   },
-  telemetryPanel: { top: 0 },
-  missionPanel: { bottom: 0 },
+  telemetryPanel: { top: HUD_PAD, right: HUD_PAD },
+  missionPanel: { bottom: HUD_PAD, right: HUD_PAD },
   missionPanelJoystick: { maxHeight: "68%", height: "auto" },
   joystickPanel: {
     bottom: HUD_PAD,

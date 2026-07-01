@@ -2151,7 +2151,7 @@ export default function App() {
     if (rtkRunning) return;
     setRtkConnecting(true);
     try {
-      if (!rtkCaster || !rtkPort || !rtkMountPoint || !rtkUsername || !rtkPassword) {
+      if (!rtkCaster || !rtkPort || !rtkMountPoint) {
         Alert.alert("Credentials needed", "Please fill in all RTK NTRIP credentials in Settings before connecting.");
         setRtkConnecting(false);
         return;
