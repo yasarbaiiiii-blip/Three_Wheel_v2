@@ -609,6 +609,88 @@ const FloatingEStop = ({ visible, onTrigger }) => {
   );
 };
 
+const QuickSubNavSectionLabel = ({ label }) => (
+  <Text style={styles.quickSubNavSectionLabel}>{label}</Text>
+);
+
+const QuickSubNavDivider = () => <View style={styles.quickSubNavDivider} />;
+
+const QuickSubNavItem = ({
+  icon: Icon,
+  label,
+  active,
+  onPress,
+  signal = false,
+  healthy = false,
+  danger = false,
+  disabled = false,
+  compact = false,
+}) => (
+  <Pressable
+    style={[
+      styles.quickSubNavItem,
+      compact && styles.quickSubNavItemCompact,
+      active && !danger && styles.quickSubNavItemActive,
+      active && danger && styles.quickSubNavItemDangerActive,
+      danger && !active && styles.quickSubNavItemDanger,
+      disabled && styles.quickSubNavItemDisabled,
+    ]}
+    onPress={onPress}
+    disabled={disabled}
+  >
+    <View style={[
+      styles.quickSubNavIconWrap,
+      compact && styles.quickSubNavIconWrapCompact,
+      active && !danger && styles.quickSubNavIconWrapActive,
+      active && danger && styles.quickSubNavIconWrapDangerActive,
+      danger && !active && styles.quickSubNavIconWrapDanger,
+    ]}>
+      <Icon
+        color={active ? (danger ? "#fff" : COLORS.accentText) : danger ? COLORS.danger : COLORS.textMuted}
+        size={compact ? 16 : 18}
+        strokeWidth={2.2}
+      />
+    </View>
+    <View style={styles.quickSubNavItemBody}>
+      <Text
+        style={[
+          styles.quickSubNavLabel,
+          compact && styles.quickSubNavLabelCompact,
+          active && !danger && styles.quickSubNavLabelActive,
+          danger && styles.quickSubNavLabelDanger,
+          disabled && styles.quickSubNavLabelDisabled,
+        ]}
+        numberOfLines={1}
+      >
+        {label}
+      </Text>
+      {signal ? (
+        <View style={styles.quickSubNavSignalBars}>
+          {[4, 7, 10, 12].map((h, i) => {
+            const barActive = active && (healthy ? true : i < 2);
+            return (
+              <View
+                key={i}
+                style={{
+                  width: 2.5,
+                  height: h,
+                  borderRadius: 1,
+                  backgroundColor: barActive
+                    ? healthy
+                      ? COLORS.success
+                      : COLORS.warning
+                    : COLORS.textMuted,
+                  opacity: barActive ? 1 : 0.3,
+                }}
+              />
+            );
+          })}
+        </View>
+      ) : null}
+    </View>
+  </Pressable>
+);
+
 export default function ModernHomeUI(props) {
   const {
     lines = [], importedPlan, systemHealth, telemetrySnapshot, missionRunning,
@@ -934,88 +1016,6 @@ export default function ModernHomeUI(props) {
   const handleToggleTelemetryPanel = useCallback(() => {
     setShowTelemetry((v) => !v);
   }, []);
-
-  const QuickSubNavSectionLabel = ({ label }) => (
-    <Text style={styles.quickSubNavSectionLabel}>{label}</Text>
-  );
-
-  const QuickSubNavDivider = () => <View style={styles.quickSubNavDivider} />;
-
-  const QuickSubNavItem = ({
-    icon: Icon,
-    label,
-    active,
-    onPress,
-    signal = false,
-    healthy = false,
-    danger = false,
-    disabled = false,
-    compact = false,
-  }) => (
-    <Pressable
-      style={[
-        styles.quickSubNavItem,
-        compact && styles.quickSubNavItemCompact,
-        active && !danger && styles.quickSubNavItemActive,
-        active && danger && styles.quickSubNavItemDangerActive,
-        danger && !active && styles.quickSubNavItemDanger,
-        disabled && styles.quickSubNavItemDisabled,
-      ]}
-      onPress={onPress}
-      disabled={disabled}
-    >
-      <View style={[
-        styles.quickSubNavIconWrap,
-        compact && styles.quickSubNavIconWrapCompact,
-        active && !danger && styles.quickSubNavIconWrapActive,
-        active && danger && styles.quickSubNavIconWrapDangerActive,
-        danger && !active && styles.quickSubNavIconWrapDanger,
-      ]}>
-        <Icon
-          color={active ? (danger ? "#fff" : COLORS.accentText) : danger ? COLORS.danger : COLORS.textMuted}
-          size={compact ? 16 : 18}
-          strokeWidth={2.2}
-        />
-      </View>
-      <View style={styles.quickSubNavItemBody}>
-        <Text
-          style={[
-            styles.quickSubNavLabel,
-            compact && styles.quickSubNavLabelCompact,
-            active && !danger && styles.quickSubNavLabelActive,
-            danger && styles.quickSubNavLabelDanger,
-            disabled && styles.quickSubNavLabelDisabled,
-          ]}
-          numberOfLines={1}
-        >
-          {label}
-        </Text>
-        {signal ? (
-          <View style={styles.quickSubNavSignalBars}>
-            {[4, 7, 10, 12].map((h, i) => {
-              const barActive = active && (healthy ? true : i < 2);
-              return (
-                <View
-                  key={i}
-                  style={{
-                    width: 2.5,
-                    height: h,
-                    borderRadius: 1,
-                    backgroundColor: barActive
-                      ? healthy
-                        ? COLORS.success
-                        : COLORS.warning
-                      : COLORS.textMuted,
-                    opacity: barActive ? 1 : 0.3,
-                  }}
-                />
-              );
-            })}
-          </View>
-        ) : null}
-      </View>
-    </Pressable>
-  );
 
   const renderMapToolsColumn = () => {
     if ((!isHomePage && !isFieldsPage) || !navIconsVisible) return null;
