@@ -885,7 +885,7 @@ export default function ModernHomeUI(props) {
       onPress={onPress}
     >
       <View style={[styles.quickSubNavIconWrap, active && styles.quickSubNavIconWrapActive]}>
-        <Icon color={active ? COLORS.accentText : COLORS.textMuted} size={15} strokeWidth={2.2} />
+        <Icon color={active ? COLORS.accentText : COLORS.textMuted} size={18} strokeWidth={2.2} />
       </View>
       <Text style={[styles.quickSubNavLabel, active && styles.quickSubNavLabelActive]} numberOfLines={1}>
         {label}
@@ -1220,7 +1220,11 @@ export default function ModernHomeUI(props) {
   };
 
   const renderJoystickPanel = () => {
-    if (!showJoystick || vehicleMode !== "MANUAL" || missionRunning) return null;
+    return null;
+  };
+
+  const renderMissionControl = () => {
+    if (!showMissionControl) return null;
 
     const statusLabel = joystickActive
       ? "Driving"
@@ -1229,108 +1233,33 @@ export default function ModernHomeUI(props) {
         : joystickState.replace(/_/g, " ").toLowerCase();
 
     return (
-      <View style={[styles.rightPanelBase, styles.joystickPanel]}>
+      <View style={[styles.rightPanelBase, styles.missionPanel, showJoystick && styles.missionPanelJoystick]}>
         <PanelHeader
-          icon={Gamepad2}
-          title="Manual Control"
-          subtitle={isArmed ? "Ready to drive" : "Arm vehicle first"}
-          onClose={() => setShowJoystick(false)}
-        />
-        <ScrollView
-          style={styles.panelScroll}
-          contentContainerStyle={styles.joystickScrollContent}
-          showsVerticalScrollIndicator={false}
-          nestedScrollEnabled
-        >
-          <View style={styles.manualStatusBar}>
-            <View style={[styles.manualStatusDot, { backgroundColor: joystickStateTone }]} />
-            <Text style={styles.manualStatusText}>{statusLabel}</Text>
-          </View>
-
-          <View style={styles.joystickCard}>
-            <ManualJoystick
-              onChange={(vals) => {
-                if (virtualJoystick) virtualJoystick.setIntent(vals.forward, vals.yaw);
-              }}
-              onRelease={() => {
-                if (virtualJoystick) virtualJoystick.setIntent(0, 0);
-              }}
-              size={160}
-              knobSize={50}
-              disabled={!isArmed}
-            />
-            {!isArmed && (
-              <View style={styles.joystickOverlay}>
-                <ShieldAlert color="#fff" size={18} strokeWidth={2} />
-                <Text style={styles.joystickOverlayText}>Arm to drive</Text>
-              </View>
-            )}
-          </View>
-
-          <View style={styles.manualActionGroup}>
-            <View style={styles.acquireSegment}>
-              <Pressable style={[styles.acquireSegmentBtn, styles.acquireSegmentLeft]} onPress={handleAcquire}>
-                <Text style={[styles.acquireSegmentText, styles.acquireSegmentTextDark]}>Acquire</Text>
-              </Pressable>
-              <View style={styles.acquireSegmentDivider} />
-              <Pressable style={[styles.acquireSegmentBtn, styles.acquireSegmentRight]} onPress={handleRelease}>
-                <Text style={styles.acquireSegmentText}>Release</Text>
-              </Pressable>
-            </View>
-
-            <Pressable
-              style={[styles.armToggle, isArmed ? styles.armToggleOn : styles.armToggleOff]}
-              onPress={() => {
-                onArmVehicle(!isArmed);
-                setIsArmed(!isArmed);
-              }}
-            >
-              <ShieldAlert color="#fff" size={16} strokeWidth={2.2} />
-              <Text style={styles.armToggleText}>{isArmed ? "Disarm" : "Arm Vehicle"}</Text>
-            </Pressable>
-          </View>
-        </ScrollView>
-      </View>
-    );
-  };
-
-  const renderMissionControl = () => {
-    if (!showMissionControl) return null;
-
-    return (
-      <View style={[styles.rightPanelBase, styles.missionPanel]}>
-        <PanelHeader
-          icon={Route}
-          title="Mission Control"
-          subtitle={missionRunning ? "Mission in progress" : "Ready to start"}
+          icon={showJoystick ? Gamepad2 : Route}
+          title={showJoystick ? "Manual Control" : "Mission Control"}
+          subtitle={
+            showJoystick
+              ? isArmed
+                ? "Ready to drive"
+                : "Arm vehicle first"
+              : missionRunning
+                ? "Mission in progress"
+                : "Ready to start"
+          }
           live={missionRunning}
-          onClose={!missionRunning ? () => setShowMissionControl(false) : undefined}
+          onClose={!missionRunning ? () => {
+            if (showJoystick) setShowJoystick(false);
+            else setShowMissionControl(false);
+          } : undefined}
         />
 
         <ScrollView
           style={styles.panelScroll}
-          contentContainerStyle={styles.panelScrollContent}
+          contentContainerStyle={[styles.panelScrollContent, showJoystick && styles.joystickScrollContent]}
           showsVerticalScrollIndicator={false}
           nestedScrollEnabled
         >
-          <View style={styles.progressCard}>
-            <View style={styles.progressTopRow}>
-              <View>
-                <Text style={styles.progressPercent}>{missionProgress}%</Text>
-                <Text style={styles.progressLabel}>Route completed</Text>
-              </View>
-              <View style={styles.progressEtaBox}>
-                <Text style={styles.progressEtaLabel}>ETA</Text>
-                <Text style={styles.progressTime}>--:--</Text>
-              </View>
-            </View>
-            <View style={styles.progressBarTrack}>
-              <View style={[styles.progressBarFill, { width: `${missionProgress}%` }]} />
-              <View style={[styles.progressBarGlow, { left: `${Math.max(0, missionProgress - 2)}%` }]} />
-            </View>
-          </View>
-
-          {vehicleMode === "MANUAL" && !missionRunning ? (
+          {!showJoystick && vehicleMode === "MANUAL" && !missionRunning ? (
             <Pressable
               style={[styles.joystickLaunchBtn, showJoystick && styles.joystickLaunchBtnActive]}
               onPress={() => setShowJoystick((v) => !v)}
@@ -1358,18 +1287,79 @@ export default function ModernHomeUI(props) {
             </Pressable>
           ) : null}
 
-          <View style={styles.missionActionsGrid}>
-            <MissionActionBtn
-              icon={missionRunning ? Square : Play}
-              label={missionRunning ? "Stop Mission" : "Start Mission"}
-              variant={missionRunning ? "danger" : "primary"}
-              fullWidth
-              onPress={missionRunning ? onStopPlan : onStartPlan}
-            />
-            <MissionActionBtn icon={Pause} label="Pause" onPress={handlePause} />
-            <MissionActionBtn icon={SkipForward} label="Next" onPress={handleNext} />
-            <MissionActionBtn icon={Download} label="Export Log" onPress={handleExport} />
-          </View>
+          {showJoystick && vehicleMode === "MANUAL" && !missionRunning ? (
+            <>
+              <View style={styles.manualStatusBar}>
+                <View style={[styles.manualStatusDot, { backgroundColor: joystickStateTone }]} />
+                <Text style={styles.manualStatusText}>{statusLabel}</Text>
+              </View>
+
+              <View style={styles.joystickCard}>
+                <ManualJoystick
+                  onChange={(vals) => {
+                    if (virtualJoystick) virtualJoystick.setIntent(vals.forward, vals.yaw);
+                  }}
+                  onRelease={() => {
+                    if (virtualJoystick) virtualJoystick.setIntent(0, 0);
+                  }}
+                  size={160}
+                  knobSize={50}
+                  disabled={!isArmed}
+                />
+                {!isArmed && (
+                  <View style={styles.joystickOverlay}>
+                    <ShieldAlert color="#fff" size={18} strokeWidth={2} />
+                    <Text style={styles.joystickOverlayText}>Arm to drive</Text>
+                  </View>
+                )}
+              </View>
+
+              <View style={styles.manualActionGroup}>
+                <Pressable
+                  style={[styles.armToggle, isArmed ? styles.armToggleOn : styles.armToggleOff]}
+                  onPress={() => {
+                    onArmVehicle(!isArmed);
+                    setIsArmed(!isArmed);
+                  }}
+                >
+                  <ShieldAlert color="#fff" size={16} strokeWidth={2.2} />
+                  <Text style={styles.armToggleText}>{isArmed ? "Disarm" : "Arm Vehicle"}</Text>
+                </Pressable>
+              </View>
+            </>
+          ) : (
+            <>
+              <View style={styles.progressCard}>
+                <View style={styles.progressTopRow}>
+                  <View>
+                    <Text style={styles.progressPercent}>{missionProgress}%</Text>
+                    <Text style={styles.progressLabel}>Route completed</Text>
+                  </View>
+                  <View style={styles.progressEtaBox}>
+                    <Text style={styles.progressEtaLabel}>ETA</Text>
+                    <Text style={styles.progressTime}>--:--</Text>
+                  </View>
+                </View>
+                <View style={styles.progressBarTrack}>
+                  <View style={[styles.progressBarFill, { width: `${missionProgress}%` }]} />
+                  <View style={[styles.progressBarGlow, { left: `${Math.max(0, missionProgress - 2)}%` }]} />
+                </View>
+              </View>
+
+              <View style={styles.missionActionsGrid}>
+                <MissionActionBtn
+                  icon={missionRunning ? Square : Play}
+                  label={missionRunning ? "Stop Mission" : "Start Mission"}
+                  variant={missionRunning ? "danger" : "primary"}
+                  fullWidth
+                  onPress={missionRunning ? onStopPlan : onStartPlan}
+                />
+                <MissionActionBtn icon={Pause} label="Pause" onPress={handlePause} />
+                <MissionActionBtn icon={SkipForward} label="Next" onPress={handleNext} />
+                <MissionActionBtn icon={Download} label="Export Log" onPress={handleExport} />
+              </View>
+            </>
+          )}
         </ScrollView>
       </View>
     );
@@ -1453,7 +1443,6 @@ export default function ModernHomeUI(props) {
           {renderMapToolsColumn()}
           {isHomePage ? renderTelemetrySection() : null}
           {isHomePage ? renderMissionControl() : null}
-          {isHomePage ? renderJoystickPanel() : null}
           {isHomePage ? <FloatingEStop visible={missionRunning || isArmed} onTrigger={handleEStop} /> : null}
         </View>
       ) : null}
@@ -1580,20 +1569,20 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "stretch",
     backgroundColor: COLORS.navSolid,
-    borderTopRightRadius: 14,
-    borderBottomRightRadius: 14,
+    borderTopRightRadius: 16,
+    borderBottomRightRadius: 16,
     borderTopLeftRadius: 0,
     borderBottomLeftRadius: 0,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
     borderLeftWidth: 0,
-    paddingVertical: 0,
-    paddingHorizontal: 10,
+    paddingVertical: 4,
+    paddingHorizontal: 12,
     paddingLeft: 0,
     ...SHADOWS.panel,
   },
   quickAccessSubNavBridge: {
-    width: 8,
+    width: 12,
     backgroundColor: COLORS.navSolid,
     borderColor: COLORS.panelBorder,
   },
@@ -1601,29 +1590,31 @@ const styles = StyleSheet.create({
     flexDirection: "column",
     alignItems: "stretch",
     justifyContent: "center",
-    gap: 6,
-    paddingVertical: 8,
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 4,
+    minWidth: 140,
   },
   quickSubNavItem: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: 12,
+    gap: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 14,
     backgroundColor: COLORS.cardSolid,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
-    height: 42,
+    height: 48,
   },
   quickSubNavItemActive: {
     backgroundColor: COLORS.accentMuted,
     borderColor: COLORS.accentBorder,
   },
   quickSubNavIconWrap: {
-    width: 24,
-    height: 24,
-    borderRadius: 8,
+    width: 32,
+    height: 32,
+    borderRadius: 10,
     backgroundColor: COLORS.surfaceSolid,
     alignItems: "center",
     justifyContent: "center",
@@ -1633,11 +1624,12 @@ const styles = StyleSheet.create({
   },
   quickSubNavLabel: {
     color: COLORS.textMuted,
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: "700",
   },
   quickSubNavLabelActive: {
     color: COLORS.textMain,
+    fontWeight: "800",
   },
   exitSessionBtn: {
     flexDirection: "row",
@@ -2033,6 +2025,7 @@ const styles = StyleSheet.create({
   },
   telemetryPanel: { top: HUD_PAD, height: "50%" },
   missionPanel: { bottom: HUD_PAD, height: `${BOTTOM_PANEL_HEIGHT_RATIO * 100}%` },
+  missionPanelJoystick: { maxHeight: "68%", height: "auto" },
   joystickPanel: {
     bottom: HUD_PAD,
     left: HUD_PAD + NAV_WIDTH_COLLAPSED + SIDE_GAP + 8,
