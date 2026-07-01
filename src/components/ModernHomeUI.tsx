@@ -617,6 +617,7 @@ export default function ModernHomeUI(props) {
   } = props;
 
   const isHomePage = currentPage === "home";
+  const isFieldsPage = currentPage === "fields";
   const PAGE_TO_NAV = {
     home: "main",
     fields: "fields",
@@ -804,10 +805,10 @@ export default function ModernHomeUI(props) {
   }));
 
   const sectionContentAnimatedStyle = useAnimatedStyle(() => ({
-    left: HUD_PAD + navWidth.value + SIDE_GAP,
-    right: HUD_PAD,
-    top: HUD_PAD + SIDE_GAP,
-    bottom: HUD_PAD,
+    left: isFieldsPage ? 0 : HUD_PAD + navWidth.value + SIDE_GAP,
+    right: isFieldsPage ? 0 : HUD_PAD,
+    top: isFieldsPage ? 0 : HUD_PAD + SIDE_GAP,
+    bottom: isFieldsPage ? 0 : HUD_PAD,
   }));
 
   const handleMenuPress = useCallback(() => {
@@ -893,24 +894,27 @@ export default function ModernHomeUI(props) {
   );
 
   const renderMapToolsColumn = () => {
-    if (!isHomePage || !navIconsVisible) return null;
+    if ((!isHomePage && !isFieldsPage) || !navIconsVisible) return null;
     return (
       <AnimatedReanimated.View style={[styles.mapToolsColumn, compassAnimatedStyle]} pointerEvents="box-none">
-        <View style={styles.compassCard}>
+        <View style={styles.mapToolsGroupCard} pointerEvents="auto">
           <TopBarCompass headingDeg={roverHeadingDeg ?? 0} hasRoverHeading={hasRoverHeading} />
-        </View>
 
-        <View style={styles.focusToolsRow} pointerEvents="auto">
+          <View style={styles.mapToolsDivider} />
+
           <Pressable
-            style={({ pressed }) => [styles.focusToolBtn, pressed && styles.focusToolBtnPressed]}
+            style={({ pressed }) => [styles.focusToolBtnGrouped, pressed && styles.focusToolBtnPressed]}
             onPress={() => onFocusPlan?.()}
             accessibilityLabel="Focus Plan"
           >
             <MapIcon color={COLORS.accentBrand} size={18} strokeWidth={2.2} />
             <Text style={styles.focusToolLabel}>Plan</Text>
           </Pressable>
+
+          <View style={styles.mapToolsDivider} />
+
           <Pressable
-            style={({ pressed }) => [styles.focusToolBtn, pressed && styles.focusToolBtnPressed]}
+            style={({ pressed }) => [styles.focusToolBtnGrouped, pressed && styles.focusToolBtnPressed]}
             onPress={() => onFocusRover?.()}
             accessibilityLabel="Focus Rover"
           >
@@ -918,7 +922,6 @@ export default function ModernHomeUI(props) {
             <Text style={styles.focusToolLabel}>Rover</Text>
           </Pressable>
         </View>
-
       </AnimatedReanimated.View>
     );
   };
@@ -930,12 +933,12 @@ export default function ModernHomeUI(props) {
         style={[
           styles.quickAccessSubNav,
           quickAccessSubNavAnimatedStyle,
-          { top: quickAccessAnchor.top + QUICK_ACCESS_SUBNAV_OFFSET, height: quickAccessAnchor.height },
+          { top: quickAccessAnchor.top + QUICK_ACCESS_SUBNAV_OFFSET },
         ]}
         pointerEvents="box-none"
       >
         <View style={styles.quickAccessSubNavInner} pointerEvents="auto">
-          <View style={[styles.quickAccessSubNavBridge, { height: quickAccessAnchor.height }]} />
+          <View style={styles.quickAccessSubNavBridge} />
           <View style={styles.quickAccessSubNavRow}>
             <QuickSubNavItem
               icon={vehicleMode === "MANUAL" ? Gamepad2 : vehicleMode === "OFFBOARD" ? Hexagon : Zap}
@@ -1111,20 +1114,14 @@ export default function ModernHomeUI(props) {
 
           <View style={styles.navDivider} />
 
-          <Pressable
-            style={({ pressed }) => [
-              styles.exitSessionBtn,
-              !navExpanded && styles.exitSessionBtnCollapsed,
-              pressed && styles.bottomActionBtnDangerPressed,
-            ]}
+          <NavBarItem
+            icon={LogOut}
+            label="Exit Session"
+            active={false}
+            expanded={navExpanded}
+            danger={true}
             onPress={() => onNav("connection")}
-            accessibilityLabel="Exit Session"
-          >
-            <View style={[styles.bottomActionIconWrap, styles.bottomActionIconWrapDanger]}>
-              <LogOut color={COLORS.danger} size={18} strokeWidth={2.2} />
-            </View>
-            {navExpanded ? <Text style={[styles.bottomActionLabel, styles.bottomActionLabelDanger]}>Exit Session</Text> : null}
-          </Pressable>
+          />
         </>
       )}
     </AnimatedReanimated.View>
@@ -1441,7 +1438,7 @@ export default function ModernHomeUI(props) {
 
       {!isHomePage && renderSectionContent ? (
         <AnimatedReanimated.View
-          style={[styles.sectionContent, sectionContentAnimatedStyle]}
+          style={[styles.sectionContent, sectionContentAnimatedStyle, isFieldsPage && StyleSheet.absoluteFillObject]}
           pointerEvents="box-none"
         >
           {renderSectionContent()}
@@ -1500,7 +1497,35 @@ const styles = StyleSheet.create({
     position: "absolute",
     zIndex: 95,
     gap: 8,
-    maxWidth: 280,
+    maxWidth: 400,
+  },
+  mapToolsGroupCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.panelSolid,
+    borderRadius: 16,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    gap: 4,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    ...SHADOWS.card,
+    alignSelf: "flex-start",
+  },
+  mapToolsDivider: {
+    width: 1,
+    height: 24,
+    backgroundColor: COLORS.panelBorder,
+    marginHorizontal: 4,
+  },
+  focusToolBtnGrouped: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    backgroundColor: "transparent",
   },
   compassCard: {
     flexDirection: "row",
@@ -1552,9 +1577,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   quickAccessSubNavInner: {
-    flex: 1,
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "stretch",
     backgroundColor: COLORS.navSolid,
     borderTopRightRadius: 14,
     borderBottomRightRadius: 14,
@@ -1571,15 +1595,14 @@ const styles = StyleSheet.create({
   quickAccessSubNavBridge: {
     width: 8,
     backgroundColor: COLORS.navSolid,
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
     borderColor: COLORS.panelBorder,
   },
   quickAccessSubNavRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    flexWrap: "nowrap",
+    flexDirection: "column",
+    alignItems: "stretch",
+    justifyContent: "center",
     gap: 6,
+    paddingVertical: 8,
   },
   quickSubNavItem: {
     flexDirection: "row",
@@ -1612,7 +1635,6 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 10,
     fontWeight: "700",
-    maxWidth: 72,
   },
   quickSubNavLabelActive: {
     color: COLORS.textMain,

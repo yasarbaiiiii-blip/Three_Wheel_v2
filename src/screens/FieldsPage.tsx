@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { Alert, ScrollView, View } from "react-native";
+import { Alert, ScrollView, StyleSheet, View } from "react-native";
 
 import * as missionApi from "../api/missionApi";
 import * as pathApi from "../api/pathApi";
@@ -414,54 +414,52 @@ export function FieldsPage(props: FieldsPageProps) {
 
   return (
     <View style={{ flex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
-      <View style={{ position: "absolute", left: 0, right: "35%", top: 0, bottom: 0, padding: 10 }}>
-        <View
-          style={{
-            flex: 1,
-            borderRadius: 16,
-            overflow: "hidden",
-            backgroundColor: FIELDS_COLORS.cardSolid,
-            borderWidth: 1,
-            borderColor: FIELDS_COLORS.panelBorder,
-          }}
-        >
-          {renderPlanPreview({
-            lines,
-            mapSourceLines,
-            autoOriginReference,
-            mapGeometryFrame,
-            autoOriginEnabled,
-            visibility: effectiveLayerVisibility,
-            selectedLineId,
-            onSelectLine,
-            roverPosN: previewRoverPoint?.north ?? null,
-            roverPosE: previewRoverPoint?.east ?? null,
-            roverHeadingDeg: telemetrySnapshot?.heading_ned_deg ?? null,
-            selectedPoints: activeAccordion === "alignDxf" ? refPoints.map((point) => ({ x: point.dxf_y, y: point.dxf_x })) : [],
-            onSelectPoint: activeAccordion === "alignDxf" ? handleSelectPoint : undefined,
-            alignedRefPoints,
-            stagedVerified: stagedWorkflow.staged === "verified",
-            mapViewEnabled,
-            showRefPointLabels,
-            activeRefPointLabelIndex,
-            onToggleRefPointLabel: setActiveRefPointLabelIndex,
-            isVisualAlignmentMode,
-            visualAlignmentItem,
-            setVisualAlignmentItem,
-          })}
-        </View>
+      <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
+        {renderPlanPreview({
+          lines,
+          mapSourceLines,
+          autoOriginReference,
+          mapGeometryFrame,
+          autoOriginEnabled,
+          visibility: effectiveLayerVisibility,
+          selectedLineId,
+          onSelectLine,
+          roverPosN: previewRoverPoint?.north ?? null,
+          roverPosE: previewRoverPoint?.east ?? null,
+          roverHeadingDeg: telemetrySnapshot?.heading_ned_deg ?? null,
+          selectedPoints: activeAccordion === "alignDxf" ? refPoints.map((point) => ({ x: point.dxf_y, y: point.dxf_x })) : [],
+          onSelectPoint: activeAccordion === "alignDxf" ? handleSelectPoint : undefined,
+          alignedRefPoints,
+          stagedVerified: stagedWorkflow.staged === "verified",
+          mapViewEnabled,
+          showRefPointLabels,
+          activeRefPointLabelIndex,
+          onToggleRefPointLabel: setActiveRefPointLabelIndex,
+          isVisualAlignmentMode,
+          visualAlignmentItem,
+          setVisualAlignmentItem,
+        })}
       </View>
 
       <View
         style={{
           position: "absolute",
-          right: 0,
-          width: "35%",
-          top: 0,
-          bottom: 0,
-          backgroundColor: FIELDS_COLORS.panelBg,
-          borderLeftWidth: 1,
-          borderLeftColor: FIELDS_COLORS.panelBorder,
+          right: 20,
+          top: 20,
+          bottom: 20,
+          width: 380,
+          maxWidth: "38%",
+          backgroundColor: FIELDS_COLORS.panelSolid,
+          borderRadius: 20,
+          borderWidth: 1,
+          borderColor: FIELDS_COLORS.panelBorder,
+          overflow: "hidden",
+          elevation: 10,
+          shadowColor: "#000",
+          shadowOffset: { width: 0, height: 8 },
+          shadowOpacity: 0.4,
+          shadowRadius: 16,
+          zIndex: 10,
         }}
       >
         <FieldsClearBar onClear={onClearMission} busy={missionActionBusy} />
