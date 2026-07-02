@@ -1536,6 +1536,8 @@ export function MapViewLeaflet({
   showRefPointLabels = false,
   boundaryPosition,
   onMoveBoundary,
+  boundaryRotation = 0,
+  onRotateBoundary,
   showBoundaryPoints = false,
   activeSnapPointId = null,
   onPlaceRoverAtPoint,
@@ -1693,52 +1695,53 @@ export function MapViewLeaflet({
 
   // ── Projected boundary box (Templates Mode) ──
   const projectedBoundary = useMemo(() => {
-    if (!boundaryWidth || !boundaryHeight) return null;
+    if (!boundaryWidth || !boundaryHeight || !projectionOrigin) return null;
 
     const bpX = boundaryPosition?.x || 0;
     const bpY = boundaryPosition?.y || 0;
     const halfW = boundaryWidth / 2;
     const halfH = boundaryHeight / 2;
 
-    const outerDxfPoints = [
-      { north: bpY - halfH, east: bpX - halfW },
-      { north: bpY - halfH, east: bpX + halfW },
-      { north: bpY + halfH, east: bpX + halfW },
-      { north: bpY + halfH, east: bpX - halfW },
-      { north: bpY - halfH, east: bpX - halfW },
+    const rad = ((boundaryRotation || 0) * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    const projectRotated = (dn: number, de: number): [number, number] => {
+      const n = (dn * cos - de * sin) + bpY;
+      const e = (dn * sin + de * cos) + bpX;
+      const gps = projectPlanNorthEastToGps(n, e, projectionOrigin);
+      return [gps.lat, gps.lon];
+    };
+
+    const outerGps = [
+      projectRotated(-halfH, -halfW),
+      projectRotated(-halfH, halfW),
+      projectRotated(halfH, halfW),
+      projectRotated(halfH, -halfW),
+      projectRotated(-halfH, -halfW),
     ];
-
-    if (!projectionOrigin) return null;
-
-    const outerGps = outerDxfPoints.map((pt) => {
-      const gps = projectPlanNorthEastToGps(pt.north, pt.east, projectionOrigin);
-      return [gps.lat, gps.lon] as [number, number];
-    });
 
     let indentGps: [number, number][] = [];
     if (indentSpacing && indentSpacing > 0) {
       const indW = halfW - indentSpacing;
       const indH = halfH - indentSpacing;
       if (indW > 0 && indH > 0) {
-        const indentDxfPoints = [
-          { north: bpY - indH, east: bpX - indW },
-          { north: bpY - indH, east: bpX + indW },
-          { north: bpY + indH, east: bpX + indW },
-          { north: bpY + indH, east: bpX - indW },
-          { north: bpY - indH, east: bpX - indW },
+        indentGps = [
+          projectRotated(-indH, -indW),
+          projectRotated(-indH, indW),
+          projectRotated(indH, indW),
+          projectRotated(indH, -indW),
+          projectRotated(-indH, -indW),
         ];
-        indentGps = indentDxfPoints.map((pt) => {
-          const gps = projectPlanNorthEastToGps(pt.north, pt.east, projectionOrigin);
-          return [gps.lat, gps.lon] as [number, number];
-        });
       }
     }
 
     return {
       outer: outerGps,
       indent: indentGps.length > 0 ? indentGps : null,
+      rotation: boundaryRotation || 0,
     };
-  }, [boundaryWidth, boundaryHeight, indentSpacing, projectionOrigin, boundaryPosition]);
+  }, [boundaryWidth, boundaryHeight, indentSpacing, projectionOrigin, boundaryPosition, boundaryRotation]);
 
   const projectedBoundaryControlPoints = useMemo(() => {
     if (!showBoundaryPoints || !projectedBoundary?.outer || projectedBoundary.outer.length < 4) return [];

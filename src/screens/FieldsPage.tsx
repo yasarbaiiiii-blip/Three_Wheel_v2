@@ -116,6 +116,8 @@ export type FieldsPageProps = {
     boundaryHeight?: number;
     boundaryPosition?: { x: number; y: number };
     onMoveBoundary?: (x: number, y: number) => void;
+    boundaryRotation?: number;
+    onRotateBoundary?: (rotation: number) => void;
     sketchMode?: boolean;
     showBoundaryPoints?: boolean;
   }) => React.ReactNode;
@@ -205,12 +207,14 @@ export function FieldsPage(props: FieldsPageProps) {
   const [sketchMode, setSketchMode] = useState(false);
   const [showSnapPoints, setShowSnapPoints] = useState(true);
   const [boundaryPosition, setBoundaryPosition] = useState<{ x: number; y: number } | null>(null);
+  const [boundaryRotation, setBoundaryRotation] = useState<number>(0);
 
   const handleToggleBoundaryMode = useCallback((enabled: boolean) => {
     setBoundaryMode(enabled);
     if (!enabled) {
       setActiveBoundaryWidth(null);
       setActiveBoundaryHeight(null);
+      setBoundaryRotation(0);
     }
   }, []);
 
@@ -495,6 +499,8 @@ export function FieldsPage(props: FieldsPageProps) {
           boundaryHeight: boundaryMode && activeBoundaryHeight ? activeBoundaryHeight : undefined,
           boundaryPosition: boundaryPosition ?? undefined,
           onMoveBoundary: (x: number, y: number) => setBoundaryPosition({ x, y }),
+          boundaryRotation,
+          onRotateBoundary: (rot: number) => setBoundaryRotation(rot),
           sketchMode,
           showBoundaryPoints: showSnapPoints,
         })}

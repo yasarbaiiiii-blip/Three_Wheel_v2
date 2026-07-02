@@ -19,7 +19,7 @@
  * Coordinate order is converted ONLY through toMapboxCoord/fromMapboxCoord.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Animated, Easing, StyleSheet, View } from "react-native";
+import { Animated, Easing, StyleSheet, View, Text } from "react-native";
 import {
   MapView as RNMapboxMapView,
   Camera,
@@ -247,6 +247,9 @@ export function MapViewNative(props: MapViewProps) {
     indentSpacing,
     showRefPointLabels,
     boundaryPosition,
+    onMoveBoundary,
+    boundaryRotation = 0,
+    onRotateBoundary,
     showBoundaryPoints,
     activeSnapPointId,
     onSelectionChange,
@@ -299,9 +302,10 @@ export function MapViewNative(props: MapViewProps) {
     lines: GeoJSON.FeatureCollection;
     boxes: GeoJSON.FeatureCollection;
   } | null>(null);
-  const [previewBoundaryPos, setPreviewBoundaryPos] = useState<{
+  const [previewBoundary, setPreviewBoundary] = useState<{
     x: number;
     y: number;
+    rotation: number;
   } | null>(null);
 
   // rAF coalescing for preview updates — avoids calling setPreviewItemsGeo 60×/sec.
@@ -327,6 +331,7 @@ export function MapViewNative(props: MapViewProps) {
   useEffect(() => {
     if (!visible || mode !== "templates") {
       setTemplatesFloatingOrigin(null);
+      setPreviewBoundary(null);
       return;
     }
     if (previewAnchor || (alignedRefPoints && alignedRefPoints.length > 0) || templatesFloatingOrigin) {
@@ -636,24 +641,31 @@ export function MapViewNative(props: MapViewProps) {
       !boundaryWidth ||
       !boundaryHeight
     ) {
-      return { outer: featureCollection([]), indent: featureCollection([]), controlPoints: featureCollection([]) };
+      return { outer: featureCollection([]), indent: featureCollection([]), controlPoints: featureCollection([]), labelCoord: null as Coord | null, rotDeg: 0 };
     }
-    const bpX = boundaryPosition?.x ?? 0;
-    const bpY = boundaryPosition?.y ?? 0;
+    const bpX = (previewBoundary ? previewBoundary.x : boundaryPosition?.x) ?? 0;
+    const bpY = (previewBoundary ? previewBoundary.y : boundaryPosition?.y) ?? 0;
+    const rotDeg = (previewBoundary ? previewBoundary.rotation : boundaryRotation) ?? 0;
     const halfW = boundaryWidth / 2;
     const halfH = boundaryHeight / 2;
 
-    const project = (north: number, east: number): Coord => {
-      const gps = projectPlanNorthEastToGps(north, east, projectionOrigin);
+    const rad = ((rotDeg || 0) * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    const projectRotated = (dn: number, de: number): Coord => {
+      const n = (dn * cos - de * sin) + bpY;
+      const e = (dn * sin + de * cos) + bpX;
+      const gps = projectPlanNorthEastToGps(n, e, projectionOrigin);
       return toMapboxCoord(gps.lat, gps.lon);
     };
 
     const outerRing: Coord[] = [
-      project(bpY - halfH, bpX - halfW),
-      project(bpY - halfH, bpX + halfW),
-      project(bpY + halfH, bpX + halfW),
-      project(bpY + halfH, bpX - halfW),
-      project(bpY - halfH, bpX - halfW),
+      projectRotated(-halfH, -halfW),
+      projectRotated(-halfH, halfW),
+      projectRotated(halfH, halfW),
+      projectRotated(halfH, -halfW),
+      projectRotated(-halfH, -halfW),
     ];
 
     let indentFeatures: GeoJSON.Feature[] = [];
@@ -662,11 +674,11 @@ export function MapViewNative(props: MapViewProps) {
       const indH = halfH - indentSpacing;
       if (indW > 0 && indH > 0) {
         const indentRing: Coord[] = [
-          project(bpY - indH, bpX - indW),
-          project(bpY - indH, bpX + indW),
-          project(bpY + indH, bpX + indW),
-          project(bpY + indH, bpX - indW),
-          project(bpY - indH, bpX - indW),
+          projectRotated(-indH, -indW),
+          projectRotated(-indH, indW),
+          projectRotated(indH, indW),
+          projectRotated(indH, -indW),
+          projectRotated(-indH, -indW),
         ];
         indentFeatures = [lineFeature(indentRing)];
       }
@@ -692,11 +704,15 @@ export function MapViewNative(props: MapViewProps) {
       );
     }
 
+    const labelCoord = projectRotated(halfH + 1.5, 0);
+
     const isSelected = selectedItemIds?.includes("boundary") ?? false;
     return {
       outer: featureCollection([lineFeature(outerRing, { selected: isSelected })]),
       indent: featureCollection(indentFeatures),
       controlPoints: featureCollection(controlPointFeatures),
+      labelCoord: [labelCoord[0], labelCoord[1]] as Coord,
+      rotDeg,
     };
   }, [
     mode,
@@ -705,6 +721,8 @@ export function MapViewNative(props: MapViewProps) {
     boundaryHeight,
     indentSpacing,
     boundaryPosition,
+    boundaryRotation,
+    previewBoundary,
     showBoundaryPoints,
     activeSnapPointId,
     selectedItemIds,
@@ -831,9 +849,21 @@ export function MapViewNative(props: MapViewProps) {
    */
   const onDragMove = useCallback(
     (dN: number, dE: number, rotDeg: number, scaleF: number) => {
-      if (!placedItems) return;
       const starts = dragStartPositionsRef.current;
       const ids = selectedItemIds ?? [];
+
+      if (ids.includes("boundary") && starts["boundary"]) {
+        const start = starts["boundary"];
+        let newRot = (start.rotation + rotDeg) % 360;
+        if (newRot < 0) newRot += 360;
+        setPreviewBoundary({
+          x: start.x + dE,
+          y: start.y + dN,
+          rotation: newRot,
+        });
+      }
+
+      if (!placedItems) return;
       const indentRect = buildIndentRect();
 
       const shifted = placedItems.map((item) => {
@@ -872,12 +902,28 @@ export function MapViewNative(props: MapViewProps) {
         previewRafRef.current = null;
       }
 
+      const starts = dragStartPositionsRef.current;
+      const ids = selectedItemIds ?? [];
+
+      if (ids.includes("boundary") && starts["boundary"]) {
+        const start = starts["boundary"];
+        const finalX = start.x + finalDE;
+        const finalY = start.y + finalDN;
+        let finalRot = (start.rotation + finalRotDeg) % 360;
+        if (finalRot < 0) finalRot += 360;
+        if (onMoveBoundary) {
+          onMoveBoundary(finalX, finalY);
+        }
+        if (onRotateBoundary) {
+          onRotateBoundary(finalRot);
+        }
+        setPreviewBoundary(null);
+      }
+
       if (!placedItems) {
         setPreviewItemsGeo(null);
         return;
       }
-      const starts = dragStartPositionsRef.current;
-      const ids = selectedItemIds ?? [];
       const indentRect = buildIndentRect();
 
       const updated = placedItems.map((item) => {
@@ -915,7 +961,7 @@ export function MapViewNative(props: MapViewProps) {
       setPreviewItemsGeo(null);
       dragStartPositionsRef.current = {};
     },
-    [placedItems, selectedItemIds, buildIndentRect, onUpdatePlacedItems, onUpdatePlacedItem]
+    [placedItems, selectedItemIds, buildIndentRect, onUpdatePlacedItems, onUpdatePlacedItem, onMoveBoundary, onRotateBoundary]
   );
 
   /**
@@ -930,10 +976,18 @@ export function MapViewNative(props: MapViewProps) {
           snapshot[item.id] = { x: item.x, y: item.y, rotation: item.rotation || 0, scale: item.scale || 1 };
         }
       }
+      if (ids.includes("boundary")) {
+        snapshot["boundary"] = {
+          x: boundaryPosition?.x ?? 0,
+          y: boundaryPosition?.y ?? 0,
+          rotation: boundaryRotation ?? 0,
+          scale: 1,
+        };
+      }
       dragStartPositionsRef.current = snapshot;
       calibrateMetersPerPixel(touchX, touchY);
     },
-    [placedItems, selectedItemIds, calibrateMetersPerPixel]
+    [placedItems, selectedItemIds, boundaryPosition, boundaryRotation, calibrateMetersPerPixel]
   );
 
   // ── Gesture surface: Pan + Pinch + Rotation (Simultaneous) ──
@@ -1295,13 +1349,20 @@ export function MapViewNative(props: MapViewProps) {
         </ShapeSource>
 
         {/* ── Boundary box (Templates) ── */}
-        <ShapeSource id="boundary-indent" shape={boundaryGeo.indent}>
+        <ShapeSource id="boundary-indent" shape={boundaryGeo.indent} onPress={() => onSelectionChange?.(["boundary"])}>
           <LineLayer
             id="boundary-indent-layer"
             style={{ lineColor: "#cbd5e1", lineWidth: 2, lineDasharray: [5, 5] }}
           />
         </ShapeSource>
-        <ShapeSource id="boundary-outer" shape={boundaryGeo.outer}>
+        <ShapeSource id="boundary-outer" shape={boundaryGeo.outer} onPress={() => onSelectionChange?.(["boundary"])}>
+          <FillLayer
+            id="boundary-outer-fill"
+            style={{
+              fillColor: ["case", ["get", "selected"], "rgba(239, 68, 68, 0.15)", "rgba(15, 23, 42, 0.05)"],
+              fillOpacity: 1,
+            }}
+          />
           <LineLayer
             id="boundary-outer-layer"
             style={{
@@ -1323,6 +1384,30 @@ export function MapViewNative(props: MapViewProps) {
             }}
           />
         </ShapeSource>
+
+        {/* ── Real-Time Boundary Rotation Degree Label ── */}
+        {boundaryGeo.labelCoord && (
+          <MarkerView coordinate={boundaryGeo.labelCoord} anchor={{ x: 0.5, y: 0.5 }} allowOverlap>
+            <View
+              style={{
+                backgroundColor: "rgba(15, 23, 42, 0.9)",
+                paddingHorizontal: 8,
+                paddingVertical: 4,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: "#38bdf8",
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 4,
+              }}
+            >
+              <Text style={{ color: "#38bdf8", fontSize: 12, fontWeight: "bold" }}>↻</Text>
+              <Text style={{ color: "#ffffff", fontSize: 12, fontWeight: "bold", fontFamily: "monospace" }}>
+                {Math.round(boundaryGeo.rotDeg || 0)}°
+              </Text>
+            </View>
+          </MarkerView>
+        )}
 
         {/* ── Placed template items (Templates) ── */}
         <ShapeSource id="placed-item-boxes" shape={activeItemsGeo.boxes} onPress={handleItemsPress}>

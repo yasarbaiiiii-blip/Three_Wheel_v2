@@ -35,6 +35,8 @@ export interface MapViewProps {
   showRefPointLabels?: boolean;
   boundaryPosition?: { x: number; y: number };
   onMoveBoundary?: (x: number, y: number) => void;
+  boundaryRotation?: number;
+  onRotateBoundary?: (rotation: number) => void;
   showBoundaryPoints?: boolean;
   activeSnapPointId?: string | null;
   onPlaceRoverAtPoint?: (pointId: string, localX: number, localY: number) => void;

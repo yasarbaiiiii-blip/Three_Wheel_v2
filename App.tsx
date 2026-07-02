@@ -5693,6 +5693,8 @@ function PlanPreview({
   boundaryHeight,
   boundaryPosition,
   onMoveBoundary,
+  boundaryRotation = 0,
+  onRotateBoundary,
   sketchMode = false,
   showBoundaryPoints = true,
   mapMode = "fields",
@@ -5735,6 +5737,8 @@ function PlanPreview({
   boundaryHeight?: number;
   boundaryPosition?: { x: number; y: number };
   onMoveBoundary?: (x: number, y: number) => void;
+  boundaryRotation?: number;
+  onRotateBoundary?: (rotation: number) => void;
   sketchMode?: boolean;
   showBoundaryPoints?: boolean;
   mapMode?: "fields" | "templates";
@@ -5743,6 +5747,7 @@ function PlanPreview({
   hideRefocusControls?: boolean;
 }) {
   const [visualSelected, setVisualSelected] = useState(true);
+  const [boundarySelected, setBoundarySelected] = useState(true);
   const isEditablePlacedItemMode = Boolean(
     visualAlignmentItem && (isVisualAlignmentMode || isPlanEditingMode)
   );
@@ -5753,6 +5758,12 @@ function PlanPreview({
       setVisualSelected(true);
     }
   }, [visualAlignmentItem, isVisualAlignmentMode, isPlanEditingMode]);
+
+  useEffect(() => {
+    if (boundaryMode) {
+      setBoundarySelected(true);
+    }
+  }, [boundaryMode]);
 
   const filtered = useMemo(
     () =>
@@ -6290,16 +6301,26 @@ function PlanPreview({
             boundaryHeight={boundaryHeight}
             boundaryPosition={boundaryPosition}
             onMoveBoundary={onMoveBoundary}
+            boundaryRotation={boundaryRotation}
+            onRotateBoundary={onRotateBoundary}
             sketchMode={sketchMode}
             showBoundaryPoints={showBoundaryPoints}
             placedItems={isEditablePlacedItemMode && visualAlignmentItem ? [visualAlignmentItem] : []}
             selectedItemIds={
-              isEditablePlacedItemMode && visualSelected && placedItemId ? [placedItemId] : []
+              isEditablePlacedItemMode && visualSelected && placedItemId
+                ? [placedItemId]
+                : boundaryMode && boundarySelected
+                ? ["boundary"]
+                : []
             }
             multiTouchMode={
               isEditablePlacedItemMode ? (isPlanEditingMode ? "both" : "rotate") : "both"
             }
             onSelectionChange={(ids) => {
+              if (boundaryMode) {
+                setBoundarySelected(ids.includes("boundary"));
+                return;
+              }
               if (!isEditablePlacedItemMode || !placedItemId) return;
               setVisualSelected(ids.includes(placedItemId));
             }}
