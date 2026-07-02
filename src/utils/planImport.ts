@@ -4,7 +4,7 @@ import type { ImportedPlan, PlanLayer, PlanLine, PlanPoint } from "../types/plan
 
 type Pair = { code: string; value: string };
 
-const ARC_SEGMENTS = 24;
+const ARC_SEGMENTS = 144;
 
 export async function readImportedPlanFile(plan: ImportedPlan) {
   const raw = await FileSystem.readAsStringAsync(plan.uri, {

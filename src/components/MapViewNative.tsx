@@ -1343,11 +1343,11 @@ export function MapViewNative(props: MapViewProps) {
           <CircleLayer
             id="corner-points-layer"
             style={{
-              circleRadius: 5,
+              circleRadius: 4,
               circleColor: "#3b82f6",
               circleOpacity: 0.9,
               circleStrokeColor: "#ffffff",
-              circleStrokeWidth: 2,
+              circleStrokeWidth: 1.5,
             }}
           />
         </ShapeSource>
@@ -1357,7 +1357,7 @@ export function MapViewNative(props: MapViewProps) {
           <CircleLayer
             id="ref-points-layer"
             style={{
-              circleRadius: 4.5,
+              circleRadius: 3.5,
               circleColor: "#10b981",
               circleStrokeColor: "#ffffff",
               circleStrokeWidth: 1.5,
@@ -1408,11 +1408,11 @@ export function MapViewNative(props: MapViewProps) {
           <CircleLayer
             id="boundary-control-points-layer"
             style={{
-              circleRadius: ["case", ["get", "active"], 7, 5],
+              circleRadius: ["case", ["get", "active"], 4.5, 3],
               circleColor: ["case", ["get", "active"], "#f59e0b", "#3b82f6"],
-              circleOpacity: ["case", ["get", "active"], 0.9, 0.6],
+              circleOpacity: ["case", ["get", "active"], 0.9, 0.7],
               circleStrokeColor: "#ffffff",
-              circleStrokeWidth: 2,
+              circleStrokeWidth: 1.5,
             }}
           />
         </ShapeSource>

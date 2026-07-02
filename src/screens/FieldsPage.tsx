@@ -332,6 +332,8 @@ export function FieldsPage(props: FieldsPageProps) {
             onToggleSketchMode={setSketchMode}
             showSnapPoints={showSnapPoints}
             onToggleShowSnapPoints={setShowSnapPoints}
+            telemetryPosN={telemetrySnapshot?.pos_n ?? null}
+            telemetryPosE={telemetrySnapshot?.pos_e ?? null}
           />
         );
       case "planPreview":

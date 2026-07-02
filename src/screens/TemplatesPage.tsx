@@ -583,18 +583,31 @@ export function TemplatesPage(props: TemplatesPageProps) {
     let newX = 0;
     let newY = 0;
     
-    if (placedItems.length === 0) {
-      newX = -bw / 2 + indent + newWidth / 2;
-      newY = 0;
-    } else {
-      const lastItem = placedItems[placedItems.length - 1];
-      newX = lastItem.x + lastItem.width / 2 + newWidth / 2 + lSpacing;
-      newY = lastItem.y;
-      
-      const rightEdge = bw / 2 - indent;
-      if (newX + newWidth / 2 > rightEdge) {
+    if (boundaryMode) {
+      if (placedItems.length === 0) {
         newX = -bw / 2 + indent + newWidth / 2;
-        newY = lastItem.y - Math.max(lastItem.height, newHeight) - 0.2;
+        newY = 0;
+      } else {
+        const lastItem = placedItems[placedItems.length - 1];
+        newX = lastItem.x + lastItem.width / 2 + newWidth / 2 + lSpacing;
+        newY = lastItem.y;
+        
+        const rightEdge = bw / 2 - indent;
+        if (newX + newWidth / 2 > rightEdge) {
+          newX = -bw / 2 + indent + newWidth / 2;
+          newY = lastItem.y - Math.max(lastItem.height, newHeight) - 0.2;
+        }
+      }
+    } else {
+      const roverN = props.telemetrySnapshot?.pos_n ?? 0;
+      const roverE = props.telemetrySnapshot?.pos_e ?? 0;
+      if (placedItems.length === 0) {
+        newX = roverE + 2.0;
+        newY = roverN;
+      } else {
+        const lastItem = placedItems[placedItems.length - 1];
+        newX = lastItem.x + lastItem.width / 2 + newWidth / 2 + lSpacing;
+        newY = lastItem.y;
       }
     }
     
@@ -1065,7 +1078,7 @@ export function TemplatesPage(props: TemplatesPageProps) {
     <View style={{ flex: 1, flexDirection: "row" }}>
       <View style={{ width: "58%", backgroundColor: "transparent", padding: 14 }}>
         <View style={{ flex: 1, borderRadius: 20, overflow: "hidden", backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d8e1eb" }}>
-          {boundaryMode && props.mapViewEnabled ? (
+          {(boundaryMode || placedItems.length > 0) && props.mapViewEnabled ? (
             <MapView
               mode="templates"
               visible={true}
@@ -1090,7 +1103,7 @@ export function TemplatesPage(props: TemplatesPageProps) {
               onSelectionChange={(ids) => setSelectedItemIds(ids)}
               previewAnchor={previewAnchor}
             />
-          ) : boundaryMode ? (
+          ) : (boundaryMode || placedItems.length > 0) ? (
             <BoundaryEditor
               boundaryWidth={bw}
               boundaryHeight={bh}
@@ -1242,17 +1255,26 @@ export function TemplatesPage(props: TemplatesPageProps) {
                 {hasBoundaryChanges && (
                   <Pressable
                     onPress={handleApplyBoundary}
-                    style={{
+                    style={({ pressed }) => ({
                       height: 44,
                       borderRadius: 10,
                       backgroundColor: "#0f988f",
+                      borderWidth: 1.5,
+                      borderColor: "#14b8a6",
                       alignItems: "center",
                       justifyContent: "center",
                       marginTop: 6,
-                    }}
+                      flexDirection: "row",
+                      elevation: 4,
+                      shadowColor: "#000",
+                      shadowOffset: { width: 0, height: 2 },
+                      shadowOpacity: 0.3,
+                      shadowRadius: 3.84,
+                      opacity: pressed ? 0.85 : 1,
+                    })}
                   >
-                    <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>
-                      Apply Boundary Changes
+                    <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800", letterSpacing: 0.5 }}>
+                      ✓ Apply Boundary Changes
                     </Text>
                   </Pressable>
                 )}
@@ -1698,13 +1720,29 @@ export function TemplatesPage(props: TemplatesPageProps) {
               </View>
             )}
 
-            {boundaryMode && (
-              <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+            {(boundaryMode || previewLines.length > 0) && (
+              <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
                 <Pressable
                   onPress={handleAddToBoundary}
-                  style={{ flex: 1, minWidth: 100, height: 48, borderRadius: 12, backgroundColor: "#0ea5e9", alignItems: "center", justifyContent: "center" }}
+                  style={({ pressed }) => ({
+                    flex: 1,
+                    minWidth: 100,
+                    height: 48,
+                    borderRadius: 12,
+                    backgroundColor: "#0ea5e9",
+                    borderWidth: 1.5,
+                    borderColor: "#38bdf8",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    elevation: 4,
+                    shadowColor: "#000",
+                    shadowOffset: { width: 0, height: 2 },
+                    shadowOpacity: 0.3,
+                    shadowRadius: 4,
+                    opacity: pressed ? 0.85 : 1,
+                  })}
                 >
-                  <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>+ Add</Text>
+                  <Text style={{ color: "#fff", fontSize: 15, fontWeight: "800", letterSpacing: 0.5 }}>+ Add</Text>
                 </Pressable>
                 
                 {placedItems.length > 1 && (

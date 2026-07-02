@@ -927,10 +927,10 @@ export const BoundaryEditor = memo(function BoundaryEditor({
               <Circle
                 cx={pt.svgX}
                 cy={pt.svgY}
-                r={14 / camera.zoom}
+                r={10 / camera.zoom}
                 fill="none"
                 stroke="#f59e0b"
-                strokeWidth={3 / camera.zoom}
+                strokeWidth={2 / camera.zoom}
                 opacity={0.55}
               />
             ) : null}
@@ -938,20 +938,20 @@ export const BoundaryEditor = memo(function BoundaryEditor({
               <Circle
                 cx={pt.svgX}
                 cy={pt.svgY}
-                r={9 / camera.zoom}
+                r={6.5 / camera.zoom}
                 fill="none"
                 stroke="#f59e0b"
-                strokeWidth={2 / camera.zoom}
+                strokeWidth={1.5 / camera.zoom}
                 opacity={0.35}
               />
             ) : null}
             <Circle
               cx={pt.svgX}
               cy={pt.svgY}
-              r={(activeSnapPointId === pt.id ? 7 : 6) / camera.zoom}
+              r={(activeSnapPointId === pt.id ? 4.5 : 3.5) / camera.zoom}
               fill={activeSnapPointId === pt.id ? "#f59e0b" : "#3b82f6"}
               stroke="#ffffff"
-              strokeWidth={2 / camera.zoom}
+              strokeWidth={1.5 / camera.zoom}
             />
           </G>
         ))}

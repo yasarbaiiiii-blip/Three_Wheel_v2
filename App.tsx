@@ -5795,7 +5795,7 @@ function getCornerPoints(lines: PlanLine[]): { x: number, y: number }[] {
       corners.push(pt);
     } else if (segments.length === 2) {
       const dotProduct = segments[0].dx * segments[1].dx + segments[0].dy * segments[1].dy;
-      if (dotProduct > -0.99) {
+      if (dotProduct > -0.85) {
         corners.push(pt);
       }
     }

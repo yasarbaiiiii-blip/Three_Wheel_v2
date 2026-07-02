@@ -322,19 +322,19 @@ describe('Baseline: shape generators', () => {
     expect(lines).toHaveLength(3);
   });
 
-  it('circle (full) has 36 segments', () => {
+  it('circle (full) has 144 segments', () => {
     const lines = generateTemplateLines('circle', 1.0, 'full');
-    expect(lines).toHaveLength(36);
+    expect(lines).toHaveLength(144);
   });
 
-  it('circle (half) has 18 segments', () => {
+  it('circle (half) has 72 segments', () => {
     const lines = generateTemplateLines('circle', 1.0, 'half');
-    expect(lines).toHaveLength(18);
+    expect(lines).toHaveLength(72);
   });
 
-  it('circle (quarter) has 9 segments', () => {
+  it('circle (quarter) has 36 segments', () => {
     const lines = generateTemplateLines('circle', 1.0, 'quarter');
-    expect(lines).toHaveLength(9);
+    expect(lines).toHaveLength(36);
   });
 
   it('10m square has 10m sides', () => {

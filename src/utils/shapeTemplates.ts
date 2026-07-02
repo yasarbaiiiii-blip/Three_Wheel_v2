@@ -51,9 +51,9 @@ export function generateTemplateLines(shape: ShapeType, size: number, arcType: A
     if (arcType === "half") angleMult = 1;
     if (arcType === "quarter") angleMult = 0.5;
 
-    let segments = 36;
-    if (arcType === "half") segments = 18;
-    if (arcType === "quarter") segments = 9;
+    let segments = 144;
+    if (arcType === "half") segments = 72;
+    if (arcType === "quarter") segments = 36;
 
     const pts = [];
     for (let i = 0; i <= segments; i++) {

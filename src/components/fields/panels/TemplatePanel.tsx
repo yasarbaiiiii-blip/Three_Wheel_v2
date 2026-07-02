@@ -27,6 +27,8 @@ type TemplatePanelProps = {
   onToggleSketchMode?: (enabled: boolean) => void;
   showSnapPoints?: boolean;
   onToggleShowSnapPoints?: (enabled: boolean) => void;
+  telemetryPosN?: number | null;
+  telemetryPosE?: number | null;
 };
 
 export function TemplatePanel(props: TemplatePanelProps) {
@@ -80,7 +82,17 @@ export function TemplatePanel(props: TemplatePanelProps) {
     setIsParsing(true);
     try {
       const fileName = `${title.replace(/\s+/g, "_")}.dxf`;
-      const fileContent = linesToDxf(previewLines, fileName);
+      let linesToConvert = previewLines;
+      if (!boundaryMode) {
+        const roverN = props.telemetryPosN ?? 0;
+        const roverE = props.telemetryPosE ?? 0;
+        linesToConvert = previewLines.map(line => ({
+          ...line,
+          from: { ...line.from, x: line.from.x + roverE + 2.0, y: line.from.y + roverN },
+          to: { ...line.to, x: line.to.x + roverE + 2.0, y: line.to.y + roverN },
+        }));
+      }
+      const fileContent = linesToDxf(linesToConvert, fileName);
       const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
       await FileSystem.writeAsStringAsync(fileUri, fileContent, { encoding: FileSystem.EncodingType.UTF8 });
 
@@ -89,7 +101,7 @@ export function TemplatePanel(props: TemplatePanelProps) {
 
       const res = await fetch(`${apiBaseUrl}/api/path/parse-dxf`, { method: "POST", body: formData });
       if (res.ok) {
-        Alert.alert("Success", `Template "${fileName}" sent to rover.`);
+        Alert.alert("Success", `Component added to map as "${fileName}".`);
         onRefreshPaths();
         onSelectPath(fileName);
       } else {
@@ -185,16 +197,24 @@ export function TemplatePanel(props: TemplatePanelProps) {
               props.onApplyBoundary?.(w, h);
             }}
             style={({ pressed }) => ({
-              height: 40,
-              borderRadius: 8,
+              height: 44,
+              borderRadius: 10,
               alignItems: "center",
               justifyContent: "center",
               backgroundColor: FIELDS_COLORS.tealDark,
+              borderWidth: 1.5,
+              borderColor: "#14b8a6",
+              flexDirection: "row",
+              elevation: 4,
+              shadowColor: "#000",
+              shadowOffset: { width: 0, height: 2 },
+              shadowOpacity: 0.3,
+              shadowRadius: 3.84,
               opacity: pressed ? 0.85 : 1,
             })}
           >
-            <Text style={{ color: "#fff", fontSize: 13, fontWeight: "800" }}>
-              Apply to Map
+            <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800", letterSpacing: 0.5 }}>
+              ✓ Apply to Map
             </Text>
           </Pressable>
 
@@ -303,16 +323,24 @@ export function TemplatePanel(props: TemplatePanelProps) {
       <Pressable
         onPress={handleParse}
         disabled={isParsing}
-        style={{
-          height: 44,
-          borderRadius: 10,
+        style={({ pressed }) => ({
+          height: 48,
+          borderRadius: 12,
           alignItems: "center",
           justifyContent: "center",
-          backgroundColor: isParsing ? FIELDS_COLORS.textDim : FIELDS_COLORS.tealDark,
-        }}
+          backgroundColor: isParsing ? FIELDS_COLORS.textDim : "#0ea5e9",
+          borderWidth: 1.5,
+          borderColor: "#38bdf8",
+          elevation: 4,
+          shadowColor: "#000",
+          shadowOffset: { width: 0, height: 2 },
+          shadowOpacity: 0.3,
+          shadowRadius: 4,
+          opacity: pressed ? 0.85 : 1,
+        })}
       >
-        <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>
-          {isParsing ? "Sending..." : "Send Template to Rover"}
+        <Text style={{ color: "#fff", fontSize: 15, fontWeight: "800", letterSpacing: 0.5 }}>
+          {isParsing ? "Adding..." : "+ Add"}
         </Text>
       </Pressable>
     </View>
