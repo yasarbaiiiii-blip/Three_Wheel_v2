@@ -8,6 +8,7 @@ import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circ
 import { ManualJoystick } from "./ManualJoystick";
 import { pauseMission, nextMission, exportLog } from "../api/missionApi";
 import { MapView } from "./MapView";
+import { canAcquireJoystick as canAcquireJoystickForState } from "../utils/joystickFrontendSafety";
 
 // Using 127.0.0.1:5001 as fallback if window location is unavailable
 const getApiBase = () => {
@@ -702,7 +703,7 @@ export default function ModernHomeUI(props) {
     autoOriginEnabled, mapSourceLines, alignedRefPoints, autoOriginReference,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
     isPlanEditingMode,
-    virtualJoystick, onPausePlan,
+    virtualJoystick, onPausePlan, missionActionBusy = false,
     mapViewEnabled = false, setMapViewEnabled, renderPlanPreview,
     onFocusRover, onFocusPlan,
     recenterRoverCount, recenterPlanCount,
@@ -723,6 +724,7 @@ export default function ModernHomeUI(props) {
   const [showTelemetry, setShowTelemetry] = useState(false);
   const [showMissionControl, setShowMissionControl] = useState(false);
   const [showJoystick, setShowJoystick] = useState(false);
+  const [pendingJoystickOpen, setPendingJoystickOpen] = useState(false);
   const [quickAccessExpanded, setQuickAccessExpanded] = useState(false);
   const [mapFullscreen, setMapFullscreen] = useState(false);
   const [navExpanded, setNavExpanded] = useState(false);
@@ -730,6 +732,11 @@ export default function ModernHomeUI(props) {
   const [activeNav, setActiveNav] = useState(PAGE_TO_NAV[currentPage] || "main");
   const lastMenuTapRef = useRef(0);
   const lastNavTapRef = useRef({ id: null, time: 0 });
+  const autoArmAttemptedRef = useRef(false);
+  const autoAcquireAttemptedRef = useRef(false);
+  const wasMissionControlOpenRef = useRef(false);
+  const virtualJoystickRef = useRef(virtualJoystick);
+  virtualJoystickRef.current = virtualJoystick;
   const hudLayerRef = useRef(null);
   const quickAccessAnchorRef = useRef(null);
   const [quickAccessAnchor, setQuickAccessAnchor] = useState(QUICK_ACCESS_ANCHOR_FALLBACK);
@@ -740,10 +747,10 @@ export default function ModernHomeUI(props) {
   const { height: windowHeight } = useWindowDimensions();
   const telemetryPanelHeight = Math.max(280, windowHeight * 0.44 - HUD_PAD);
   const missionPanelHeight = Math.max(300, windowHeight * BOTTOM_PANEL_HEIGHT_RATIO - HUD_PAD * 2);
-  const [isArmed, setIsArmed] = useState(systemHealth?.armed || false);
   const [visualSelected, setVisualSelected] = useState(false);
 
   const vehicleMode = normalizeVehicleMode(telemetrySnapshot?.mode ?? systemHealth?.mode);
+  const isVehicleArmed = telemetrySnapshot?.armed ?? systemHealth?.armed ?? false;
 
   const batteryPct = telemetrySnapshot?.battery_pct ?? 0;
   const missionProgress = lines.length > 0 ? Math.min(100, Math.round(((telemetrySnapshot?.projection_segment_index || 0) / lines.length) * 100)) : 0;
@@ -771,6 +778,15 @@ export default function ModernHomeUI(props) {
   const joystickState = virtualJoystick?.state ?? "DISABLED";
   const hasJoystickLease = Boolean(virtualJoystick?.leaseId);
   const joystickActive = virtualJoystick?.joystickActive || telemetrySnapshot?.joystick_active;
+  const stickEnabled =
+    hasJoystickLease &&
+    (joystickState === "ACTIVE" || joystickState === "HELD");
+  const canAcquireJoystick = canAcquireJoystickForState({
+    missionRunning,
+    frontendState: joystickState,
+    backendJoystickActive: telemetrySnapshot?.joystick_active,
+    controlOwner: telemetrySnapshot?.control_owner,
+  });
 
   const missionStateTone =
     missionStateStr === "running" ? COLORS.success
@@ -793,10 +809,6 @@ export default function ModernHomeUI(props) {
     : hasJoystickLease ? COLORS.accentBrand
     : joystickState === "BLOCKED_BY_MISSION" ? COLORS.warning
     : COLORS.textMuted;
-
-  useEffect(() => {
-    if (systemHealth?.armed !== undefined) setIsArmed(systemHealth.armed);
-  }, [systemHealth?.armed]);
 
   useEffect(() => {
     if (!mapViewEnabled && mapFullscreen) setMapFullscreen(false);
@@ -833,12 +845,66 @@ export default function ModernHomeUI(props) {
   useEffect(() => {
     if (vehicleMode !== "MANUAL" || missionRunning) {
       setShowJoystick(false);
+      if (missionRunning) setPendingJoystickOpen(false);
     }
   }, [vehicleMode, missionRunning]);
 
   useEffect(() => {
-    if (!showMissionControl) setShowJoystick(false);
+    if (!pendingJoystickOpen) return;
+    if (vehicleMode === "MANUAL" && !missionRunning) {
+      setShowJoystick(true);
+      setPendingJoystickOpen(false);
+    }
+  }, [pendingJoystickOpen, vehicleMode, missionRunning]);
+
+  useEffect(() => {
+    const wasOpen = wasMissionControlOpenRef.current;
+    wasMissionControlOpenRef.current = showMissionControl;
+
+    if (wasOpen && !showMissionControl) {
+      virtualJoystickRef.current?.release();
+      setShowJoystick(false);
+      setPendingJoystickOpen(false);
+    }
   }, [showMissionControl]);
+
+  useEffect(() => {
+    if (!showJoystick) {
+      autoArmAttemptedRef.current = false;
+      autoAcquireAttemptedRef.current = false;
+      return;
+    }
+    if (vehicleMode !== "MANUAL" || missionRunning || isVehicleArmed || missionActionBusy) return;
+    if (autoArmAttemptedRef.current || !onArmVehicle) return;
+
+    autoArmAttemptedRef.current = true;
+    void onArmVehicle(true);
+  }, [showJoystick, vehicleMode, missionRunning, isVehicleArmed, missionActionBusy, onArmVehicle]);
+
+  useEffect(() => {
+    if (!showJoystick || vehicleMode !== "MANUAL" || missionRunning || !isVehicleArmed) return;
+    if (
+      !canAcquireJoystick ||
+      hasJoystickLease ||
+      joystickState === "ACQUIRING" ||
+      joystickState === "RELEASING"
+    ) {
+      return;
+    }
+    if (autoAcquireAttemptedRef.current || !virtualJoystick) return;
+
+    autoAcquireAttemptedRef.current = true;
+    virtualJoystick.acquire();
+  }, [
+    showJoystick,
+    vehicleMode,
+    missionRunning,
+    isVehicleArmed,
+    canAcquireJoystick,
+    hasJoystickLease,
+    joystickState,
+    virtualJoystick,
+  ]);
 
   useEffect(() => {
     quickAccessSubNavProgress.value = withTiming(quickAccessExpanded ? 1 : 0, PANEL_TIMING);
@@ -944,25 +1010,56 @@ export default function ModernHomeUI(props) {
     exportLog(getApiBase()).catch(console.error);
   };
 
-  const handleAcquire = () => {
-    if (virtualJoystick) virtualJoystick.acquire();
-  };
+  const handleCloseManualPanel = useCallback(() => {
+    virtualJoystickRef.current?.release();
+    setShowJoystick(false);
+    setPendingJoystickOpen(false);
+  }, []);
 
-  const handleRelease = () => {
-    if (virtualJoystick) virtualJoystick.release();
-  };
+  const manualDriveHint = stickEnabled
+    ? "Move the stick to drive. Return to centre or lift finger to stop."
+    : joystickState === "BLOCKED_BY_MISSION"
+      ? "Mission active — stop mission before manual drive."
+      : joystickState === "ACQUIRING"
+        ? "Acquiring joystick control..."
+        : hasJoystickLease
+          ? "Lease held neutral — move the stick to drive."
+          : joystickState === "SUSPENDED"
+            ? "App resumed — close and reopen manual control."
+            : !isVehicleArmed
+              ? missionActionBusy
+                ? "Arming vehicle..."
+                : "Waiting for vehicle arm..."
+              : "Preparing joystick control...";
 
-  const handleSetManualMode = useCallback(() => {
-    if (onSetMode) {
-      onSetMode("MANUAL");
-    } else {
-      fetch(`${getApiBase()}/api/set_mode`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "MANUAL" }),
-      }).catch(console.error);
+  const openManualJoystickPanel = useCallback(() => {
+    setShowMissionControl(true);
+    setShowJoystick(true);
+    setPendingJoystickOpen(true);
+    setQuickAccessExpanded(false);
+  }, []);
+
+  const handleSetManualMode = useCallback(async () => {
+    if (missionRunning) {
+      Alert.alert("Mission Running", "Stop the mission before using manual drive.");
+      return;
     }
-  }, [onSetMode]);
+    try {
+      if (onSetMode) {
+        await onSetMode("MANUAL");
+      } else {
+        const res = await fetch(`${getApiBase()}/api/set_mode`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: "MANUAL" }),
+        });
+        if (!res.ok) throw new Error("Set mode failed");
+      }
+      openManualJoystickPanel();
+    } catch {
+      // setVehicleMode surfaces errors via alert/toast
+    }
+  }, [missionRunning, onSetMode, openManualJoystickPanel]);
 
   const hasNtripCredentials = Boolean(
     rtkCaster?.trim() && rtkPort?.trim() && rtkMountPoint?.trim()
@@ -1396,16 +1493,24 @@ export default function ModernHomeUI(props) {
           title={showJoystick ? "Manual Control" : "Mission Control"}
           subtitle={
             showJoystick
-              ? isArmed
+              ? stickEnabled
                 ? "Ready to drive"
-                : "Arm vehicle first"
+                : joystickState === "ACQUIRING"
+                  ? "Acquiring joystick..."
+                  : hasJoystickLease
+                    ? "Lease active — move stick"
+                    : missionActionBusy
+                      ? "Arming vehicle..."
+                      : isVehicleArmed
+                        ? "Preparing joystick..."
+                        : "Preparing manual drive..."
               : missionRunning
                 ? "Mission in progress"
                 : "Ready to start"
           }
           live={missionRunning}
           onClose={!missionRunning ? () => {
-            if (showJoystick) setShowJoystick(false);
+            if (showJoystick) handleCloseManualPanel();
             else setShowMissionControl(false);
           } : undefined}
         />
@@ -1423,6 +1528,20 @@ export default function ModernHomeUI(props) {
                 <Text style={styles.manualStatusText}>{statusLabel}</Text>
               </View>
 
+              <View style={styles.manualMetaRow}>
+                <Text style={styles.manualMetaText}>{joystickState}</Text>
+                <Text style={[styles.manualMetaText, { color: isVehicleArmed ? COLORS.success : COLORS.danger }]}>
+                  {isVehicleArmed ? "ARMED" : "DISARMED"}
+                </Text>
+                <Text style={styles.manualMetaText}>{vehicleMode}</Text>
+                {virtualJoystick?.commandRateHz ? (
+                  <Text style={styles.manualMetaText}>{virtualJoystick.commandRateHz.toFixed(0)} Hz</Text>
+                ) : null}
+                {virtualJoystick?.lastCmdAgeMs != null ? (
+                  <Text style={styles.manualMetaText}>cmd {virtualJoystick.lastCmdAgeMs.toFixed(0)}ms</Text>
+                ) : null}
+              </View>
+
               <View style={styles.joystickCard}>
                 <ManualJoystick
                   onChange={(vals) => {
@@ -1433,28 +1552,40 @@ export default function ModernHomeUI(props) {
                   }}
                   size={160}
                   knobSize={50}
-                  disabled={!isArmed}
+                  disabled={!stickEnabled}
                 />
-                {!isArmed && (
+                {!stickEnabled ? (
                   <View style={styles.joystickOverlay}>
                     <ShieldAlert color="#fff" size={18} strokeWidth={2} />
-                    <Text style={styles.joystickOverlayText}>Arm to drive</Text>
+                    <Text style={styles.joystickOverlayText}>
+                      {joystickState === "ACQUIRING"
+                        ? "Acquiring..."
+                        : isVehicleArmed
+                          ? "Preparing drive..."
+                          : missionActionBusy
+                            ? "Arming..."
+                            : "Waiting for arm..."}
+                    </Text>
                   </View>
-                )}
+                ) : null}
               </View>
 
-              <View style={styles.manualActionGroup}>
-                <Pressable
-                  style={[styles.armToggle, isArmed ? styles.armToggleOn : styles.armToggleOff]}
-                  onPress={() => {
-                    onArmVehicle(!isArmed);
-                    setIsArmed(!isArmed);
-                  }}
-                >
-                  <ShieldAlert color="#fff" size={16} strokeWidth={2.2} />
-                  <Text style={styles.armToggleText}>{isArmed ? "Disarm" : "Arm Vehicle"}</Text>
-                </Pressable>
-              </View>
+              {virtualJoystick?.displayIntent ? (
+                <Text style={styles.manualIntentText}>
+                  Throttle {virtualJoystick.displayIntent.throttle >= 0 ? "+" : ""}
+                  {virtualJoystick.displayIntent.throttle.toFixed(2)} · Steering{" "}
+                  {virtualJoystick.displayIntent.steering >= 0 ? "+" : ""}
+                  {virtualJoystick.displayIntent.steering.toFixed(2)}
+                </Text>
+              ) : null}
+
+              <Text style={[styles.manualHintText, !stickEnabled && styles.manualHintTextWarn]}>
+                {manualDriveHint}
+              </Text>
+
+              {virtualJoystick?.stopReason ? (
+                <Text style={styles.manualStopReasonText}>Stop: {virtualJoystick.stopReason}</Text>
+              ) : null}
             </>
           ) : (
             <>
@@ -1604,7 +1735,7 @@ export default function ModernHomeUI(props) {
               {renderMissionControl()}
             </View>
           ) : null}
-          {isHomePage ? <FloatingEStop visible={missionRunning || isArmed} onTrigger={handleEStop} /> : null}
+          {isHomePage ? <FloatingEStop visible={missionRunning || isVehicleArmed} onTrigger={handleEStop} /> : null}
         </View>
       ) : null}
 
@@ -2586,6 +2717,39 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     textTransform: "capitalize",
   },
+  manualMetaRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    paddingHorizontal: 4,
+  },
+  manualMetaText: {
+    color: COLORS.textMuted,
+    fontSize: 9.5,
+    fontWeight: "700",
+    textTransform: "uppercase",
+  },
+  manualIntentText: {
+    color: COLORS.textMuted,
+    fontSize: 10,
+    textAlign: "center",
+    lineHeight: 15,
+  },
+  manualHintText: {
+    color: COLORS.textDim,
+    fontSize: 10,
+    textAlign: "center",
+    lineHeight: 15,
+    paddingHorizontal: 4,
+  },
+  manualHintTextWarn: {
+    color: COLORS.danger,
+  },
+  manualStopReasonText: {
+    color: COLORS.warning,
+    fontSize: 9.5,
+    textAlign: "center",
+  },
   joystickCard: {
     alignItems: "center",
     justifyContent: "center",
@@ -2619,6 +2783,9 @@ const styles = StyleSheet.create({
     height: 40,
     alignItems: "center",
     justifyContent: "center",
+  },
+  acquireSegmentBtnDisabled: {
+    opacity: 0.45,
   },
   acquireSegmentLeft: { backgroundColor: COLORS.accentBrand },
   acquireSegmentRight: { backgroundColor: COLORS.surfaceSolid },

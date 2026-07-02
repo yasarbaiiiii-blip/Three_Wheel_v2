@@ -2534,7 +2534,7 @@ export default function App() {
         const errMsg = await parseFetchError(res, "Set mode failed");
         throw new Error(errMsg);
       }
-      void refreshTelemetryPanel();
+      await refreshTelemetryPanel();
       logAction("SET_MODE_SUCCESS", { targetMode });
       Alert.alert("Mode Changed", `Vehicle mode set to ${targetMode}.`);
       showToast("Mode Changed", `Vehicle mode is now ${targetMode}.`, "success");
@@ -2545,6 +2545,7 @@ export default function App() {
       });
       Alert.alert("Mode Change Failed", error instanceof Error ? error.message : "Command rejected.");
       showToast("Mode Change Failed", error instanceof Error ? error.message : "Command rejected.", "error");
+      throw error;
     } finally {
       setMissionActionBusy(false);
     }
