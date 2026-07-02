@@ -460,6 +460,7 @@ const LOCAL_WS_CANDIDATES = [
 const PRIORITY_BACKEND_IPS: string[] = [];
 
 const DISCOVERY_REFRESH_MS = 5000;
+const SOCKET_CONNECT_TIMEOUT_MS = 25000;
 const DISCOVERY_PORT = 5001;
 const SUBNET_HOST_MIN = 1;
 const SUBNET_HOST_MAX = 254;
@@ -475,6 +476,41 @@ const MENU_ITEMS: Array<{ key: Page; label: string; icon: React.ReactNode }> = [
   { key: "howto", label: "How To", icon: <CircleHelp size={22} color="#fff" /> },
   { key: "about", label: "About", icon: <Info size={22} color="#fff" /> },
 ];
+
+function waitForSocketConnect(socket: Socket, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onConnect = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err: Error) => {
+      cleanup();
+      reject(err);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      socket.disconnect();
+      reject(new Error("Socket connection timed out. Check Wi-Fi and rover backend."));
+    }, timeoutMs);
+
+    function cleanup() {
+      clearTimeout(timer);
+      socket.off("connect", onConnect);
+      socket.off("connect_error", onError);
+    }
+
+    socket.on("connect", onConnect);
+    socket.on("connect_error", onError);
+  });
+}
+
+function formatSocketConnectError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/unauthor/i.test(message)) {
+    return "Authentication failed. The rover may have restarted — enter the password and connect again.";
+  }
+  return message || "Unable to connect";
+}
 
 export default function App() {
   // TEMPORARY (Phase 0.1) on-device basemap smoke test. Flip SMOKE_TEST_MAPBOX
@@ -883,6 +919,9 @@ export default function App() {
   // Prevents overlapping discovery sweeps from piling up on a slow/lossy link
   // (each full /24 sweep can outlast the 5s refresh interval).
   const scanInFlightRef = useRef(false);
+  const connectInFlightRef = useRef(false);
+  const pendingSocketRef = useRef<Socket | null>(null);
+  const wsStatusRef = useRef(wsStatus);
   const previousSelectedPathRef = useRef<string | null>(null);
 
   const activeMenu = useMemo(() => MENU_ITEMS.find((x) => x.key === page), [page]);
@@ -1047,6 +1086,10 @@ export default function App() {
     backendPinnedRef.current = backendPinned;
   }, [backendPinned]);
 
+  useEffect(() => {
+    wsStatusRef.current = wsStatus;
+  }, [wsStatus]);
+
 
 
 
@@ -1084,16 +1127,42 @@ export default function App() {
   const connectSelectedWebsocket = async () => {
     const target = selectedWs || manualHost;
     if (!target) return;
-    if (!operatorSession && !operatorPassword.trim()) {
-      setWsError("Enter the rover password to connect.");
+    if (connectInFlightRef.current) {
+      logAction("WS_CONNECT_SKIPPED", { reason: "already_connecting" });
       return;
     }
-    logAction("WS_CONNECT", { selectedWs: target });
+
+    const canReuse = authApi.canReuseSession(operatorSession, target);
+    const passwordEntered = Boolean(operatorPassword.trim());
+    if (!canReuse && !passwordEntered) {
+      setWsError(
+        operatorSession && !authApi.sessionMatchesHost(operatorSession, target)
+          ? "Saved session is for a different backend. Enter the rover password."
+          : "Enter the rover password to connect."
+      );
+      return;
+    }
+
+    connectInFlightRef.current = true;
+    logAction("WS_CONNECT", { selectedWs: target, reuseSession: canReuse && !passwordEntered });
     setWsStatus("connecting");
     setWsError("");
 
+    let usedStoredSession = false;
+    let nextSocket: Socket | null = null;
+
     try {
-      const session = operatorSession ?? await authApi.login(target, operatorPassword);
+      let session: authApi.OperatorSession;
+      if (canReuse && !passwordEntered) {
+        session = operatorSession!;
+        usedStoredSession = true;
+        logAction("AUTH_SESSION_REUSE", { target, session_id: session.session_id });
+      } else {
+        logAction("AUTH_LOGIN_START", { target });
+        session = await authApi.login(target, operatorPassword);
+        logAction("AUTH_LOGIN_OK", { target, session_id: session.session_id });
+      }
+
       setOperatorSession(session);
       setOperatorPassword("");
       await authApi.saveStoredSession(session);
@@ -1103,21 +1172,16 @@ export default function App() {
         onInvalidSession: handleInvalidSession,
       });
 
-      const nextSocket = io(target, {
+      pendingSocketRef.current?.disconnect();
+      nextSocket = io(target, {
         transports: ["websocket"], // Use websocket ONLY - polling is unreliable in APK builds
-        timeout: 20000, // Increase to 20 seconds
+        timeout: 20000,
         forceNew: true,
         auth: { token: session.token },
       });
+      pendingSocketRef.current = nextSocket;
 
-      await new Promise<void>((resolve, reject) => {
-        nextSocket.on("connect", () => {
-          resolve();
-        });
-        nextSocket.on("connect_error", (err) => {
-          reject(err);
-        });
-      });
+      await waitForSocketConnect(nextSocket, SOCKET_CONNECT_TIMEOUT_MS);
 
       nextSocket.on("disconnect", (reason) => {
         console.log(`[SOCKET] Disconnected from ${target} — reason: ${reason}`);
@@ -1246,6 +1310,7 @@ export default function App() {
         }
       });
 
+      pendingSocketRef.current = null;
       setSocket(nextSocket);
       setWsStatus("connected");
       setSelectedWs(target);
@@ -1255,13 +1320,20 @@ export default function App() {
       setMenuOpen(true);
       logAction("WS_CONNECTED", { apiBaseUrl: target });
     } catch (error) {
-      if (operatorSession && !operatorPassword.trim()) {
+      nextSocket?.disconnect();
+      if (pendingSocketRef.current === nextSocket) {
+        pendingSocketRef.current = null;
+      }
+      if (usedStoredSession) {
         setOperatorSession(null);
         await authApi.saveStoredSession(null);
       }
-      setWsStatus("error");
-      setWsError(error instanceof Error ? error.message : "Unable to connect");
-      logAction("WS_CONNECT_FAILED", { error: error instanceof Error ? error.message : String(error) });
+      const message = formatSocketConnectError(error);
+      setWsStatus("ready");
+      setWsError(message);
+      logAction("WS_CONNECT_FAILED", { error: message, reusedSession: usedStoredSession });
+    } finally {
+      connectInFlightRef.current = false;
     }
   };
 
@@ -1350,6 +1422,14 @@ export default function App() {
   };
 
   const runWebsocketScan = async () => {
+    if (
+      connectInFlightRef.current ||
+      wsStatusRef.current === "connecting" ||
+      wsStatusRef.current === "connected"
+    ) {
+      return;
+    }
+
     const currentSelectedWs = selectedWsRef.current;
     const currentManualHost = manualHostRef.current;
     const isPinned = backendPinnedRef.current;
@@ -4818,11 +4898,14 @@ function ConnectionView({
   onOfflinePreview: () => void;
 }) {
   const selectedTarget = selectedWs || manualHost;
-  const pingState = wsStatus === "scanning" ? "Checking" : isOffline ? "No reply" : "Ready";
+  const pingState =
+    wsStatus === "scanning" ? "Checking" : wsStatus === "connecting" ? "Connecting" : isOffline ? "No reply" : "Ready";
   const healthState = selectedWs
     ? wsStatus === "connected"
       ? "Connected"
-      : "Selected"
+      : wsStatus === "connecting"
+        ? "Connecting"
+        : "Selected"
     : "No target";
   const discoverState = discoveredRovers.length > 0 ? `${discoveredRovers.length} found` : "None yet";
 
@@ -4868,7 +4951,7 @@ function ConnectionView({
                   {isOffline ? "Offline" : "Backend reachable"}
                 </Text>
               </View>
-              {wsStatus === "scanning" ? (
+              {wsStatus === "scanning" || wsStatus === "connecting" ? (
                 <View
                   style={{
                     paddingHorizontal: 12,
@@ -4879,7 +4962,9 @@ function ConnectionView({
                     borderColor: "rgba(96,165,250,0.22)",
                   }}
                 >
-                  <Text style={{ color: "#bfdbfe", fontSize: 12, fontWeight: "800" }}>Scanning network</Text>
+                  <Text style={{ color: "#bfdbfe", fontSize: 12, fontWeight: "800" }}>
+                    {wsStatus === "connecting" ? "Connecting" : "Scanning network"}
+                  </Text>
                 </View>
               ) : null}
             </View>
@@ -4972,7 +5057,11 @@ function ConnectionView({
               <TextInput
                 value={password}
                 onChangeText={onPasswordChange}
-                placeholder={hasStoredSession ? "Saved session token will be tried" : "Rover password"}
+                placeholder={
+                  hasStoredSession
+                    ? "Password optional for this backend; required after rover restart"
+                    : "Rover password"
+                }
                 placeholderTextColor="#94a3b8"
                 secureTextEntry
                 autoCapitalize="none"

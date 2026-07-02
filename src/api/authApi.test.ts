@@ -34,3 +34,43 @@ describe("authApi authenticated fetch", () => {
     globalThis.fetch = original;
   });
 });
+
+describe("authApi session helpers", () => {
+  it("reuses only non-expired sessions for the same backend host", async () => {
+    const authApi = await import("./authApi");
+    const session = {
+      token: "abc",
+      session_id: "sid",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      ttl_s: 3600,
+      baseUrl: "http://192.168.1.102:5001",
+    };
+
+    expect(authApi.canReuseSession(session, "http://192.168.1.102:5001/")).toBe(true);
+    expect(authApi.canReuseSession(session, "http://192.168.1.103:5001")).toBe(false);
+    expect(authApi.isSessionExpired({ ...session, expires_at: "2000-01-01T00:00:00Z" })).toBe(true);
+  });
+
+  it("attaches baseUrl on login responses", async () => {
+    const authApi = await import("./authApi");
+    const original = globalThis.fetch;
+
+    globalThis.fetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          token: "new-token",
+          session_id: "sid-1",
+          expires_at: "2099-01-01T00:00:00Z",
+          ttl_s: 3600,
+        }),
+        { status: 200 }
+      )
+    ) as typeof fetch;
+
+    const session = await authApi.login("http://192.168.1.102:5001", "secret");
+    expect(session.baseUrl).toBe("http://192.168.1.102:5001");
+    expect(session.token).toBe("new-token");
+
+    globalThis.fetch = original;
+  });
+});

@@ -2,12 +2,15 @@ import { Platform } from "react-native";
 
 const STORAGE_KEY = "rover.operatorSession.v1";
 const TOKEN_HEADER = "X-Rover-Token";
+const LOGIN_TIMEOUT_MS = 15000;
 
 export type OperatorSession = {
   token: string;
   session_id: string;
   expires_at: string;
   ttl_s: number;
+  /** Backend this session was issued for (tokens are in-memory on the server). */
+  baseUrl: string;
 };
 
 let sessionToken: string | null = null;
@@ -15,7 +18,7 @@ let activeBaseUrl: string | null = null;
 let invalidSessionHandler: (() => void) | null = null;
 let originalFetch: typeof fetch | null = null;
 
-function normalizeBase(url: string | null | undefined): string | null {
+export function normalizeBase(url: string | null | undefined): string | null {
   const trimmed = (url ?? "").trim().replace(/\/$/, "");
   return trimmed || null;
 }
@@ -37,6 +40,28 @@ export function setAuthRuntime(args: {
   sessionToken = args.token;
   activeBaseUrl = normalizeBase(args.baseUrl);
   invalidSessionHandler = args.onInvalidSession ?? invalidSessionHandler;
+}
+
+export function isSessionExpired(session: OperatorSession | null | undefined): boolean {
+  if (!session?.expires_at) return true;
+  return Date.parse(session.expires_at) <= Date.now();
+}
+
+export function sessionMatchesHost(
+  session: OperatorSession | null | undefined,
+  baseUrl: string | null | undefined
+): boolean {
+  const target = normalizeBase(baseUrl);
+  const sessionHost = normalizeBase(session?.baseUrl);
+  return Boolean(target && sessionHost && target === sessionHost);
+}
+
+/** True when a stored session can be reused for Socket.IO (same host, not expired). */
+export function canReuseSession(
+  session: OperatorSession | null | undefined,
+  baseUrl: string | null | undefined
+): boolean {
+  return Boolean(session?.token && !isSessionExpired(session) && sessionMatchesHost(session, baseUrl));
 }
 
 export async function saveStoredSession(session: OperatorSession | null) {
@@ -63,7 +88,7 @@ export async function loadStoredSession(): Promise<OperatorSession | null> {
   try {
     const parsed = JSON.parse(raw) as OperatorSession;
     if (!parsed.token || !parsed.expires_at) return null;
-    if (Date.parse(parsed.expires_at) <= Date.now()) return null;
+    if (isSessionExpired(parsed)) return null;
     return parsed;
   } catch {
     return null;
@@ -98,16 +123,41 @@ export function installAuthenticatedFetch() {
   }) as typeof fetch;
 }
 
-export async function login(baseUrl: string, password: string): Promise<OperatorSession> {
-  const response = await fetch(`${normalizeBase(baseUrl)}/api/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ password }),
-  });
-  if (!response.ok) {
-    throw new Error(response.status === 503 ? "Rover password is not configured." : "Invalid rover password.");
+function withSessionHost(session: OperatorSession, baseUrl: string): OperatorSession {
+  return { ...session, baseUrl: normalizeBase(baseUrl) ?? baseUrl };
+}
+
+export async function login(
+  baseUrl: string,
+  password: string,
+  timeoutMs = LOGIN_TIMEOUT_MS
+): Promise<OperatorSession> {
+  const normalized = normalizeBase(baseUrl);
+  if (!normalized) {
+    throw new Error("Enter a valid backend address.");
   }
-  return (await response.json()) as OperatorSession;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${normalized}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ password }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(response.status === 503 ? "Rover password is not configured." : "Invalid rover password.");
+    }
+    const body = (await response.json()) as Omit<OperatorSession, "baseUrl">;
+    return withSessionHost(body, normalized);
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Login timed out. Check Wi-Fi and rover backend.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function logout(baseUrl: string) {
@@ -119,7 +169,11 @@ export async function changePassword(
   currentPassword: string,
   newPassword: string
 ): Promise<OperatorSession> {
-  const response = await fetch(`${normalizeBase(baseUrl)}/api/auth/change-password`, {
+  const normalized = normalizeBase(baseUrl);
+  if (!normalized) {
+    throw new Error("Backend address is not set.");
+  }
+  const response = await fetch(`${normalized}/api/auth/change-password`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
@@ -128,5 +182,6 @@ export async function changePassword(
     const text = await response.text();
     throw new Error(text || `Password change failed (${response.status})`);
   }
-  return (await response.json()) as OperatorSession;
+  const body = (await response.json()) as Omit<OperatorSession, "baseUrl">;
+  return withSessionHost(body, normalized);
 }
