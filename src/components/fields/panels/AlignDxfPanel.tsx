@@ -143,7 +143,7 @@ export function AlignDxfPanel({
         const data = await res.json();
         if (data.mission_summary) {
           setMissionSummary(data.mission_summary);
-          if (data.merged_waypoints && alignmentMethod !== "visual_alignment") {
+          if (data.merged_waypoints) {
             const alignedLines: PlanLine[] = [];
             const pts = Array.isArray(data.merged_waypoints) ? data.merged_waypoints : [];
             const sprayFlags = Array.isArray(data.spray_flags) ? data.spray_flags : [];
@@ -183,11 +183,10 @@ export function AlignDxfPanel({
           });
           onWorkflowStep?.("alignment", "verified");
 
-          const isFromLLAReceiver = !isVisualAlignmentMode && alignmentMethod !== "visual_alignment";
           const rotDeg = coerceFiniteNumber(data.rotation_deg);
           const offsetE = coerceFiniteNumber(data.offset_e);
           const offsetN = coerceFiniteNumber(data.offset_n);
-          if (isFromLLAReceiver && rotDeg != null && offsetE != null && offsetN != null) {
+          if (rotDeg != null && offsetE != null && offsetN != null && !data.merged_waypoints) {
             const rotRad = (rotDeg * Math.PI) / 180;
             const cos = Math.cos(rotRad);
             const sin = Math.sin(rotRad);
@@ -221,7 +220,7 @@ export function AlignDxfPanel({
           Alert.alert("Success", "Alignment verified.");
         }
 
-        if (setAlignedRefPoints && alignmentMethod !== "visual_alignment") {
+        if (setAlignedRefPoints) {
           setAlignedRefPoints(
             validPoints.map((point) => ({
               dxf_x: point.dxf_x,
@@ -233,9 +232,7 @@ export function AlignDxfPanel({
         }
         setRefPoints([]);
         setExtractedCorners?.(null);
-        if (alignmentMethod !== "visual_alignment") {
-          setVisualAlignmentItem?.(null);
-        }
+        setVisualAlignmentItem?.(null);
       } else {
         onWorkflowStep?.("alignment", "failed");
         setVerifiedAlignmentRequest(null);
@@ -358,6 +355,7 @@ export function AlignDxfPanel({
                 onPress={() => {
                   setExtractedCorners?.(null);
                   setVisualAlignmentItem?.(null);
+                  setAlignedRefPoints?.([]);
                 }}
                 style={{
                   marginTop: 4,

@@ -541,6 +541,12 @@ export default function App() {
       }
     });
 
+    const startLat = alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 28.6139;
+    const startLon = alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 77.2090;
+    const startNorth = alignedRefPoints[0] ? alignedRefPoints[0].dxf_y : ((lines[0]?.from?.x ?? 0) - 2);
+    const startEast = alignedRefPoints[0] ? alignedRefPoints[0].dxf_x : ((lines[0]?.from?.y ?? 0) - 2);
+    setVisualAlignmentAnchor({ originLat: startLat, originLon: startLon, originDxfNorth: startNorth, originDxfEast: startEast });
+
     setVisualAlignmentItem({
       id: "visual-alignment-group",
       lines: lines,
@@ -568,6 +574,12 @@ export default function App() {
         maxY = Math.max(maxY, line.from.y, line.to.y);
       }
     });
+    const startLat = alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 28.6139;
+    const startLon = alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 77.2090;
+    const startNorth = alignedRefPoints[0] ? alignedRefPoints[0].dxf_y : ((lines[0]?.from?.x ?? 0) - 2);
+    const startEast = alignedRefPoints[0] ? alignedRefPoints[0].dxf_x : ((lines[0]?.from?.y ?? 0) - 2);
+    setVisualAlignmentAnchor({ originLat: startLat, originLon: startLon, originDxfNorth: startNorth, originDxfEast: startEast });
+
     setVisualAlignmentItem({
       id: "plan-editing-group",
       lines: lines,
@@ -640,23 +652,46 @@ export default function App() {
       { x: minX, y: maxY },
     ];
 
-    const baseLat = telemetrySnapshot?.lat ?? 28.6139;
-    const baseLon = telemetrySnapshot?.lon ?? 77.2090;
+    const baseLat = visualAlignmentAnchor?.originLat ?? alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 28.6139;
+    const baseLon = visualAlignmentAnchor?.originLon ?? alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 77.2090;
+
+    let originDxfNorth = 0;
+    let originDxfEast = 0;
+    if (visualAlignmentAnchor) {
+      originDxfNorth = visualAlignmentAnchor.originDxfNorth;
+      originDxfEast = visualAlignmentAnchor.originDxfEast;
+    } else if (alignedRefPoints[0]) {
+      originDxfNorth = alignedRefPoints[0].dxf_y;
+      originDxfEast = alignedRefPoints[0].dxf_x;
+    } else if (lines.length > 0) {
+      originDxfNorth = (lines[0].from?.x ?? 0) - 2;
+      originDxfEast = (lines[0].from?.y ?? 0) - 2;
+    }
 
     const extractedLLA = buildVisualAlignmentRefPoints(
       dxfCorners,
       visualAlignmentItem,
       baseLat,
-      baseLon
+      baseLon,
+      originDxfNorth,
+      originDxfEast
     );
 
     console.log("Captured LLA reference points for rover:", extractedLLA);
 
     // Keep canonical DXF lines unchanged; retain the sticker transform for map preview.
     setExtractedCorners(extractedLLA);
+    setAlignedRefPoints(extractedLLA);
     setIsVisualAlignmentMode(false);
   }
   const [extractedCorners, setExtractedCorners] = useState<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>(null);
+  const [visualAlignmentAnchor, setVisualAlignmentAnchor] = useState<{ originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null>(null);
+
+  useEffect(() => {
+    if (!visualAlignmentItem) {
+      setVisualAlignmentAnchor(null);
+    }
+  }, [visualAlignmentItem]);
   const [layerVisibility, setLayerVisibility] = useState<LayerVisibility>({
     boundary: true,
     marking: true,
@@ -3004,6 +3039,7 @@ export default function App() {
                   setShowRefPointLabels={setShowRefPointLabels}
                   activeRefPointLabelIndex={activeRefPointLabelIndex}
                   setActiveRefPointLabelIndex={setActiveRefPointLabelIndex}
+                  visualAlignmentAnchor={visualAlignmentAnchor}
                   renderSectionContent={
                     page !== "home"
                       ? () => (
@@ -3037,6 +3073,7 @@ export default function App() {
                             isVisualAlignmentMode={isVisualAlignmentMode}
                             visualAlignmentItem={visualAlignmentItem}
                             setVisualAlignmentItem={setVisualAlignmentItem}
+                            visualAlignmentAnchor={visualAlignmentAnchor}
                             onStartVisualAlignment={startVisualAlignment}
                             onConfirmVisualAlignment={handleConfirmVisualAlignment}
                             isPlanEditingMode={isPlanEditingMode}
@@ -3372,6 +3409,7 @@ type HomeViewProps = {
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
   onStartVisualAlignment?: () => void;
   onConfirmVisualAlignment?: () => void;
+  visualAlignmentAnchor?: { originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null;
 };
 
 function HomeView(props: HomeViewProps) {
@@ -3462,6 +3500,7 @@ function HomeView(props: HomeViewProps) {
     onStartVisualAlignment,
     onConfirmVisualAlignment,
     isPlanEditingMode,
+    visualAlignmentAnchor,
   } = props;
 
   const [sprayModalOpen, setSprayModalOpen] = useState(false);
@@ -3782,6 +3821,7 @@ function HomeView(props: HomeViewProps) {
           isVisualAlignmentMode={isVisualAlignmentMode}
           visualAlignmentItem={visualAlignmentItem}
           setVisualAlignmentItem={setVisualAlignmentItem}
+          visualAlignmentAnchor={visualAlignmentAnchor}
           recenterRoverTrigger={recenterRoverCount}
           recenterPlanTrigger={recenterPlanCount}
           hideRefocusControls
@@ -4637,6 +4677,7 @@ function SectionPages(props: {
   rtkDefaultMode?: string;
   setRtkDefaultMode?: React.Dispatch<React.SetStateAction<string>>;
   onClearMission: () => Promise<void>;
+  visualAlignmentAnchor?: { originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
 
@@ -4661,6 +4702,7 @@ function SectionPages(props: {
               isVisualAlignmentMode={props.isVisualAlignmentMode}
               visualAlignmentItem={props.visualAlignmentItem}
               setVisualAlignmentItem={props.setVisualAlignmentItem}
+              visualAlignmentAnchor={props.visualAlignmentAnchor}
               isPlanEditingMode={props.isPlanEditingMode}
             />
           )}
@@ -4686,6 +4728,7 @@ function SectionPages(props: {
               isVisualAlignmentMode={props.isVisualAlignmentMode}
               visualAlignmentItem={props.visualAlignmentItem}
               setVisualAlignmentItem={props.setVisualAlignmentItem}
+              visualAlignmentAnchor={props.visualAlignmentAnchor}
             />
           )}
         />
@@ -5688,6 +5731,7 @@ function PlanPreview({
   isPlanEditingMode = false,
   visualAlignmentItem,
   setVisualAlignmentItem,
+  visualAlignmentAnchor,
   boundaryMode = false,
   boundaryWidth,
   boundaryHeight,
@@ -5732,6 +5776,7 @@ function PlanPreview({
   isPlanEditingMode?: boolean;
   visualAlignmentItem?: PlacedItem | null;
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
+  visualAlignmentAnchor?: { originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null;
   boundaryMode?: boolean;
   boundaryWidth?: number;
   boundaryHeight?: number;
@@ -5751,6 +5796,10 @@ function PlanPreview({
   const isEditablePlacedItemMode = Boolean(
     visualAlignmentItem && (isVisualAlignmentMode || isPlanEditingMode)
   );
+  const isVisualAlignmentPreview = Boolean(
+    visualAlignmentItem && alignedRefPoints && alignedRefPoints.length > 0
+  );
+  const isPlacedItemActive = isEditablePlacedItemMode || isVisualAlignmentPreview;
   const placedItemId = visualAlignmentItem?.id ?? null;
 
   useEffect(() => {
@@ -6296,7 +6345,7 @@ function PlanPreview({
       >
         {mapViewEnabled ? (
           <MapView
-            mode={isEditablePlacedItemMode || boundaryMode ? "templates" : "fields"}
+            mode={isPlacedItemActive || boundaryMode ? "templates" : "fields"}
             boundaryWidth={boundaryWidth}
             boundaryHeight={boundaryHeight}
             boundaryPosition={boundaryPosition}
@@ -6305,7 +6354,7 @@ function PlanPreview({
             onRotateBoundary={onRotateBoundary}
             sketchMode={sketchMode}
             showBoundaryPoints={showBoundaryPoints}
-            placedItems={isEditablePlacedItemMode && visualAlignmentItem ? [visualAlignmentItem] : []}
+            placedItems={isPlacedItemActive && visualAlignmentItem ? [visualAlignmentItem] : []}
             selectedItemIds={
               isEditablePlacedItemMode && visualSelected && placedItemId
                 ? [placedItemId]
@@ -6340,7 +6389,7 @@ function PlanPreview({
               pos_e: telemetryPosE,
             } as any}
             lines={
-              isEditablePlacedItemMode
+              isPlacedItemActive
                 ? []
                 : autoOriginEnabled && mapSourceLines
                   ? mapSourceLines
@@ -6351,6 +6400,7 @@ function PlanPreview({
             mapGeometryFrame={mapGeometryFrame}
             autoOriginEnabled={autoOriginEnabled}
             stagedVerified={stagedVerified}
+            visualAlignmentAnchor={visualAlignmentAnchor}
             visible={true}
             recenterRoverTrigger={recenterRoverCount}
             recenterPlanTrigger={recenterPlanCount}

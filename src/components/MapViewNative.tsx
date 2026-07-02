@@ -258,6 +258,7 @@ export function MapViewNative(props: MapViewProps) {
     mapGeometryFrame,
     stagedVerified = false,
     autoOriginEnabled = false,
+    visualAlignmentAnchor,
     lockPanDrag,
     lockZoom,
     sketchMode,
@@ -364,7 +365,7 @@ export function MapViewNative(props: MapViewProps) {
       resolveMapGeometryFrame({
         mode,
         previewAnchor,
-        alignedRefPoints,
+        alignedRefPoints: alignedRefPoints ?? [],
         stagedVerified,
         autoOriginReference: autoOriginReference ?? null,
         autoOriginEnabled,
@@ -373,6 +374,20 @@ export function MapViewNative(props: MapViewProps) {
   );
 
   const projectionOrigin = useMemo((): MapProjectionOrigin | null => {
+    const isPlanManipulation = placedItems?.some(
+      (it) => it.id === "visual-alignment-group" || it.id === "plan-editing-group"
+    );
+
+    if (isPlanManipulation && visualAlignmentAnchor) {
+      return {
+        frame: "RAW_DESIGN",
+        originLat: visualAlignmentAnchor.originLat,
+        originLon: visualAlignmentAnchor.originLon,
+        originDxfNorth: visualAlignmentAnchor.originDxfNorth,
+        originDxfEast: visualAlignmentAnchor.originDxfEast,
+      };
+    }
+
     const resolved = resolveMapProjectionOrigin(geometryFrame, {
       mode,
       previewAnchor,
@@ -382,10 +397,6 @@ export function MapViewNative(props: MapViewProps) {
       autoOriginEnabled,
     });
     if (resolved) return resolved;
-
-    const isPlanManipulation = placedItems?.some(
-      (it) => it.id === "visual-alignment-group" || it.id === "plan-editing-group"
-    );
 
     if (mode === "templates" && !isPlanManipulation && templatesFloatingOrigin) {
       return {
@@ -431,6 +442,7 @@ export function MapViewNative(props: MapViewProps) {
     stableFallbackOrigin,
     lines, // We use lines to find the center/start
     placedItems,
+    visualAlignmentAnchor,
   ]);
 
   // ── Stable primitive signatures (perf) ──
@@ -1331,10 +1343,10 @@ export function MapViewNative(props: MapViewProps) {
           <CircleLayer
             id="ref-points-layer"
             style={{
-              circleRadius: 7,
+              circleRadius: 4.5,
               circleColor: "#10b981",
               circleStrokeColor: "#ffffff",
-              circleStrokeWidth: 2.5,
+              circleStrokeWidth: 1.5,
             }}
           />
           {/* Labels always mounted; visibility toggled via opacity to keep

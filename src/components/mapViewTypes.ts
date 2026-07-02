@@ -50,4 +50,10 @@ export interface MapViewProps {
   mapGeometryFrame?: MapGeometryFrame;
   stagedVerified?: boolean;
   autoOriginEnabled?: boolean;
+  visualAlignmentAnchor?: {
+    originLat: number;
+    originLon: number;
+    originDxfNorth: number;
+    originDxfEast: number;
+  } | null;
 }
