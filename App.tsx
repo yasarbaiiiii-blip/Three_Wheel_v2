@@ -518,6 +518,7 @@ export default function App() {
 
   // 1. Mode Toggle State
   const [isVisualAlignmentMode, setIsVisualAlignmentMode] = useState(false);
+  const [isPlanEditingMode, setIsPlanEditingMode] = useState(false);
 
   // 2. The temporary "Sticker" holding all DXF lines
   const [visualAlignmentItem, setVisualAlignmentItem] = useState<PlacedItem | null>(null);
@@ -553,6 +554,76 @@ export default function App() {
 
     console.log(`[Align DXF] startVisualAlignment: Created visual sticker. Width: ${maxX - minX}, Height: ${maxY - minY}`);
     setIsVisualAlignmentMode(true);
+  }
+
+  // Plan Editing: lets user drag/scale/rotate the plan from the 4th dropdown
+  function startPlanEditing() {
+    if (lines.length === 0) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    lines.forEach(line => {
+      if (line.from && line.to) {
+        minX = Math.min(minX, line.from.x, line.to.x);
+        minY = Math.min(minY, line.from.y, line.to.y);
+        maxX = Math.max(maxX, line.from.x, line.to.x);
+        maxY = Math.max(maxY, line.from.y, line.to.y);
+      }
+    });
+    setVisualAlignmentItem({
+      id: "plan-editing-group",
+      lines: lines,
+      x: 0,
+      y: 0,
+      rotation: 0,
+      scale: 1,
+      width: maxX - minX,
+      height: maxY - minY,
+    });
+    setIsVisualAlignmentMode(false);
+    setMapViewEnabled(true);
+    setIsPlanEditingMode(true);
+  }
+
+  function stopPlanEditing() {
+    if (visualAlignmentItem && isPlanEditingMode) {
+      const { x, y, rotation = 0, scale = 1 } = visualAlignmentItem;
+      const rad = (rotation * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+
+      const transformPt = (n: number, e: number) => {
+        return {
+          n: n * scale * cos - e * scale * sin + y,
+          e: e * scale * cos + n * scale * sin + x,
+        };
+      };
+
+      setLines((prev) =>
+        prev.map((line) => {
+          const transformedFrom = transformPt(line.from.x, line.from.y);
+          const transformedTo = transformPt(line.to.x, line.to.y);
+          let updatedEntity = line.entity;
+          
+          if (updatedEntity?.preview_points) {
+            updatedEntity = {
+              ...updatedEntity,
+              preview_points: updatedEntity.preview_points.map((pt: { north: number; east: number }) => {
+                const transformed = transformPt(pt.north, pt.east);
+                return { ...pt, north: transformed.n, east: transformed.e };
+              }),
+            };
+          }
+          
+          return {
+            ...line,
+            from: { ...line.from, x: transformedFrom.n, y: transformedFrom.e },
+            to: { ...line.to, x: transformedTo.n, y: transformedTo.e },
+            ...(updatedEntity ? { entity: updatedEntity } : {}),
+          };
+        })
+      );
+    }
+    setIsPlanEditingMode(false);
+    setVisualAlignmentItem(null);
   }
 
   function handleConfirmVisualAlignment() {
@@ -2968,6 +3039,9 @@ export default function App() {
                             setVisualAlignmentItem={setVisualAlignmentItem}
                             onStartVisualAlignment={startVisualAlignment}
                             onConfirmVisualAlignment={handleConfirmVisualAlignment}
+                            isPlanEditingMode={isPlanEditingMode}
+                            onStartPlanEditing={startPlanEditing}
+                            onStopPlanEditing={stopPlanEditing}
                             extractedCorners={extractedCorners}
                             setExtractedCorners={setExtractedCorners}
                             onNav={(p) => setPage(p)}
@@ -3293,6 +3367,7 @@ type HomeViewProps = {
   activeRefPointLabelIndex?: number | null;
   setActiveRefPointLabelIndex?: React.Dispatch<React.SetStateAction<number | null>>;
   isVisualAlignmentMode?: boolean;
+  isPlanEditingMode?: boolean;
   visualAlignmentItem?: PlacedItem | null;
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
   onStartVisualAlignment?: () => void;
@@ -3386,6 +3461,7 @@ function HomeView(props: HomeViewProps) {
     setVisualAlignmentItem,
     onStartVisualAlignment,
     onConfirmVisualAlignment,
+    isPlanEditingMode,
   } = props;
 
   const [sprayModalOpen, setSprayModalOpen] = useState(false);
@@ -4538,6 +4614,9 @@ function SectionPages(props: {
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
   onStartVisualAlignment?: () => void;
   onConfirmVisualAlignment?: () => void;
+  isPlanEditingMode?: boolean;
+  onStartPlanEditing?: () => void;
+  onStopPlanEditing?: () => void;
   extractedCorners?: { dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>>;
   isFloatingEStopEnabled: boolean;
@@ -4579,6 +4658,10 @@ function SectionPages(props: {
               showRefPointLabels={props.showRefPointLabels}
               activeRefPointLabelIndex={props.activeRefPointLabelIndex}
               onToggleRefPointLabel={props.setActiveRefPointLabelIndex}
+              isVisualAlignmentMode={props.isVisualAlignmentMode}
+              visualAlignmentItem={props.visualAlignmentItem}
+              setVisualAlignmentItem={props.setVisualAlignmentItem}
+              isPlanEditingMode={props.isPlanEditingMode}
             />
           )}
         />
@@ -5602,6 +5685,7 @@ function PlanPreview({
   activeRefPointLabelIndex = null,
   onToggleRefPointLabel,
   isVisualAlignmentMode,
+  isPlanEditingMode = false,
   visualAlignmentItem,
   setVisualAlignmentItem,
   mapMode = "fields",
@@ -5636,6 +5720,7 @@ function PlanPreview({
   activeRefPointLabelIndex?: number | null;
   onToggleRefPointLabel?: (index: number | null) => void;
   isVisualAlignmentMode?: boolean;
+  isPlanEditingMode?: boolean;
   visualAlignmentItem?: PlacedItem | null;
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
   mapMode?: "fields" | "templates";
@@ -5644,12 +5729,16 @@ function PlanPreview({
   hideRefocusControls?: boolean;
 }) {
   const [visualSelected, setVisualSelected] = useState(true);
+  const isEditablePlacedItemMode = Boolean(
+    visualAlignmentItem && (isVisualAlignmentMode || isPlanEditingMode)
+  );
+  const placedItemId = visualAlignmentItem?.id ?? null;
 
   useEffect(() => {
-    if (visualAlignmentItem) {
+    if (visualAlignmentItem && (isVisualAlignmentMode || isPlanEditingMode)) {
       setVisualSelected(true);
     }
-  }, [visualAlignmentItem]);
+  }, [visualAlignmentItem, isVisualAlignmentMode, isPlanEditingMode]);
 
   const filtered = useMemo(
     () =>
@@ -6182,17 +6271,20 @@ function PlanPreview({
       >
         {mapViewEnabled ? (
           <MapView
-            mode={visualAlignmentItem ? "templates" : "fields"}
-            placedItems={visualAlignmentItem ? [visualAlignmentItem] : []}
-            selectedItemIds={visualAlignmentItem && visualSelected ? ["visual-alignment-group"] : []}
-            multiTouchMode={visualAlignmentItem ? "rotate" : "both"}
+            mode={isEditablePlacedItemMode ? "templates" : "fields"}
+            placedItems={isEditablePlacedItemMode && visualAlignmentItem ? [visualAlignmentItem] : []}
+            selectedItemIds={
+              isEditablePlacedItemMode && visualSelected && placedItemId ? [placedItemId] : []
+            }
+            multiTouchMode={
+              isEditablePlacedItemMode ? (isPlanEditingMode ? "both" : "rotate") : "both"
+            }
             onSelectionChange={(ids) => {
-              if (isVisualAlignmentMode) {
-                setVisualSelected(ids.includes("visual-alignment-group"));
-              }
+              if (!isEditablePlacedItemMode || !placedItemId) return;
+              setVisualSelected(ids.includes(placedItemId));
             }}
             onUpdatePlacedItem={(id, updates) => {
-              if (!isVisualAlignmentMode || id !== "visual-alignment-group") return;
+              if (!isEditablePlacedItemMode || !placedItemId || id !== placedItemId) return;
               setVisualAlignmentItem?.((prev: PlacedItem | null) => {
                 if (!prev) return prev;
                 return { ...prev, ...updates };
@@ -6207,7 +6299,7 @@ function PlanPreview({
               pos_e: telemetryPosE,
             } as any}
             lines={
-              visualAlignmentItem
+              isEditablePlacedItemMode
                 ? []
                 : autoOriginEnabled && mapSourceLines
                   ? mapSourceLines

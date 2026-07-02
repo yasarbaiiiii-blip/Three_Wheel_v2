@@ -701,6 +701,7 @@ export default function ModernHomeUI(props) {
     rtkConnecting = false, startNtrip, startLora, stopRtk, selectedLineId, onSelectLine,
     autoOriginEnabled, mapSourceLines, alignedRefPoints, autoOriginReference,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
+    isPlanEditingMode,
     virtualJoystick, onPausePlan,
     mapViewEnabled = false, setMapViewEnabled, renderPlanPreview,
     onFocusRover, onFocusPlan,
@@ -1531,15 +1532,16 @@ export default function ModernHomeUI(props) {
         <MapView
           mode={visualAlignmentItem ? "templates" : "fields"}
           placedItems={visualAlignmentItem ? [visualAlignmentItem] : []}
-          selectedItemIds={visualAlignmentItem && visualSelected ? ["visual-alignment-group"] : []}
-          multiTouchMode={visualAlignmentItem ? "rotate" : "both"}
+          selectedItemIds={visualAlignmentItem && visualSelected ? [visualAlignmentItem.id] : []}
+          multiTouchMode={visualAlignmentItem ? (isPlanEditingMode ? "both" : "rotate") : "both"}
           onSelectionChange={(ids) => {
-            if (isVisualAlignmentMode) {
-              setVisualSelected(ids.includes("visual-alignment-group"));
+            if (isVisualAlignmentMode || isPlanEditingMode) {
+              setVisualSelected(visualAlignmentItem ? ids.includes(visualAlignmentItem.id) : false);
             }
           }}
           onUpdatePlacedItem={(id, updates) => {
-            if (!isVisualAlignmentMode || id !== "visual-alignment-group") return;
+            if (!(isVisualAlignmentMode || isPlanEditingMode)) return;
+            if (visualAlignmentItem && id !== visualAlignmentItem.id) return;
             if (props.setVisualAlignmentItem) {
               props.setVisualAlignmentItem((prev) => {
                 if (!prev) return prev;
@@ -1614,6 +1616,46 @@ export default function ModernHomeUI(props) {
         >
           <X color={COLORS.textMain} size={22} strokeWidth={2.4} />
         </Pressable>
+      ) : null}
+
+      {/* Plan Editing Rotation/Scale Overlay */}
+      {isPlanEditingMode && visualAlignmentItem ? (
+        <View style={{
+          position: "absolute",
+          top: 80,
+          alignSelf: "center",
+          zIndex: 300,
+          backgroundColor: "rgba(0,0,0,0.85)",
+          borderRadius: 14,
+          paddingHorizontal: 20,
+          paddingVertical: 12,
+          borderWidth: 1,
+          borderColor: COLORS.accentBrand,
+          flexDirection: "row",
+          gap: 18,
+          alignItems: "center",
+        }}>
+          <View style={{ alignItems: "center" }}>
+            <Text style={{ color: COLORS.textMuted, fontSize: 10, fontWeight: "700", letterSpacing: 0.5 }}>ROTATION</Text>
+            <Text style={{ color: COLORS.accentBrand, fontSize: 22, fontWeight: "900", fontFamily: "monospace" }}>
+              {(visualAlignmentItem.rotation ?? 0).toFixed(1)}°
+            </Text>
+          </View>
+          <View style={{ width: 1, height: 30, backgroundColor: COLORS.panelBorder }} />
+          <View style={{ alignItems: "center" }}>
+            <Text style={{ color: COLORS.textMuted, fontSize: 10, fontWeight: "700", letterSpacing: 0.5 }}>SCALE</Text>
+            <Text style={{ color: COLORS.textMain, fontSize: 22, fontWeight: "900", fontFamily: "monospace" }}>
+              {(visualAlignmentItem.scale ?? 1).toFixed(2)}x
+            </Text>
+          </View>
+          <View style={{ width: 1, height: 30, backgroundColor: COLORS.panelBorder }} />
+          <View style={{ alignItems: "center" }}>
+            <Text style={{ color: COLORS.textMuted, fontSize: 10, fontWeight: "700", letterSpacing: 0.5 }}>OFFSET</Text>
+            <Text style={{ color: COLORS.textMain, fontSize: 14, fontWeight: "800", fontFamily: "monospace" }}>
+              {(visualAlignmentItem.x ?? 0).toFixed(2)}m, {(visualAlignmentItem.y ?? 0).toFixed(2)}m
+            </Text>
+          </View>
+        </View>
       ) : null}
     </GestureHandlerRootView>
   );

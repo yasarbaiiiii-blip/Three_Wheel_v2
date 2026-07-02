@@ -81,6 +81,9 @@ export type FieldsPageProps = {
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
   onStartVisualAlignment?: () => void;
   onConfirmVisualAlignment?: () => void;
+  isPlanEditingMode?: boolean;
+  onStartPlanEditing?: () => void;
+  onStopPlanEditing?: () => void;
   extractedCorners?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null>>;
   onClearMission: () => Promise<void>;
@@ -105,6 +108,7 @@ export type FieldsPageProps = {
     activeRefPointLabelIndex?: number | null;
     onToggleRefPointLabel?: React.Dispatch<React.SetStateAction<number | null>>;
     isVisualAlignmentMode?: boolean;
+    isPlanEditingMode?: boolean;
     visualAlignmentItem?: PlacedItem | null;
     setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
   }) => React.ReactNode;
@@ -173,6 +177,9 @@ export function FieldsPage(props: FieldsPageProps) {
     setVisualAlignmentItem,
     onStartVisualAlignment,
     onConfirmVisualAlignment,
+    isPlanEditingMode,
+    onStartPlanEditing,
+    onStopPlanEditing,
     extractedCorners,
     setExtractedCorners,
     onClearMission,
@@ -317,6 +324,10 @@ export function FieldsPage(props: FieldsPageProps) {
             onInvalidateWorkflow={onInvalidateWorkflow}
             blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
             visualAlignmentItem={visualAlignmentItem}
+            isPlanEditingMode={isPlanEditingMode}
+            mapViewEnabled={mapViewEnabled}
+            onStartPlanEditing={onStartPlanEditing}
+            onStopPlanEditing={onStopPlanEditing}
           />
         );
       case "pathOrder":
@@ -436,6 +447,7 @@ export function FieldsPage(props: FieldsPageProps) {
           activeRefPointLabelIndex,
           onToggleRefPointLabel: setActiveRefPointLabelIndex,
           isVisualAlignmentMode,
+          isPlanEditingMode,
           visualAlignmentItem,
           setVisualAlignmentItem,
         })}

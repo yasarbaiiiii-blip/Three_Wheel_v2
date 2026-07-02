@@ -15,6 +15,10 @@ type PlanEditingPanelProps = {
   onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
   blockProtectedWorkflowMutation: (action: string) => boolean;
   visualAlignmentItem?: PlacedItem | null;
+  isPlanEditingMode?: boolean;
+  mapViewEnabled?: boolean;
+  onStartPlanEditing?: () => void;
+  onStopPlanEditing?: () => void;
 };
 
 export function PlanEditingPanel({
@@ -26,6 +30,10 @@ export function PlanEditingPanel({
   onInvalidateWorkflow,
   blockProtectedWorkflowMutation,
   visualAlignmentItem,
+  isPlanEditingMode = false,
+  mapViewEnabled = false,
+  onStartPlanEditing,
+  onStopPlanEditing,
 }: PlanEditingPanelProps) {
   const [extModalOpen, setExtModalOpen] = useState(false);
   const [extPre, setExtPre] = useState("0.5");
@@ -130,6 +138,68 @@ export function PlanEditingPanel({
           </Text>
           <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontFamily: "monospace" }}>
             Rotation: {(visualAlignmentItem.rotation ?? 0).toFixed(1)}°
+          </Text>
+        </View>
+      ) : null}
+
+      {/* Edit Plan Toggle – above Enable Extension */}
+      <View
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: 12,
+          borderRadius: 10,
+          backgroundColor: isPlanEditingMode ? "#1a2e1a" : FIELDS_COLORS.surfaceSolid,
+          borderWidth: 1,
+          borderColor: isPlanEditingMode ? "#22c55e" : FIELDS_COLORS.panelBorder,
+        }}
+      >
+        <View style={{ flex: 1, paddingRight: 10 }}>
+          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "800" }}>Edit Plan</Text>
+          <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
+            {isPlanEditingMode
+              ? mapViewEnabled
+                ? "Tap plan to select, then drag / pinch / rotate"
+                : "Map is turning on — enable Map On if the plan is hidden"
+              : "Enable to move, scale & rotate the plan on the map"}
+          </Text>
+        </View>
+        <Switch
+          value={isPlanEditingMode}
+          onValueChange={(value) => {
+            if (value) {
+              onStartPlanEditing?.();
+            } else {
+              onStopPlanEditing?.();
+            }
+          }}
+          trackColor={{ false: FIELDS_COLORS.panelBorder, true: "#22c55e" }}
+          thumbColor={isPlanEditingMode ? "#ffffff" : "#94a3b8"}
+        />
+      </View>
+
+      {/* Plan editing info card */}
+      {isPlanEditingMode && visualAlignmentItem ? (
+        <View
+          style={{
+            padding: 12,
+            borderRadius: 10,
+            backgroundColor: FIELDS_COLORS.surfaceSolid,
+            borderWidth: 1,
+            borderColor: "#22c55e",
+            gap: 6,
+          }}
+        >
+          <Text style={{ color: "#22c55e", fontSize: 13, fontWeight: "800" }}>Plan Transform</Text>
+          <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontFamily: "monospace" }}>
+            Offset: {visualAlignmentItem.x?.toFixed(2) ?? "0.00"}m E, {visualAlignmentItem.y?.toFixed(2) ?? "0.00"}m N
+          </Text>
+          <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontFamily: "monospace" }}>
+            Rotation: {(visualAlignmentItem.rotation ?? 0).toFixed(1)}°
+          </Text>
+          <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontFamily: "monospace" }}>
+            Scale: {(visualAlignmentItem.scale ?? 1).toFixed(2)}x
           </Text>
         </View>
       ) : null}
