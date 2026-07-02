@@ -763,6 +763,7 @@ export default function App() {
     alignedRefPoints.length === 0;
   const missionStateRef = useRef<string | null>(null);
   const [mapViewEnabled, setMapViewEnabled] = useState(false);
+  const [resetNorthCount, setResetNorthCount] = useState(0);
 
   const toggleAutoOrigin = useCallback(() => {
     setAutoOrigin((prev) => {
@@ -2981,6 +2982,8 @@ export default function App() {
                   page={page}
                   autoOrigin={autoOrigin}
                   onToggleAutoOrigin={toggleAutoOrigin}
+                  onResetNorth={() => setResetNorthCount((c) => c + 1)}
+                  resetNorthCount={resetNorthCount}
                   previewRoverPoint={previewRoverPoint}
                   originShiftKey={
                     autoOriginReference
@@ -3101,6 +3104,7 @@ export default function App() {
                             setShowRefPointLabels={setShowRefPointLabels}
                             activeRefPointLabelIndex={activeRefPointLabelIndex}
                             setActiveRefPointLabelIndex={setActiveRefPointLabelIndex}
+                            resetNorthCount={resetNorthCount}
                             isVisualAlignmentMode={isVisualAlignmentMode}
                             visualAlignmentItem={visualAlignmentItem}
                             setVisualAlignmentItem={setVisualAlignmentItem}
@@ -3358,6 +3362,8 @@ type HomeViewProps = {
   renderSectionContent?: () => React.ReactNode;
   autoOrigin: boolean;
   onToggleAutoOrigin: () => void;
+  onResetNorth?: () => void;
+  resetNorthCount?: number;
   previewRoverPoint: { north: number; east: number } | null;
   originShiftKey?: string | null;
   mapSourceLines: PlanLine[];
@@ -3823,6 +3829,8 @@ function HomeView(props: HomeViewProps) {
       onFocusPlan={() => setRecenterPlanCount((c) => c + 1)}
       recenterRoverCount={recenterRoverCount}
       recenterPlanCount={recenterPlanCount}
+      onResetNorth={props.onResetNorth}
+      resetNorthCount={props.resetNorthCount}
       renderPlanPreview={page === "home" ? () => (
         <PlanPreview
           lines={lines}
@@ -3855,6 +3863,7 @@ function HomeView(props: HomeViewProps) {
           visualAlignmentAnchor={visualAlignmentAnchor}
           recenterRoverTrigger={recenterRoverCount}
           recenterPlanTrigger={recenterPlanCount}
+          resetNorthTrigger={props.resetNorthCount}
           hideRefocusControls
         />
       ) : undefined}
@@ -4708,6 +4717,7 @@ function SectionPages(props: {
   rtkDefaultMode?: string;
   setRtkDefaultMode?: React.Dispatch<React.SetStateAction<string>>;
   onClearMission: () => Promise<void>;
+  resetNorthCount?: number;
   visualAlignmentAnchor?: { originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
@@ -4735,6 +4745,7 @@ function SectionPages(props: {
               setVisualAlignmentItem={props.setVisualAlignmentItem}
               visualAlignmentAnchor={props.visualAlignmentAnchor}
               isPlanEditingMode={props.isPlanEditingMode}
+              resetNorthTrigger={props.resetNorthCount}
             />
           )}
         />
@@ -4760,6 +4771,7 @@ function SectionPages(props: {
               visualAlignmentItem={props.visualAlignmentItem}
               setVisualAlignmentItem={props.setVisualAlignmentItem}
               visualAlignmentAnchor={props.visualAlignmentAnchor}
+              resetNorthTrigger={props.resetNorthCount}
             />
           )}
         />
@@ -5775,6 +5787,7 @@ function PlanPreview({
   mapMode = "fields",
   recenterRoverTrigger,
   recenterPlanTrigger,
+  resetNorthTrigger,
   hideRefocusControls = false,
 }: {
   lines: PlanLine[];
@@ -5820,6 +5833,7 @@ function PlanPreview({
   mapMode?: "fields" | "templates";
   recenterRoverTrigger?: number;
   recenterPlanTrigger?: number;
+  resetNorthTrigger?: number;
   hideRefocusControls?: boolean;
 }) {
   const [visualSelected, setVisualSelected] = useState(true);
@@ -6433,8 +6447,9 @@ function PlanPreview({
             stagedVerified={stagedVerified}
             visualAlignmentAnchor={visualAlignmentAnchor}
             visible={true}
-            recenterRoverTrigger={recenterRoverCount}
-            recenterPlanTrigger={recenterPlanCount}
+            recenterRoverTrigger={recenterRoverTrigger || recenterRoverCount}
+            recenterPlanTrigger={recenterPlanTrigger || recenterPlanCount}
+            resetNorthTrigger={resetNorthTrigger}
             onSelectPoint={onSelectPoint}
             onSelectLine={onSelectLine}
             selectedLineId={selectedLineId}

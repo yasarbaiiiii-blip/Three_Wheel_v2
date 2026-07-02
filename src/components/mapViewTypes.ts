@@ -17,6 +17,7 @@ export interface MapViewProps {
   visible: boolean;
   recenterRoverTrigger?: number;
   recenterPlanTrigger?: number;
+  resetNorthTrigger?: number;
   onSelectPoint?: (pt: { x: number; y: number }) => void;
   onSelectLine?: (id: string | null) => void;
   selectedLineId?: string | null;

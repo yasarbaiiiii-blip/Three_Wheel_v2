@@ -236,6 +236,7 @@ export function MapViewNative(props: MapViewProps) {
     visible,
     recenterRoverTrigger,
     recenterPlanTrigger,
+    resetNorthTrigger,
     onSelectPoint,
     onSelectLine,
     selectedLineId,
@@ -274,6 +275,7 @@ export function MapViewNative(props: MapViewProps) {
   // per button press and never on telemetry/geometry changes.
   const lastRecenterRoverRef = useRef(0);
   const lastRecenterPlanRef = useRef(0);
+  const lastResetNorthRef = useRef(0);
 
   // ── Gesture state ──
   // GestureType enum for the in-progress gesture (items drag or boundary drag).
@@ -1182,6 +1184,18 @@ export function MapViewNative(props: MapViewProps) {
     fitToPlan();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recenterPlanTrigger, visible]);
+
+  // Reset camera bearing to North (0 deg) — one-shot per button press.
+  useEffect(() => {
+    if (!visible || !resetNorthTrigger || resetNorthTrigger <= 0) return;
+    if (resetNorthTrigger === lastResetNorthRef.current) return;
+    lastResetNorthRef.current = resetNorthTrigger;
+    cameraRef.current?.setCamera({
+      heading: 0,
+      animationDuration: 300,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetNorthTrigger, visible]);
 
   // Initial autocenter: prefer rover, else fit plan (parity with legacy).
   useEffect(() => {

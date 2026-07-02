@@ -4,7 +4,7 @@ import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform, Moda
 import { GestureHandlerRootView, GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps, withSpring, withTiming, cancelAnimation, Easing, runOnJS, Keyframe } from "react-native-reanimated";
 import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText } from "react-native-svg";
-import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut } from "lucide-react-native";
+import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check } from "lucide-react-native";
 import { ManualJoystick } from "./ManualJoystick";
 import { pauseMission, nextMission, exportLog } from "../api/missionApi";
 import { MapView } from "./MapView";
@@ -707,6 +707,7 @@ export default function ModernHomeUI(props) {
     mapViewEnabled = false, setMapViewEnabled, renderPlanPreview,
     onFocusRover, onFocusPlan,
     recenterRoverCount, recenterPlanCount,
+    onResetNorth, resetNorthCount, autoOrigin, onToggleAutoOrigin,
     currentPage = "home",
     renderSectionContent,
   } = props;
@@ -770,24 +771,25 @@ export default function ModernHomeUI(props) {
       : telemetrySnapshot.gps_fix === 6 ? "RTK Fixed"
       : `Fix ${telemetrySnapshot.gps_fix}`);
   const sats = telemetrySnapshot?.gps_sat ?? 0;
-  const hrms = telemetrySnapshot?.hrms?.toFixed(3) ?? "—";
-  const vrms = telemetrySnapshot?.vrms?.toFixed(3) ?? "—";
+  // hrms/vrms displayed in centimetres (m * 100), 2 decimal places
+  const hrms = telemetrySnapshot?.hrms != null ? (telemetrySnapshot.hrms * 100).toFixed(2) : "—";
+  const vrms = telemetrySnapshot?.vrms != null ? (telemetrySnapshot.vrms * 100).toFixed(2) : "—";
   const missionStateStr = telemetrySnapshot?.mission_state ?? (missionRunning ? "running" : "idle");
-  const xtrack = telemetrySnapshot?.xtrack_m?.toFixed(3) ?? "—";
-  const headingErr = telemetrySnapshot?.heading_err_deg?.toFixed(1) ?? "—";
-  const headingDeg = telemetrySnapshot?.heading_ned_deg?.toFixed(1) ?? "—";
+  const xtrack = telemetrySnapshot?.xtrack_m != null ? telemetrySnapshot.xtrack_m.toFixed(2) : "—";
+  const headingErr = telemetrySnapshot?.heading_err_deg != null ? telemetrySnapshot.heading_err_deg.toFixed(2) : "—";
+  const headingDeg = telemetrySnapshot?.heading_ned_deg != null ? telemetrySnapshot.heading_ned_deg.toFixed(2) : "—";
   const roverHeadingDeg = telemetrySnapshot?.heading_ned_deg;
   const hasRoverHeading = roverHeadingDeg != null;
-  const distGoal = telemetrySnapshot?.dist_to_goal_m?.toFixed(2) ?? "—";
-  const speed = telemetrySnapshot?.speed_m_s?.toFixed(2) ?? "—";
-  const measuredSpeed = telemetrySnapshot?.measured_speed_m_s?.toFixed(2) ?? null;
+  const distGoal = telemetrySnapshot?.dist_to_goal_m != null ? telemetrySnapshot.dist_to_goal_m.toFixed(2) : "—";
+  const speed = telemetrySnapshot?.speed_m_s != null ? telemetrySnapshot.speed_m_s.toFixed(2) : "—";
+  const measuredSpeed = telemetrySnapshot?.measured_speed_m_s != null ? telemetrySnapshot.measured_speed_m_s.toFixed(2) : null;
   const displaySpeed = measuredSpeed ?? speed;
-  const alongTrackSpeed = telemetrySnapshot?.along_track_speed_mps?.toFixed(2) ?? "—";
-  const crossTrackSpeed = telemetrySnapshot?.cross_track_speed_mps?.toFixed(2) ?? "—";
+  const alongTrackSpeed = telemetrySnapshot?.along_track_speed_mps != null ? telemetrySnapshot.along_track_speed_mps.toFixed(2) : "—";
+  const crossTrackSpeed = telemetrySnapshot?.cross_track_speed_mps != null ? telemetrySnapshot.cross_track_speed_mps.toFixed(2) : "—";
   const rppState = telemetrySnapshot?.rpp_state_name ?? "N/A";
   const fcuConn = systemHealth?.fcu_connected ? "Connected" : "Disconnected";
-  const poseAge = telemetrySnapshot?.pose_age_ms ?? 0;
-  const battV = telemetrySnapshot?.battery_v?.toFixed(1) ?? "0.0";
+  const poseAge = telemetrySnapshot?.pose_age_ms != null ? telemetrySnapshot.pose_age_ms.toFixed(0) : "—";
+  const battV = telemetrySnapshot?.battery_v != null ? telemetrySnapshot.battery_v.toFixed(2) : "—";
   // Ampere not explicitly in schema, show N/A
   const battA = "N/A";
   const joystickState = virtualJoystick?.state ?? "DISABLED";
@@ -1135,7 +1137,9 @@ export default function ModernHomeUI(props) {
     return (
       <AnimatedReanimated.View style={[styles.mapToolsColumn, compassAnimatedStyle]} pointerEvents="box-none">
         <View style={styles.mapToolsGroupCard} pointerEvents="auto">
-          <TopBarCompass headingDeg={roverHeadingDeg ?? 0} hasRoverHeading={hasRoverHeading} />
+          <Pressable onPress={() => onResetNorth?.()} style={({ pressed }) => [pressed && { opacity: 0.7 }]} accessibilityLabel="Reset Map to North">
+            <TopBarCompass headingDeg={roverHeadingDeg ?? 0} hasRoverHeading={hasRoverHeading} />
+          </Pressable>
 
           <View style={styles.mapToolsDivider} />
 
@@ -1418,9 +1422,9 @@ export default function ModernHomeUI(props) {
             </View>
             <View style={styles.statGrid}>
               <StatTile icon={Satellite} label="Satellites" value={String(sats)} accent={COLORS.accentBrand} />
-              <StatTile icon={Target} label="HRMS" value={`${hrms} m`} accent={COLORS.textMuted} />
-              <StatTile icon={Target} label="VRMS" value={`${vrms} m`} accent={COLORS.textMuted} />
-              <StatTile icon={Activity} label="Pose Age" value={`${poseAge} ms`} accent={COLORS.textMuted} />
+              <StatTile icon={Target} label="HRMS" value={hrms !== "—" ? `${hrms} cm` : "—"} accent={COLORS.textMuted} />
+              <StatTile icon={Target} label="VRMS" value={vrms !== "—" ? `${vrms} cm` : "—"} accent={COLORS.textMuted} />
+              <StatTile icon={Activity} label="Pose Age" value={poseAge !== "—" ? `${poseAge} ms` : "—"} accent={COLORS.textMuted} />
             </View>
           </TelemetryBlock>
 
@@ -1433,18 +1437,36 @@ export default function ModernHomeUI(props) {
               <StatusPill label={missionStateStr.toUpperCase()} tone={missionStateTone} pulse={missionStateStr === "running"} />
             </View>
             <View style={styles.statGrid}>
-              {/* Cross-track error from xtrack_m */}
-              <StatTile icon={Route} label="X-Track" value={xtrack !== "—" ? `${xtrack} m` : "—"} accent={Math.abs(parseFloat(xtrack) || 0) > 0.05 ? COLORS.danger : COLORS.accentBrand} />
-              {/* Heading direction from heading_ned_deg */}
-              <StatTile icon={Navigation} label="Heading" value={headingDeg !== "—" ? `${headingDeg}°` : "—"} accent={COLORS.accentBrand} />
+              {/* X-Track from xtrack_m */}
+              <StatTile
+                icon={Route}
+                label="X-Track"
+                value={xtrack !== "—" ? `${xtrack} m` : "—"}
+                accent={Math.abs(parseFloat(xtrack) || 0) > 0.05 ? COLORS.danger : COLORS.accentBrand}
+              />
               {/* Heading error from heading_err_deg */}
-              <StatTile icon={Navigation} label="Hdg Err" value={headingErr !== "—" ? `${headingErr}°` : "—"} accent={Math.abs(parseFloat(headingErr) || 0) > 10 ? COLORS.danger : COLORS.warning} />
+              <StatTile
+                icon={Navigation}
+                label="Hdg Err"
+                value={headingErr !== "—" ? `${headingErr}°` : "—"}
+                accent={Math.abs(parseFloat(headingErr) || 0) > 10 ? COLORS.danger : COLORS.warning}
+              />
               {/* Distance to goal from dist_to_goal_m */}
-              <StatTile icon={Target} label="Dist Goal" value={distGoal !== "—" ? `${distGoal} m` : "—"} accent={COLORS.success} />
-              {/* Speed from speed_m_s / measured_speed_m_s */}
-              <StatTile icon={Gauge} label="Speed" value={displaySpeed !== "—" ? `${displaySpeed} m/s` : "—"} accent={COLORS.accentBrand} wide />
+              <StatTile
+                icon={Target}
+                label="Dist Goal"
+                value={distGoal !== "—" ? `${distGoal} m` : "—"}
+                accent={COLORS.success}
+              />
+              {/* Speed — prefers measured_speed_m_s from MAVROS */}
+              <StatTile
+                icon={Gauge}
+                label="Speed"
+                value={displaySpeed !== "—" ? `${displaySpeed} m/s` : "—"}
+                accent={COLORS.accentBrand}
+              />
             </View>
-            {/* Along/cross track speeds */}
+            {/* Along/cross track speeds row */}
             <View style={[styles.statGrid, { marginTop: 6 }]}>
               <StatTile icon={Route} label="Along-Trk" value={alongTrackSpeed !== "—" ? `${alongTrackSpeed} m/s` : "—"} accent={COLORS.textMuted} />
               <StatTile icon={Route} label="Cross-Trk" value={crossTrackSpeed !== "—" ? `${crossTrackSpeed} m/s` : "—"} accent={COLORS.textMuted} />
@@ -1549,25 +1571,6 @@ export default function ModernHomeUI(props) {
         >
           {showJoystick && vehicleMode === "MANUAL" && !missionRunning ? (
             <>
-              <View style={styles.manualStatusBar}>
-                <View style={[styles.manualStatusDot, { backgroundColor: joystickStateTone }]} />
-                <Text style={styles.manualStatusText}>{statusLabel}</Text>
-              </View>
-
-              <View style={styles.manualMetaRow}>
-                <Text style={styles.manualMetaText}>{joystickState}</Text>
-                <Text style={[styles.manualMetaText, { color: isVehicleArmed ? COLORS.success : COLORS.danger }]}>
-                  {isVehicleArmed ? "ARMED" : "DISARMED"}
-                </Text>
-                <Text style={styles.manualMetaText}>{vehicleMode}</Text>
-                {virtualJoystick?.commandRateHz ? (
-                  <Text style={styles.manualMetaText}>{virtualJoystick.commandRateHz.toFixed(0)} Hz</Text>
-                ) : null}
-                {virtualJoystick?.lastCmdAgeMs != null ? (
-                  <Text style={styles.manualMetaText}>cmd {virtualJoystick.lastCmdAgeMs.toFixed(0)}ms</Text>
-                ) : null}
-              </View>
-
               <View style={styles.joystickCard}>
                 <ManualJoystick
                   onChange={(vals) => {
@@ -1596,21 +1599,25 @@ export default function ModernHomeUI(props) {
                 ) : null}
               </View>
 
+              {/* Throttle & Steering readout at bottom */}
               {virtualJoystick?.displayIntent ? (
-                <Text style={styles.manualIntentText}>
-                  Throttle {virtualJoystick.displayIntent.throttle >= 0 ? "+" : ""}
-                  {virtualJoystick.displayIntent.throttle.toFixed(2)} · Steering{" "}
-                  {virtualJoystick.displayIntent.steering >= 0 ? "+" : ""}
-                  {virtualJoystick.displayIntent.steering.toFixed(2)}
-                </Text>
-              ) : null}
-
-              <Text style={[styles.manualHintText, !stickEnabled && styles.manualHintTextWarn]}>
-                {manualDriveHint}
-              </Text>
-
-              {virtualJoystick?.stopReason ? (
-                <Text style={styles.manualStopReasonText}>Stop: {virtualJoystick.stopReason}</Text>
+                <View style={styles.joystickReadoutRow}>
+                  <View style={styles.joystickReadoutItem}>
+                    <Text style={styles.joystickReadoutLabel}>THROTTLE</Text>
+                    <Text style={styles.joystickReadoutValue}>
+                      {virtualJoystick.displayIntent.throttle >= 0 ? "+" : ""}
+                      {virtualJoystick.displayIntent.throttle.toFixed(2)}
+                    </Text>
+                  </View>
+                  <View style={styles.joystickReadoutDivider} />
+                  <View style={styles.joystickReadoutItem}>
+                    <Text style={styles.joystickReadoutLabel}>STEERING</Text>
+                    <Text style={styles.joystickReadoutValue}>
+                      {virtualJoystick.displayIntent.steering >= 0 ? "+" : ""}
+                      {virtualJoystick.displayIntent.steering.toFixed(2)}
+                    </Text>
+                  </View>
+                </View>
               ) : null}
             </>
           ) : (
@@ -1722,6 +1729,7 @@ export default function ModernHomeUI(props) {
           visible={mapViewEnabled}
           recenterRoverTrigger={recenterRoverCount}
           recenterPlanTrigger={recenterPlanCount}
+          resetNorthTrigger={resetNorthCount}
           onSelectPoint={props.onSelectPoint}
         />
         ) : renderPlanPreview ? (
@@ -2796,7 +2804,38 @@ const styles = StyleSheet.create({
   },
   joystickOverlayText: { color: "#fff", fontSize: 11, fontWeight: "600" },
 
-  manualActionGroup: { gap: 10 },
+  joystickReadoutRow: {
+    flexDirection: "row",
+    backgroundColor: COLORS.surfaceSolid,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    borderRadius: 12,
+    overflow: "hidden",
+  },
+  joystickReadoutItem: {
+    flex: 1,
+    alignItems: "center",
+    paddingVertical: 10,
+    gap: 4,
+  },
+  joystickReadoutDivider: {
+    width: 1,
+    backgroundColor: COLORS.panelBorder,
+  },
+  joystickReadoutLabel: {
+    color: COLORS.textDim,
+    fontSize: 8,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+  },
+  joystickReadoutValue: {
+    color: COLORS.textMain,
+    fontSize: 15,
+    fontWeight: "700",
+    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+  },
+
   acquireSegment: {
     flexDirection: "row",
     borderRadius: 12,
