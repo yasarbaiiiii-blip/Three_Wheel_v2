@@ -758,17 +758,32 @@ export default function ModernHomeUI(props) {
   // Derived Telemetry Values
   const lat = telemetrySnapshot?.lat?.toFixed(6) ?? "N/A";
   const lon = telemetrySnapshot?.lon?.toFixed(6) ?? "N/A";
-  const gpsFix = telemetrySnapshot?.gps_fix_name ?? "No Fix";
+  // Prefer the human-readable fix name from API, fall back to numeric lookup
+  const gpsFix = telemetrySnapshot?.gps_fix_name
+    ?? (telemetrySnapshot?.gps_fix == null ? "No Fix"
+      : telemetrySnapshot.gps_fix === 0 ? "No Fix"
+      : telemetrySnapshot.gps_fix === 1 ? "No Fix"
+      : telemetrySnapshot.gps_fix === 2 ? "2D Fix"
+      : telemetrySnapshot.gps_fix === 3 ? "3D Fix"
+      : telemetrySnapshot.gps_fix === 4 ? "DGPS"
+      : telemetrySnapshot.gps_fix === 5 ? "RTK Float"
+      : telemetrySnapshot.gps_fix === 6 ? "RTK Fixed"
+      : `Fix ${telemetrySnapshot.gps_fix}`);
   const sats = telemetrySnapshot?.gps_sat ?? 0;
-  const hrms = telemetrySnapshot?.hrms?.toFixed(2) ?? "0.00";
-  const vrms = telemetrySnapshot?.vrms?.toFixed(2) ?? "0.00";
-  const missionStateStr = telemetrySnapshot?.state ?? (missionRunning ? "running" : "idle");
-  const xtrack = telemetrySnapshot?.xtrack_m?.toFixed(2) ?? "0.00";
-  const headingErr = telemetrySnapshot?.heading_err_deg?.toFixed(1) ?? "0.0";
+  const hrms = telemetrySnapshot?.hrms?.toFixed(3) ?? "—";
+  const vrms = telemetrySnapshot?.vrms?.toFixed(3) ?? "—";
+  const missionStateStr = telemetrySnapshot?.mission_state ?? (missionRunning ? "running" : "idle");
+  const xtrack = telemetrySnapshot?.xtrack_m?.toFixed(3) ?? "—";
+  const headingErr = telemetrySnapshot?.heading_err_deg?.toFixed(1) ?? "—";
+  const headingDeg = telemetrySnapshot?.heading_ned_deg?.toFixed(1) ?? "—";
   const roverHeadingDeg = telemetrySnapshot?.heading_ned_deg;
   const hasRoverHeading = roverHeadingDeg != null;
-  const distGoal = telemetrySnapshot?.dist_to_goal_m?.toFixed(1) ?? "0.0";
-  const speed = telemetrySnapshot?.speed_m_s?.toFixed(2) ?? "0.00";
+  const distGoal = telemetrySnapshot?.dist_to_goal_m?.toFixed(2) ?? "—";
+  const speed = telemetrySnapshot?.speed_m_s?.toFixed(2) ?? "—";
+  const measuredSpeed = telemetrySnapshot?.measured_speed_m_s?.toFixed(2) ?? null;
+  const displaySpeed = measuredSpeed ?? speed;
+  const alongTrackSpeed = telemetrySnapshot?.along_track_speed_mps?.toFixed(2) ?? "—";
+  const crossTrackSpeed = telemetrySnapshot?.cross_track_speed_mps?.toFixed(2) ?? "—";
   const rppState = telemetrySnapshot?.rpp_state_name ?? "N/A";
   const fcuConn = systemHealth?.fcu_connected ? "Connected" : "Disconnected";
   const poseAge = telemetrySnapshot?.pose_age_ms ?? 0;
@@ -1418,10 +1433,21 @@ export default function ModernHomeUI(props) {
               <StatusPill label={missionStateStr.toUpperCase()} tone={missionStateTone} pulse={missionStateStr === "running"} />
             </View>
             <View style={styles.statGrid}>
-              <StatTile icon={Route} label="X-Track" value={`${xtrack} m`} accent={COLORS.accentBrand} />
-              <StatTile icon={Navigation} label="Heading Err" value={`${headingErr}°`} accent={COLORS.warning} />
-              <StatTile icon={Target} label="Dist Goal" value={`${distGoal} m`} accent={COLORS.success} />
-              <StatTile icon={Gauge} label="Speed" value={`${speed} m/s`} accent={COLORS.accentBrand} />
+              {/* Cross-track error from xtrack_m */}
+              <StatTile icon={Route} label="X-Track" value={xtrack !== "—" ? `${xtrack} m` : "—"} accent={Math.abs(parseFloat(xtrack) || 0) > 0.05 ? COLORS.danger : COLORS.accentBrand} />
+              {/* Heading direction from heading_ned_deg */}
+              <StatTile icon={Navigation} label="Heading" value={headingDeg !== "—" ? `${headingDeg}°` : "—"} accent={COLORS.accentBrand} />
+              {/* Heading error from heading_err_deg */}
+              <StatTile icon={Navigation} label="Hdg Err" value={headingErr !== "—" ? `${headingErr}°` : "—"} accent={Math.abs(parseFloat(headingErr) || 0) > 10 ? COLORS.danger : COLORS.warning} />
+              {/* Distance to goal from dist_to_goal_m */}
+              <StatTile icon={Target} label="Dist Goal" value={distGoal !== "—" ? `${distGoal} m` : "—"} accent={COLORS.success} />
+              {/* Speed from speed_m_s / measured_speed_m_s */}
+              <StatTile icon={Gauge} label="Speed" value={displaySpeed !== "—" ? `${displaySpeed} m/s` : "—"} accent={COLORS.accentBrand} wide />
+            </View>
+            {/* Along/cross track speeds */}
+            <View style={[styles.statGrid, { marginTop: 6 }]}>
+              <StatTile icon={Route} label="Along-Trk" value={alongTrackSpeed !== "—" ? `${alongTrackSpeed} m/s` : "—"} accent={COLORS.textMuted} />
+              <StatTile icon={Route} label="Cross-Trk" value={crossTrackSpeed !== "—" ? `${crossTrackSpeed} m/s` : "—"} accent={COLORS.textMuted} />
             </View>
           </TelemetryBlock>
 

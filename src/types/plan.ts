@@ -104,6 +104,8 @@ export interface TelemetrySnapshot {
   battery_v?: number | null;
   battery_pct?: number | null;
   gps_fix?: number | null;
+  /** Human-readable GPS fix type name from API, e.g. "RTK Fixed", "Float", "No Fix" */
+  gps_fix_name?: string | null;
   gps_sat?: number | null;
   lat?: number | null;
   lon?: number | null;
@@ -130,5 +132,11 @@ export interface TelemetrySnapshot {
   transport?: string | null;
   transport_healthy?: boolean | null;
   transport_error?: string | null;
+  // Additional fields from /api/telemetry/latest
+  along_track_speed_mps?: number | null;
+  cross_track_speed_mps?: number | null;
+  projection_segment_index?: number | null;
+  gps_safety_ok?: boolean | null;
+  manual_resume_required?: boolean | null;
 }
 

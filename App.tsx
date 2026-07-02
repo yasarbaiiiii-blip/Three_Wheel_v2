@@ -1156,16 +1156,23 @@ export default function App() {
             prev.lat === data.lat &&
             prev.lon === data.lon &&
             prev.heading_ned_deg === data.heading_ned_deg &&
+            prev.xtrack_m === data.xtrack_m &&
+            prev.heading_err_deg === data.heading_err_deg &&
+            prev.dist_to_goal_m === data.dist_to_goal_m &&
+            prev.speed_m_s === data.speed_m_s &&
+            prev.measured_speed_m_s === data.measured_speed_m_s &&
+            prev.along_track_speed_mps === data.along_track_speed_mps &&
+            prev.cross_track_speed_mps === data.cross_track_speed_mps &&
             prev.rpp_state === data.rpp_state &&
+            prev.rpp_state_name === data.rpp_state_name &&
             prev.armed === data.armed &&
             prev.mode === data.mode &&
             prev.battery_pct === data.battery_pct &&
             prev.gps_fix === data.gps_fix &&
+            prev.gps_fix_name === data.gps_fix_name &&
             prev.gps_sat === data.gps_sat &&
             prev.hrms === data.hrms &&
             prev.vrms === data.vrms &&
-            prev.speed_m_s === data.speed_m_s &&
-            prev.measured_speed_m_s === data.measured_speed_m_s &&
             prev.joystick_state === data.joystick_state &&
             prev.joystick_active === data.joystick_active &&
             prev.control_owner === data.control_owner &&
@@ -1882,16 +1889,30 @@ export default function App() {
           pose_age_ms: number;
           rpp_state: number;
           rpp_state_name: string;
+          rpp_debug_age_ms?: number | null;
+          rpp_debug_fresh?: boolean | null;
           armed: boolean;
           mode: string;
           connected: boolean;
           battery_v: number;
           battery_pct: number;
           gps_fix: number;
+          gps_fix_name?: string | null;
           gps_sat: number;
+          hrms?: number | null;
+          vrms?: number | null;
           lat: number;
           lon: number;
           alt: number;
+          spraying?: boolean | null;
+          along_track_speed_mps?: number | null;
+          cross_track_speed_mps?: number | null;
+          projection_segment_index?: number | null;
+          projection_s?: number | null;
+          projection_xtrack_error_m?: number | null;
+          vehicle_state_stale?: boolean | null;
+          gps_safety_ok?: boolean | null;
+          manual_resume_required?: boolean | null;
         }>(`${apiBaseUrl}/api/telemetry/latest`).catch((err) => {
           console.log("telemetry/latest failed:", err);
           return null;
@@ -1920,6 +1941,9 @@ export default function App() {
         pose_age_ms: telemetryRes ? telemetryRes.pose_age_ms : (healthRes ? healthRes.pose_age_ms : 100),
         gps_sat: telemetryRes ? telemetryRes.gps_sat : 12,
         gps_fix: telemetryRes ? telemetryRes.gps_fix : null,
+        gps_fix_name: telemetryRes?.gps_fix_name ?? null,
+        hrms: telemetryRes?.hrms ?? null,
+        vrms: telemetryRes?.vrms ?? null,
         pos_n: telemetryRes ? telemetryRes.pos_n : 0.0,
         pos_e: telemetryRes ? telemetryRes.pos_e : 0.0,
         heading_ned_deg: telemetryRes ? telemetryRes.heading_ned_deg : 0.0,
@@ -1932,6 +1956,12 @@ export default function App() {
         armed: telemetryRes ? telemetryRes.armed : (healthRes ? healthRes.armed : (statusRes.state !== "idle" && statusRes.state !== "error")),
         mode: telemetryRes ? telemetryRes.mode : (healthRes ? healthRes.mode : statusRes.state.toUpperCase()),
         mission_state: statusRes.state,
+        // Additional fields from API
+        along_track_speed_mps: telemetryRes?.along_track_speed_mps ?? null,
+        cross_track_speed_mps: telemetryRes?.cross_track_speed_mps ?? null,
+        projection_segment_index: telemetryRes?.projection_segment_index ?? null,
+        gps_safety_ok: telemetryRes?.gps_safety_ok ?? null,
+        manual_resume_required: telemetryRes?.manual_resume_required ?? null,
       } as any);
 
       if (statusRes.state === "paused") {
