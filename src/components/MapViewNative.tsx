@@ -307,11 +307,22 @@ export function MapViewNative(props: MapViewProps) {
   // rAF coalescing for preview updates — avoids calling setPreviewItemsGeo 60×/sec.
   const previewRafRef = useRef<number | null>(null);
 
+  // Stable fallback origin so the plan doesn't jitter with every telemetry tick during preview
+  const [stableFallbackOrigin, setStableFallbackOrigin] = useState<{lat: number, lon: number} | null>(null);
+
   // ── Templates floating origin (parity with legacy) ──
   const [templatesFloatingOrigin, setTemplatesFloatingOrigin] = useState<{
     lat: number;
     lon: number;
   } | null>(null);
+
+  useEffect(() => {
+    if (!stableFallbackOrigin && telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null) {
+      setStableFallbackOrigin({ lat: telemetrySnapshot.lat, lon: telemetrySnapshot.lon });
+    } else if (!stableFallbackOrigin && templatesFloatingOrigin) {
+      setStableFallbackOrigin(templatesFloatingOrigin);
+    }
+  }, [telemetrySnapshot?.lat, telemetrySnapshot?.lon, templatesFloatingOrigin, stableFallbackOrigin]);
 
   useEffect(() => {
     if (!visible || mode !== "templates") {
@@ -323,6 +334,10 @@ export function MapViewNative(props: MapViewProps) {
     }
     if (telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null) {
       setTemplatesFloatingOrigin({ lat: telemetrySnapshot.lat, lon: telemetrySnapshot.lon });
+    } else if (stableFallbackOrigin) {
+      setTemplatesFloatingOrigin(stableFallbackOrigin);
+    } else {
+      setTemplatesFloatingOrigin({ lat: 0, lon: 0 });
     }
   }, [
     visible,
@@ -332,6 +347,7 @@ export function MapViewNative(props: MapViewProps) {
     telemetrySnapshot?.lat,
     telemetrySnapshot?.lon,
     templatesFloatingOrigin,
+    stableFallbackOrigin,
   ]);
 
   // ── Projection frame + origin (reuse existing utilities verbatim) ──
@@ -350,17 +366,6 @@ export function MapViewNative(props: MapViewProps) {
       }),
     [mapGeometryFrame, mode, previewAnchor, alignedRefPoints, stagedVerified, autoOriginReference, autoOriginEnabled]
   );
-
-  // Stable fallback origin so the plan doesn't jitter with every telemetry tick during preview
-  const [stableFallbackOrigin, setStableFallbackOrigin] = useState<{lat: number, lon: number} | null>(null);
-
-  useEffect(() => {
-    if (!stableFallbackOrigin && telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null) {
-      setStableFallbackOrigin({ lat: telemetrySnapshot.lat, lon: telemetrySnapshot.lon });
-    } else if (!stableFallbackOrigin && templatesFloatingOrigin) {
-      setStableFallbackOrigin(templatesFloatingOrigin);
-    }
-  }, [telemetrySnapshot?.lat, telemetrySnapshot?.lon, templatesFloatingOrigin, stableFallbackOrigin]);
 
   const projectionOrigin = useMemo((): MapProjectionOrigin | null => {
     const resolved = resolveMapProjectionOrigin(geometryFrame, {

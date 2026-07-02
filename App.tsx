@@ -5688,6 +5688,13 @@ function PlanPreview({
   isPlanEditingMode = false,
   visualAlignmentItem,
   setVisualAlignmentItem,
+  boundaryMode = false,
+  boundaryWidth,
+  boundaryHeight,
+  boundaryPosition,
+  onMoveBoundary,
+  sketchMode = false,
+  showBoundaryPoints = true,
   mapMode = "fields",
   recenterRoverTrigger,
   recenterPlanTrigger,
@@ -5723,6 +5730,13 @@ function PlanPreview({
   isPlanEditingMode?: boolean;
   visualAlignmentItem?: PlacedItem | null;
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
+  boundaryMode?: boolean;
+  boundaryWidth?: number;
+  boundaryHeight?: number;
+  boundaryPosition?: { x: number; y: number };
+  onMoveBoundary?: (x: number, y: number) => void;
+  sketchMode?: boolean;
+  showBoundaryPoints?: boolean;
   mapMode?: "fields" | "templates";
   recenterRoverTrigger?: number;
   recenterPlanTrigger?: number;
@@ -6271,7 +6285,13 @@ function PlanPreview({
       >
         {mapViewEnabled ? (
           <MapView
-            mode={isEditablePlacedItemMode ? "templates" : "fields"}
+            mode={isEditablePlacedItemMode || boundaryMode ? "templates" : "fields"}
+            boundaryWidth={boundaryWidth}
+            boundaryHeight={boundaryHeight}
+            boundaryPosition={boundaryPosition}
+            onMoveBoundary={onMoveBoundary}
+            sketchMode={sketchMode}
+            showBoundaryPoints={showBoundaryPoints}
             placedItems={isEditablePlacedItemMode && visualAlignmentItem ? [visualAlignmentItem] : []}
             selectedItemIds={
               isEditablePlacedItemMode && visualSelected && placedItemId ? [placedItemId] : []

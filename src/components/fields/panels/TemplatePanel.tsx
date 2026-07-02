@@ -16,12 +16,37 @@ type TemplatePanelProps = {
   apiBaseUrl: string;
   onRefreshPaths: () => void;
   onSelectPath: (name: string) => void;
+  boundaryMode?: boolean;
+  onToggleBoundaryMode?: (enabled: boolean) => void;
+  boundaryWidthStr?: string;
+  onChangeBoundaryWidthStr?: (val: string) => void;
+  boundaryHeightStr?: string;
+  onChangeBoundaryHeightStr?: (val: string) => void;
+  onApplyBoundary?: (w: number, h: number) => void;
+  sketchMode?: boolean;
+  onToggleSketchMode?: (enabled: boolean) => void;
+  showSnapPoints?: boolean;
+  onToggleShowSnapPoints?: (enabled: boolean) => void;
 };
 
-export function TemplatePanel({ apiBaseUrl, onRefreshPaths, onSelectPath }: TemplatePanelProps) {
-  const [boundaryMode, setBoundaryMode] = useState(false);
-  const [sketchMode, setSketchMode] = useState(false);
-  const [showSnapPoints, setShowSnapPoints] = useState(true);
+export function TemplatePanel(props: TemplatePanelProps) {
+  const { apiBaseUrl, onRefreshPaths, onSelectPath } = props;
+  const [internalBoundaryMode, setInternalBoundaryMode] = useState(false);
+  const [internalSketchMode, setInternalSketchMode] = useState(false);
+  const [internalShowSnapPoints, setInternalShowSnapPoints] = useState(true);
+  const [internalWidthStr, setInternalWidthStr] = useState("4.0");
+  const [internalHeightStr, setInternalHeightStr] = useState("3.0");
+
+  const boundaryMode = props.boundaryMode ?? internalBoundaryMode;
+  const setBoundaryMode = props.onToggleBoundaryMode ?? setInternalBoundaryMode;
+  const sketchMode = props.sketchMode ?? internalSketchMode;
+  const setSketchMode = props.onToggleSketchMode ?? setInternalSketchMode;
+  const showSnapPoints = props.showSnapPoints ?? internalShowSnapPoints;
+  const setShowSnapPoints = props.onToggleShowSnapPoints ?? setInternalShowSnapPoints;
+  const widthStr = props.boundaryWidthStr ?? internalWidthStr;
+  const setWidthStr = props.onChangeBoundaryWidthStr ?? setInternalWidthStr;
+  const heightStr = props.boundaryHeightStr ?? internalHeightStr;
+  const setHeightStr = props.onChangeBoundaryHeightStr ?? setInternalHeightStr;
   const [charactersEnabled, setCharactersEnabled] = useState(false);
   const [previewText, setPreviewText] = useState("HELLO");
   const [fontStyle, setFontStyle] = useState<FontStyle>("smooth");
@@ -90,8 +115,90 @@ export function TemplatePanel({ apiBaseUrl, onRefreshPaths, onSelectPath }: Temp
         <Switch value={boundaryMode} onValueChange={setBoundaryMode} trackColor={{ false: FIELDS_COLORS.panelBorder, true: FIELDS_COLORS.tealDark }} />
       </View>
       {boundaryMode ? (
-        <>
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+        <View
+          style={{
+            padding: 12,
+            borderRadius: 12,
+            backgroundColor: FIELDS_COLORS.surfaceSolid,
+            borderWidth: 1,
+            borderColor: FIELDS_COLORS.panelBorder,
+            gap: 12,
+          }}
+        >
+          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.5 }}>
+            Boundary Dimensions
+          </Text>
+
+          <View style={{ flexDirection: "row", gap: 10 }}>
+            <View style={{ flex: 1, gap: 4 }}>
+              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontWeight: "700" }}>Width (m)</Text>
+              <TextInput
+                style={{
+                  height: 40,
+                  borderWidth: 1,
+                  borderColor: FIELDS_COLORS.panelBorder,
+                  borderRadius: 8,
+                  paddingHorizontal: 10,
+                  color: FIELDS_COLORS.textMain,
+                  backgroundColor: FIELDS_COLORS.cardSolid,
+                  fontSize: 13,
+                  fontWeight: "600",
+                }}
+                value={widthStr}
+                onChangeText={setWidthStr}
+                keyboardType="numeric"
+                placeholder="4.0"
+                placeholderTextColor={FIELDS_COLORS.textDim}
+              />
+            </View>
+            <View style={{ flex: 1, gap: 4 }}>
+              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontWeight: "700" }}>Height (m)</Text>
+              <TextInput
+                style={{
+                  height: 40,
+                  borderWidth: 1,
+                  borderColor: FIELDS_COLORS.panelBorder,
+                  borderRadius: 8,
+                  paddingHorizontal: 10,
+                  color: FIELDS_COLORS.textMain,
+                  backgroundColor: FIELDS_COLORS.cardSolid,
+                  fontSize: 13,
+                  fontWeight: "600",
+                }}
+                value={heightStr}
+                onChangeText={setHeightStr}
+                keyboardType="numeric"
+                placeholder="3.0"
+                placeholderTextColor={FIELDS_COLORS.textDim}
+              />
+            </View>
+          </View>
+
+          <Pressable
+            onPress={() => {
+              const w = parseFloat(widthStr);
+              const h = parseFloat(heightStr);
+              if (!Number.isFinite(w) || w <= 0 || !Number.isFinite(h) || h <= 0) {
+                Alert.alert("Invalid Dimensions", "Please enter valid positive numbers for width and height.");
+                return;
+              }
+              props.onApplyBoundary?.(w, h);
+            }}
+            style={({ pressed }) => ({
+              height: 40,
+              borderRadius: 8,
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: FIELDS_COLORS.tealDark,
+              opacity: pressed ? 0.85 : 1,
+            })}
+          >
+            <Text style={{ color: "#fff", fontSize: 13, fontWeight: "800" }}>
+              Apply to Map
+            </Text>
+          </Pressable>
+
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingTop: 4 }}>
             <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>Sketch Mode</Text>
             <Switch value={sketchMode} onValueChange={setSketchMode} trackColor={{ false: FIELDS_COLORS.panelBorder, true: FIELDS_COLORS.tealDark }} />
           </View>
@@ -99,7 +206,7 @@ export function TemplatePanel({ apiBaseUrl, onRefreshPaths, onSelectPath }: Temp
             <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>Show Snap Points</Text>
             <Switch value={showSnapPoints} onValueChange={setShowSnapPoints} trackColor={{ false: FIELDS_COLORS.panelBorder, true: FIELDS_COLORS.tealDark }} />
           </View>
-        </>
+        </View>
       ) : null}
 
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>

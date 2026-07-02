@@ -1574,6 +1574,8 @@ export function MapViewLeaflet({
     }
     if (telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null) {
       setTemplatesFloatingOrigin({ lat: telemetrySnapshot.lat, lon: telemetrySnapshot.lon });
+    } else {
+      setTemplatesFloatingOrigin({ lat: 0, lon: 0 });
     }
   }, [
     visible,

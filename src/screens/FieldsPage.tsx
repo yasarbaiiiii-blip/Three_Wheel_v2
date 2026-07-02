@@ -111,6 +111,13 @@ export type FieldsPageProps = {
     isPlanEditingMode?: boolean;
     visualAlignmentItem?: PlacedItem | null;
     setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
+    boundaryMode?: boolean;
+    boundaryWidth?: number;
+    boundaryHeight?: number;
+    boundaryPosition?: { x: number; y: number };
+    onMoveBoundary?: (x: number, y: number) => void;
+    sketchMode?: boolean;
+    showBoundaryPoints?: boolean;
   }) => React.ReactNode;
 };
 
@@ -189,6 +196,28 @@ export function FieldsPage(props: FieldsPageProps) {
   const [refPoints, setRefPoints] = useState<RefPoint[]>([]);
   const [missionSummary, setMissionSummary] = useState<any | null>(null);
   const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "single_point" | "visual_alignment">("least_squares");
+
+  const [boundaryMode, setBoundaryMode] = useState(false);
+  const [boundaryWidthStr, setBoundaryWidthStr] = useState("4.0");
+  const [boundaryHeightStr, setBoundaryHeightStr] = useState("3.0");
+  const [activeBoundaryWidth, setActiveBoundaryWidth] = useState<number | null>(null);
+  const [activeBoundaryHeight, setActiveBoundaryHeight] = useState<number | null>(null);
+  const [sketchMode, setSketchMode] = useState(false);
+  const [showSnapPoints, setShowSnapPoints] = useState(true);
+  const [boundaryPosition, setBoundaryPosition] = useState<{ x: number; y: number } | null>(null);
+
+  const handleToggleBoundaryMode = useCallback((enabled: boolean) => {
+    setBoundaryMode(enabled);
+    if (!enabled) {
+      setActiveBoundaryWidth(null);
+      setActiveBoundaryHeight(null);
+    }
+  }, []);
+
+  const handleApplyBoundary = useCallback((w: number, h: number) => {
+    setActiveBoundaryWidth(w);
+    setActiveBoundaryHeight(h);
+  }, []);
 
   const {
     activeAccordion,
@@ -288,6 +317,17 @@ export function FieldsPage(props: FieldsPageProps) {
             apiBaseUrl={apiBaseUrl}
             onRefreshPaths={onRefreshPaths}
             onSelectPath={onSelectPath}
+            boundaryMode={boundaryMode}
+            onToggleBoundaryMode={handleToggleBoundaryMode}
+            boundaryWidthStr={boundaryWidthStr}
+            onChangeBoundaryWidthStr={setBoundaryWidthStr}
+            boundaryHeightStr={boundaryHeightStr}
+            onChangeBoundaryHeightStr={setBoundaryHeightStr}
+            onApplyBoundary={handleApplyBoundary}
+            sketchMode={sketchMode}
+            onToggleSketchMode={setSketchMode}
+            showSnapPoints={showSnapPoints}
+            onToggleShowSnapPoints={setShowSnapPoints}
           />
         );
       case "planPreview":
@@ -450,6 +490,13 @@ export function FieldsPage(props: FieldsPageProps) {
           isPlanEditingMode,
           visualAlignmentItem,
           setVisualAlignmentItem,
+          boundaryMode,
+          boundaryWidth: boundaryMode && activeBoundaryWidth ? activeBoundaryWidth : undefined,
+          boundaryHeight: boundaryMode && activeBoundaryHeight ? activeBoundaryHeight : undefined,
+          boundaryPosition: boundaryPosition ?? undefined,
+          onMoveBoundary: (x: number, y: number) => setBoundaryPosition({ x, y }),
+          sketchMode,
+          showBoundaryPoints: showSnapPoints,
         })}
       </View>
 
