@@ -1654,14 +1654,36 @@ export default function ModernHomeUI(props) {
               </View>
 
               <View style={styles.missionActionsGrid}>
-                <MissionActionBtn
-                  icon={missionRunning ? Square : Play}
-                  label={missionRunning ? "Stop Mission" : "Start Mission"}
-                  variant={missionRunning ? "danger" : "primary"}
-                  fullWidth
-                  big
-                  onPress={missionRunning ? onStopPlan : onStartPlan}
-                />
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 10, width: "100%" }}>
+                  <View style={{ flex: 1 }}>
+                    <MissionActionBtn
+                      icon={missionRunning ? Square : Play}
+                      label={missionRunning ? "Stop Mission" : "Start Mission"}
+                      variant={missionRunning ? "danger" : "primary"}
+                      fullWidth
+                      big
+                      onPress={missionRunning ? onStopPlan : onStartPlan}
+                    />
+                  </View>
+                  {!missionRunning ? (
+                    <Pressable
+                      onPress={onToggleAutoOrigin}
+                      accessibilityLabel="Auto Origin Checkbox"
+                      style={{
+                        width: 48,
+                        height: 48,
+                        borderRadius: 12,
+                        backgroundColor: autoOrigin ? "rgba(16, 185, 129, 0.15)" : COLORS.surfaceSolid,
+                        borderWidth: 1.5,
+                        borderColor: autoOrigin ? "#10b981" : COLORS.panelBorder,
+                        justifyContent: "center",
+                        alignItems: "center",
+                      }}
+                    >
+                      {autoOrigin ? <Check color="#10b981" size={22} strokeWidth={3} /> : null}
+                    </Pressable>
+                  ) : null}
+                </View>
                 <MissionActionBtn
                   icon={Pause}
                   label="Pause"

@@ -4988,6 +4988,12 @@ function ConnectionView({
                 }}
               />
 
+              {wsError ? (
+                <View style={{ padding: 12, borderRadius: 14, backgroundColor: "#fef2f2", borderWidth: 1, borderColor: "#fecaca", marginTop: 4 }}>
+                  <Text style={{ color: "#b91c1c", fontWeight: "700" }}>{wsError}</Text>
+                </View>
+              ) : null}
+
               <View style={{ flexDirection: "row", gap: 10, flexWrap: "wrap" }}>
                 <Pressable
                   onPress={() => onSelect(manualHost)}
