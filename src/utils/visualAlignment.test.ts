@@ -63,4 +63,33 @@ describe("visualAlignment", () => {
       expect(fromGps.east).toBeCloseTo(preview.east, 6);
     }
   });
+
+  it("supports originDxfNorth and originDxfEast offsets", () => {
+    const item = { x: 5, y: -3, rotation: 0, scale: 1 };
+    const corners = [{ x: 10, y: 20 }];
+    const originLat = 28.6139;
+    const originLon = 77.209;
+    const originDxfNorth = 8;
+    const originDxfEast = 18;
+
+    const refs = buildVisualAlignmentRefPoints(
+      corners,
+      item,
+      originLat,
+      originLon,
+      originDxfNorth,
+      originDxfEast
+    );
+    const ref = refs[0];
+    expect(ref.dxf_y).toBeCloseTo(10, 12);
+    expect(ref.dxf_x).toBeCloseTo(20, 12);
+
+    const placed = transformVisualDxfPoint(10, 20, item); // north: 7, east: 25
+    const expectedLocalNorth = placed.north - originDxfNorth; // 7 - 8 = -1
+    const expectedLocalEast = placed.east - originDxfEast; // 25 - 18 = 7
+
+    const local = projectGpsToLocalMeters(ref.lat, ref.lon, originLat, originLon);
+    expect(local.north).toBeCloseTo(expectedLocalNorth, 6);
+    expect(local.east).toBeCloseTo(expectedLocalEast, 6);
+  });
 });

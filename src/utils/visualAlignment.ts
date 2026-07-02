@@ -72,11 +72,13 @@ export function buildVisualAlignmentRefPoints(
   corners: Array<{ x: number; y: number }>,
   item: VisualAlignmentTransform,
   originLat: number,
-  originLon: number
+  originLon: number,
+  originDxfNorth: number = 0,
+  originDxfEast: number = 0
 ): VisualAlignmentRefPoint[] {
   return corners.map((corner) => {
     const placed = transformVisualDxfPoint(corner.x, corner.y, item);
-    const gps = projectLocalMetersToGps(placed.north, placed.east, originLat, originLon);
+    const gps = projectLocalMetersToGps(placed.north - originDxfNorth, placed.east - originDxfEast, originLat, originLon);
     return {
       // RefPoint API: dxf_y = north, dxf_x = east (see handleSelectPoint / backend swap).
       dxf_x: corner.y,

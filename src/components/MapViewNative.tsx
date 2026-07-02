@@ -383,7 +383,11 @@ export function MapViewNative(props: MapViewProps) {
     });
     if (resolved) return resolved;
 
-    if (mode === "templates" && templatesFloatingOrigin) {
+    const isPlanManipulation = placedItems?.some(
+      (it) => it.id === "visual-alignment-group" || it.id === "plan-editing-group"
+    );
+
+    if (mode === "templates" && !isPlanManipulation && templatesFloatingOrigin) {
       return {
         frame: "RAW_DESIGN",
         originLat: templatesFloatingOrigin.lat,
@@ -393,12 +397,13 @@ export function MapViewNative(props: MapViewProps) {
       };
     }
 
-    // Fallback: If no origin is available (e.g. previewing unaligned plans in fields mode),
+    // Fallback: If no origin is available (e.g. previewing unaligned plans in fields mode or visual alignment),
     // place the plan at the first seen floating origin (rover's position) so it renders on map.
     // If there is no rover telemetry, fallback to 0,0 (Null Island) so we can at least see the plan.
-    if (mode === "fields" && lines.length > 0) {
-      const fallback = stableFallbackOrigin || { lat: 0, lon: 0 };
-      const firstLine = lines[0];
+    if ((mode === "fields" || isPlanManipulation) && (lines.length > 0 || isPlanManipulation)) {
+      const fallback = stableFallbackOrigin || templatesFloatingOrigin || { lat: 0, lon: 0 };
+      const planLines = lines.length > 0 ? lines : (placedItems?.[0]?.lines ?? []);
+      const firstLine = planLines[0];
       const startN = firstLine?.from?.x ?? 0;
       const startE = firstLine?.from?.y ?? 0;
 
@@ -425,6 +430,7 @@ export function MapViewNative(props: MapViewProps) {
     templatesFloatingOrigin,
     stableFallbackOrigin,
     lines, // We use lines to find the center/start
+    placedItems,
   ]);
 
   // ── Stable primitive signatures (perf) ──
