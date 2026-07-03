@@ -1,5 +1,3 @@
-import circle from "@turf/circle";
-
 import type { DesignPreviewAnchor } from "../types/designDocument";
 import type { PlanLine } from "../types/plan";
 import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
@@ -139,28 +137,14 @@ export function projectPlanLineToGpsSegments(
   line: PlanLine,
   origin: MapProjectionOrigin
 ): [number, number][] {
-  if (isCircleLikeLine(line) || isCurveEntity(line)) {
+  const isCurve = isCircleLikeLine(line) || isCurveEntity(line);
+
+  if (isCurve) {
     const curve = getCurveGeometry(line);
     if (curve) {
-      const center = projectPlanNorthEastToGps(
-        curve.centerNorth,
-        curve.centerEast,
-        origin
-      );
-      if (Number.isFinite(center.lat) && Number.isFinite(center.lon) && curve.radius > 0) {
-        try {
-          const ring = circle([center.lon, center.lat], curve.radius, {
-            steps: MAP_CIRCLE_STEPS,
-            units: "meters",
-          });
-          const coords = ring.geometry.coordinates[0] ?? [];
-          if (coords.length >= 2) {
-            return coords.map(([lon, lat]) => [lat, lon] as [number, number]);
-          }
-        } catch {
-          // Fall through to parametric NED samples below.
-        }
-      }
+      // Use the same angle-respecting NED samples as the SVG preview. This keeps
+      // CIRCLE/ARC rendering consistent across the canvas and native Mapbox
+      // previews, including the exact start/end angles and closure point.
       const sampled = projectCurveSamplesToGps(line, origin);
       if (sampled.length >= 2) return sampled;
     }

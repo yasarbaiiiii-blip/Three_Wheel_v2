@@ -80,6 +80,8 @@ const LAYER_COLORS: Record<string, string> = {
   extension: "#8b5cf6",
 };
 const DEFAULT_LINE_COLOR = "#0f172a";
+const PLAN_SOURCE_MAX_ZOOM = 22;
+const PLAN_SOURCE_TOLERANCE = 0;
 
 /** Colour for a plan line layer, with a safe fallback for unknown values. */
 function colorForLayer(layer: string): string {
@@ -130,6 +132,13 @@ function pointFeature(
     properties,
     geometry: { type: "Point", coordinates: coord },
   };
+}
+
+function isClosedCoordRing(coords: Coord[]): boolean {
+  if (coords.length < 4) return false;
+  const first = coords[0];
+  const last = coords[coords.length - 1];
+  return Math.abs(first[0] - last[0]) < 1e-12 && Math.abs(first[1] - last[1]) < 1e-12;
 }
 
 /** A looping pulsing dot used for the next-target waypoint (parity with the
@@ -487,6 +496,7 @@ export function MapViewNative(props: MapViewProps) {
             id: line.id,
             layer: line.layer,
             color: colorForLayer(line.layer),
+            closedRing: isClosedCoordRing(coords),
           })
         );
       }
@@ -523,6 +533,7 @@ export function MapViewNative(props: MapViewProps) {
       return { line: featureCollection([]), corners: featureCollection([]) };
     }
     const coords = segs.map(([lat, lon]) => toMapboxCoord(lat, lon));
+    const closedRing = isClosedCoordRing(coords);
     const cornerAnchors = isCurveEntity(selected) || isCircleLikeLine(selected)
       ? getCurveSelectionAnchors(selected).map((pt) => {
           const gps = projectPlanNorthEastToGps(pt.north, pt.east, projectionOrigin);
@@ -531,7 +542,7 @@ export function MapViewNative(props: MapViewProps) {
       : coords.map((c) => pointFeature(c));
     const corners = cornerAnchors;
     return {
-      line: featureCollection([lineFeature(coords)]),
+      line: featureCollection([lineFeature(coords, { closedRing })]),
       corners: featureCollection(corners),
     };
   }, [mode, originSig, selectedLineId, lines]);
@@ -1354,9 +1365,15 @@ export function MapViewNative(props: MapViewProps) {
         />
 
         {/* ── Plan lines (Fields) ── */}
-        <ShapeSource id="plan-lines" shape={planLinesFC}>
+        <ShapeSource
+          id="plan-lines"
+          shape={planLinesFC}
+          maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
+          tolerance={PLAN_SOURCE_TOLERANCE}
+        >
           <LineLayer
-            id="plan-lines-layer"
+            id="plan-lines-open-layer"
+            filter={["!=", ["get", "closedRing"], true]}
             style={{
               lineColor: ["get", "color"],
               lineWidth: 2,
@@ -1365,15 +1382,37 @@ export function MapViewNative(props: MapViewProps) {
               lineJoin: "round",
             }}
           />
+          <LineLayer
+            id="plan-lines-closed-layer"
+            filter={["==", ["get", "closedRing"], true]}
+            style={{
+              lineColor: ["get", "color"],
+              lineWidth: 2,
+              lineOpacity: 0.85,
+              lineCap: "butt",
+              lineJoin: "round",
+            }}
+          />
         </ShapeSource>
 
         {/* ── Start-direction arrow rendered below as a rotated MarkerView ── */}
 
         {/* ── Fields selection highlight + corner points ── */}
-        <ShapeSource id="selected-line" shape={selectionFC.line}>
+        <ShapeSource
+          id="selected-line"
+          shape={selectionFC.line}
+          maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
+          tolerance={PLAN_SOURCE_TOLERANCE}
+        >
           <LineLayer
-            id="selected-line-layer"
+            id="selected-line-open-layer"
+            filter={["!=", ["get", "closedRing"], true]}
             style={{ lineColor: "#ef4444", lineWidth: 4, lineCap: "round", lineJoin: "round" }}
+          />
+          <LineLayer
+            id="selected-line-closed-layer"
+            filter={["==", ["get", "closedRing"], true]}
+            style={{ lineColor: "#ef4444", lineWidth: 4, lineCap: "butt", lineJoin: "round" }}
           />
         </ShapeSource>
         <ShapeSource id="corner-points" shape={selectionFC.corners}>

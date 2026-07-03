@@ -1,7 +1,7 @@
 import type { DxfEntity, DxfPoint, PlanLine } from "../types/plan";
 
-export const MAP_CIRCLE_STEPS = 128;
-export const MAP_ARC_STEPS = 192;
+export const MAP_CIRCLE_STEPS = 256;
+export const MAP_ARC_STEPS = 256;
 export const SVG_CIRCLE_STEPS = 256;
 
 export type PlanBoundingBox = {
@@ -46,18 +46,28 @@ export function isCurveEntity(line: PlanLine): boolean {
 
 /** True when the line should render as a smooth closed circle (entity tag or fitted preview). */
 export function isCircleLikeLine(line: PlanLine): boolean {
-  if (isCircleEntity(line)) return true;
+  const entityType = normalizeCurveEntityType(line.entity?.entity_type);
+  if (entityType === "circle") return true;
+  if (entityType === "arc") return false;
   const points = line.entity?.preview_points ?? [];
   if (points.length < 8) return false;
   return inferCurveGeometryFromPreviewPoints(points, "circle") != null;
 }
 
 function readGeometryFields(geom: Record<string, unknown>) {
+  // Backend /entities responses store the center as a [north, east] tuple
+  // (see path_engine/parsers/dxf_parser.py: `"center": (center.y * s, center.x * s)`)
+  // rather than named cx/cy fields — read that shape first so real API
+  // geometry is used directly instead of falling back to point-fit inference.
+  const centerTuple = Array.isArray(geom.center) && geom.center.length === 2
+    ? (geom.center as unknown[])
+    : null;
+
   const centerNorth = coerceFinite(
-    geom.centerNorth ?? geom.center_north ?? geom.cy ?? geom.north ?? geom.y
+    geom.centerNorth ?? geom.center_north ?? geom.cy ?? geom.north ?? geom.y ?? centerTuple?.[0]
   );
   const centerEast = coerceFinite(
-    geom.centerEast ?? geom.center_east ?? geom.cx ?? geom.east ?? geom.x
+    geom.centerEast ?? geom.center_east ?? geom.cx ?? geom.east ?? geom.x ?? centerTuple?.[1]
   );
   const radius = coerceFinite(geom.radius ?? geom.r);
   const startAngle = coerceFinite(geom.startAngle ?? geom.start_angle) ?? 0;
@@ -97,7 +107,7 @@ function fitCircleFromPoints(points: DxfPoint[]): CurveGeometry | null {
   return { centerNorth, centerEast, radius, startAngle: 0, endAngle: FULL_CIRCLE_SWEEP };
 }
 
-/** Infer a circle/arc from tessellated preview_points (common in API entities). */
+/** Infer closed-circle geometry from tessellated preview_points (common in API entities). */
 export function inferCurveGeometryFromPreviewPoints(
   points: DxfPoint[],
   entityType: string
@@ -106,31 +116,13 @@ export function inferCurveGeometryFromPreviewPoints(
   if (!fitted) return null;
 
   const normalizedType = normalizeCurveEntityType(entityType);
-  if (
-    normalizedType === "circle" ||
-    isClosedPointRing(points, fitted.radius) ||
-    points.length >= 8
-  ) {
+  if (normalizedType === "circle" || isClosedPointRing(points, fitted.radius)) {
     return fitted;
   }
 
-  if (normalizedType === "arc" && points.length >= 2) {
-    const start = points[0];
-    const end = points[points.length - 1];
-    const startAngle =
-      (Math.atan2(start.north - fitted.centerNorth, start.east - fitted.centerEast) * 180) / Math.PI;
-    const endAngle =
-      (Math.atan2(end.north - fitted.centerNorth, end.east - fitted.centerEast) * 180) / Math.PI;
-    const sweep = normalizedArcSweep(startAngle, endAngle);
-    if (sweep < FULL_CIRCLE_SWEEP - 10) {
-      return {
-        centerNorth: fitted.centerNorth,
-        centerEast: fitted.centerEast,
-        radius: fitted.radius,
-        startAngle,
-        endAngle,
-      };
-    }
+  if (normalizedType === "arc") return null;
+
+  if (points.length >= 8) {
     return fitted;
   }
 
@@ -359,12 +351,21 @@ export function sampleCurveEntityPoints(
   const sweep = normalizedArcSweep(curve.startAngle, curve.endAngle);
   const circleSteps = mapMode ? MAP_CIRCLE_STEPS : steps;
   const arcSteps = mapMode ? MAP_ARC_STEPS : steps;
-  const count = isFullCircleCurve(line, curve)
+  const isFullCircle = isFullCircleCurve(line, curve);
+  const count = isFullCircle
     ? Math.max(circleSteps, 32)
     : Math.max(8, Math.ceil((sweep / FULL_CIRCLE_SWEEP) * arcSteps));
   const points: DxfPoint[] = [];
 
   for (let i = 0; i <= count; i++) {
+    // For a full circle, reuse the first sample exactly at closure instead of
+    // recomputing sin/cos at startAngle+360 — those can differ from the
+    // startAngle result by a few ULPs, which is enough for downstream
+    // closed-ring detection (map rendering) to miss the closure.
+    if (isFullCircle && i === count) {
+      points.push(points[0]);
+      break;
+    }
     const angle = curve.startAngle + (sweep * i) / count;
     points.push(curvePointAtAngle(curve, angle));
   }
