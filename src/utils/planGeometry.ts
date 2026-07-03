@@ -1,4 +1,5 @@
 import type { PlanLine } from "../types/plan";
+export { computePlanBoundingBox, computePlanBoundingBoxLegacy } from "./curveGeometry";
 
 const PRIMARY_ENTITY_TYPES = new Set(["line", "arc", "circle"]);
 

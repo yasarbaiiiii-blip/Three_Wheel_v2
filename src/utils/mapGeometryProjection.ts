@@ -1,6 +1,16 @@
+import circle from "@turf/circle";
+
 import type { DesignPreviewAnchor } from "../types/designDocument";
 import type { PlanLine } from "../types/plan";
 import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
+import {
+  getCurveGeometry,
+  getPlanLineRenderPoints,
+  isCircleLikeLine,
+  isCurveEntity,
+  MAP_CIRCLE_STEPS,
+  sampleCurveEntityPoints,
+} from "./curveGeometry";
 import { projectLocalMetersToGps } from "./visualAlignment";
 
 export type MapProjectionOrigin = {
@@ -113,35 +123,58 @@ export function projectPlanNorthEastToGps(
   );
 }
 
+function projectCurveSamplesToGps(
+  line: PlanLine,
+  origin: MapProjectionOrigin
+): [number, number][] {
+  const samples = sampleCurveEntityPoints(line, MAP_CIRCLE_STEPS, true);
+  if (samples.length < 2) return [];
+  return samples.map((pt) => {
+    const gps = projectPlanNorthEastToGps(pt.north, pt.east, origin);
+    return [gps.lat, gps.lon] as [number, number];
+  });
+}
+
 export function projectPlanLineToGpsSegments(
   line: PlanLine,
   origin: MapProjectionOrigin
 ): [number, number][] {
-  const coords: [number, number][] = [];
-
-  if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
-    for (const pt of line.entity.preview_points) {
-      const gps = projectPlanNorthEastToGps(pt.north, pt.east, origin);
-      coords.push([gps.lat, gps.lon]);
+  if (isCircleLikeLine(line) || isCurveEntity(line)) {
+    const curve = getCurveGeometry(line);
+    if (curve) {
+      const center = projectPlanNorthEastToGps(
+        curve.centerNorth,
+        curve.centerEast,
+        origin
+      );
+      if (Number.isFinite(center.lat) && Number.isFinite(center.lon) && curve.radius > 0) {
+        try {
+          const ring = circle([center.lon, center.lat], curve.radius, {
+            steps: MAP_CIRCLE_STEPS,
+            units: "meters",
+          });
+          const coords = ring.geometry.coordinates[0] ?? [];
+          if (coords.length >= 2) {
+            return coords.map(([lon, lat]) => [lat, lon] as [number, number]);
+          }
+        } catch {
+          // Fall through to parametric NED samples below.
+        }
+      }
+      const sampled = projectCurveSamplesToGps(line, origin);
+      if (sampled.length >= 2) return sampled;
     }
-    return coords;
   }
 
-  if (
-    line.from &&
-    line.to &&
-    Number.isFinite(line.from.x) &&
-    Number.isFinite(line.from.y) &&
-    Number.isFinite(line.to.x) &&
-    Number.isFinite(line.to.y)
-  ) {
-    const fromGps = projectPlanNorthEastToGps(line.from.x, line.from.y, origin);
-    const toGps = projectPlanNorthEastToGps(line.to.x, line.to.y, origin);
-    coords.push([fromGps.lat, fromGps.lon]);
-    coords.push([toGps.lat, toGps.lon]);
+  const renderPoints = getPlanLineRenderPoints(line, true);
+  if (renderPoints.length < 2) {
+    return [];
   }
 
-  return coords;
+  return renderPoints.map((pt) => {
+    const gps = projectPlanNorthEastToGps(pt.north, pt.east, origin);
+    return [gps.lat, gps.lon] as [number, number];
+  });
 }
 
 /** Default map tile centre when no mission geometry origin is available. */

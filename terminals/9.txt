@@ -1,0 +1,7 @@
+---
+pid: 25568
+cwd: "D:\DXF_THREE_WHEEL_REDESIGN\Three_Wheel_v2"
+command: "cd \"D:\\DXF_THREE_WHEEL_REDESIGN\\Three_Wheel_v2\"; npx tsc --noEmit"
+started_at: 2026-07-03T12:40:29.967Z
+running_for_ms: 980005   
+---

@@ -55,6 +55,12 @@ import {
   type MapProjectionOrigin,
 } from "../utils/mapGeometryProjection";
 import {
+  getCurveSelectionAnchors,
+  getPlanLineRenderPoints,
+  isCircleLikeLine,
+  isCurveEntity,
+} from "../utils/curveGeometry";
+import {
   transformVisualDxfPoint,
   projectGpsToLocalMeters,
 } from "../utils/visualAlignment";
@@ -517,7 +523,13 @@ export function MapViewNative(props: MapViewProps) {
       return { line: featureCollection([]), corners: featureCollection([]) };
     }
     const coords = segs.map(([lat, lon]) => toMapboxCoord(lat, lon));
-    const corners = coords.map((c) => pointFeature(c));
+    const cornerAnchors = isCurveEntity(selected) || isCircleLikeLine(selected)
+      ? getCurveSelectionAnchors(selected).map((pt) => {
+          const gps = projectPlanNorthEastToGps(pt.north, pt.east, projectionOrigin);
+          return pointFeature(toMapboxCoord(gps.lat, gps.lon));
+        })
+      : coords.map((c) => pointFeature(c));
+    const corners = cornerAnchors;
     return {
       line: featureCollection([lineFeature(coords)]),
       corners: featureCollection(corners),
@@ -619,16 +631,26 @@ export function MapViewNative(props: MapViewProps) {
       const selected = selectedItemIds?.includes(item.id) ?? false;
       // Item lines via the shared visual transform (north/east → GPS).
       for (const l of item.lines) {
-        const fromP = transformVisualDxfPoint(l.from.x, l.from.y, item);
-        const toP = transformVisualDxfPoint(l.to.x, l.to.y, item);
-        const fromGps = projectPlanNorthEastToGps(fromP.north, fromP.east, projectionOrigin);
-        const toGps = projectPlanNorthEastToGps(toP.north, toP.east, projectionOrigin);
-        lineFeatures.push(
-          lineFeature(
-            [toMapboxCoord(fromGps.lat, fromGps.lon), toMapboxCoord(toGps.lat, toGps.lon)],
-            { itemId: item.id, selected }
-          )
-        );
+        const renderPoints = getPlanLineRenderPoints(l, true);
+        if (renderPoints.length >= 2) {
+          const coords: Coord[] = renderPoints.map((pt) => {
+            const tp = transformVisualDxfPoint(pt.north, pt.east, item);
+            const gps = projectPlanNorthEastToGps(tp.north, tp.east, projectionOrigin);
+            return toMapboxCoord(gps.lat, gps.lon);
+          });
+          lineFeatures.push(lineFeature(coords, { itemId: item.id, selected }));
+        } else {
+          const fromP = transformVisualDxfPoint(l.from.x, l.from.y, item);
+          const toP = transformVisualDxfPoint(l.to.x, l.to.y, item);
+          const fromGps = projectPlanNorthEastToGps(fromP.north, fromP.east, projectionOrigin);
+          const toGps = projectPlanNorthEastToGps(toP.north, toP.east, projectionOrigin);
+          lineFeatures.push(
+            lineFeature(
+              [toMapboxCoord(fromGps.lat, fromGps.lon), toMapboxCoord(toGps.lat, toGps.lon)],
+              { itemId: item.id, selected }
+            )
+          );
+        }
       }
       // Bounding box (centered at item.y North / item.x East), rotated + scaled.
       const cos = Math.cos(((item.rotation || 0) * Math.PI) / 180);
@@ -831,16 +853,26 @@ export function MapViewNative(props: MapViewProps) {
       for (const item of items) {
         const selected = selectedItemIds?.includes(item.id) ?? false;
         for (const l of item.lines) {
-          const fromP = transformVisualDxfPoint(l.from.x, l.from.y, item);
-          const toP   = transformVisualDxfPoint(l.to.x,   l.to.y,   item);
-          const fG = projectPlanNorthEastToGps(fromP.north, fromP.east, projectionOrigin);
-          const tG = projectPlanNorthEastToGps(toP.north,   toP.east,   projectionOrigin);
-          lineFeatures.push(
-            lineFeature(
-              [toMapboxCoord(fG.lat, fG.lon), toMapboxCoord(tG.lat, tG.lon)],
-              { itemId: item.id, selected }
-            )
-          );
+          const renderPoints = getPlanLineRenderPoints(l, true);
+          if (renderPoints.length >= 2) {
+            const coords: Coord[] = renderPoints.map((pt) => {
+              const tp = transformVisualDxfPoint(pt.north, pt.east, item);
+              const gps = projectPlanNorthEastToGps(tp.north, tp.east, projectionOrigin);
+              return toMapboxCoord(gps.lat, gps.lon);
+            });
+            lineFeatures.push(lineFeature(coords, { itemId: item.id, selected }));
+          } else {
+            const fromP = transformVisualDxfPoint(l.from.x, l.from.y, item);
+            const toP   = transformVisualDxfPoint(l.to.x,   l.to.y,   item);
+            const fG = projectPlanNorthEastToGps(fromP.north, fromP.east, projectionOrigin);
+            const tG = projectPlanNorthEastToGps(toP.north,   toP.east,   projectionOrigin);
+            lineFeatures.push(
+              lineFeature(
+                [toMapboxCoord(fG.lat, fG.lon), toMapboxCoord(tG.lat, tG.lon)],
+                { itemId: item.id, selected }
+              )
+            );
+          }
         }
         const cos = Math.cos(((item.rotation || 0) * Math.PI) / 180);
         const sin = Math.sin(((item.rotation || 0) * Math.PI) / 180);

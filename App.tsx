@@ -120,6 +120,16 @@ import type {
 import { INITIAL_STAGED_WORKFLOW_STATE } from "./src/types/fieldsWorkflow";
 import { MapView } from "./src/components/MapView";
 import {
+  buildPlanLineSvgPath,
+  computePlanBoundingBoxLegacy,
+  getCurveGeometry,
+  getPreviewCircleElements,
+  isCircleLikeLine,
+  isCurveEntity,
+  normalizeDxfEntityGeometry,
+  normalizePlanLinesForCurves,
+} from "./src/utils/curveGeometry";
+import {
   buildVisualAlignmentRefPoints,
   computeLineBoundingBox,
 } from "./src/utils/visualAlignment";
@@ -237,16 +247,11 @@ function buildSvgPathChunks(lines: PlanLine[]) {
 
   for (const line of lines) {
     if (!isRenderableLine(line)) continue;
+    if (isCircleLikeLine(line)) continue;
 
-    if (line.entity && line.entity.preview_points && line.entity.preview_points.length > 1) {
-      const pts = line.entity.preview_points;
-      current += `M${pts[0].east} ${pts[0].north}`;
-      for (let i = 1; i < pts.length; i++) {
-        current += `L${pts[i].east} ${pts[i].north}`;
-      }
-    } else {
-      current += `M${line.from.y} ${line.from.x}L${line.to.y} ${line.to.x}`;
-    }
+    const segment = buildPlanLineSvgPath(line);
+    if (!segment) continue;
+    current += segment;
 
     count += 1;
 
@@ -567,15 +572,7 @@ export default function App() {
       return;
     }
 
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    lines.forEach(line => {
-      if (line.from && line.to) {
-        minX = Math.min(minX, line.from.x, line.to.x);
-        minY = Math.min(minY, line.from.y, line.to.y);
-        maxX = Math.max(maxX, line.from.x, line.to.x);
-        maxY = Math.max(maxY, line.from.y, line.to.y);
-      }
-    });
+    const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(lines);
 
     const startLat = alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 28.6139;
     const startLon = alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 77.2090;
@@ -601,15 +598,7 @@ export default function App() {
   // Plan Editing: lets user drag/scale/rotate the plan from the 4th dropdown
   function startPlanEditing() {
     if (lines.length === 0) return;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    lines.forEach(line => {
-      if (line.from && line.to) {
-        minX = Math.min(minX, line.from.x, line.to.x);
-        minY = Math.min(minY, line.from.y, line.to.y);
-        maxX = Math.max(maxX, line.from.x, line.to.x);
-        maxY = Math.max(maxY, line.from.y, line.to.y);
-      }
-    });
+    const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(lines);
     const startLat = alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 28.6139;
     const startLon = alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 77.2090;
     const startNorth = alignedRefPoints[0] ? alignedRefPoints[0].dxf_y : ((lines[0]?.from?.x ?? 0) - 2);
@@ -1210,6 +1199,20 @@ export default function App() {
           return;
         }
 
+        // Normalize common ROS/backend field aliases so state updates even if backend uses long-form property names
+        if (data.lat == null && (data.latitude != null || data.gps_lat != null || data.global_lat != null)) {
+          data.lat = data.latitude ?? data.gps_lat ?? data.global_lat;
+        }
+        if (data.lon == null && (data.longitude != null || data.gps_lon != null || data.global_lon != null)) {
+          data.lon = data.longitude ?? data.gps_lon ?? data.global_lon;
+        }
+        if (data.alt == null && (data.altitude != null || data.gps_alt != null)) {
+          data.alt = data.altitude ?? data.gps_alt;
+        }
+        if (data.heading_ned_deg == null && data.heading != null) {
+          data.heading_ned_deg = data.heading;
+        }
+
         virtualJoystickRef.current.reconcileTelemetry(data);
 
         setTelemetrySnapshot((prev) => {
@@ -1679,7 +1682,7 @@ export default function App() {
                 to: { id: i * 2 + 2, x: toPt.north, y: toPt.east },
                 width: 0.1,
                 is_mark: ent.is_mark,
-                entity: ent,
+                entity: normalizeDxfEntityGeometry(ent),
               });
 
               // Add extensions if enabled (buffered — only drawn in fallback)
@@ -1843,7 +1846,9 @@ export default function App() {
           width: 0.1,
         }];
       }
-      const normalized = sanitizePlanLines(normalizePlanLines(generatedLines));
+      const normalized = sanitizePlanLines(
+        normalizePlanLinesForCurves(normalizePlanLines(generatedLines))
+      );
       setLines(normalized);
       setImportedPlan({
         fileName: pathName,
@@ -2760,7 +2765,7 @@ export default function App() {
         fileType: "dxf",
         source: "generated",
       });
-      const safeGeneratedLines = sanitizePlanLines(generatedLines);
+      const safeGeneratedLines = sanitizePlanLines(normalizePlanLinesForCurves(generatedLines));
       setLines(safeGeneratedLines);
       setSelectedLineId(safeGeneratedLines[0]?.id ?? null);
       setMissionLoaded(true);
@@ -3203,7 +3208,7 @@ export default function App() {
                                 Alert.alert("Mission conflict", "Generating a new template is blocked while a protected surveyed mission is resident.");
                                 return;
                               }
-                              const safeGeneratedLines = sanitizePlanLines(generatedLines);
+                              const safeGeneratedLines = sanitizePlanLines(normalizePlanLinesForCurves(generatedLines));
                               setImportedPlan({ fileName: `${name}.dxf`, uri: "", fileType: "dxf", source: "generated" });
                               setLines(safeGeneratedLines);
                               setSelectedLineId(safeGeneratedLines[0]?.id ?? null);
@@ -5536,13 +5541,11 @@ function computeAutoFitViewport(
   let minN = Number.POSITIVE_INFINITY;
   let maxN = Number.NEGATIVE_INFINITY;
 
-  for (const line of lines) {
-    // line.x = North, line.y = East
-    minN = Math.min(minN, line.from.x, line.to.x);
-    maxN = Math.max(maxN, line.from.x, line.to.x);
-    minE = Math.min(minE, line.from.y, line.to.y);
-    maxE = Math.max(maxE, line.from.y, line.to.y);
-  }
+  const bounds = computePlanBoundingBoxLegacy(lines);
+  minN = bounds.minX;
+  maxN = bounds.maxX;
+  minE = bounds.minY;
+  maxE = bounds.maxY;
 
   if (roverPoint) {
     minN = Math.min(minN, roverPoint.north);
@@ -5770,6 +5773,9 @@ function getCornerPoints(lines: PlanLine[]): { x: number, y: number }[] {
   const pointMap = new Map<string, { pt: { x: number, y: number }, segments: { dx: number, dy: number }[] }>();
 
   for (const line of lines) {
+    if (isCurveEntity(line) || isCircleLikeLine(line)) {
+      continue;
+    }
     const k1 = `${line.from.x.toFixed(3)},${line.from.y.toFixed(3)}`;
     const k2 = `${line.to.x.toFixed(3)},${line.to.y.toFixed(3)}`;
 
@@ -5993,6 +5999,22 @@ function PlanPreview({
       center: buildSvgPathChunks(filtered.filter((line) => line.layer === "center")),
       transit: buildSvgPathChunks(filtered.filter((line) => line.layer === "transit")),
       extension: buildSvgPathChunks(filtered.filter((line) => line.layer === "extension")),
+    }),
+    [filtered]
+  );
+
+  const previewCirclesByLayer = useMemo(
+    () => ({
+      boundary: getPreviewCircleElements(filtered.filter((line) => line.layer === "boundary")),
+      marking_true: getPreviewCircleElements(
+        filtered.filter((line) => line.layer === "marking" && line.entity?.is_mark !== false)
+      ),
+      marking_false: getPreviewCircleElements(
+        filtered.filter((line) => line.layer === "marking" && line.entity?.is_mark === false)
+      ),
+      center: getPreviewCircleElements(filtered.filter((line) => line.layer === "center")),
+      transit: getPreviewCircleElements(filtered.filter((line) => line.layer === "transit")),
+      extension: getPreviewCircleElements(filtered.filter((line) => line.layer === "extension")),
     }),
     [filtered]
   );
@@ -6604,7 +6626,7 @@ function PlanPreview({
               {PREVIEW_RENDERED_LAYERS.flatMap((layer) =>
                 pathChunksByLayer[layer].map((d, index) => (
                   <Path
-                    key={`${layer}-${index}`}
+                    key={`${layer}-path-${index}`}
                     d={d}
                     stroke={strokeForLayer(layer)}
                     strokeWidth={2 / viewport.zoom}
@@ -6616,7 +6638,35 @@ function PlanPreview({
                   />
                 ))
               )}
-              {selectedLine ? (
+              {PREVIEW_RENDERED_LAYERS.flatMap((layer) =>
+                previewCirclesByLayer[layer].map((circleShape, index) => (
+                  <Circle
+                    key={`${layer}-circle-${circleShape.line.id}-${index}`}
+                    cx={circleShape.centerEast}
+                    cy={circleShape.centerNorth}
+                    r={circleShape.radius}
+                    stroke={strokeForLayer(layer)}
+                    strokeWidth={2 / viewport.zoom}
+                    fill="none"
+                    opacity={0.96}
+                  />
+                ))
+              )}
+              {selectedLine && isCircleLikeLine(selectedLine) ? (() => {
+                const curve = getCurveGeometry(selectedLine);
+                if (!curve) return null;
+                return (
+                  <Circle
+                    cx={curve.centerEast}
+                    cy={curve.centerNorth}
+                    r={curve.radius}
+                    stroke="#ef4444"
+                    strokeWidth={3 / viewport.zoom}
+                    fill="none"
+                    opacity={1}
+                  />
+                );
+              })() : selectedLine ? (
                 <Path
                   d={buildSvgPathForLine(selectedLine)}
                   stroke="#ef4444"

@@ -9,6 +9,9 @@
  * - item.rotation = degrees, positive = standard math CCW in north/east plane
  */
 
+import type { PlanLine } from "../types/plan";
+import { computePlanBoundingBoxLegacy } from "./curveGeometry";
+
 export type VisualAlignmentTransform = {
   x: number;
   y: number;
@@ -89,24 +92,6 @@ export function buildVisualAlignmentRefPoints(
   });
 }
 
-export function computeLineBoundingBox(lines: Array<{ from?: { x: number; y: number }; to?: { x: number; y: number } }>) {
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const line of lines) {
-    if (line.from) {
-      minX = Math.min(minX, line.from.x);
-      minY = Math.min(minY, line.from.y);
-      maxX = Math.max(maxX, line.from.x);
-      maxY = Math.max(maxY, line.from.y);
-    }
-    if (line.to) {
-      minX = Math.min(minX, line.to.x);
-      minY = Math.min(minY, line.to.y);
-      maxX = Math.max(maxX, line.to.x);
-      maxY = Math.max(maxY, line.to.y);
-    }
-  }
-  return { minX, minY, maxX, maxY };
+export function computeLineBoundingBox(lines: PlanLine[]) {
+  return computePlanBoundingBoxLegacy(lines);
 }

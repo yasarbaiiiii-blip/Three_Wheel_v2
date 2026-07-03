@@ -1,0 +1,38 @@
+---
+pid: 16964
+cwd: "D:\DXF_THREE_WHEEL_REDESIGN\Three_Wheel_v2"
+command: "cd \"D:\\DXF_THREE_WHEEL_REDESIGN\\Three_Wheel_v2\"; npm test"
+started_at: 2026-07-03T12:07:44.271Z
+running_for_ms: 2945004  
+---
+
+> rover-three-wheel-native@1.0.0 test
+> vitest run
+
+
+ RUN  v4.1.9 D:/DXF_THREE_WHEEL_REDESIGN/Three_Wheel_v2
+
+ ✓ src/utils/joystickAcquireRecovery.test.ts (18 tests) 32ms
+ ✓ src/utils/designTemplateRegistry.test.ts (3 tests) 36ms
+ ✓ src/utils/mapboxCoords.test.ts (8 tests) 52ms
+ ✓ src/api/authApi.test.ts (3 tests) 812ms
+     ✓ adds session token to protected rover calls and handles 401  778ms
+ ✓ src/utils/designMigration.test.ts (2 tests) 25ms
+ ✓ src/utils/autoOrigin.test.ts (18 tests) 45ms
+ ✓ src/utils/baselineGeometry.test.ts (19 tests) 52ms
+ ✓ src/utils/curveGeometry.test.ts (4 tests) 20ms
+ ✓ src/utils/designTransform.test.ts (5 tests) 25ms
+ ✓ src/utils/planImport.test.ts (2 tests) 21ms
+ ✓ src/utils/mapGestureUtils.test.ts (36 tests) 44ms
+ ✓ src/hooks/useFieldsWorkflow.test.ts (3 tests) 15ms
+ ✓ src/utils/designExport.test.ts (1 test) 18ms
+ ✓ src/utils/visualAlignment.test.ts (4 tests) 17ms
+ ✓ src/utils/designHistory.test.ts (3 tests) 15ms
+ ✓ src/utils/designSnap.test.ts (3 tests) 14ms
+ ✓ src/utils/designMapProjection.test.ts (2 tests) 15ms
+
+ Test Files  17 passed (17)
+      Tests  134 passed (134)
+   Start at  17:37:53
+   Duration  5.60s (transform 9.00s, setup 0ms, import 10.64s, tests 1.26s, environment 11ms)
+

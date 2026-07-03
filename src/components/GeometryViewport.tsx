@@ -24,6 +24,7 @@ import Svg, { Circle, G, Line, Path, Polygon, Text as SvgText } from "react-nati
 
 import type { Palette } from "../theme/colors";
 import type { ImportedPlan, MarkingStyle, PlanLine, PlanPoint } from "../types/plan";
+import { buildPlanLineSvgPath } from "../utils/curveGeometry";
 
 interface GeometryViewportProps {
   palette: Palette;
@@ -73,7 +74,9 @@ function buildSvgPathChunks(lines: PlanLine[]) {
 
   for (const line of lines) {
     if (!isRenderableLine(line)) continue;
-    current += `M${line.from.y} ${line.from.x}L${line.to.y} ${line.to.x}`;
+    const segment = buildPlanLineSvgPath(line);
+    if (!segment) continue;
+    current += segment;
     count += 1;
 
     if (count >= PATH_SEGMENT_CHUNK_SIZE) {

@@ -1,0 +1,74 @@
+---
+pid: 8080
+cwd: "D:\DXF_THREE_WHEEL_REDESIGN\Three_Wheel_v2"
+command: "cd \"D:\\DXF_THREE_WHEEL_REDESIGN\\Three_Wheel_v2\"; npm test"
+started_at: 2026-07-03T11:56:01.619Z
+running_for_ms: 3645004  
+---
+
+> rover-three-wheel-native@1.0.0 test
+> vitest run
+
+
+ RUN  v4.1.9 D:/DXF_THREE_WHEEL_REDESIGN/Three_Wheel_v2
+
+ ✓ src/utils/mapGestureUtils.test.ts (36 tests) 25ms
+ ✓ src/utils/curveGeometry.test.ts (4 tests) 16ms
+ ✓ src/utils/designTemplateRegistry.test.ts (3 tests) 45ms
+ ❯ src/utils/planImport.test.ts (2 tests | 2 failed) 58ms
+     × groups LWPOLYLINE into one line with preview_points 21ms
+     × stores circle geometry in NED after axis conversion 32ms
+ ✓ src/api/authApi.test.ts (3 tests) 1123ms
+     ✓ adds session token to protected rover calls and handles 401  1097ms
+ ✓ src/utils/mapboxCoords.test.ts (8 tests) 18ms
+ ✓ src/utils/autoOrigin.test.ts (18 tests) 33ms
+ ✓ src/utils/joystickAcquireRecovery.test.ts (18 tests) 14ms
+ ✓ src/utils/visualAlignment.test.ts (4 tests) 18ms
+ ✓ src/utils/baselineGeometry.test.ts (19 tests) 57ms
+ ✓ src/utils/designTransform.test.ts (5 tests) 23ms
+ ✓ src/utils/designMigration.test.ts (2 tests) 22ms
+ ✓ src/utils/designExport.test.ts (1 test) 15ms
+ ✓ src/utils/designHistory.test.ts (3 tests) 15ms
+ ✓ src/utils/designMapProjection.test.ts (2 tests) 12ms
+ ✓ src/utils/designSnap.test.ts (3 tests) 15ms
+ ✓ src/hooks/useFieldsWorkflow.test.ts (3 tests) 17ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+
+ Test Files  1 failed | 16 passed (17)
+      Tests  2 failed | 132 passed (134)
+   Start at  17:26:20
+   Duration  8.09s (transform 18.20s, setup 0ms, import 21.25s, tests 1.53s, environment 7ms)
+
+ FAIL  src/utils/planImport.test.ts > planImport curves > groups LWPOLYLINE into one line with preview_points
+AssertionError: expected [] to have a length of 1 but got +0
+
+- Expected
++ Received
+
+- 1
++ 0
+
+ ❯ src/utils/planImport.test.ts:26:19
+     24|
+     25|     const lines = parseImportedPlanContent("dxf", dxf);
+     26|     expect(lines).toHaveLength(1);
+       |                   ^
+     27|     expect(lines[0].entity?.entity_type).toBe("LWPOLYLINE");
+     28|     expect(lines[0].entity?.preview_points?.length).toBeGreaterThanOrE…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/utils/planImport.test.ts > planImport curves > stores circle geometry in NED after axis conversion
+TypeError: Cannot read properties of undefined (reading 'entity')
+ ❯ src/utils/planImport.test.ts:45:27
+     43|
+     44|     const lines = parseImportedPlanContent("dxf", dxf);
+     45|     const geom = lines[0].entity?.geometry;
+       |                           ^
+     46|     expect(geom.centerNorth).toBe(4);
+     47|     expect(geom.centerEast).toBe(3);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+

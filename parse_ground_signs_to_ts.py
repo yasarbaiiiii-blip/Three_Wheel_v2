@@ -11,7 +11,7 @@ import os, math, glob
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", "Ground signs")
 OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src", "utils", "roadSignTemplates.ts")
 
-ARC_SEGMENTS = 24  # segments per full circle for approximation
+ARC_SEGMENTS = 144  # segments per full circle for approximation
 
 def parse_dxf(filepath: str):
     """Parse a DXF file and return list of (x1,y1,x2,y2) line segments."""
@@ -194,7 +194,7 @@ def generate_ts(all_data: dict):
 
     # Raw data arrays
     ts.append("// Pre-computed normalized line segments [x1, y1, x2, y2][]")
-    ts.append("const SIGN_DATA: Record<RoadSignType, number[][]> = {")
+    ts.append("export const SIGN_DATA: Record<RoadSignType, number[][]> = {")
     for f in field_names:
         segs = all_data[f]["segments"]
         ts.append(f'    "{f}": [')

@@ -757,8 +757,8 @@ export default function ModernHomeUI(props) {
   const missionProgress = lines.length > 0 ? Math.min(100, Math.round(((telemetrySnapshot?.projection_segment_index || 0) / lines.length) * 100)) : 0;
 
   // Derived Telemetry Values
-  const lat = telemetrySnapshot?.lat?.toFixed(6) ?? "N/A";
-  const lon = telemetrySnapshot?.lon?.toFixed(6) ?? "N/A";
+  const lat = telemetrySnapshot?.lat?.toFixed(8) ?? "N/A";
+  const lon = telemetrySnapshot?.lon?.toFixed(8) ?? "N/A";
   // Prefer the human-readable fix name from API, fall back to numeric lookup
   const gpsFix = telemetrySnapshot?.gps_fix_name
     ?? (telemetrySnapshot?.gps_fix == null ? "No Fix"

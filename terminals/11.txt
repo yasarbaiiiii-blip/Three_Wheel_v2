@@ -1,0 +1,7 @@
+---
+pid: 3468
+cwd: "D:\DXF_THREE_WHEEL_REDESIGN\Three_Wheel_v2"
+command: "Stop-Process -Id 25568 -Force -ErrorAction SilentlyContinue; cd \"D:\\DXF_THREE_WHEEL_REDESIGN\\Three_Wheel_v2\"; npx tsc --noEmit --pretty false"
+started_at: 2026-07-03T12:45:05.378Z
+running_for_ms: 700014   
+---

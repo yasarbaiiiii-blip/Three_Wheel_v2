@@ -25,7 +25,7 @@ FIELDS = {
     "volleyball": "Volleyball",
 }
 
-ARC_SEGMENTS = 24  # segments per full circle for approximation
+ARC_SEGMENTS = 144  # segments per full circle for approximation
 
 
 def parse_dxf(filepath: str):

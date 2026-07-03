@@ -1,0 +1,32 @@
+---
+pid: 2488
+cwd: "D:\DXF_THREE_WHEEL_REDESIGN\Three_Wheel_v2"
+command: "cd \"D:\\DXF_THREE_WHEEL_REDESIGN\\Three_Wheel_v2\"; npx vitest run src/utils/planImport.test.ts --reporter=verbose 2>&1 | Select-Object -Last 30"
+started_at: 2026-07-03T11:57:37.263Z
+running_for_ms: 3550007  
+---
+
++ 0
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  17:27:55
+   Duration  3.08s (transform 958ms, setup 0ms, import 1.19s, tests 74ms, environment 0ms)
+
+ ❯ src/utils/planImport.test.ts:26:19
+     24|
+     25|     const lines = parseImportedPlanContent("dxf", dxf);
+     26|     expect(lines).toHaveLength(1);
+       |                   ^
+     27|     expect(lines[0].entity?.entity_type).toBe("LWPOLYLINE");
+     28|     expect(lines[0].entity?.preview_points?.length).toBeGreaterThanOrE…
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+ FAIL  src/utils/planImport.test.ts > planImport curves > stores circle geometry in NED after axis conversion
+TypeError: Cannot read properties of undefined (reading 'entity')
+ ❯ src/utils/planImport.test.ts:45:27
+     43|
+     44|     const lines = parseImportedPlanContent("dxf", dxf);
+     45|     const geom = lines[0].entity?.geometry;
+       |                           ^
+     46|     expect(geom.centerNorth).toBe(4);
+     47|     expect(geom.centerEast).toBe(3);
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯

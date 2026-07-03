@@ -1,6 +1,7 @@
 import * as FileSystem from "expo-file-system/legacy";
 
 import type { ImportedPlan, PlanLayer, PlanLine, PlanPoint } from "../types/plan";
+import { dxfCurveGeometryToNed } from "./curveGeometry";
 
 type Pair = { code: string; value: string };
 
@@ -85,8 +86,8 @@ function extractSection(pairs: Pair[], sectionName: string): Pair[] {
       pairs[i + 1]?.code === "2" &&
       pairs[i + 1]?.value === sectionName
     ) {
-      // Start after the SECTION/2/name triple
-      let j = i + 3;
+      // Start after the SECTION + 2/name pair (i and i+1)
+      let j = i + 2;
       const result: Pair[] = [];
       while (j < pairs.length && !(pairs[j].code === "0" && pairs[j].value === "ENDSEC")) {
         result.push(pairs[j]);
@@ -114,6 +115,25 @@ function collectEntityGroups(sectionPairs: Pair[]): { type: string; pairs: Pair[
       while (i < sectionPairs.length && sectionPairs[i].code !== "0") {
         groupPairs.push(sectionPairs[i]);
         i++;
+      }
+      if (type === "POLYLINE") {
+        while (i < sectionPairs.length && sectionPairs[i].value !== "SEQEND") {
+          if (sectionPairs[i].code === "0" && sectionPairs[i].value === "VERTEX") {
+            i++;
+            while (i < sectionPairs.length && sectionPairs[i].code !== "0") {
+              groupPairs.push(sectionPairs[i]);
+              i++;
+            }
+          } else {
+            i++;
+          }
+        }
+        if (i < sectionPairs.length && sectionPairs[i].code === "0" && sectionPairs[i].value === "SEQEND") {
+          i++;
+          while (i < sectionPairs.length && sectionPairs[i].code !== "0") {
+            i++;
+          }
+        }
       }
       groups.push({ type, pairs: groupPairs });
     } else {
@@ -285,18 +305,66 @@ function parseSingleEntity(
     return;
   }
 
-  if (type === "LWPOLYLINE") {
+  if (type === "LWPOLYLINE" || type === "POLYLINE") {
     const vertices = getVertexList(entityPairs);
-    const closed = getNumber(entityPairs, "70") === 1;
-    const tfVertices = tfPts(vertices);
+    const flags = getNumber(entityPairs, "70") || 0;
+    const closed = (flags & 1) === 1 || flags === 1;
+    const previewPoints: { x: number; y: number }[] = [];
 
-    for (let vi = 0; vi < tfVertices.length - 1; vi++) {
-      lines.push(makeLine(tfVertices[vi], tfVertices[vi + 1], layer, entityIndexRef.value++, pointIdRef.value));
-      pointIdRef.value += 2;
+    const addSegment = (vFrom: { x: number; y: number; bulge?: number }, vTo: { x: number; y: number }) => {
+      const bulge = vFrom.bulge || 0;
+      if (Math.abs(bulge) >= 1e-6) {
+        const rawArcPts = buildBulgeArcPoints(vFrom, vTo, bulge);
+        const tfArcPts = tfPts(rawArcPts);
+        for (let k = 0; k < tfArcPts.length; k++) {
+          if (k === 0 || previewPoints.length === 0) {
+            previewPoints.push(tfArcPts[k]);
+          } else {
+            const last = previewPoints[previewPoints.length - 1];
+            if (Math.hypot(tfArcPts[k].x - last.x, tfArcPts[k].y - last.y) > 1e-9) {
+              previewPoints.push(tfArcPts[k]);
+            }
+          }
+        }
+      } else {
+        const p1 = tf(vFrom.x, vFrom.y);
+        const p2 = tf(vTo.x, vTo.y);
+        if (previewPoints.length === 0) {
+          previewPoints.push(p1);
+        }
+        previewPoints.push(p2);
+      }
+    };
+
+    for (let vi = 0; vi < vertices.length - 1; vi++) {
+      addSegment(vertices[vi], vertices[vi + 1]);
     }
-    if (closed && tfVertices.length > 2) {
-      lines.push(makeLine(tfVertices[tfVertices.length - 1], tfVertices[0], layer, entityIndexRef.value++, pointIdRef.value));
-      pointIdRef.value += 2;
+    if (closed && vertices.length > 2) {
+      addSegment(vertices[vertices.length - 1], vertices[0]);
+    }
+
+    if (previewPoints.length >= 2) {
+      const entityIndex = entityIndexRef.value++;
+      const first = previewPoints[0];
+      const last = previewPoints[previewPoints.length - 1];
+      lines.push({
+        id: `dxf-polyline-${entityIndex}`,
+        label: `${titleForLayer(layer)} Polyline ${entityIndex + 1}`,
+        layer,
+        from: { id: pointIdRef.value++, x: first.x, y: first.y },
+        to: { id: pointIdRef.value++, x: last.x, y: last.y },
+        width: 0.1,
+        entity: {
+          entity_id: `entity-${entityIndex}`,
+          entity_type: type,
+          layer: getSingle(entityPairs, "8") || "0",
+          color: getNumber(entityPairs, "62") || 7,
+          is_mark: false,
+          length_m: 0,
+          geometry: { closed, vertexCount: vertices.length },
+          preview_points: previewPoints.map((p) => ({ north: p.y, east: p.x })),
+        },
+      });
     }
     return;
   }
@@ -329,7 +397,7 @@ function parseSingleEntity(
             color: getNumber(entityPairs, "62") || 7,
             is_mark: false,
             length_m: arcLength,
-            geometry: { cx, cy, radius, startAngle, endAngle },
+            geometry: dxfCurveGeometryToNed({ cx, cy, radius, startAngle, endAngle }),
             preview_points: tfArcPoints.map((p) => ({ north: p.y, east: p.x })),
           },
         });
@@ -639,13 +707,62 @@ function getAllNumbers(pairs: Pair[], code: string): number[] {
     .filter((v) => Number.isFinite(v));
 }
 
-function getVertexList(pairs: Pair[]) {
-  const xs = pairs.filter((pair) => pair.code === "10").map((pair) => Number(pair.value));
-  const ys = pairs.filter((pair) => pair.code === "20").map((pair) => Number(pair.value));
+function getVertexList(pairs: Pair[]): { x: number; y: number; bulge: number }[] {
+  const vertices: { x: number; y: number; bulge: number }[] = [];
+  let current: { x: number; y: number; bulge: number } | null = null;
 
-  return xs
-    .map((x, index) => ({ x, y: ys[index] }))
-    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  for (const pair of pairs) {
+    if (pair.code === "10") {
+      if (current) vertices.push(current);
+      current = { x: Number(pair.value), y: 0, bulge: 0 };
+    } else if (pair.code === "20" && current) {
+      current.y = Number(pair.value);
+    } else if (pair.code === "42" && current) {
+      current.bulge = Number(pair.value);
+    }
+  }
+  if (current) vertices.push(current);
+
+  return vertices.filter((pt) => Number.isFinite(pt.x) && Number.isFinite(pt.y));
+}
+
+function buildBulgeArcPoints(
+  p1: { x: number; y: number },
+  p2: { x: number; y: number },
+  bulge: number
+): { x: number; y: number }[] {
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const d = Math.hypot(dx, dy);
+  if (d === 0 || Math.abs(bulge) < 1e-6) {
+    return [p1, p2];
+  }
+
+  const absB = Math.abs(bulge);
+  const r = (d / 4) * (absB + 1 / absB);
+  const h = (d / 4) * (1 / absB - absB);
+  const sign = bulge > 0 ? 1 : -1;
+
+  const mx = (p1.x + p2.x) / 2;
+  const my = (p1.y + p2.y) / 2;
+  const cx = mx + h * (-sign * (dy / d));
+  const cy = my + h * (sign * (dx / d));
+
+  const startAngleRad = Math.atan2(p1.y - cy, p1.x - cx);
+  const sweepRad = 4 * Math.atan(bulge);
+  const sweepDeg = Math.abs(sweepRad) * (180 / Math.PI);
+  const segmentCount = Math.max(4, Math.ceil((sweepDeg / 360) * ARC_SEGMENTS));
+
+  const points: { x: number; y: number }[] = [];
+  for (let i = 0; i <= segmentCount; i++) {
+    const t = i / segmentCount;
+    const angleRad = startAngleRad + sweepRad * t;
+    points.push({
+      x: cx + r * Math.cos(angleRad),
+      y: cy + r * Math.sin(angleRad),
+    });
+  }
+  return points;
 }
 
 function makeLine(
@@ -727,11 +844,33 @@ function titleForLayer(layer: PlanLayer) {
  * overall profile is wrong. Display-only: the rover reads the DXF file itself.
  */
 function dxfToAppAxes(lines: PlanLine[]): PlanLine[] {
-  return lines.map((line) => ({
-    ...line,
-    from: { ...line.from, x: line.from.y, y: line.from.x },
-    to: { ...line.to, x: line.to.y, y: line.to.x },
-  }));
+  return lines.map((line) => {
+    const entityType = (line.entity?.entity_type ?? "").trim().toUpperCase();
+    let entity = line.entity;
+
+    if (entity?.geometry && (entityType === "CIRCLE" || entityType === "ARC")) {
+      const geom = entity.geometry;
+      if (geom.cx != null && geom.cy != null && geom.centerNorth == null) {
+        entity = {
+          ...entity,
+          geometry: dxfCurveGeometryToNed({
+            cx: geom.cx,
+            cy: geom.cy,
+            radius: geom.radius,
+            startAngle: geom.startAngle,
+            endAngle: geom.endAngle,
+          }),
+        };
+      }
+    }
+
+    return {
+      ...line,
+      from: { ...line.from, x: line.from.y, y: line.from.x },
+      to: { ...line.to, x: line.to.y, y: line.to.x },
+      ...(entity ? { entity } : {}),
+    };
+  });
 }
 
 function parseCsv(content: string): PlanLine[] {

@@ -322,19 +322,23 @@ describe('Baseline: shape generators', () => {
     expect(lines).toHaveLength(3);
   });
 
-  it('circle (full) has 144 segments', () => {
+  it('circle (full) is a single CIRCLE entity', () => {
     const lines = generateTemplateLines('circle', 1.0, 'full');
-    expect(lines).toHaveLength(144);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].entity?.entity_type).toBe('CIRCLE');
+    expect(lines[0].entity?.preview_points?.length).toBeGreaterThan(100);
   });
 
-  it('circle (half) has 72 segments', () => {
+  it('circle (half) is a single ARC entity', () => {
     const lines = generateTemplateLines('circle', 1.0, 'half');
-    expect(lines).toHaveLength(72);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].entity?.entity_type).toBe('ARC');
   });
 
-  it('circle (quarter) has 36 segments', () => {
+  it('circle (quarter) is a single ARC entity', () => {
     const lines = generateTemplateLines('circle', 1.0, 'quarter');
-    expect(lines).toHaveLength(36);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].entity?.entity_type).toBe('ARC');
   });
 
   it('10m square has 10m sides', () => {

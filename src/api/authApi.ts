@@ -123,8 +123,8 @@ export function installAuthenticatedFetch() {
   }) as typeof fetch;
 }
 
-function withSessionHost(session: OperatorSession, baseUrl: string): OperatorSession {
-  return { ...session, baseUrl: normalizeBase(baseUrl) ?? baseUrl };
+function withSessionHost(session: Omit<OperatorSession, "baseUrl"> | OperatorSession, baseUrl: string): OperatorSession {
+  return { ...session, baseUrl: normalizeBase(baseUrl) ?? baseUrl } as OperatorSession;
 }
 
 export async function login(

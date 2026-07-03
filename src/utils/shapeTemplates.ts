@@ -45,34 +45,51 @@ export function generateTemplateLines(shape: ShapeType, size: number, arcType: A
             });
         }
   } else if (shape === "circle") {
-    // Circle generated using polygon segments. Size = diameter
     const radius = size / 2;
-    let angleMult = 2; // full circle is 2*PI
-    if (arcType === "half") angleMult = 1;
-    if (arcType === "quarter") angleMult = 0.5;
+    const startAngle = arcType === "quarter" ? 0 : 0;
+    const endAngle = arcType === "full" ? 360 : arcType === "half" ? 180 : 90;
+    const sweep = endAngle - startAngle;
+    const segments = arcType === "full" ? 144 : arcType === "half" ? 72 : 36;
+    const previewPoints: { north: number; east: number }[] = [];
 
-    let segments = 144;
-    if (arcType === "half") segments = 72;
-    if (arcType === "quarter") segments = 36;
-
-    const pts = [];
     for (let i = 0; i <= segments; i++) {
-      const angle = (i / segments) * angleMult * Math.PI;
-      pts.push({
-        n: radius * Math.cos(angle),
-        e: radius * Math.sin(angle),
+      const angleDeg = startAngle + (sweep * i) / segments;
+      const radians = (angleDeg * Math.PI) / 180;
+      previewPoints.push({
+        north: radius * Math.sin(radians),
+        east: radius * Math.cos(radians),
       });
     }
-    for (let i = 0; i < segments; i++) {
-      lines.push({
-        id: `template-circle-${i}`,
-        label: `Segment ${i + 1}`,
-        layer: "marking",
-        from: { id: i * 2 + 1, x: pts[i].n, y: pts[i].e },
-        to: { id: i * 2 + 2, x: pts[i+1].n, y: pts[i+1].e },
-        width: 0.1,
-      });
-    }
+
+    const entityType = arcType === "full" ? "CIRCLE" : "ARC";
+    lines.push({
+      id: "template-circle-0",
+      label: arcType === "full" ? "Circle" : `Arc (${arcType})`,
+      layer: "marking",
+      from: { id: 1, x: previewPoints[0].north, y: previewPoints[0].east },
+      to: {
+        id: 2,
+        x: previewPoints[previewPoints.length - 1].north,
+        y: previewPoints[previewPoints.length - 1].east,
+      },
+      width: 0.1,
+      entity: {
+        entity_id: "template-circle",
+        entity_type: entityType,
+        layer: "0",
+        color: 7,
+        is_mark: false,
+        length_m: (sweep / 360) * 2 * Math.PI * radius,
+        geometry: {
+          centerNorth: 0,
+          centerEast: 0,
+          radius,
+          startAngle,
+          endAngle,
+        },
+        preview_points: previewPoints,
+      },
+    });
   }
 
   return lines;
