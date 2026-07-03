@@ -553,42 +553,47 @@ export function MapViewNative(props: MapViewProps) {
     // per-tick rover path.
     const rangeCircle = circle(center, 1.5, { steps: 16, units: "meters" }) as GeoJSON.Feature<GeoJSON.Polygon>;
 
-    // Next-target: nearest plan segment ahead of the rover (parity with legacy).
+    // Next-target: active waypoint or plan start point ahead of the rover
     let targetPoint: Coord | null = null;
-    if (
-      telemetrySnapshot?.pos_n != null &&
-      telemetrySnapshot?.pos_e != null &&
-      lines.length > 0 &&
-      projectionOrigin
-    ) {
-      const realN = telemetrySnapshot.pos_n;
-      const realE = telemetrySnapshot.pos_e;
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        if (!line.from || !line.to) continue;
-        const segDx = line.to.x - line.from.x;
-        const segDy = line.to.y - line.from.y;
-        const segLen2 = segDx * segDx + segDy * segDy;
-        if (segLen2 === 0) continue;
-        const t = ((realN - line.from.x) * segDx + (realE - line.from.y) * segDy) / segLen2;
-        const target =
-          t <= 0.5
-            ? { x: line.to.x, y: line.to.y }
-            : i < lines.length - 1
-              ? { x: lines[i + 1].from.x, y: lines[i + 1].from.y }
-              : { x: line.to.x, y: line.to.y };
-        const dist = Math.hypot(target.x - realN, target.y - realE);
-        if (dist < 100) {
-          const gps = projectPlanNorthEastToGps(target.x, target.y, projectionOrigin);
+    let targetDist: number | null = null;
+    if (lines.length > 0 && projectionOrigin) {
+      const missionRunningOrPaused =
+        telemetrySnapshot?.mission_state === "running" ||
+        telemetrySnapshot?.mission_state === "paused";
+      const idx = missionRunningOrPaused
+        ? Math.min(
+            Math.max(0, telemetrySnapshot?.projection_segment_index ?? 0),
+            lines.length - 1
+          )
+        : 0;
+      const targetSeg = lines[idx];
+      if (targetSeg && targetSeg.from && targetSeg.to) {
+        // When waiting/idle, destination is the very start of the path (from).
+        // When running/paused, destination is the active segment end (to).
+        const target = missionRunningOrPaused
+          ? { x: targetSeg.to.x, y: targetSeg.to.y }
+          : { x: targetSeg.from.x, y: targetSeg.from.y };
+        const gps = projectPlanNorthEastToGps(target.x, target.y, projectionOrigin);
+        // Calculate real physical distance on Earth (meters) between rover GPS and target GPS
+        const dLatMeters = (gps.lat - lat) * 111320;
+        const dLonMeters = (gps.lon - lon) * (111320 * Math.cos((lat * Math.PI) / 180));
+        const dist = Math.hypot(dLatMeters, dLonMeters);
+        if (dist < 10000) {
+          targetDist = dist;
           targetPoint = toMapboxCoord(gps.lat, gps.lon);
         }
-        break;
       }
     }
 
     const targetLine =
-      targetPoint != null
-        ? featureCollection([lineFeature([center, targetPoint])])
+      targetPoint != null && targetDist != null
+        ? featureCollection([
+            lineFeature([center, targetPoint]),
+            pointFeature(
+              [(center[0] + targetPoint[0]) / 2, (center[1] + targetPoint[1]) / 2],
+              { label: `${targetDist.toFixed(1)} m` }
+            ),
+          ])
         : null;
 
     return { center, heading, rangeCircle, targetLine, targetPoint };
@@ -596,8 +601,8 @@ export function MapViewNative(props: MapViewProps) {
     telemetrySnapshot?.lat,
     telemetrySnapshot?.lon,
     telemetrySnapshot?.heading_ned_deg,
-    telemetrySnapshot?.pos_n,
-    telemetrySnapshot?.pos_e,
+    telemetrySnapshot?.mission_state,
+    telemetrySnapshot?.projection_segment_index,
     lines,
     originSig,
   ]);
@@ -1483,6 +1488,18 @@ export function MapViewNative(props: MapViewProps) {
             <LineLayer
               id="rover-target-layer"
               style={{ lineColor: "#f59e0b", lineWidth: 2, lineDasharray: [4, 4] }}
+            />
+            <SymbolLayer
+              id="rover-target-label"
+              style={{
+                textField: ["get", "label"],
+                textColor: "#f59e0b",
+                textHaloColor: "#0f172a",
+                textHaloWidth: 1.5,
+                textSize: 12,
+                textOffset: [0, -1],
+                textAnchor: "bottom",
+              }}
             />
           </ShapeSource>
         )}
