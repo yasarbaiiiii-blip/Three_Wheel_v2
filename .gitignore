@@ -22,3 +22,4 @@ CLAUDE.md
 .env.*.local
 src/components/image.png
     docs/application_mind_map.png
+/templates/
