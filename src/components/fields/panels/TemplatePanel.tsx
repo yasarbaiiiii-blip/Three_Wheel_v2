@@ -122,112 +122,25 @@ export function TemplatePanel(props: TemplatePanelProps) {
         Quick template generator for road signs and text. Boundary toggles apply when placing in boundary mode.
       </Text>
 
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-        <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>Boundary Mode</Text>
-        <Switch value={boundaryMode} onValueChange={setBoundaryMode} trackColor={{ false: FIELDS_COLORS.panelBorder, true: FIELDS_COLORS.tealDark }} />
-      </View>
-      {boundaryMode ? (
-        <View
-          style={{
-            padding: 12,
-            borderRadius: 12,
-            backgroundColor: FIELDS_COLORS.surfaceSolid,
-            borderWidth: 1,
-            borderColor: FIELDS_COLORS.panelBorder,
-            gap: 12,
-          }}
-        >
-          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.5 }}>
-            Boundary Dimensions
-          </Text>
-
-          <View style={{ flexDirection: "row", gap: 10 }}>
-            <View style={{ flex: 1, gap: 4 }}>
-              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontWeight: "700" }}>Width (m)</Text>
-              <TextInput
-                style={{
-                  height: 40,
-                  borderWidth: 1,
-                  borderColor: FIELDS_COLORS.panelBorder,
-                  borderRadius: 8,
-                  paddingHorizontal: 10,
-                  color: FIELDS_COLORS.textMain,
-                  backgroundColor: FIELDS_COLORS.cardSolid,
-                  fontSize: 13,
-                  fontWeight: "600",
-                }}
-                value={widthStr}
-                onChangeText={setWidthStr}
-                keyboardType="numeric"
-                placeholder="4.0"
-                placeholderTextColor={FIELDS_COLORS.textDim}
-              />
-            </View>
-            <View style={{ flex: 1, gap: 4 }}>
-              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontWeight: "700" }}>Height (m)</Text>
-              <TextInput
-                style={{
-                  height: 40,
-                  borderWidth: 1,
-                  borderColor: FIELDS_COLORS.panelBorder,
-                  borderRadius: 8,
-                  paddingHorizontal: 10,
-                  color: FIELDS_COLORS.textMain,
-                  backgroundColor: FIELDS_COLORS.cardSolid,
-                  fontSize: 13,
-                  fontWeight: "600",
-                }}
-                value={heightStr}
-                onChangeText={setHeightStr}
-                keyboardType="numeric"
-                placeholder="3.0"
-                placeholderTextColor={FIELDS_COLORS.textDim}
-              />
-            </View>
-          </View>
-
-          <Pressable
-            onPress={() => {
-              const w = parseFloat(widthStr);
-              const h = parseFloat(heightStr);
-              if (!Number.isFinite(w) || w <= 0 || !Number.isFinite(h) || h <= 0) {
-                Alert.alert("Invalid Dimensions", "Please enter valid positive numbers for width and height.");
-                return;
-              }
-              props.onApplyBoundary?.(w, h);
-            }}
-            style={({ pressed }) => ({
-              height: 44,
-              borderRadius: 10,
-              alignItems: "center",
-              justifyContent: "center",
-              backgroundColor: FIELDS_COLORS.tealDark,
-              borderWidth: 1.5,
-              borderColor: "#14b8a6",
-              flexDirection: "row",
-              elevation: 4,
-              shadowColor: "#000",
-              shadowOffset: { width: 0, height: 2 },
-              shadowOpacity: 0.3,
-              shadowRadius: 3.84,
-              opacity: pressed ? 0.85 : 1,
-            })}
-          >
-            <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800", letterSpacing: 0.5 }}>
-              ✓ Apply to Map
-            </Text>
-          </Pressable>
-
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingTop: 4 }}>
-            <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>Sketch Mode</Text>
-            <Switch value={sketchMode} onValueChange={setSketchMode} trackColor={{ false: FIELDS_COLORS.panelBorder, true: FIELDS_COLORS.tealDark }} />
-          </View>
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-            <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>Show Snap Points</Text>
-            <Switch value={showSnapPoints} onValueChange={setShowSnapPoints} trackColor={{ false: FIELDS_COLORS.panelBorder, true: FIELDS_COLORS.tealDark }} />
-          </View>
+      <View
+        style={{
+          padding: 12,
+          borderRadius: 12,
+          backgroundColor: FIELDS_COLORS.surfaceSolid,
+          borderWidth: 1,
+          borderColor: FIELDS_COLORS.panelBorder,
+          gap: 12,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>Sketch Mode</Text>
+          <Switch value={sketchMode} onValueChange={setSketchMode} trackColor={{ false: FIELDS_COLORS.panelBorder, true: FIELDS_COLORS.tealDark }} />
         </View>
-      ) : null}
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>Show Snap Points</Text>
+          <Switch value={showSnapPoints} onValueChange={setShowSnapPoints} trackColor={{ false: FIELDS_COLORS.panelBorder, true: FIELDS_COLORS.tealDark }} />
+        </View>
+      </View>
 
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
         <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>Characters</Text>

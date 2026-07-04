@@ -606,7 +606,7 @@ export function MapViewNative(props: MapViewProps) {
 
   // ── Virtual bounding box corners and dimension labels ──
   const { virtualBoxCornersFC, virtualBoxLabelsFC } = useMemo(() => {
-    if (mode === "templates" || !projectionOrigin || lines.length === 0) {
+    if (!projectionOrigin || lines.length === 0) {
       return { virtualBoxCornersFC: featureCollection([]), virtualBoxLabelsFC: featureCollection([]) };
     }
     const vbLines = lines.filter((l) => l.layer === "virtual_boundary");
@@ -1112,15 +1112,6 @@ export function MapViewNative(props: MapViewProps) {
         const newY = start.y + dN;
         const newRotation = start.rotation + rotDeg;
         const newScale = start.scale * scaleF;
-        if (indentRect) {
-          const { east, north } = clampToIndent(
-            newX, newY,
-            item.width  * newScale / 2,
-            item.height * newScale / 2,
-            indentRect
-          );
-          return { ...item, x: east, y: north, rotation: newRotation, scale: newScale };
-        }
         return { ...item, x: newX, y: newY, rotation: newRotation, scale: newScale };
       });
 
@@ -1172,15 +1163,6 @@ export function MapViewNative(props: MapViewProps) {
         const newY = start.y + finalDN;
         const newRotation = start.rotation + finalRotDeg;
         const newScale = start.scale * finalScaleF;
-        if (indentRect) {
-          const { east, north } = clampToIndent(
-            newX, newY,
-            item.width  * newScale / 2,
-            item.height * newScale / 2,
-            indentRect
-          );
-          return { ...item, x: east, y: north, rotation: newRotation, scale: newScale };
-        }
         return { ...item, x: newX, y: newY, rotation: newRotation, scale: newScale };
       });
 

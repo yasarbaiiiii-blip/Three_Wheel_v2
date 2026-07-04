@@ -13,6 +13,7 @@ import { FieldsClearBar } from "../components/fields/FieldsClearBar";
 import { MapPlanInteractionOverlay } from "../components/fields/MapPlanInteractionOverlay";
 import { FIELDS_COLORS } from "../components/fields/fieldsTheme";
 import { AlignDxfPanel } from "../components/fields/panels/AlignDxfPanel";
+import { BoundingBoxStep } from "../components/fields/panels/BoundingBoxStep";
 import { PathOrderAndSprayStep } from "../components/fields/panels/PathOrderAndSprayStep";
 import { TemplatePanel } from "../components/fields/panels/TemplatePanel";
 import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPreviewStep";
@@ -123,9 +124,10 @@ export type FieldsPageProps = {
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
 
 const STEP_DEFS: { id: FieldsStepId; title: string; stepNumber: number }[] = [
-  { id: "upload", title: "Upload & Preview", stepNumber: 1 },
-  { id: "align", title: "Align DXF", stepNumber: 2 },
-  { id: "orderAndSpray", title: "Path Order & Spray", stepNumber: 3 },
+  { id: "boundingBox", title: "Bounding Box", stepNumber: 1 },
+  { id: "upload", title: "Upload & Parse", stepNumber: 2 },
+  { id: "align", title: "Align DXF", stepNumber: 3 },
+  { id: "orderAndSpray", title: "Path Order & Load", stepNumber: 4 },
 ];
 
 export function FieldsPage(props: FieldsPageProps) {
@@ -213,7 +215,34 @@ export function FieldsPage(props: FieldsPageProps) {
   const handleApplyBoundary = useCallback((w: number, h: number) => {
     setActiveBoundaryWidth(w);
     setActiveBoundaryHeight(h);
-  }, []);
+    setLines((prev) => {
+      const nonVirtual = prev.filter((l) => l.layer !== "virtual_boundary");
+      const bMinN = -h / 2;
+      const bMaxN = h / 2;
+      const bMinE = -w / 2;
+      const bMaxE = w / 2;
+      const corners = [
+        { n: bMinN, e: bMinE }, // 0: Bottom-Left
+        { n: bMinN, e: bMaxE }, // 1: Bottom-Right
+        { n: bMaxN, e: bMaxE }, // 2: Top-Right
+        { n: bMaxN, e: bMinE }, // 3: Top-Left
+      ];
+      const virtualLines: any[] = [];
+      for (let i = 0; i < 4; i++) {
+        const from = corners[i];
+        const to = corners[(i + 1) % 4];
+        virtualLines.push({
+          id: `vbox-edge-${i}`,
+          label: `Virtual Box Edge ${i + 1}`,
+          layer: "virtual_boundary",
+          from: { id: 800000 + i * 2, x: from.n, y: from.e },
+          to: { id: 800000 + i * 2 + 1, x: to.n, y: to.e },
+          width: 0.1,
+        });
+      }
+      return [...nonVirtual, ...virtualLines];
+    });
+  }, [setLines]);
 
   const {
     activeStep,
@@ -284,6 +313,12 @@ export function FieldsPage(props: FieldsPageProps) {
 
   const stepStatus = (id: FieldsStepId): "pending" | "active" | "done" => {
     switch (id) {
+      case "boundingBox":
+        return activeBoundaryWidth != null && activeBoundaryHeight != null
+          ? "done"
+          : activeStep === "boundingBox"
+          ? "active"
+          : "pending";
       case "upload":
         return uploadDone ? "done" : activeStep === "upload" ? "active" : "pending";
       case "align":
@@ -300,7 +335,7 @@ export function FieldsPage(props: FieldsPageProps) {
   };
 
   const toggleStep = (id: FieldsStepId) => {
-    setActiveStep(activeStep === id ? "upload" : id);
+    setActiveStep(activeStep === id ? "boundingBox" : id);
   };
 
   // Confirm transform handler — captures coordinates and reveals align step
@@ -363,9 +398,9 @@ export function FieldsPage(props: FieldsPageProps) {
           isPlanEditingMode,
           visualAlignmentItem,
           setVisualAlignmentItem,
-          boundaryMode,
-          boundaryWidth: boundaryMode && activeBoundaryWidth ? activeBoundaryWidth : undefined,
-          boundaryHeight: boundaryMode && activeBoundaryHeight ? activeBoundaryHeight : undefined,
+          boundaryMode: false,
+          boundaryWidth: undefined,
+          boundaryHeight: undefined,
           boundaryPosition: boundaryPosition ?? undefined,
           onMoveBoundary: (x: number, y: number) => setBoundaryPosition({ x, y }),
           boundaryRotation,
@@ -419,10 +454,30 @@ export function FieldsPage(props: FieldsPageProps) {
       >
         <FieldsClearBar onClear={onClearMission} busy={missionActionBusy} />
         <View style={{ flex: 1, padding: 12, gap: 10, paddingBottom: 24 }}>
-          {/* Step 1: Upload & Preview */}
+          {/* Step 1: Bounding Box */}
           <FieldsStepCard
             stepNumber={1}
-            title="Upload & Preview"
+            title="Bounding Box"
+            status={stepStatus("boundingBox")}
+            expanded={activeStep === "boundingBox"}
+            onToggle={() => toggleStep("boundingBox")}
+          >
+            <BoundingBoxStep
+              widthStr={boundaryWidthStr}
+              onChangeWidthStr={setBoundaryWidthStr}
+              heightStr={boundaryHeightStr}
+              onChangeHeightStr={setBoundaryHeightStr}
+              onApplyBoundary={handleApplyBoundary}
+              activeWidth={activeBoundaryWidth}
+              activeHeight={activeBoundaryHeight}
+              onProceedToUpload={() => setActiveStep("upload")}
+            />
+          </FieldsStepCard>
+
+          {/* Step 2: Upload & Parse */}
+          <FieldsStepCard
+            stepNumber={2}
+            title="Upload & Parse"
             status={stepStatus("upload")}
             expanded={activeStep === "upload"}
             onToggle={() => toggleStep("upload")}
@@ -439,6 +494,7 @@ export function FieldsPage(props: FieldsPageProps) {
                 if (isPlanEditingMode !== true) {
                   onStartPlanEditing?.();
                 }
+                setActiveStep("align");
               }}
               onInvalidateWorkflow={onInvalidateWorkflow}
               blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
@@ -453,6 +509,7 @@ export function FieldsPage(props: FieldsPageProps) {
                     if (isPlanEditingMode !== true) {
                       onStartPlanEditing?.();
                     }
+                    setActiveStep("align");
                   }}
                   boundaryMode={boundaryMode}
                   onToggleBoundaryMode={handleToggleBoundaryMode}
@@ -472,9 +529,9 @@ export function FieldsPage(props: FieldsPageProps) {
             />
           </FieldsStepCard>
 
-          {/* Step 2: Align DXF — visible after plan is loaded */}
+          {/* Step 3: Align DXF — visible after plan is loaded */}
           <FieldsStepCard
-            stepNumber={2}
+            stepNumber={3}
             title="Align DXF"
             status={stepStatus("align")}
             expanded={activeStep === "align"}
@@ -509,9 +566,9 @@ export function FieldsPage(props: FieldsPageProps) {
             />
           </FieldsStepCard>
 
-          {/* Step 3: Path Order & Spray + Load to Controller */}
+          {/* Step 4: Path Order & Load */}
           <FieldsStepCard
-            stepNumber={3}
+            stepNumber={4}
             title="Path Order & Load"
             status={stepStatus("orderAndSpray")}
             expanded={activeStep === "orderAndSpray"}

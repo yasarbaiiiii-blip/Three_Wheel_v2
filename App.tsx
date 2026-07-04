@@ -1847,11 +1847,9 @@ export default function App() {
           width: 0.1,
         }];
       }
-      // ── Compute 1m Virtual Bounding Box ──
+      // ── Compute Bounding Box & Auto-Center Plan ──
       // Calculate the axis-aligned bounding box of all plan geometry,
-      // then pad by 1 meter on each side. The 4 resulting corner-to-corner
-      // lines use the virtual_boundary layer so they render on the preview
-      // but are excluded from any backend payload or mission execution.
+      // center the plan at (0, 0), and generate the 4 virtual bounding box edges.
       if (generatedLines.length > 0) {
         let bbMinN = Infinity, bbMaxN = -Infinity;
         let bbMinE = Infinity, bbMaxE = -Infinity;
@@ -1872,29 +1870,65 @@ export default function App() {
           }
         }
         if (isFinite(bbMinN) && isFinite(bbMaxN) && isFinite(bbMinE) && isFinite(bbMaxE)) {
-          const BOX_PAD = 1.0; // meters
-          const bMinN = bbMinN - BOX_PAD;
-          const bMaxN = bbMaxN + BOX_PAD;
-          const bMinE = bbMinE - BOX_PAD;
-          const bMaxE = bbMaxE + BOX_PAD;
-          // Corner order: BL → BR → TR → TL → BL (closed rectangle)
-          const corners = [
-            { n: bMinN, e: bMinE }, // 0: Bottom-Left
-            { n: bMinN, e: bMaxE }, // 1: Bottom-Right
-            { n: bMaxN, e: bMaxE }, // 2: Top-Right
-            { n: bMaxN, e: bMinE }, // 3: Top-Left
-          ];
-          for (let i = 0; i < 4; i++) {
-            const from = corners[i];
-            const to = corners[(i + 1) % 4];
-            generatedLines.push({
-              id: `vbox-edge-${i}`,
-              label: `Virtual Box Edge ${i + 1}`,
-              layer: "virtual_boundary",
-              from: { id: 800000 + i * 2, x: from.n, y: from.e },
-              to: { id: 800000 + i * 2 + 1, x: to.n, y: to.e },
-              width: 0.1,
-            });
+          // Calculate geometric midpoint of the plan
+          const planCenterN = (bbMinN + bbMaxN) / 2;
+          const planCenterE = (bbMinE + bbMaxE) / 2;
+
+          // Translate all non-virtual_boundary coordinates so the plan is centered at (0, 0)
+          for (const line of generatedLines) {
+            if (line.layer === "virtual_boundary") continue;
+            if (line.from) {
+              line.from = { ...line.from, x: line.from.x - planCenterN, y: line.from.y - planCenterE };
+            }
+            if (line.to) {
+              line.to = { ...line.to, x: line.to.x - planCenterN, y: line.to.y - planCenterE };
+            }
+            if (line.entity?.preview_points) {
+              line.entity.preview_points = line.entity.preview_points.map((pt) => ({
+                ...pt,
+                north: pt.north - planCenterN,
+                east: pt.east - planCenterE,
+              }));
+            }
+          }
+
+          // Remove any existing virtual_boundary lines before adding updated ones
+          const nonVirtual = generatedLines.filter((l) => l.layer !== "virtual_boundary");
+          generatedLines.length = 0;
+          generatedLines.push(...nonVirtual);
+
+          // Check if there is already a user-created virtual_boundary in lines from Step 1
+          const existingVirtual = lines.filter((l: PlanLine) => l.layer === "virtual_boundary");
+          if (existingVirtual.length > 0) {
+            // Re-use the exact virtual boundary applied by the user in Step 1
+            generatedLines.push(...existingVirtual);
+          } else {
+            // Determine bounding box dimensions: use 1m padding around centered geometry
+            const BOX_PAD = 1.0; // meters
+            const bMinN = (bbMinN - planCenterN) - BOX_PAD;
+            const bMaxN = (bbMaxN - planCenterN) + BOX_PAD;
+            const bMinE = (bbMinE - planCenterE) - BOX_PAD;
+            const bMaxE = (bbMaxE - planCenterE) + BOX_PAD;
+
+            // Corner order: BL → BR → TR → TL → BL (closed rectangle)
+            const corners = [
+              { n: bMinN, e: bMinE }, // 0: Bottom-Left
+              { n: bMinN, e: bMaxE }, // 1: Bottom-Right
+              { n: bMaxN, e: bMaxE }, // 2: Top-Right
+              { n: bMaxN, e: bMinE }, // 3: Top-Left
+            ];
+            for (let i = 0; i < 4; i++) {
+              const from = corners[i];
+              const to = corners[(i + 1) % 4];
+              generatedLines.push({
+                id: `vbox-edge-${i}`,
+                label: `Virtual Box Edge ${i + 1}`,
+                layer: "virtual_boundary",
+                from: { id: 800000 + i * 2, x: from.n, y: from.e },
+                to: { id: 800000 + i * 2 + 1, x: to.n, y: to.e },
+                width: 0.1,
+              });
+            }
           }
         }
       }
