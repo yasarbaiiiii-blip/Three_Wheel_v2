@@ -1,4 +1,4 @@
-export type PlanLayer = "boundary" | "marking" | "center" | "transit" | "extension";
+export type PlanLayer = "boundary" | "marking" | "center" | "transit" | "extension" | "virtual_boundary";
 export type SidebarPanel = "import" | "details" | "mission" | "view" | "positioning" | "settings";
 export type MarkingStyle = "straight" | "dotted" | "dashed";
 

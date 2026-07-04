@@ -79,6 +79,7 @@ const LAYER_COLORS: Record<string, string> = {
   center: "#f59e0b",
   transit: "#94a3b8",
   extension: "#8b5cf6",
+  virtual_boundary: "#06b6d4",
 };
 const DEFAULT_LINE_COLOR = "#0f172a";
 const PLAN_SOURCE_MAX_ZOOM = 22;
@@ -285,6 +286,7 @@ export function MapViewNative(props: MapViewProps) {
     onSelectPoint,
     onSelectLine,
     selectedLineId,
+    selectedPoints,
     mode = "fields",
     placedItems,
     selectedItemIds,
@@ -588,6 +590,88 @@ export function MapViewNative(props: MapViewProps) {
     );
     return featureCollection(features);
   }, [refPointsSig]);
+
+  // ── Selected alignment points (highlighted in yellow) ──
+  const selectedPointsFC = useMemo(() => {
+    if (!selectedPoints || selectedPoints.length === 0 || !projectionOrigin) {
+      return featureCollection([]);
+    }
+    const features = selectedPoints.map((p, i) => {
+      // In FieldsPage/App.tsx, p.x is Easting (dxf_y) and p.y is Northing (dxf_x)
+      const gps = projectPlanNorthEastToGps(p.y, p.x, projectionOrigin);
+      return pointFeature(toMapboxCoord(gps.lat, gps.lon), { id: `sp-${i}` });
+    });
+    return featureCollection(features);
+  }, [selectedPoints, originSig]);
+
+  // ── Virtual bounding box corners and dimension labels ──
+  const { virtualBoxCornersFC, virtualBoxLabelsFC } = useMemo(() => {
+    if (mode === "templates" || !projectionOrigin || lines.length === 0) {
+      return { virtualBoxCornersFC: featureCollection([]), virtualBoxLabelsFC: featureCollection([]) };
+    }
+    const vbLines = lines.filter((l) => l.layer === "virtual_boundary");
+    if (vbLines.length === 0) {
+      return { virtualBoxCornersFC: featureCollection([]), virtualBoxLabelsFC: featureCollection([]) };
+    }
+
+    const seenCorners = new Set<string>();
+    const cornerFeatures: GeoJSON.Feature[] = [];
+    let minN = Infinity, maxN = -Infinity, minE = Infinity, maxE = -Infinity;
+    for (const line of vbLines) {
+      minN = Math.min(minN, line.from.x, line.to.x);
+      maxN = Math.max(maxN, line.from.x, line.to.x);
+      minE = Math.min(minE, line.from.y, line.to.y);
+      maxE = Math.max(maxE, line.from.y, line.to.y);
+    }
+    const centerN = (minN + maxN) / 2;
+    const centerE = (minE + maxE) / 2;
+
+    const labelFeatures: GeoJSON.Feature[] = [];
+    for (const line of vbLines) {
+      const segs = projectPlanLineToGpsSegments(line, projectionOrigin);
+      if (segs.length >= 2) {
+        const [lat1, lon1] = segs[0];
+        const k1 = `${lat1.toFixed(6)},${lon1.toFixed(6)}`;
+        if (!seenCorners.has(k1)) {
+          seenCorners.add(k1);
+          cornerFeatures.push(pointFeature(toMapboxCoord(lat1, lon1)));
+        }
+        const [lat2, lon2] = segs[segs.length - 1];
+        const k2 = `${lat2.toFixed(6)},${lon2.toFixed(6)}`;
+        if (!seenCorners.has(k2)) {
+          seenCorners.add(k2);
+          cornerFeatures.push(pointFeature(toMapboxCoord(lat2, lon2)));
+        }
+
+        const midLat = (lat1 + lat2) / 2;
+        const midLon = (lon1 + lon2) / 2;
+        const midN = (line.from.x + line.to.x) / 2;
+        const midE = (line.from.y + line.to.y) / 2;
+        const lenM = Math.hypot(line.to.x - line.from.x, line.to.y - line.from.y);
+        const isHorizontal = Math.abs(line.to.y - line.from.y) > Math.abs(line.to.x - line.from.x);
+
+        let label = "";
+        let offset: [number, number] = [0, 0];
+        if (isHorizontal) {
+          label = `Width: ${lenM.toFixed(2)}m`;
+          offset = midN > centerN ? [0, -1.2] : [0, 1.2];
+        } else {
+          label = midE > centerE ? `Height: ${lenM.toFixed(2)}m` : `Length: ${lenM.toFixed(2)}m`;
+          offset = midE > centerE ? [2.5, 0] : [-2.5, 0];
+        }
+        labelFeatures.push(
+          pointFeature(toMapboxCoord(midLat, midLon), {
+            label,
+            offset,
+          })
+        );
+      }
+    }
+    return {
+      virtualBoxCornersFC: featureCollection(cornerFeatures),
+      virtualBoxLabelsFC: featureCollection(labelFeatures),
+    };
+  }, [lines, originSig, mode]);
 
   // ── Rover geometry (ISOLATED memo — telemetry hot path, see plan §9.1) ──
   // Only depends on rover fields + lines/origin so high-frequency updates never
@@ -1461,7 +1545,7 @@ export function MapViewNative(props: MapViewProps) {
         >
           <LineLayer
             id="plan-lines-open-layer"
-            filter={["!=", ["get", "closedRing"], true]}
+            filter={["all", ["!=", ["get", "closedRing"], true], ["!=", ["get", "layer"], "virtual_boundary"]]}
             style={{
               lineColor: ["get", "color"],
               lineWidth: 2,
@@ -1472,13 +1556,23 @@ export function MapViewNative(props: MapViewProps) {
           />
           <LineLayer
             id="plan-lines-closed-layer"
-            filter={["==", ["get", "closedRing"], true]}
+            filter={["all", ["==", ["get", "closedRing"], true], ["!=", ["get", "layer"], "virtual_boundary"]]}
             style={{
               lineColor: ["get", "color"],
               lineWidth: 2,
               lineOpacity: 0.85,
               lineCap: "butt",
               lineJoin: "round",
+            }}
+          />
+          <LineLayer
+            id="plan-lines-virtual-boundary-layer"
+            filter={["==", ["get", "layer"], "virtual_boundary"]}
+            style={{
+              lineColor: "#06b6d4",
+              lineWidth: 2.5,
+              lineDasharray: [2, 1],
+              lineOpacity: 0.95,
             }}
           />
         </ShapeSource>
@@ -1495,7 +1589,7 @@ export function MapViewNative(props: MapViewProps) {
           <LineLayer
             id="selected-line-open-layer"
             filter={["!=", ["get", "closedRing"], true]}
-            style={{ lineColor: "#ef4444", lineWidth: 4, lineCap: "round", lineJoin: "round" }}
+            style={{ lineColor: "#3b82f6", lineWidth: 4, lineCap: "round", lineJoin: "round" }}
           />
           <LineLayer
             id="selected-line-closed-layer"
@@ -1540,6 +1634,48 @@ export function MapViewNative(props: MapViewProps) {
               textOffset: [0, -1.4],
               textAnchor: "bottom",
               textOpacity: refLabelsVisible ? 1 : 0,
+            }}
+          />
+        </ShapeSource>
+
+        {/* ── Selected alignment points (highlighted in yellow) ── */}
+        <ShapeSource id="selected-points" shape={selectedPointsFC}>
+          <CircleLayer
+            id="selected-points-layer"
+            style={{
+              circleRadius: 6.5,
+              circleColor: "#eab308",
+              circleStrokeColor: "#ffffff",
+              circleStrokeWidth: 2,
+              circleOpacity: 1,
+            }}
+          />
+        </ShapeSource>
+
+        {/* ── Virtual bounding box corners and dimension labels ── */}
+        <ShapeSource id="virtual-box-corners" shape={virtualBoxCornersFC}>
+          <CircleLayer
+            id="virtual-box-corners-layer"
+            style={{
+              circleRadius: 5,
+              circleColor: "#06b6d4",
+              circleStrokeColor: "#ffffff",
+              circleStrokeWidth: 1.5,
+              circleOpacity: 0.95,
+            }}
+          />
+        </ShapeSource>
+        <ShapeSource id="virtual-box-labels" shape={virtualBoxLabelsFC}>
+          <SymbolLayer
+            id="virtual-box-labels-layer"
+            style={{
+              textField: ["get", "label"],
+              textColor: "#0891b2",
+              textHaloColor: "#ffffff",
+              textHaloWidth: 2,
+              textSize: 12,
+              textOffset: ["get", "offset"],
+              textAllowOverlap: true,
             }}
           />
         </ShapeSource>

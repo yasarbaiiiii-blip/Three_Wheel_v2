@@ -153,7 +153,7 @@ const MAX_PREVIEW_CORNERS = 450;
 const PATH_SEGMENT_CHUNK_SIZE = 650;
 const PREVIEW_ARROWHEAD_LENGTH_PX = 14;
 const PREVIEW_ARROWHEAD_HALF_WIDTH_PX = 5;
-const PREVIEW_RENDERED_LAYERS = ["boundary", "center", "transit", "extension", "marking_true", "marking_false"] as const;
+const PREVIEW_RENDERED_LAYERS = ["virtual_boundary", "boundary", "center", "transit", "extension", "marking_true", "marking_false"] as const;
 
 type PreviewRenderedLayer = (typeof PREVIEW_RENDERED_LAYERS)[number];
 
@@ -1846,6 +1846,57 @@ export default function App() {
           to: { id: 2, x: 0, y: 10 },
           width: 0.1,
         }];
+      }
+      // ── Compute 1m Virtual Bounding Box ──
+      // Calculate the axis-aligned bounding box of all plan geometry,
+      // then pad by 1 meter on each side. The 4 resulting corner-to-corner
+      // lines use the virtual_boundary layer so they render on the preview
+      // but are excluded from any backend payload or mission execution.
+      if (generatedLines.length > 0) {
+        let bbMinN = Infinity, bbMaxN = -Infinity;
+        let bbMinE = Infinity, bbMaxE = -Infinity;
+        const updateBounds = (n: number, e: number) => {
+          if (n < bbMinN) bbMinN = n;
+          if (n > bbMaxN) bbMaxN = n;
+          if (e < bbMinE) bbMinE = e;
+          if (e > bbMaxE) bbMaxE = e;
+        };
+        for (const line of generatedLines) {
+          if (line.layer === "virtual_boundary") continue; // skip if already present
+          if (line.from) updateBounds(line.from.x, line.from.y);
+          if (line.to) updateBounds(line.to.x, line.to.y);
+          if (line.entity?.preview_points) {
+            for (const pt of line.entity.preview_points) {
+              updateBounds(pt.north, pt.east);
+            }
+          }
+        }
+        if (isFinite(bbMinN) && isFinite(bbMaxN) && isFinite(bbMinE) && isFinite(bbMaxE)) {
+          const BOX_PAD = 1.0; // meters
+          const bMinN = bbMinN - BOX_PAD;
+          const bMaxN = bbMaxN + BOX_PAD;
+          const bMinE = bbMinE - BOX_PAD;
+          const bMaxE = bbMaxE + BOX_PAD;
+          // Corner order: BL → BR → TR → TL → BL (closed rectangle)
+          const corners = [
+            { n: bMinN, e: bMinE }, // 0: Bottom-Left
+            { n: bMinN, e: bMaxE }, // 1: Bottom-Right
+            { n: bMaxN, e: bMaxE }, // 2: Top-Right
+            { n: bMaxN, e: bMinE }, // 3: Top-Left
+          ];
+          for (let i = 0; i < 4; i++) {
+            const from = corners[i];
+            const to = corners[(i + 1) % 4];
+            generatedLines.push({
+              id: `vbox-edge-${i}`,
+              label: `Virtual Box Edge ${i + 1}`,
+              layer: "virtual_boundary",
+              from: { id: 800000 + i * 2, x: from.n, y: from.e },
+              to: { id: 800000 + i * 2 + 1, x: to.n, y: to.e },
+              width: 0.1,
+            });
+          }
+        }
       }
       const normalized = sanitizePlanLines(
         normalizePlanLinesForCurves(normalizePlanLines(generatedLines))
@@ -6005,7 +6056,71 @@ function PlanPreview({
     return `${len}:${first.id}:${last.id}:${mid.from.x.toFixed(2)}:${mid.to.y.toFixed(2)}`;
   }, [filtered]);
 
-  const cornerPoints = useMemo(() => getCornerPoints(filtered).slice(0, MAX_PREVIEW_CORNERS), [filtered]);
+  const cornerPoints = useMemo(() => getCornerPoints(filtered.filter((l) => l.layer !== "virtual_boundary")).slice(0, MAX_PREVIEW_CORNERS), [filtered]);
+  // Extract the 4 unique corners of the virtual bounding box for rendering & selection
+  const virtualBoxCorners = useMemo(() => {
+    const vbLines = filtered.filter((line) => line.layer === "virtual_boundary");
+    if (vbLines.length === 0) return [];
+    const seen = new Set<string>();
+    const corners: { x: number; y: number }[] = [];
+    for (const line of vbLines) {
+      const fKey = `${line.from.x.toFixed(4)},${line.from.y.toFixed(4)}`;
+      if (!seen.has(fKey)) { seen.add(fKey); corners.push({ x: line.from.x, y: line.from.y }); }
+      const tKey = `${line.to.x.toFixed(4)},${line.to.y.toFixed(4)}`;
+      if (!seen.has(tKey)) { seen.add(tKey); corners.push({ x: line.to.x, y: line.to.y }); }
+    }
+    return corners;
+  }, [filtered]);
+  // Compute dimension labels (Width and Length/Height) for the 4 virtual bounding box edges
+  const virtualBoxLabels = useMemo(() => {
+    const vbLines = filtered.filter((line) => line.layer === "virtual_boundary");
+    if (vbLines.length === 0) return [];
+
+    let minN = Infinity, maxN = -Infinity, minE = Infinity, maxE = -Infinity;
+    for (const line of vbLines) {
+      minN = Math.min(minN, line.from.x, line.to.x);
+      maxN = Math.max(maxN, line.from.x, line.to.x);
+      minE = Math.min(minE, line.from.y, line.to.y);
+      maxE = Math.max(maxE, line.from.y, line.to.y);
+    }
+    const centerN = (minN + maxN) / 2;
+    const centerE = (minE + maxE) / 2;
+
+    return vbLines.map((line, idx) => {
+      const midN = (line.from.x + line.to.x) / 2;
+      const midE = (line.from.y + line.to.y) / 2;
+      const lenM = Math.hypot(line.to.x - line.from.x, line.to.y - line.from.y);
+      const isHorizontal = Math.abs(line.to.y - line.from.y) > Math.abs(line.to.x - line.from.x);
+
+      let text = "";
+      let anchor: "start" | "middle" | "end" = "middle";
+      let offsetX = 0;
+      let offsetY = 0;
+
+      if (isHorizontal) {
+        text = `Width: ${lenM.toFixed(2)}m`;
+        anchor = "middle";
+        // Top edge in CAD (larger Northing) appears at smaller screen Y (top of screen).
+        offsetY = midN > centerN ? -8 : 16;
+      } else {
+        // Use both Length and Height terminology as requested by user
+        text = midE > centerE ? `Height: ${lenM.toFixed(2)}m` : `Length: ${lenM.toFixed(2)}m`;
+        anchor = midE > centerE ? "start" : "end";
+        offsetX = midE > centerE ? 6 : -6;
+        offsetY = 3;
+      }
+
+      return {
+        id: line.id || `vlabel-${idx}`,
+        midN,
+        midE,
+        text,
+        anchor,
+        offsetX,
+        offsetY,
+      };
+    });
+  }, [filtered]);
   const primarySequenceLines = useMemo(
     () => filtered.filter(isPrimaryEditableLine),
     [filtered]
@@ -6016,6 +6131,7 @@ function PlanPreview({
   );
   const pathChunksByLayer = useMemo(
     () => ({
+      virtual_boundary: buildSvgPathChunks(filtered.filter((line) => line.layer === "virtual_boundary")),
       boundary: buildSvgPathChunks(filtered.filter((line) => line.layer === "boundary")),
       marking_true: buildSvgPathChunks(filtered.filter((line) => line.layer === "marking" && line.entity?.is_mark !== false)),
       marking_false: buildSvgPathChunks(filtered.filter((line) => line.layer === "marking" && line.entity?.is_mark === false)),
@@ -6028,6 +6144,7 @@ function PlanPreview({
 
   const previewCirclesByLayer = useMemo(
     () => ({
+      virtual_boundary: getPreviewCircleElements(filtered.filter((line) => line.layer === "virtual_boundary")),
       boundary: getPreviewCircleElements(filtered.filter((line) => line.layer === "boundary")),
       marking_true: getPreviewCircleElements(
         filtered.filter((line) => line.layer === "marking" && line.entity?.is_mark !== false)
@@ -6093,6 +6210,7 @@ function PlanPreview({
   const [rotation, setRotation] = useState(0);
   const arrowheadsByLayer = useMemo(() => {
     const result: Record<PreviewRenderedLayer, string[]> = {
+      virtual_boundary: [],
       boundary: [],
       center: [],
       transit: [],
@@ -6441,6 +6559,7 @@ function PlanPreview({
   }, []);
 
   const strokeForLayer = (layer: string) => {
+    if (layer === "virtual_boundary") return "#06b6d4"; // Cyan dashed boundary box
     if (layer === "boundary") return "#0f172a";
     if (layer === "center") return "#d97706";
     if (layer === "transit") return "#94a3b8";
@@ -6597,6 +6716,7 @@ function PlanPreview({
             onSelectLine={onSelectLine}
             selectedLineId={selectedLineId}
             showCornerPoints={true}
+            selectedPoints={selectedPoints}
           />
         ) : filtered.length === 0 && !hasRover ? (
           // No plan, no rover: show placeholder
@@ -6655,12 +6775,13 @@ function PlanPreview({
                     key={`${layer}-path-${index}`}
                     d={d}
                     stroke={strokeForLayer(layer)}
-                    strokeWidth={2 / viewport.zoom}
+                    strokeWidth={layer === "virtual_boundary" ? 2.5 / viewport.zoom : 2 / viewport.zoom}
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     fill="none"
                     opacity={0.96}
                     {...(layer === "extension" ? { strokeDasharray: `${8 / viewport.zoom} ${6 / viewport.zoom}` } : {})}
+                    {...(layer === "virtual_boundary" ? { strokeDasharray: `${10 / viewport.zoom} ${5 / viewport.zoom}` } : {})}
                   />
                 ))
               )}
@@ -6707,16 +6828,29 @@ function PlanPreview({
               {cornerPoints.map((pt, i) => (
                 <Circle key={`ep-${i}`} cx={pt.y} cy={pt.x} r={2.5 / viewport.zoom} fill="#3b82f6" opacity={0.8} />
               ))}
-              {/* ── Selected Points ── */}
+              {/* ── Virtual Bounding Box Corners ── */}
+              {virtualBoxCorners.map((pt, i) => (
+                <Circle
+                  key={`vbc-${i}`}
+                  cx={pt.y}
+                  cy={pt.x}
+                  r={5 / viewport.zoom}
+                  fill="#06b6d4"
+                  stroke="#ffffff"
+                  strokeWidth={1.5 / viewport.zoom}
+                  opacity={0.95}
+                />
+              ))}
+              {/* ── Selected Points (yellow highlight for alignment) ── */}
               {selectedPoints?.map((pt, i) => (
                 <Circle
                   key={`sp-${i}`}
                   cx={pt.y}
                   cy={pt.x}
-                  r={6 / viewport.zoom}
-                  fill="#f97316"
+                  r={7 / viewport.zoom}
+                  fill="#eab308"
                   stroke="#ffffff"
-                  strokeWidth={1.5 / viewport.zoom}
+                  strokeWidth={2 / viewport.zoom}
                 />
               ))}
 
@@ -6904,6 +7038,45 @@ function PlanPreview({
                       </SvgText>
                     </>
                   )}
+                </G>
+              );
+            })}
+
+            {/* ── Virtual Bounding Box Dimension Labels ── */}
+            {virtualBoxLabels.map((lbl) => {
+              const rawSX = lbl.midE * viewport.zoom + viewport.panX;
+              const rawSY = -lbl.midN * viewport.zoom + viewport.panY;
+              let sx = rawSX + lbl.offsetX;
+              let sy = rawSY + lbl.offsetY;
+              if (rotation !== 0 && layoutSize.width > 0 && layoutSize.height > 0) {
+                const rotated = rotatePoint(sx, sy, layoutSize.width / 2, layoutSize.height / 2, rotation);
+                sx = rotated.x;
+                sy = rotated.y;
+              }
+              return (
+                <G key={lbl.id}>
+                  <SvgText
+                    x={sx}
+                    y={sy}
+                    fontSize={11}
+                    fill="#ffffff"
+                    stroke="#ffffff"
+                    strokeWidth={3.5}
+                    fontWeight="700"
+                    textAnchor={lbl.anchor}
+                  >
+                    {lbl.text}
+                  </SvgText>
+                  <SvgText
+                    x={sx}
+                    y={sy}
+                    fontSize={11}
+                    fill="#0891b2"
+                    fontWeight="700"
+                    textAnchor={lbl.anchor}
+                  >
+                    {lbl.text}
+                  </SvgText>
                 </G>
               );
             })}
@@ -8300,7 +8473,9 @@ const generatorStyles = {
 } as const;
 
 function linesToDxf(lines: PlanLine[], name: string) {
-  const layers = Array.from(new Set(lines.map((line) => line.layer.toUpperCase())));
+  // Exclude virtual_boundary lines — they are UI-only alignment aids
+  const filteredLines = lines.filter((line) => line.layer !== "virtual_boundary");
+  const layers = Array.from(new Set(filteredLines.map((line) => line.layer.toUpperCase())));
   const layerTable = layers
     .map((layer) => [
       "0",
@@ -8316,7 +8491,7 @@ function linesToDxf(lines: PlanLine[], name: string) {
     ].join("\n"))
     .join("\n");
 
-  const entities = lines
+  const entities = filteredLines
     .map((entry) => [
       "0",
       "LINE",

@@ -22,6 +22,7 @@ export interface MapViewProps {
   onSelectLine?: (id: string | null) => void;
   selectedLineId?: string | null;
   showCornerPoints?: boolean;
+  selectedPoints?: { x: number; y: number }[];
 
   // Interactive templates mode support
   mode?: "fields" | "templates";
