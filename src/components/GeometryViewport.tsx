@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   LayoutChangeEvent,
   Modal,
-  PanResponder,
   Pressable,
   StyleSheet,
   Text,
@@ -21,6 +20,8 @@ import {
   ZoomOut,
 } from "lucide-react-native";
 import Svg, { Circle, G, Line, Path, Polygon, Text as SvgText } from "react-native-svg";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { useSharedValue, runOnJS } from "react-native-reanimated";
 
 import type { Palette } from "../theme/colors";
 import type { ImportedPlan, MarkingStyle, PlanLine, PlanPoint } from "../types/plan";
@@ -43,7 +44,7 @@ interface GeometryViewportProps {
   planNotes: string;
 }
 
-const PATH_SEGMENT_CHUNK_SIZE = 650;
+const PATH_SEGMENT_CHUNK_SIZE = 350;
 const ARROWHEAD_LENGTH_PX = 14;
 const ARROWHEAD_HALF_WIDTH_PX = 5;
 const RENDERED_PLAN_LAYERS = ["boundary", "marking", "center"] as const;
@@ -172,8 +173,6 @@ export function GeometryViewport({
   onDeleteSelectedLine,
 }: GeometryViewportProps) {
   const [zoom, setZoom] = useState(1);
-  const [rotateDragMode, setRotateDragMode] = useState(false);
-  const [dragMode, setDragMode] = useState(false);
   const [angleModalVisible, setAngleModalVisible] = useState(false);
   const [markingModalVisible, setMarkingModalVisible] = useState(false);
   const [miniInfoVisible, setMiniInfoVisible] = useState(false);
@@ -183,41 +182,52 @@ export function GeometryViewport({
     width: 0,
     height: 0,
   });
-  const rotationRef = useRef(rotation);
-  const ignoreTapRef = useRef(false);
-  const dragBaseRotation = useRef(rotation);
-  const dragBaseOffset = useRef(offset);
-  const pinchDistanceRef = useRef<number | null>(null);
-  const pinchZoomBaseRef = useRef(1);
-  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
-  const touchMovedRef = useRef(false);
 
-  /* ── RAF throttle refs (Step 1) ── */
-  const rafPendingRef = useRef<Record<string, any>>({});
-  const rafIdRef = useRef<number | null>(null);
+  // Reanimated shared values for gestures
+  const offsetX = useSharedValue(offset.x);
+  const offsetY = useSharedValue(offset.y);
+  const savedOffsetX = useSharedValue(offset.x);
+  const savedOffsetY = useSharedValue(offset.y);
+  const zoomSV = useSharedValue(zoom);
+  const savedZoomSV = useSharedValue(zoom);
+  const rotationSV = useSharedValue(rotation);
+  const savedRotationSV = useSharedValue(rotation);
 
-  const scheduleCommit = useCallback(() => {
-    if (rafIdRef.current !== null) return;
-    rafIdRef.current = requestAnimationFrame(() => {
-      const pending = rafPendingRef.current;
-      if (pending.offset) {
-        setOffset(pending.offset);
-      }
-      if (pending.zoom !== undefined) {
-        setZoom(pending.zoom);
-      }
-      rafPendingRef.current = {};
-      rafIdRef.current = null;
-    });
+  // Counts concurrently active gestures on the JS thread (pan + pinch + rotation can overlap).
+  // Sync effects stay locked out until the JS thread processes all final gestures and hits 0.
+  const [activeGesturesCountJS, setActiveGesturesCountJS] = useState(0);
+
+  const incrementGestureCount = useCallback(() => {
+    setActiveGesturesCountJS((prev) => prev + 1);
   }, []);
+
+  const decrementGestureCount = useCallback(() => {
+    setActiveGesturesCountJS((prev) => Math.max(0, prev - 1));
+  }, []);
+
+  // Sync React states and props to Reanimated shared values
+  useEffect(() => {
+    if (activeGesturesCountJS === 0) {
+      offsetX.value = offset.x;
+      savedOffsetX.value = offset.x;
+      offsetY.value = offset.y;
+      savedOffsetY.value = offset.y;
+    }
+  }, [offset, activeGesturesCountJS]);
 
   useEffect(() => {
-    return () => {
-      if (rafIdRef.current !== null) {
-        cancelAnimationFrame(rafIdRef.current);
-      }
-    };
-  }, []);
+    if (activeGesturesCountJS === 0) {
+      zoomSV.value = zoom;
+      savedZoomSV.value = zoom;
+    }
+  }, [zoom, activeGesturesCountJS]);
+
+  useEffect(() => {
+    if (activeGesturesCountJS === 0) {
+      rotationSV.value = rotation;
+      savedRotationSV.value = rotation;
+    }
+  }, [rotation, activeGesturesCountJS]);
 
   const safeLines = useMemo(() => lines.filter(isRenderableLine), [lines]);
 
@@ -242,24 +252,22 @@ export function GeometryViewport({
     });
   }, [safeLines, visibleBounds]);
 
-  useEffect(() => {
-    rotationRef.current = rotation;
-  }, [rotation]);
-
-  useEffect(() => {
-    dragBaseOffset.current = offset;
-  }, [offset]);
+  const lastImportedPlanRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!importedPlan || surfaceSize.width <= 0 || surfaceSize.height <= 0 || safeLines.length === 0) {
       if (!importedPlan) {
         setZoom(1);
-        setRotateDragMode(false);
-        setDragMode(false);
         setOffset({ x: 0, y: 0 });
+        lastImportedPlanRef.current = null;
       }
       return;
     }
+
+    if (lastImportedPlanRef.current === importedPlan.fileName) {
+      return;
+    }
+    lastImportedPlanRef.current = importedPlan.fileName;
 
     // Auto-fit logic for absolute metric coordinates
     let minX = Number.POSITIVE_INFINITY;
@@ -337,147 +345,84 @@ export function GeometryViewport({
     [offset.x, offset.y, rotation, zoom, surfaceSize]
   );
 
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => dragMode || rotateDragMode,
-        onMoveShouldSetPanResponder: (_, gesture) => {
-          if (!(rotateDragMode || dragMode)) {
-            return false;
-          }
-
-          return (
-            Math.abs(gesture.dx) > 6 ||
-            Math.abs(gesture.dy) > 6 ||
-            gesture.numberActiveTouches > 1
-          );
-        },
-        onPanResponderGrant: (_, gesture) => {
-          dragBaseRotation.current = rotationRef.current;
-          dragBaseOffset.current = offset;
-        },
-        onPanResponderMove: (_, gesture) => {
-          if (rotateDragMode) {
-            const nextAngle =
-              (dragBaseRotation.current + gesture.dx * 0.6 + 3600) % 360;
-            onRotationChange(nextAngle);
-            return;
-          }
-
-          if (dragMode) {
-            rafPendingRef.current.offset = {
-              x: dragBaseOffset.current.x + gesture.dx,
-              y: dragBaseOffset.current.y + gesture.dy,
-            };
-            scheduleCommit();
-          }
-        },
-        onPanResponderRelease: (_, gesture) => {
-          if (rotateDragMode) {
-            setRotateDragMode(false);
-          }
-        },
-        onPanResponderTerminate: () => {
-          if (rotateDragMode) {
-            setRotateDragMode(false);
-          }
-        },
+  // ── Gesture Handlers ──
+  const panGesture = useMemo(() =>
+    Gesture.Pan()
+      .onStart(() => {
+        "worklet";
+        runOnJS(incrementGestureCount)();
+      })
+      .onUpdate((e) => {
+        "worklet";
+        offsetX.value = savedOffsetX.value + e.translationX;
+        offsetY.value = savedOffsetY.value + e.translationY;
+        runOnJS(setOffset)({ x: offsetX.value, y: offsetY.value });
+      })
+      .onEnd(() => {
+        "worklet";
+        savedOffsetX.value = offsetX.value;
+        savedOffsetY.value = offsetY.value;
+      })
+      .onFinalize(() => {
+        "worklet";
+        runOnJS(decrementGestureCount)();
       }),
-    [dragMode, offset, onRotationChange, rotateDragMode]
+    [offsetX, offsetY, savedOffsetX, savedOffsetY, incrementGestureCount, decrementGestureCount]
   );
 
-  const applyAngle = () => {
-    const next = Number(angleInput);
+  const pinchGesture = useMemo(() =>
+    Gesture.Pinch()
+      .onStart(() => {
+        "worklet";
+        runOnJS(incrementGestureCount)();
+      })
+      .onUpdate((e) => {
+        "worklet";
+        const nextZoom = Math.max(0.6, Math.min(2.6, savedZoomSV.value * e.scale));
+        const ratio = 1 - nextZoom / savedZoomSV.value;
+        offsetX.value = savedOffsetX.value + e.focalX * ratio;
+        offsetY.value = savedOffsetY.value + e.focalY * ratio;
+        zoomSV.value = nextZoom;
+        runOnJS(setZoom)(nextZoom);
+        runOnJS(setOffset)({ x: offsetX.value, y: offsetY.value });
+      })
+      .onEnd(() => {
+        "worklet";
+        savedZoomSV.value = zoomSV.value;
+        savedOffsetX.value = offsetX.value;
+        savedOffsetY.value = offsetY.value;
+      })
+      .onFinalize(() => {
+        "worklet";
+        runOnJS(decrementGestureCount)();
+      }),
+    [zoomSV, savedZoomSV, offsetX, offsetY, savedOffsetX, savedOffsetY, incrementGestureCount, decrementGestureCount]
+  );
 
-    if (Number.isNaN(next)) {
-      return;
-    }
+  const rotationGesture = useMemo(() =>
+    Gesture.Rotation()
+      .onStart(() => {
+        "worklet";
+        runOnJS(incrementGestureCount)();
+      })
+      .onUpdate((e) => {
+        "worklet";
+        rotationSV.value = ((savedRotationSV.value + (e.rotation * 180) / Math.PI) % 360 + 360) % 360;
+        runOnJS(onRotationChange)(rotationSV.value);
+      })
+      .onEnd(() => {
+        "worklet";
+        savedRotationSV.value = rotationSV.value;
+      })
+      .onFinalize(() => {
+        "worklet";
+        runOnJS(decrementGestureCount)();
+      }),
+    [rotationSV, savedRotationSV, onRotationChange, incrementGestureCount, decrementGestureCount]
+  );
 
-    onRotationChange(((next % 360) + 360) % 360);
-    setAngleModalVisible(false);
-  };
-
-  const handleTouchStart = (event: any) => {
-    const touches = event.nativeEvent.touches;
-    touchMovedRef.current = false;
-
-    if (touches.length === 1) {
-      touchStartRef.current = {
-        x: touches[0].locationX,
-        y: touches[0].locationY,
-      };
-    }
-
-    if (!dragMode) {
-      return;
-    }
-
-    if (touches.length === 2) {
-      const [a, b] = touches;
-      pinchDistanceRef.current = Math.hypot(
-        a.pageX - b.pageX,
-        a.pageY - b.pageY
-      );
-      pinchZoomBaseRef.current = zoom;
-    }
-  };
-
-  const handleTouchMove = (event: any) => {
-    const touches = event.nativeEvent.touches;
-
-    if (touches.length === 1 && touchStartRef.current) {
-      const dx = touches[0].locationX - touchStartRef.current.x;
-      const dy = touches[0].locationY - touchStartRef.current.y;
-
-      if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
-        touchMovedRef.current = true;
-      }
-    } else if (touches.length > 1) {
-      touchMovedRef.current = true;
-    }
-
-    if (!dragMode) {
-      return;
-    }
-
-    if (touches.length === 2 && pinchDistanceRef.current) {
-      const [a, b] = touches;
-      const nextDistance = Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY);
-      const scale = nextDistance / pinchDistanceRef.current;
-      const nextZoom = Math.max(0.6, Math.min(2.6, pinchZoomBaseRef.current * scale));
-      rafPendingRef.current.zoom = nextZoom;
-      scheduleCommit();
-    }
-  };
-
-  const handleTouchEnd = (event: any) => {
+  const handleCanvasTapFromLocalPoint = useCallback((locationX: number, locationY: number) => {
     if (
-      !dragMode &&
-      !rotateDragMode &&
-      !touchMovedRef.current &&
-      touchStartRef.current
-    ) {
-      const touch =
-        event.nativeEvent.changedTouches?.[0] ?? event.nativeEvent;
-      const locationX = touch.locationX ?? touchStartRef.current.x;
-      const locationY = touch.locationY ?? touchStartRef.current.y;
-      handleCanvasTapFromLocalPoint(locationX, locationY);
-    }
-
-    pinchDistanceRef.current = null;
-    touchStartRef.current = null;
-    touchMovedRef.current = false;
-  };
-
-  const handleSurfaceLayout = (event: LayoutChangeEvent) => {
-    const { width, height } = event.nativeEvent.layout;
-    setSurfaceSize({ width, height });
-  };
-
-  const handleCanvasTapFromLocalPoint = (locationX: number, locationY: number) => {
-    if (
-      dragMode ||
-      rotateDragMode ||
       safeLines.length === 0 ||
       !surfaceSize.width ||
       !surfaceSize.height
@@ -513,6 +458,40 @@ export function GeometryViewport({
     }
 
     onSelectLine(null);
+  }, [safeLines, surfaceSize, zoom, rotation, offset, onSelectLine]);
+
+  const tapGesture = useMemo(() =>
+    Gesture.Tap()
+      .maxDistance(6)
+      .onEnd((e) => {
+        "worklet";
+        runOnJS(handleCanvasTapFromLocalPoint)(e.x, e.y);
+      }),
+    [handleCanvasTapFromLocalPoint]
+  );
+
+  const composedGesture = useMemo(
+    () => {
+      const panPinchRotate = Gesture.Simultaneous(panGesture, pinchGesture, rotationGesture);
+      return Gesture.Exclusive(tapGesture, panPinchRotate);
+    },
+    [panGesture, pinchGesture, rotationGesture, tapGesture]
+  );
+
+  const handleSurfaceLayout = (event: LayoutChangeEvent) => {
+    const { width, height } = event.nativeEvent.layout;
+    setSurfaceSize({ width, height });
+  };
+
+  const applyAngle = () => {
+    const next = Number(angleInput);
+
+    if (Number.isNaN(next)) {
+      return;
+    }
+
+    onRotationChange(((next % 360) + 360) % 360);
+    setAngleModalVisible(false);
   };
 
   return (
@@ -537,14 +516,8 @@ export function GeometryViewport({
         >
           {importedPlan ? (
             <>
-              <View
-                style={styles.canvasGestureSurface}
-                onLayout={handleSurfaceLayout}
-                {...panResponder.panHandlers}
-                onTouchStart={handleTouchStart}
-                onTouchMove={handleTouchMove}
-                onTouchEnd={handleTouchEnd}
-              >
+              <GestureDetector gesture={composedGesture}>
+                <View style={styles.canvasGestureSurface} onLayout={handleSurfaceLayout}>
                 <Svg
                   width="100%"
                   height="100%"
@@ -563,7 +536,8 @@ export function GeometryViewport({
                                 ? palette.foreground
                                 : palette.mutedForeground
                           }
-                          strokeWidth={0.45 / zoom}
+                          strokeWidth={0.9}
+                          vectorEffect="non-scaling-stroke"
                           strokeDasharray={dashPattern(markingStyle)}
                           strokeLinecap="round"
                           fill="none"
@@ -578,7 +552,8 @@ export function GeometryViewport({
                           x2={selectedLine.to.y}
                           y2={selectedLine.to.x}
                           stroke={palette.emerald}
-                          strokeWidth={0.85 / zoom}
+                          strokeWidth={1.7}
+                          vectorEffect="non-scaling-stroke"
                           strokeDasharray={dashPattern(markingStyle)}
                           strokeLinecap="round"
                         />
@@ -624,6 +599,7 @@ export function GeometryViewport({
                   })() : null}
                 </Svg>
               </View>
+            </GestureDetector>
 
               {/* Floating Compass Overlay */}
               <View
@@ -832,56 +808,20 @@ export function GeometryViewport({
               />
               <Pressable
                 onPress={() => {
-                  setRotateDragMode(false);
-                  setDragMode((current) => !current);
-                }}
-                className="items-center"
-              >
-                <View
-                  className="h-14 w-[78px] items-center justify-center rounded-2xl"
-                  style={{
-                    backgroundColor: dragMode ? palette.emerald : palette.muted,
-                  }}
-                >
-                  <Hand
-                    size={24}
-                    color={dragMode ? "#FFFFFF" : palette.foreground}
-                  />
-                </View>
-                <Text
-                  className="mt-2 text-xs font-semibold"
-                  style={{ color: palette.foreground }}
-                >
-                  Move
-                </Text>
-              </Pressable>
-              <Pressable
-                onPress={() => {
-                  if (ignoreTapRef.current) {
-                    ignoreTapRef.current = false;
-                    return;
-                  }
-
                   setAngleInput(rotation.toFixed(0));
                   setAngleModalVisible(true);
                 }}
-                onLongPress={() => {
-                  ignoreTapRef.current = true;
-                  setDragMode(false);
-                  setRotateDragMode(true);
-                }}
-                delayLongPress={260}
                 className="items-center"
               >
                 <View
                   className="h-14 w-[78px] items-center justify-center rounded-2xl"
                   style={{
-                    backgroundColor: rotateDragMode ? palette.emerald : palette.muted,
+                    backgroundColor: palette.muted,
                   }}
                 >
                   <RotateCw
                     size={24}
-                    color={rotateDragMode ? "#FFFFFF" : palette.foreground}
+                    color={palette.foreground}
                   />
                 </View>
                 <Text
@@ -911,14 +851,6 @@ export function GeometryViewport({
               <View className="flex-row flex-wrap justify-end" style={{ gap: 12 }}>
                 <MetaBadge label={`${(zoom * 100).toFixed(0)}%`} palette={palette} />
                 <MetaBadge label={`${rotation.toFixed(0)} deg`} palette={palette} />
-                <MetaBadge
-                  label={dragMode ? "Drag on" : "Drag off"}
-                  palette={palette}
-                />
-                <MetaBadge
-                  label={rotateDragMode ? "Rotate on" : "Rotate off"}
-                  palette={palette}
-                />
                 <MetaBadge
                   label={
                     selectedLine

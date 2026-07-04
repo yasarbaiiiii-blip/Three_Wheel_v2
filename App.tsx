@@ -6110,6 +6110,11 @@ function PlanPreview({
       rafViewportIdRef.current = null;
     });
   }, []);
+  const queueViewportCommit = React.useCallback((next: PreviewViewport) => {
+    viewportRef.current = next;
+    rafViewportRef.current = next;
+    scheduleViewportCommit();
+  }, [scheduleViewportCommit]);
   React.useEffect(() => {
     return () => {
       if (rafViewportIdRef.current !== null) cancelAnimationFrame(rafViewportIdRef.current);
@@ -6334,8 +6339,7 @@ function PlanPreview({
               panY: currentCenterY - (pinchStartCenterY - pinchStartPanY) * zoomRatio,
               zoom: newZoom,
             };
-            rafViewportRef.current = next;
-            scheduleViewportCommit();
+            queueViewportCommit(next);
           }
         } else if (touches.length === 1) {
           if (pinchStartDistance > 0) {
@@ -6348,15 +6352,14 @@ function PlanPreview({
           const dy = touches[0].pageY - lastTouchY;
 
           const next = {
-            panX: viewportRef.current.panX - dx,
-            panY: viewportRef.current.panY - dy,
+            panX: viewportRef.current.panX + dx,
+            panY: viewportRef.current.panY + dy,
             zoom: viewportRef.current.zoom,
           };
           lastTouchX = touches[0].pageX;
           lastTouchY = touches[0].pageY;
 
-          rafViewportRef.current = next;
-          scheduleViewportCommit();
+          queueViewportCommit(next);
         }
       },
       onPanResponderRelease: (evt, gestureState) => {
