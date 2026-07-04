@@ -55,6 +55,7 @@ import {
   type MapProjectionOrigin,
 } from "../utils/mapGeometryProjection";
 import {
+  getCurveGeometry,
   getCurveSelectionAnchors,
   getPlanLineRenderPoints,
   isCircleLikeLine,
@@ -82,6 +83,18 @@ const LAYER_COLORS: Record<string, string> = {
 const DEFAULT_LINE_COLOR = "#0f172a";
 const PLAN_SOURCE_MAX_ZOOM = 22;
 const PLAN_SOURCE_TOLERANCE = 0;
+const WEB_MERCATOR_WORLD_METERS = 40075016.68557849;
+const MAPBOX_TILE_SIZE = 512;
+const TRUE_CIRCLE_MAX_ZOOM = 22;
+const TRUE_CIRCLE_RADIUS_EXPRESSION = [
+  "interpolate",
+  ["exponential", 2],
+  ["zoom"],
+  0,
+  ["*", ["get", "meterRadius"], ["get", "pixelsPerMeterZoom0"]],
+  TRUE_CIRCLE_MAX_ZOOM,
+  ["*", ["get", "meterRadius"], ["get", "pixelsPerMeterMaxZoom"]],
+] as const;
 
 /** Colour for a plan line layer, with a safe fallback for unknown values. */
 function colorForLayer(layer: string): string {
@@ -131,6 +144,23 @@ function pointFeature(
     type: "Feature",
     properties,
     geometry: { type: "Point", coordinates: coord },
+  };
+}
+
+function trueCircleProperties(
+  coord: Coord,
+  meterRadius: number,
+  properties: GeoJSON.GeoJsonProperties = {}
+): GeoJSON.GeoJsonProperties {
+  const lat = coord[1];
+  const latitudeScale = Math.max(Math.cos((lat * Math.PI) / 180), 1e-6);
+  const pixelsPerMeterZoom0 =
+    MAPBOX_TILE_SIZE / (WEB_MERCATOR_WORLD_METERS * latitudeScale);
+  return {
+    ...properties,
+    meterRadius,
+    pixelsPerMeterZoom0,
+    pixelsPerMeterMaxZoom: pixelsPerMeterZoom0 * Math.pow(2, TRUE_CIRCLE_MAX_ZOOM),
   };
 }
 
@@ -318,6 +348,7 @@ export function MapViewNative(props: MapViewProps) {
   // Null = use the normal committed sources (no active drag preview).
   const [previewItemsGeo, setPreviewItemsGeo] = useState<{
     lines: GeoJSON.FeatureCollection;
+    circles: GeoJSON.FeatureCollection;
     boxes: GeoJSON.FeatureCollection;
   } | null>(null);
   const [previewBoundary, setPreviewBoundary] = useState<{
@@ -633,15 +664,37 @@ export function MapViewNative(props: MapViewProps) {
   // ── Placed items (Templates): lines + bounding boxes ──
   const placedItemsGeo = useMemo(() => {
     if (mode !== "templates" || !placedItems || placedItems.length === 0 || !projectionOrigin) {
-      return { lines: featureCollection([]), boxes: featureCollection([]) };
+      return { lines: featureCollection([]), circles: featureCollection([]), boxes: featureCollection([]) };
     }
     const lineFeatures: GeoJSON.Feature[] = [];
+    const circleFeatures: GeoJSON.Feature[] = [];
     const boxFeatures: GeoJSON.Feature[] = [];
 
     for (const item of placedItems) {
       const selected = selectedItemIds?.includes(item.id) ?? false;
       // Item lines via the shared visual transform (north/east → GPS).
       for (const l of item.lines) {
+        const circleGeometry = isCircleLikeLine(l) ? getCurveGeometry(l) : null;
+        if (circleGeometry) {
+          const center = transformVisualDxfPoint(
+            circleGeometry.centerNorth,
+            circleGeometry.centerEast,
+            item
+          );
+          const centerGps = projectPlanNorthEastToGps(center.north, center.east, projectionOrigin);
+          const centerCoord = toMapboxCoord(centerGps.lat, centerGps.lon);
+          circleFeatures.push(
+            pointFeature(
+              centerCoord,
+              trueCircleProperties(centerCoord, Math.abs(circleGeometry.radius * item.scale), {
+                itemId: item.id,
+                selected,
+              })
+            )
+          );
+          continue;
+        }
+
         const renderPoints = getPlanLineRenderPoints(l, true);
         if (renderPoints.length >= 2) {
           const coords: Coord[] = renderPoints.map((pt) => {
@@ -688,7 +741,11 @@ export function MapViewNative(props: MapViewProps) {
       });
     }
 
-    return { lines: featureCollection(lineFeatures), boxes: featureCollection(boxFeatures) };
+    return {
+      lines: featureCollection(lineFeatures),
+      circles: featureCollection(circleFeatures),
+      boxes: featureCollection(boxFeatures),
+    };
   }, [mode, placedItems, selectedItemIds, originSig]);
 
   // ── Boundary box (Templates): outer + indent + control points ──
@@ -854,16 +911,42 @@ export function MapViewNative(props: MapViewProps) {
    * Reuses the same projection logic as placedItemsGeo — kept in sync manually.
    */
   const buildItemsGeoForItems = useCallback(
-    (items: PlacedItem[]): { lines: GeoJSON.FeatureCollection; boxes: GeoJSON.FeatureCollection } => {
+    (items: PlacedItem[]): {
+      lines: GeoJSON.FeatureCollection;
+      circles: GeoJSON.FeatureCollection;
+      boxes: GeoJSON.FeatureCollection;
+    } => {
       if (!projectionOrigin) {
-        return { lines: featureCollection([]), boxes: featureCollection([]) };
+        return { lines: featureCollection([]), circles: featureCollection([]), boxes: featureCollection([]) };
       }
       const lineFeatures: GeoJSON.Feature[] = [];
+      const circleFeatures: GeoJSON.Feature[] = [];
       const boxFeatures: GeoJSON.Feature[] = [];
 
       for (const item of items) {
         const selected = selectedItemIds?.includes(item.id) ?? false;
         for (const l of item.lines) {
+          const circleGeometry = isCircleLikeLine(l) ? getCurveGeometry(l) : null;
+          if (circleGeometry) {
+            const center = transformVisualDxfPoint(
+              circleGeometry.centerNorth,
+              circleGeometry.centerEast,
+              item
+            );
+            const centerGps = projectPlanNorthEastToGps(center.north, center.east, projectionOrigin);
+            const centerCoord = toMapboxCoord(centerGps.lat, centerGps.lon);
+            circleFeatures.push(
+              pointFeature(
+                centerCoord,
+                trueCircleProperties(centerCoord, Math.abs(circleGeometry.radius * item.scale), {
+                  itemId: item.id,
+                  selected,
+                })
+              )
+            );
+            continue;
+          }
+
           const renderPoints = getPlanLineRenderPoints(l, true);
           if (renderPoints.length >= 2) {
             const coords: Coord[] = renderPoints.map((pt) => {
@@ -905,7 +988,11 @@ export function MapViewNative(props: MapViewProps) {
           geometry: { type: "Polygon", coordinates: [ring] },
         });
       }
-      return { lines: featureCollection(lineFeatures), boxes: featureCollection(boxFeatures) };
+      return {
+        lines: featureCollection(lineFeatures),
+        circles: featureCollection(circleFeatures),
+        boxes: featureCollection(boxFeatures),
+      };
     },
     [projectionOrigin, selectedItemIds]
   );
@@ -1184,6 +1271,7 @@ export function MapViewNative(props: MapViewProps) {
       boundaryGeo.outer.features.forEach(pushFeatureCoords);
       boundaryGeo.indent.features.forEach(pushFeatureCoords);
       placedItemsGeo.lines.features.forEach(pushFeatureCoords);
+      placedItemsGeo.circles.features.forEach(pushFeatureCoords);
       placedItemsGeo.boxes.features.forEach(pushFeatureCoords);
     } else {
       planLinesFC.features.forEach(pushFeatureCoords);
@@ -1540,6 +1628,19 @@ export function MapViewNative(props: MapViewProps) {
               lineOpacity: ["case", ["get", "selected"], 1.0, sketchMode ? 0.2 : 0.8],
               lineCap: "round",
               lineJoin: "round",
+            }}
+          />
+        </ShapeSource>
+        <ShapeSource id="placed-item-circles" shape={activeItemsGeo.circles} onPress={handleItemsPress}>
+          <CircleLayer
+            id="placed-item-circles-layer"
+            style={{
+              circleRadius: TRUE_CIRCLE_RADIUS_EXPRESSION as any,
+              circleColor: ["case", ["get", "selected"], "#ef4444", "#16a34a"],
+              circleOpacity: 0.01,
+              circleStrokeColor: ["case", ["get", "selected"], "#ef4444", "#16a34a"],
+              circleStrokeWidth: ["case", ["get", "selected"], 3, 2],
+              circleStrokeOpacity: ["case", ["get", "selected"], 1.0, sketchMode ? 0.2 : 0.8],
             }}
           />
         </ShapeSource>
