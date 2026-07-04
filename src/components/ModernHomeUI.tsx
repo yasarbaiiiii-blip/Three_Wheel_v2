@@ -704,6 +704,7 @@ export default function ModernHomeUI(props) {
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
     isPlanEditingMode,
     virtualJoystick, onPausePlan, missionActionBusy = false,
+    missionLoaded = false, missionLoadedPanelOpenToken = 0,
     mapViewEnabled = false, setMapViewEnabled, renderPlanPreview,
     onFocusRover, onFocusPlan,
     recenterRoverCount, recenterPlanCount,
@@ -873,6 +874,15 @@ export default function ModernHomeUI(props) {
       setPendingJoystickOpen(false);
     }
   }, [pendingJoystickOpen, vehicleMode, missionRunning]);
+
+  useEffect(() => {
+    if (!missionLoaded || missionLoadedPanelOpenToken <= 0) return;
+    setShowTelemetry(true);
+    setShowMissionControl(true);
+    setShowJoystick(false);
+    setPendingJoystickOpen(false);
+    setQuickAccessExpanded(false);
+  }, [missionLoaded, missionLoadedPanelOpenToken]);
 
   useEffect(() => {
     const wasOpen = wasMissionControlOpenRef.current;

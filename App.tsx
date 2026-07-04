@@ -741,6 +741,7 @@ export default function App() {
   const [missionActionBusy, setMissionActionBusy] = useState(false);
   const [missionFileReady, setMissionFileReady] = useState(false);
   const [missionLoaded, setMissionLoaded] = useState(false);
+  const [missionLoadedPanelOpenToken, setMissionLoadedPanelOpenToken] = useState(0);
   const [missionRunning, setMissionRunning] = useState(false);
   const [toast, setToast] = useState<AppToast | null>(null);
   const [rtkModalOpen, setRtkModalOpen] = useState(false);
@@ -2246,6 +2247,7 @@ export default function App() {
         });
         setLoadedPathInspection(loadedData);
         setMissionLoaded(true);
+        setMissionLoadedPanelOpenToken((token) => token + 1);
         setWorkflowStep("staged", "verified");
         setWorkflowStep("loaded", "verified");
         setMissionRunning(false);
@@ -2267,6 +2269,7 @@ export default function App() {
 
       setLoadedPathInspection(null);
       setMissionLoaded(true);
+      setMissionLoadedPanelOpenToken((token) => token + 1);
       setWorkflowStep("loaded", "verified");
       setMissionRunning(false);
       void refreshTelemetryPanel();
@@ -2786,6 +2789,7 @@ export default function App() {
       setLines(safeGeneratedLines);
       setSelectedLineId(safeGeneratedLines[0]?.id ?? null);
       setMissionLoaded(true);
+      setMissionLoadedPanelOpenToken((token) => token + 1);
       setMissionRunning(false);
       void refreshTelemetryPanel();
       setPage("home");
@@ -3127,6 +3131,7 @@ export default function App() {
                   missionActionBusy={missionActionBusy}
                   missionFileReady={missionFileReady}
                   missionLoaded={missionLoaded}
+                  missionLoadedPanelOpenToken={missionLoadedPanelOpenToken}
                   missionRunning={missionRunning}
                   systemHealth={systemHealth}
                   telemetrySnapshot={telemetrySnapshot}
@@ -3497,6 +3502,7 @@ type HomeViewProps = {
   missionActionBusy: boolean;
   missionFileReady: boolean;
   missionLoaded: boolean;
+  missionLoadedPanelOpenToken: number;
   missionRunning: boolean;
   systemHealth: SystemHealth | null;
   telemetrySnapshot: TelemetrySnapshot | null;
