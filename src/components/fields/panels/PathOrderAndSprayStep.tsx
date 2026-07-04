@@ -3,6 +3,11 @@ import { Alert, Pressable, Text, View } from "react-native";
 import { Check as CheckIcon, Loader } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
+import type {
+  StagedPlanResultState,
+  StagedWorkflowStatus,
+  StagedWorkflowStep,
+} from "../../../types/fieldsWorkflow";
 import type { ImportedPlan, PlanLine } from "../../../types/plan";
 import { isPrimaryEditableLine, normalizeEntityType } from "../../../utils/pathWorkflow";
 import { DraggableReorderList } from "../DraggableReorderList";
@@ -22,7 +27,12 @@ type PathOrderAndSprayStepProps = {
   blockProtectedWorkflowMutation: (action: string) => boolean;
   protectedResident: boolean;
   verifiedAlignmentRequest: pathApi.AlignPathRequest | null;
-  onLoadSelectedPath: (missionId?: string) => void;
+  onWorkflowStep?: (step: StagedWorkflowStep, status: StagedWorkflowStatus) => void;
+  setSegmentVerification: React.Dispatch<React.SetStateAction<pathApi.PathSegmentsResponse | null>>;
+  setStagedPlanResult: React.Dispatch<React.SetStateAction<StagedPlanResultState | null>>;
+  setStagedMissionInspection: React.Dispatch<React.SetStateAction<pathApi.StagedMissionResponse | null>>;
+  setStagedMissionId: React.Dispatch<React.SetStateAction<string | null>>;
+  onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
   missionActionBusy: boolean;
   onNavigateHome: () => void;
 };
@@ -35,6 +45,42 @@ const LOAD_STEP_LABELS: Record<pathApi.LoadToControllerStep, string> = {
   getStagedMission: "Inspecting staged mission...",
   loadMission: "Loading to controller...",
 };
+
+function nullableNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function buildStagedPlanResult(
+  missionId: string,
+  stagedPlanResult: any,
+  segmentVerification?: pathApi.PathSegmentsResponse
+): StagedPlanResultState {
+  const summary = stagedPlanResult?.mission_summary ?? {};
+  const alignmentMetadata = stagedPlanResult?.alignment_metadata ?? {};
+  const warnings = Array.isArray(stagedPlanResult?.warnings)
+    ? stagedPlanResult.warnings.filter((warning: unknown): warning is string => typeof warning === "string")
+    : [];
+
+  return {
+    missionId,
+    numWaypoints:
+      nullableNumber(stagedPlanResult?.num_waypoints) ??
+      nullableNumber(summary?.num_waypoints) ??
+      nullableNumber(segmentVerification?.num_waypoints),
+    numSegments:
+      nullableNumber(stagedPlanResult?.num_segments) ??
+      nullableNumber(segmentVerification?.num_segments),
+    totalLengthM:
+      nullableNumber(summary?.total_length_m) ??
+      nullableNumber(segmentVerification?.total_length_m),
+    markLengthM: nullableNumber(segmentVerification?.mark_length_m),
+    transitLengthM: nullableNumber(segmentVerification?.transit_length_m),
+    estimatedPaintL: nullableNumber(summary?.estimated_paint_l),
+    estimatedRuntimeS: nullableNumber(summary?.estimated_runtime_s),
+    rmseM: nullableNumber(summary?.rmse_m) ?? nullableNumber(alignmentMetadata?.rmse_m),
+    warnings,
+  };
+}
 
 export function PathOrderAndSprayStep({
   apiBaseUrl,
@@ -50,6 +96,11 @@ export function PathOrderAndSprayStep({
   blockProtectedWorkflowMutation,
   protectedResident,
   verifiedAlignmentRequest,
+  onWorkflowStep,
+  setSegmentVerification,
+  setStagedPlanResult,
+  setStagedMissionInspection,
+  setStagedMissionId,
   onLoadSelectedPath,
   missionActionBusy,
   onNavigateHome,
@@ -147,12 +198,28 @@ export function PathOrderAndSprayStep({
         return;
       }
 
-      // Step 6: Actual load to controller
-      setLoadStep("loadMission");
-      onLoadSelectedPath(result.missionId);
+      const missionId = result.missionId;
+      if (!missionId) {
+        Alert.alert("Load Failed", "Plan & stage succeeded, but no mission ID was returned.");
+        return;
+      }
 
-      // Small delay to allow load to process
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      setSegmentVerification(result.segmentVerification ?? null);
+      setStagedPlanResult(
+        buildStagedPlanResult(missionId, result.stagedPlanResult, result.segmentVerification)
+      );
+      setStagedMissionInspection(result.stagedMissionInspection ?? null);
+      setStagedMissionId(missionId);
+      onWorkflowStep?.("order", "verified");
+      onWorkflowStep?.("spray", "verified");
+      onWorkflowStep?.("staged", "verified");
+      onWorkflowStep?.("loaded", "pending");
+
+      setLoadStep("loadMission");
+      const loaded = await onLoadSelectedPath(missionId);
+      if (!loaded) {
+        return;
+      }
 
       Alert.alert("Success", "Mission loaded to controller successfully.", [
         {

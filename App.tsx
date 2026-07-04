@@ -787,7 +787,7 @@ export default function App() {
     stagedWorkflow.staged !== "verified" &&
     alignedRefPoints.length === 0;
   const missionStateRef = useRef<string | null>(null);
-  const [mapViewEnabled, setMapViewEnabled] = useState(false);
+  const [mapViewEnabled, setMapViewEnabled] = useState(true);
   const [resetNorthCount, setResetNorthCount] = useState(0);
 
   const toggleAutoOrigin = useCallback(() => {
@@ -2145,6 +2145,7 @@ export default function App() {
 
   async function loadMissionOnBackend(requestedStagedMissionId?: string) {
     const requestedMissionId = requestedStagedMissionId?.trim() || stagedMissionId?.trim() || "";
+    const hasExplicitMissionId = Boolean(requestedStagedMissionId?.trim());
     const isStagedLoad = requestedMissionId !== "";
 
     if (stagedWorkflow.staged === "verified" && !requestedMissionId) {
@@ -2152,28 +2153,28 @@ export default function App() {
       setWorkflowStep("loaded", "failed");
       Alert.alert("Load blocked", "Staged mission is verified but the mission ID is missing. Re-run Plan & Stage before loading.");
       showToast("Load blocked", "Missing staged mission ID.", "error");
-      return;
+      return false;
     }
 
     if (isStagedLoad) {
-      if (stagedWorkflow.staged !== "verified") {
+      if (stagedWorkflow.staged !== "verified" && !hasExplicitMissionId) {
         setLoadedPathInspection(null);
         setWorkflowStep("loaded", "failed");
         Alert.alert("Prerequisites Required", "Plan and stage the mission before loading to the controller.");
-        return;
+        return false;
       }
       if (!apiBaseUrl) {
         setLoadedPathInspection(null);
         setWorkflowStep("loaded", "failed");
-        return;
+        return false;
       }
     } else if (protectedMissionResident) {
       const message = "A protected surveyed mission is resident. Legacy filename load is blocked.";
       Alert.alert("Mission conflict", message);
       showToast("Mission conflict", message, "error");
-      return;
+      return false;
     } else if (!apiBaseUrl || !importedPlan || lines.length === 0) {
-      return;
+      return false;
     }
 
     logAction("LOAD_REQUEST", { apiBaseUrl, stagedMissionId: requestedMissionId || null, fileName: importedPlan?.fileName });
@@ -2230,15 +2231,29 @@ export default function App() {
         setVisualAlignmentItem(null);
         setIsVisualAlignmentMode(false);
 
+        setStagedMissionId(missionId);
+        setStagedPlanResult((prev) => prev?.missionId === missionId ? prev : {
+          missionId,
+          numWaypoints: loadedData.num_waypoints ?? null,
+          numSegments: stagedArtifact.segment_runs?.length ?? null,
+          totalLengthM: null,
+          markLengthM: null,
+          transitLengthM: null,
+          estimatedPaintL: null,
+          estimatedRuntimeS: null,
+          rmseM: null,
+          warnings: [],
+        });
         setLoadedPathInspection(loadedData);
         setMissionLoaded(true);
+        setWorkflowStep("staged", "verified");
         setWorkflowStep("loaded", "verified");
         setMissionRunning(false);
         void refreshTelemetryPanel();
         logAction("LOAD_SUCCESS", { stagedMissionId: missionId, fileName: importedPlan?.fileName });
         setPage("home");
         showToast("Mission loaded", "Staged mission loaded to controller and verified.", "success");
-        return;
+        return true;
       }
 
       const res = await missionApi.loadMission(apiBaseUrl, {
@@ -2258,6 +2273,7 @@ export default function App() {
       logAction("LOAD_SUCCESS", { fileName: importedPlan?.fileName });
       setPage("home");
       showToast("File loaded", "Load succeeded. Start and Export are now available.", "success");
+      return true;
     } catch (error) {
       const missionError = error && typeof error === "object" && "kind" in error
         ? error as ReturnType<typeof classifyMissionError>
@@ -2277,6 +2293,7 @@ export default function App() {
       Alert.alert(title, message);
       showToast(title, message, "error");
       if (missionError?.status === 409) void refreshMissionIdentity();
+      return false;
     } finally {
       setMissionActionBusy(false);
     }
@@ -4738,7 +4755,7 @@ function SectionPages(props: {
   backendPaths: any[];
   selectedPathName: string | null;
   onSelectPath: (name: string) => void;
-  onLoadSelectedPath: (missionId?: string) => void;
+  onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
   missionActionBusy: boolean;
   apiBaseUrl: string;
   onRefreshPaths: () => void;

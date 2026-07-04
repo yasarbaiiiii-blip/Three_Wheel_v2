@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform, Modal, TextInput, Dimensions, Alert, useWindowDimensions } from "react-native";
-import { GestureHandlerRootView, GestureDetector, Gesture } from "react-native-gesture-handler";
+import { GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps, withSpring, withTiming, cancelAnimation, Easing, runOnJS, Keyframe } from "react-native-reanimated";
 import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText } from "react-native-svg";
 import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check } from "lucide-react-native";
@@ -1364,10 +1364,10 @@ export default function ModernHomeUI(props) {
                 />
                 <NavBarItem
                   icon={MapIcon}
-                  label={mapViewEnabled ? "Map On" : "Map Off"}
-                  active={mapViewEnabled}
+                  label="Map On"
+                  active
                   expanded={navExpanded}
-                  onPress={() => setMapViewEnabled((v) => !v)}
+                  onPress={() => setMapViewEnabled(true)}
                 />
               </View>
             </>
@@ -1710,7 +1710,7 @@ export default function ModernHomeUI(props) {
   const hudVisible = !mapFullscreen;
 
   return (
-    <GestureHandlerRootView style={styles.container}>
+    <View style={styles.container}>
       {/* Map / home canvas layer */}
       {isHomePage ? (
       <View style={{ ...StyleSheet.absoluteFillObject, zIndex: mapFullscreen ? 200 : 1, backgroundColor: COLORS.bgBase }}>
@@ -1844,7 +1844,7 @@ export default function ModernHomeUI(props) {
           </View>
         </View>
       ) : null}
-    </GestureHandlerRootView>
+    </View>
   );
 }
 

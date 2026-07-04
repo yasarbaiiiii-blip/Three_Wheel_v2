@@ -4,6 +4,7 @@
   "private": true,
   "main": "expo/AppEntry.js",
   "scripts": {
+    "postinstall": "node scripts/patch-draggable-flatlist.js",
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",

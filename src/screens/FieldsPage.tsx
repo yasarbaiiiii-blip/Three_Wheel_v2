@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { Alert, ScrollView, StyleSheet, View } from "react-native";
+import { Alert, StyleSheet, View } from "react-native";
 
 import * as missionApi from "../api/missionApi";
 import * as pathApi from "../api/pathApi";
@@ -45,7 +45,7 @@ export type FieldsPageProps = {
   backendPaths: any[];
   selectedPathName: string | null;
   onSelectPath: (name: string) => void;
-  onLoadSelectedPath: (missionId?: string) => void;
+  onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
   missionActionBusy: boolean;
   onSelectLine: (id: string | null) => void;
   apiBaseUrl: string;
@@ -418,11 +418,7 @@ export function FieldsPage(props: FieldsPageProps) {
         }}
       >
         <FieldsClearBar onClear={onClearMission} busy={missionActionBusy} />
-        <ScrollView
-          style={{ flex: 1 }}
-          contentContainerStyle={{ padding: 12, gap: 10, paddingBottom: 24 }}
-          showsVerticalScrollIndicator={false}
-        >
+        <View style={{ flex: 1, padding: 12, gap: 10, paddingBottom: 24 }}>
           {/* Step 1: Upload & Preview */}
           <FieldsStepCard
             stepNumber={1}
@@ -536,12 +532,17 @@ export function FieldsPage(props: FieldsPageProps) {
               blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
               protectedResident={protectedResident}
               verifiedAlignmentRequest={verifiedAlignmentRequest}
+              onWorkflowStep={onWorkflowStep}
+              setSegmentVerification={setSegmentVerification}
+              setStagedPlanResult={setStagedPlanResult}
+              setStagedMissionInspection={setStagedMissionInspection}
+              setStagedMissionId={setStagedMissionId}
               onLoadSelectedPath={onLoadSelectedPath}
               missionActionBusy={missionActionBusy}
               onNavigateHome={handleNavigateHome}
             />
           </FieldsStepCard>
-        </ScrollView>
+        </View>
       </View>
     </View>
   );
