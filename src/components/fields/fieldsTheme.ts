@@ -32,6 +32,19 @@ export const FIELDS_COLORS = {
   pillSecondary: "#35353c",
   teal: "#0f988f",
   tealDark: "#0b6b68",
+  // Map interaction overlay
+  hudBg: "rgba(15, 15, 20, 0.85)",
+  hudBorder: "rgba(255, 255, 255, 0.12)",
+  hudText: "#e2e8f0",
+  iconActive: "#22d3ee",
+  iconGlow: "rgba(34, 211, 238, 0.25)",
+  iconInactive: "#475569",
+  confirmGreen: "#22c55e",
+  confirmGreenBg: "rgba(34, 197, 94, 0.15)",
+  // Step indicators
+  stepActive: "#3b82f6",
+  stepDone: "#10b981",
+  stepPending: "#475569",
 };
 
 export const statusPillColors = (status: string) => {

@@ -263,3 +263,128 @@ export function deletePath(apiBaseUrl: string, pathName: string): Promise<Respon
 }
 
 export type { DxfEntitiesResponse };
+
+/** Step-by-step result for the Load to Controller orchestrator */
+export type LoadToControllerStep =
+  | "saveOrder"
+  | "saveSpray"
+  | "verifySegments"
+  | "planAndStage"
+  | "getStagedMission"
+  | "loadMission";
+
+export type LoadToControllerResult = {
+  success: boolean;
+  failedStep?: LoadToControllerStep;
+  error?: string;
+  missionId?: string;
+  stagedPlanResult?: any;
+  stagedMissionInspection?: StagedMissionResponse;
+  segmentVerification?: PathSegmentsResponse;
+};
+
+/**
+ * Orchestrates the full "Load to Controller" flow:
+ * 1. Save entity order
+ * 2. Save entity spray overrides
+ * 3. Verify path segments
+ * 4. Plan & stage
+ * 5. Get staged mission inspection
+ *
+ * Returns step-by-step result. The caller handles step 6 (actual load) separately.
+ */
+export async function loadToController(
+  apiBaseUrl: string,
+  pathName: string,
+  opts: {
+    entityOrder: string[];
+    sprayOverrides: EntityOverride[];
+    alignmentRequest: AlignPathRequest;
+    onStep?: (step: LoadToControllerStep) => void;
+  }
+): Promise<LoadToControllerResult> {
+  const { entityOrder, sprayOverrides, alignmentRequest, onStep } = opts;
+
+  // Step 1: Save entity order
+  try {
+    onStep?.("saveOrder");
+    const orderRes = await saveEntityOrder(apiBaseUrl, pathName, entityOrder);
+    if (!orderRes.ok) {
+      const errText = await orderRes.text();
+      return { success: false, failedStep: "saveOrder", error: errText || "Failed to save path order" };
+    }
+  } catch (err: any) {
+    return { success: false, failedStep: "saveOrder", error: err.message || "Network error saving order" };
+  }
+
+  // Step 2: Save spray overrides
+  try {
+    onStep?.("saveSpray");
+    const sprayRes = await saveEntityOverrides(apiBaseUrl, pathName, sprayOverrides);
+    if (!sprayRes.ok) {
+      const errText = await sprayRes.text();
+      return { success: false, failedStep: "saveSpray", error: errText || "Failed to save spray settings" };
+    }
+  } catch (err: any) {
+    return { success: false, failedStep: "saveSpray", error: err.message || "Network error saving spray" };
+  }
+
+  // Step 3: Verify segments
+  let segmentVerification: PathSegmentsResponse | undefined;
+  try {
+    onStep?.("verifySegments");
+    const segRes = await getPathSegments(apiBaseUrl, pathName);
+    if (!segRes.ok) {
+      const errText = await segRes.text();
+      return { success: false, failedStep: "verifySegments", error: errText || "Segment verification failed" };
+    }
+    segmentVerification = await segRes.json();
+  } catch (err: any) {
+    return { success: false, failedStep: "verifySegments", error: err.message || "Network error verifying segments" };
+  }
+
+  // Step 4: Plan & Stage
+  let missionId: string | undefined;
+  let stagedPlanResult: any;
+  try {
+    onStep?.("planAndStage");
+    const body: PlanAndStageRequest = {
+      source: pathName,
+      ...alignmentRequest,
+    };
+    const planRes = await planAndStage(apiBaseUrl, pathName, body);
+    if (!planRes.ok) {
+      const errText = await planRes.text();
+      return { success: false, failedStep: "planAndStage", error: errText || "Plan & stage failed" };
+    }
+    stagedPlanResult = await planRes.json();
+    missionId = stagedPlanResult?.mission_id ?? stagedPlanResult?.mission_summary?.mission_id;
+    if (!missionId) {
+      return { success: false, failedStep: "planAndStage", error: "Response did not include a mission_id" };
+    }
+  } catch (err: any) {
+    return { success: false, failedStep: "planAndStage", error: err.message || "Network error during planning" };
+  }
+
+  // Step 5: Get staged mission inspection
+  let stagedMissionInspection: StagedMissionResponse | undefined;
+  try {
+    onStep?.("getStagedMission");
+    const stagedRes = await getStagedMission(apiBaseUrl, missionId);
+    if (!stagedRes.ok) {
+      const errText = await stagedRes.text();
+      return { success: false, failedStep: "getStagedMission", error: errText || "Failed to inspect staged mission" };
+    }
+    stagedMissionInspection = await stagedRes.json();
+  } catch (err: any) {
+    return { success: false, failedStep: "getStagedMission", error: err.message || "Network error inspecting staged mission" };
+  }
+
+  return {
+    success: true,
+    missionId,
+    stagedPlanResult,
+    stagedMissionInspection,
+    segmentVerification,
+  };
+}

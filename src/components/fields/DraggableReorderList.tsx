@@ -9,9 +9,11 @@ import { FIELDS_COLORS } from "./fieldsTheme";
 type DraggableReorderListProps = {
   data: PlanLine[];
   onDragEnd: (next: PlanLine[]) => void;
+  /** Optional render function for extra content on the right side of each item */
+  renderExtraRight?: (item: PlanLine) => React.ReactNode;
 };
 
-export function DraggableReorderList({ data, onDragEnd }: DraggableReorderListProps) {
+export function DraggableReorderList({ data, onDragEnd, renderExtraRight }: DraggableReorderListProps) {
   return (
     <DraggableFlatList
       data={data}
@@ -26,22 +28,23 @@ export function DraggableReorderList({ data, onDragEnd }: DraggableReorderListPr
             style={{
               flexDirection: "row",
               alignItems: "center",
-              padding: 12,
-              gap: 10,
+              padding: 10,
+              gap: 8,
               backgroundColor: isActive ? FIELDS_COLORS.accentMuted : FIELDS_COLORS.cardSolid,
               borderBottomWidth: 1,
               borderBottomColor: FIELDS_COLORS.panelBorder,
             }}
           >
-            <GripVertical size={18} color={FIELDS_COLORS.textDim} />
+            <GripVertical size={16} color={FIELDS_COLORS.textDim} />
             <View style={{ flex: 1 }}>
-              <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>
+              <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
                 {item.label}
               </Text>
-              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
+              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, marginTop: 1 }}>
                 {item.entity?.entity_type ?? item.layer}
               </Text>
             </View>
+            {renderExtraRight?.(item)}
           </Pressable>
         </ScaleDecorator>
       )}

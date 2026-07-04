@@ -39,6 +39,8 @@ type AlignDxfPanelProps = {
   onConfirmVisualAlignment?: () => void;
   extractedCorners?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null>>;
+  /** Current plan LLA coordinates read from the map (for visual alignment) */
+  mapLLA?: { lat: number; lon: number } | null;
 };
 
 export function AlignDxfPanel({
@@ -64,6 +66,7 @@ export function AlignDxfPanel({
   onConfirmVisualAlignment,
   extractedCorners,
   setExtractedCorners,
+  mapLLA,
 }: AlignDxfPanelProps) {
   const [rotationDeg, setRotationDeg] = useState("");
   const [isFixing, setIsFixing] = useState(false);
@@ -371,12 +374,17 @@ export function AlignDxfPanel({
           ) : isVisualAlignmentMode ? (
             <View style={{ gap: 12 }}>
               <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12 }}>
-                Drag and rotate the plan on the map to align it, then click Confirm.
+                Coordinates are captured from the plan's current map position.
               </Text>
               <View style={{ backgroundColor: FIELDS_COLORS.surfaceSolid, padding: 10, borderRadius: 6 }}>
                 <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontFamily: "monospace" }}>
                   Offset: {visualAlignmentItem?.x?.toFixed(2) ?? "0.00"}m, {visualAlignmentItem?.y?.toFixed(2) ?? "0.00"}m
                 </Text>
+                {mapLLA && (
+                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontFamily: "monospace", marginTop: 4 }}>
+                    Lat: {mapLLA.lat.toFixed(6)} · Lon: {mapLLA.lon.toFixed(6)}
+                  </Text>
+                )}
               </View>
               <Pressable
                 onPress={onConfirmVisualAlignment}
@@ -388,23 +396,35 @@ export function AlignDxfPanel({
                   justifyContent: "center",
                 }}
               >
-                <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>LLA Receiver (Confirm)</Text>
+                <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>Capture & Confirm</Text>
               </Pressable>
             </View>
           ) : (
-            <Pressable
-              onPress={onStartVisualAlignment}
-              style={{
-                height: 44,
-                borderWidth: 1,
-                borderColor: FIELDS_COLORS.textMain,
-                borderRadius: 8,
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 14, fontWeight: "700" }}>Coordinate Receiver</Text>
-            </Pressable>
+            <View style={{ gap: 8 }}>
+              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12 }}>
+                Position the plan on the map, then capture its LLA coordinates.
+              </Text>
+              {mapLLA && (
+                <View style={{ backgroundColor: FIELDS_COLORS.surfaceSolid, padding: 8, borderRadius: 6 }}>
+                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontFamily: "monospace" }}>
+                    Current Map LLA — Lat: {mapLLA.lat.toFixed(6)} · Lon: {mapLLA.lon.toFixed(6)}
+                  </Text>
+                </View>
+              )}
+              <Pressable
+                onPress={onStartVisualAlignment}
+                style={{
+                  height: 44,
+                  borderWidth: 1,
+                  borderColor: FIELDS_COLORS.stepActive,
+                  borderRadius: 8,
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <Text style={{ color: FIELDS_COLORS.stepActive, fontSize: 14, fontWeight: "700" }}>Start Visual Alignment</Text>
+              </Pressable>
+            </View>
           )}
         </View>
       ) : refPoints.length === 0 ? (

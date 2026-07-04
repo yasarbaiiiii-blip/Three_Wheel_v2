@@ -8,23 +8,19 @@ import {
   isProtectedMissionResident,
 } from "../api/missionContract";
 import { PlacedItem } from "../components/BoundaryEditor";
-import { FieldsAccordion } from "../components/fields/FieldsAccordion";
+import { FieldsStepCard } from "../components/fields/FieldsStepCard";
 import { FieldsClearBar } from "../components/fields/FieldsClearBar";
+import { MapPlanInteractionOverlay } from "../components/fields/MapPlanInteractionOverlay";
 import { FIELDS_COLORS } from "../components/fields/fieldsTheme";
 import { AlignDxfPanel } from "../components/fields/panels/AlignDxfPanel";
-import { PathOrderPanel } from "../components/fields/panels/PathOrderPanel";
-import { PlanEditingPanel } from "../components/fields/panels/PlanEditingPanel";
-import { PlanPreviewPanel } from "../components/fields/panels/PlanPreviewPanel";
-import { PlanStagePanel } from "../components/fields/panels/PlanStagePanel";
-import { SegmentVerificationPanel } from "../components/fields/panels/SegmentVerificationPanel";
-import { SprayVerificationPanel } from "../components/fields/panels/SprayVerificationPanel";
+import { PathOrderAndSprayStep } from "../components/fields/panels/PathOrderAndSprayStep";
 import { TemplatePanel } from "../components/fields/panels/TemplatePanel";
-import { UploadParsePanel } from "../components/fields/panels/UploadParsePanel";
+import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPreviewStep";
 import { useFieldsWorkflow } from "../hooks/useFieldsWorkflow";
 import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
 import type {
   AlignmentResultState,
-  FieldsAccordionId,
+  FieldsStepId,
   StagedPlanResultState,
   StagedWorkflowState,
   StagedWorkflowStatus,
@@ -87,6 +83,7 @@ export type FieldsPageProps = {
   extractedCorners?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null>>;
   onClearMission: () => Promise<void>;
+  onNavigateHome?: () => void;
   renderPlanPreview: (props: {
     lines: PlanLine[];
     mapSourceLines?: PlanLine[];
@@ -125,16 +122,10 @@ export type FieldsPageProps = {
 
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
 
-const ACCORDION_DEFS: { id: FieldsAccordionId; title: string }[] = [
-  { id: "upload", title: "Upload & Parse" },
-  { id: "templates", title: "Templates" },
-  { id: "planPreview", title: "Plan Preview" },
-  { id: "planEditing", title: "Plan Editing" },
-  { id: "pathOrder", title: "Path Order" },
-  { id: "alignDxf", title: "Align DXF" },
-  { id: "sprayVerify", title: "Spray Verification" },
-  { id: "segmentVerify", title: "Segment Verification" },
-  { id: "planStage", title: "Plan & Stage" },
+const STEP_DEFS: { id: FieldsStepId; title: string; stepNumber: number }[] = [
+  { id: "upload", title: "Upload & Preview", stepNumber: 1 },
+  { id: "align", title: "Align DXF", stepNumber: 2 },
+  { id: "orderAndSpray", title: "Path Order & Spray", stepNumber: 3 },
 ];
 
 export function FieldsPage(props: FieldsPageProps) {
@@ -192,6 +183,7 @@ export function FieldsPage(props: FieldsPageProps) {
     extractedCorners,
     setExtractedCorners,
     onClearMission,
+    onNavigateHome,
     renderPlanPreview,
   } = props;
 
@@ -224,10 +216,19 @@ export function FieldsPage(props: FieldsPageProps) {
   }, []);
 
   const {
-    activeAccordion,
-    setActiveAccordion,
-    planPreviewConfirmed,
-    setPlanPreviewConfirmed,
+    activeStep,
+    setActiveStep,
+    isTransformConfirmed,
+    setIsTransformConfirmed,
+    isAlignmentComplete,
+    setIsAlignmentComplete,
+    manipulationMode,
+    setManipulationMode,
+    transformData,
+    setTransformData,
+    showMapInteraction,
+    setShowMapInteraction,
+    resetTransform,
     effectiveLayerVisibility,
   } = useFieldsWorkflow(layerVisibility);
 
@@ -276,201 +277,64 @@ export function FieldsPage(props: FieldsPageProps) {
     ]
   );
 
-  const accordionStatus = (id: FieldsAccordionId) => {
+  // Determine step statuses
+  const hasPath = !!selectedPathName || !!importedPlan;
+  const uploadDone = hasPath;
+  const alignDone = stagedWorkflow.alignment === "verified" || !!verifiedAlignmentRequest;
+
+  const stepStatus = (id: FieldsStepId): "pending" | "active" | "done" => {
     switch (id) {
       case "upload":
-        return stagedWorkflow.upload;
-      case "planPreview":
-        return selectedPathName ? (planPreviewConfirmed ? "verified" : "pending") : "idle";
-      case "pathOrder":
-        return stagedWorkflow.order;
-      case "alignDxf":
-        return stagedWorkflow.alignment;
-      case "sprayVerify":
-        return stagedWorkflow.entities === "verified" ? "verified" : "pending";
-      case "segmentVerify":
-        return stagedWorkflow.spray;
-      case "planStage":
-        return stagedWorkflow.staged;
+        return uploadDone ? "done" : activeStep === "upload" ? "active" : "pending";
+      case "align":
+        return alignDone ? "done" : activeStep === "align" ? "active" : "pending";
+      case "orderAndSpray":
+        return stagedWorkflow.staged === "verified"
+          ? "done"
+          : activeStep === "orderAndSpray"
+          ? "active"
+          : "pending";
       default:
-        return "idle";
+        return "pending";
     }
   };
 
-  const toggleAccordion = (id: FieldsAccordionId) => {
-    setActiveAccordion((current) => (current === id ? null : id));
+  const toggleStep = (id: FieldsStepId) => {
+    setActiveStep(activeStep === id ? "upload" : id);
   };
 
-  const renderPanel = (id: FieldsAccordionId) => {
-    switch (id) {
-      case "upload":
-        return (
-          <UploadParsePanel
-            apiBaseUrl={apiBaseUrl}
-            importedPlan={importedPlan}
-            setImportedPlan={setImportedPlan}
-            onRefreshPaths={onRefreshPaths}
-            onInvalidateWorkflow={onInvalidateWorkflow}
-            blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
-            protectedResident={protectedResident}
-          />
-        );
-      case "templates":
-        return (
-          <TemplatePanel
-            apiBaseUrl={apiBaseUrl}
-            onRefreshPaths={onRefreshPaths}
-            onSelectPath={onSelectPath}
-            boundaryMode={boundaryMode}
-            onToggleBoundaryMode={handleToggleBoundaryMode}
-            boundaryWidthStr={boundaryWidthStr}
-            onChangeBoundaryWidthStr={setBoundaryWidthStr}
-            boundaryHeightStr={boundaryHeightStr}
-            onChangeBoundaryHeightStr={setBoundaryHeightStr}
-            onApplyBoundary={handleApplyBoundary}
-            sketchMode={sketchMode}
-            onToggleSketchMode={setSketchMode}
-            showSnapPoints={showSnapPoints}
-            onToggleShowSnapPoints={setShowSnapPoints}
-            telemetryPosN={telemetrySnapshot?.pos_n ?? null}
-            telemetryPosE={telemetrySnapshot?.pos_e ?? null}
-          />
-        );
-      case "planPreview":
-        return (
-          <PlanPreviewPanel
-            apiBaseUrl={apiBaseUrl}
-            backendPaths={backendPaths}
-            selectedPathName={selectedPathName}
-            onSelectPath={onSelectPath}
-            loadedPathInspection={loadedPathInspection}
-            setAlignmentResult={setAlignmentResult}
-            setVerifiedAlignmentRequest={setVerifiedAlignmentRequest}
-            setSegmentVerification={setSegmentVerification}
-            setStagedPlanResult={setStagedPlanResult}
-            setStagedMissionInspection={setStagedMissionInspection}
-            setStagedMissionId={setStagedMissionId}
-            setMissionSummary={setMissionSummary}
-            onRefreshPaths={onRefreshPaths}
-            blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
-            onContinue={() => {
-              setPlanPreviewConfirmed(true);
-              setActiveAccordion("planEditing");
-            }}
-          />
-        );
-      case "planEditing":
-        return (
-          <PlanEditingPanel
-            apiBaseUrl={apiBaseUrl}
-            selectedPathName={selectedPathName}
-            importedPlan={importedPlan}
-            lines={lines}
-            onSelectPath={onSelectPath}
-            onInvalidateWorkflow={onInvalidateWorkflow}
-            blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
-            visualAlignmentItem={visualAlignmentItem}
-            isPlanEditingMode={isPlanEditingMode}
-            mapViewEnabled={mapViewEnabled}
-            onStartPlanEditing={onStartPlanEditing}
-            onStopPlanEditing={onStopPlanEditing}
-          />
-        );
-      case "pathOrder":
-        return (
-          <PathOrderPanel
-            apiBaseUrl={apiBaseUrl}
-            selectedPathName={selectedPathName}
-            importedPlan={importedPlan}
-            lines={lines}
-            onRefreshPaths={onRefreshPaths}
-            onSelectPath={onSelectPath}
-            onInvalidateWorkflow={onInvalidateWorkflow}
-            blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
-            protectedResident={protectedResident}
-          />
-        );
-      case "alignDxf":
-        return (
-          <AlignDxfPanel
-            apiBaseUrl={apiBaseUrl}
-            selectedPathName={selectedPathName}
-            lines={lines}
-            setLines={setLines}
-            alignmentResult={alignmentResult}
-            setAlignmentResult={setAlignmentResult}
-            setVerifiedAlignmentRequest={setVerifiedAlignmentRequest}
-            setAlignedRefPoints={setAlignedRefPoints}
-            onWorkflowStep={onWorkflowStep}
-            onInvalidateWorkflow={onInvalidateWorkflow}
-            blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
-            refPoints={refPoints}
-            setRefPoints={setRefPoints}
-            alignmentMethod={alignmentMethod}
-            setAlignmentMethod={setAlignmentMethod}
-            setMissionSummary={setMissionSummary}
-            isVisualAlignmentMode={isVisualAlignmentMode}
-            visualAlignmentItem={visualAlignmentItem}
-            setVisualAlignmentItem={setVisualAlignmentItem}
-            onStartVisualAlignment={onStartVisualAlignment}
-            onConfirmVisualAlignment={onConfirmVisualAlignment}
-            extractedCorners={extractedCorners}
-            setExtractedCorners={setExtractedCorners}
-          />
-        );
-      case "sprayVerify":
-        return (
-          <SprayVerificationPanel
-            apiBaseUrl={apiBaseUrl}
-            selectedPathName={selectedPathName}
-            importedPlan={importedPlan}
-            lines={lines}
-            setLines={setLines}
-            selectedLineId={selectedLineId}
-            onSelectLine={onSelectLine}
-            onInvalidateWorkflow={onInvalidateWorkflow}
-            blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
-          />
-        );
-      case "segmentVerify":
-        return (
-          <SegmentVerificationPanel
-            apiBaseUrl={apiBaseUrl}
-            selectedPathName={selectedPathName}
-            importedPlan={importedPlan}
-            segmentVerification={segmentVerification}
-            setSegmentVerification={setSegmentVerification}
-            onWorkflowStep={onWorkflowStep}
-            onInvalidateWorkflow={onInvalidateWorkflow}
-          />
-        );
-      case "planStage":
-        return (
-          <PlanStagePanel
-            apiBaseUrl={apiBaseUrl}
-            selectedPathName={selectedPathName}
-            stagedWorkflow={stagedWorkflow}
-            verifiedAlignmentRequest={verifiedAlignmentRequest}
-            stagedPlanResult={stagedPlanResult}
-            setStagedPlanResult={setStagedPlanResult}
-            stagedMissionInspection={stagedMissionInspection}
-            setStagedMissionInspection={setStagedMissionInspection}
-            stagedMissionId={stagedMissionId}
-            setStagedMissionId={setStagedMissionId}
-            loadedPathInspection={loadedPathInspection}
-            onLoadSelectedPath={onLoadSelectedPath}
-            missionActionBusy={missionActionBusy}
-            onWorkflowStep={onWorkflowStep}
-            onInvalidateWorkflow={onInvalidateWorkflow}
-          />
-        );
-      default:
-        return null;
-    }
-  };
+  // Confirm transform handler — captures coordinates and reveals align step
+  const handleConfirmTransform = useCallback(() => {
+    setIsTransformConfirmed(true);
+    setShowMapInteraction(false);
+    setManipulationMode("idle");
+    setActiveStep("align");
+  }, [setIsTransformConfirmed, setShowMapInteraction, setManipulationMode, setActiveStep]);
+
+  // Navigate home handler
+  const handleNavigateHome = useCallback(() => {
+    onNavigateHome?.();
+  }, [onNavigateHome]);
+
+  // Build mapLLA from visualAlignmentItem or telemetry
+  const mapLLA = visualAlignmentItem
+    ? { lat: telemetrySnapshot?.lat ?? 0, lon: telemetrySnapshot?.lon ?? 0 }
+    : telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null
+    ? { lat: telemetrySnapshot.lat, lon: telemetrySnapshot.lon }
+    : null;
+
+  // Compute transform HUD state from visualAlignmentItem
+  const hasTransform = !!(
+    visualAlignmentItem &&
+    (Math.abs(visualAlignmentItem.x ?? 0) > 0.01 ||
+      Math.abs(visualAlignmentItem.y ?? 0) > 0.01 ||
+      Math.abs(visualAlignmentItem.rotation ?? 0) > 0.1 ||
+      Math.abs((visualAlignmentItem.scale ?? 1) - 1) > 0.001)
+  );
 
   return (
     <View style={{ flex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
+      {/* Map preview — full screen background */}
       <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
         {renderPlanPreview({
           lines,
@@ -484,8 +348,11 @@ export function FieldsPage(props: FieldsPageProps) {
           roverPosN: previewRoverPoint?.north ?? null,
           roverPosE: previewRoverPoint?.east ?? null,
           roverHeadingDeg: telemetrySnapshot?.heading_ned_deg ?? null,
-          selectedPoints: activeAccordion === "alignDxf" ? refPoints.map((point) => ({ x: point.dxf_y, y: point.dxf_x })) : [],
-          onSelectPoint: activeAccordion === "alignDxf" ? handleSelectPoint : undefined,
+          selectedPoints:
+            activeStep === "align"
+              ? refPoints.map((point) => ({ x: point.dxf_y, y: point.dxf_x }))
+              : [],
+          onSelectPoint: activeStep === "align" ? handleSelectPoint : undefined,
           alignedRefPoints,
           stagedVerified: stagedWorkflow.staged === "verified",
           mapViewEnabled,
@@ -508,16 +375,37 @@ export function FieldsPage(props: FieldsPageProps) {
         })}
       </View>
 
+      {/* Map interaction overlay (floating icons on plan) */}
+      <MapPlanInteractionOverlay
+        visible={showMapInteraction && hasPath}
+        manipulationMode={manipulationMode}
+        onSetMode={setManipulationMode}
+        transformData={{
+          scaleMultiplier: visualAlignmentItem?.scale ?? 1,
+          boundingWidthM: 0, // TODO: compute from plan bounds
+          boundingHeightM: 0,
+          rotationDeg: visualAlignmentItem?.rotation ?? 0,
+          offsetMeters: {
+            x: visualAlignmentItem?.x ?? 0,
+            y: visualAlignmentItem?.y ?? 0,
+          },
+        }}
+        onTransformChange={() => {}}
+        onConfirm={handleConfirmTransform}
+        hasTransform={hasTransform}
+      />
+
+      {/* Side panel */}
       <View
         style={{
           position: "absolute",
-          right: 20,
-          top: 20,
-          bottom: 20,
-          width: 380,
-          maxWidth: "38%",
+          right: 16,
+          top: 16,
+          bottom: 16,
+          width: 360,
+          maxWidth: "36%",
           backgroundColor: FIELDS_COLORS.panelSolid,
-          borderRadius: 20,
+          borderRadius: 18,
           borderWidth: 1,
           borderColor: FIELDS_COLORS.panelBorder,
           overflow: "hidden",
@@ -535,18 +423,124 @@ export function FieldsPage(props: FieldsPageProps) {
           contentContainerStyle={{ padding: 12, gap: 10, paddingBottom: 24 }}
           showsVerticalScrollIndicator={false}
         >
-          {ACCORDION_DEFS.map((accordion) => (
-            <FieldsAccordion
-              key={accordion.id}
-              id={accordion.id}
-              title={accordion.title}
-              status={accordionStatus(accordion.id)}
-              expanded={activeAccordion === accordion.id}
-              onToggle={() => toggleAccordion(accordion.id)}
-            >
-              {renderPanel(accordion.id)}
-            </FieldsAccordion>
-          ))}
+          {/* Step 1: Upload & Preview */}
+          <FieldsStepCard
+            stepNumber={1}
+            title="Upload & Preview"
+            status={stepStatus("upload")}
+            expanded={activeStep === "upload"}
+            onToggle={() => toggleStep("upload")}
+          >
+            <UploadAndPreviewStep
+              apiBaseUrl={apiBaseUrl}
+              importedPlan={importedPlan}
+              setImportedPlan={setImportedPlan}
+              onRefreshPaths={onRefreshPaths}
+              onSelectPath={(name) => {
+                onSelectPath(name);
+                // Auto-enable map interaction when path is loaded
+                setShowMapInteraction(true);
+                if (isPlanEditingMode !== true) {
+                  onStartPlanEditing?.();
+                }
+              }}
+              onInvalidateWorkflow={onInvalidateWorkflow}
+              blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
+              protectedResident={protectedResident}
+              renderTemplates={() => (
+                <TemplatePanel
+                  apiBaseUrl={apiBaseUrl}
+                  onRefreshPaths={onRefreshPaths}
+                  onSelectPath={(name) => {
+                    onSelectPath(name);
+                    setShowMapInteraction(true);
+                    if (isPlanEditingMode !== true) {
+                      onStartPlanEditing?.();
+                    }
+                  }}
+                  boundaryMode={boundaryMode}
+                  onToggleBoundaryMode={handleToggleBoundaryMode}
+                  boundaryWidthStr={boundaryWidthStr}
+                  onChangeBoundaryWidthStr={setBoundaryWidthStr}
+                  boundaryHeightStr={boundaryHeightStr}
+                  onChangeBoundaryHeightStr={setBoundaryHeightStr}
+                  onApplyBoundary={handleApplyBoundary}
+                  sketchMode={sketchMode}
+                  onToggleSketchMode={setSketchMode}
+                  showSnapPoints={showSnapPoints}
+                  onToggleShowSnapPoints={setShowSnapPoints}
+                  telemetryPosN={telemetrySnapshot?.pos_n ?? null}
+                  telemetryPosE={telemetrySnapshot?.pos_e ?? null}
+                />
+              )}
+            />
+          </FieldsStepCard>
+
+          {/* Step 2: Align DXF — visible after plan is loaded */}
+          <FieldsStepCard
+            stepNumber={2}
+            title="Align DXF"
+            status={stepStatus("align")}
+            expanded={activeStep === "align"}
+            onToggle={() => toggleStep("align")}
+            disabled={!hasPath}
+          >
+            <AlignDxfPanel
+              apiBaseUrl={apiBaseUrl}
+              selectedPathName={selectedPathName}
+              lines={lines}
+              setLines={setLines}
+              alignmentResult={alignmentResult}
+              setAlignmentResult={setAlignmentResult}
+              setVerifiedAlignmentRequest={setVerifiedAlignmentRequest}
+              setAlignedRefPoints={setAlignedRefPoints}
+              onWorkflowStep={onWorkflowStep}
+              onInvalidateWorkflow={onInvalidateWorkflow}
+              blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
+              refPoints={refPoints}
+              setRefPoints={setRefPoints}
+              alignmentMethod={alignmentMethod}
+              setAlignmentMethod={setAlignmentMethod}
+              setMissionSummary={setMissionSummary}
+              isVisualAlignmentMode={isVisualAlignmentMode}
+              visualAlignmentItem={visualAlignmentItem}
+              setVisualAlignmentItem={setVisualAlignmentItem}
+              onStartVisualAlignment={onStartVisualAlignment}
+              onConfirmVisualAlignment={onConfirmVisualAlignment}
+              extractedCorners={extractedCorners}
+              setExtractedCorners={setExtractedCorners}
+              mapLLA={mapLLA}
+            />
+          </FieldsStepCard>
+
+          {/* Step 3: Path Order & Spray + Load to Controller */}
+          <FieldsStepCard
+            stepNumber={3}
+            title="Path Order & Load"
+            status={stepStatus("orderAndSpray")}
+            expanded={activeStep === "orderAndSpray"}
+            onToggle={() => toggleStep("orderAndSpray")}
+            disabled={!hasPath}
+          >
+            <PathOrderAndSprayStep
+              apiBaseUrl={apiBaseUrl}
+              selectedPathName={selectedPathName}
+              importedPlan={importedPlan}
+              lines={lines}
+              setLines={setLines}
+              selectedLineId={selectedLineId}
+              onSelectLine={onSelectLine}
+              onRefreshPaths={onRefreshPaths}
+              onSelectPath={onSelectPath}
+              onInvalidateWorkflow={onInvalidateWorkflow}
+              blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
+              protectedResident={protectedResident}
+              verifiedAlignmentRequest={verifiedAlignmentRequest}
+              onLoadSelectedPath={onLoadSelectedPath}
+              missionActionBusy={missionActionBusy}
+              onNavigateHome={handleNavigateHome}
+            />
+          </FieldsStepCard>
         </ScrollView>
       </View>
     </View>

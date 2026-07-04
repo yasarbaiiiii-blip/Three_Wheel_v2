@@ -1,3 +1,21 @@
+/** New streamlined 3-step workflow IDs */
+export type FieldsStepId = "upload" | "align" | "orderAndSpray";
+
+/** Map-centric plan manipulation modes */
+export type PlanManipulationMode = "idle" | "scale" | "drag" | "rotate";
+
+/** Real-time transform HUD data shown above the plan on the map */
+export type TransformHUDData = {
+  scaleMultiplier: number;
+  /** Bounding box width in meters */
+  boundingWidthM: number;
+  /** Bounding box height in meters */
+  boundingHeightM: number;
+  rotationDeg: number;
+  offsetMeters: { x: number; y: number };
+};
+
+/** @deprecated Use FieldsStepId instead — kept for backward compat during refactor */
 export type FieldsAccordionId =
   | "upload"
   | "templates"
