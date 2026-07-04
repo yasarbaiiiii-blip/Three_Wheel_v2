@@ -597,8 +597,8 @@ export function MapViewNative(props: MapViewProps) {
       return featureCollection([]);
     }
     const features = selectedPoints.map((p, i) => {
-      // In FieldsPage/App.tsx, p.x is Easting (dxf_y) and p.y is Northing (dxf_x)
-      const gps = projectPlanNorthEastToGps(p.y, p.x, projectionOrigin);
+      // In FieldsPage/App.tsx, p.x is Northing (dxf_y) and p.y is Easting (dxf_x)
+      const gps = projectPlanNorthEastToGps(p.x, p.y, projectionOrigin);
       return pointFeature(toMapboxCoord(gps.lat, gps.lon), { id: `sp-${i}` });
     });
     return featureCollection(features);
@@ -1449,7 +1449,7 @@ export function MapViewNative(props: MapViewProps) {
       const clickedDxfX = local.east + projectionOrigin.originDxfEast;
       const clickedDxfY = local.north + projectionOrigin.originDxfNorth;
 
-      // 1) Nearest vertex/point (2.0 m tolerance)
+      // 1) Nearest vertex/point (4.5 m tolerance)
       let bestPt: { x: number; y: number } | null = null;
       let bestPtDist = Infinity;
       for (const line of lines) {
@@ -1468,7 +1468,7 @@ export function MapViewNative(props: MapViewProps) {
           }
         }
       }
-      if (bestPt && bestPtDist < 2.0 && onSelectPoint) {
+      if (bestPt && bestPtDist < 4.5 && onSelectPoint) {
         onSelectPoint({ x: bestPt.x, y: bestPt.y });
         return;
       }
