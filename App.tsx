@@ -1847,62 +1847,13 @@ export default function App() {
           width: 0.1,
         }];
       }
-      // ── Compute Bounding Box & Auto-Center Plan ──
-      // Calculate the axis-aligned bounding box of all plan geometry,
-      // center the plan at (0, 0), and generate the 4 virtual bounding box edges.
+      // Keep backend/imported DXF coordinates canonical. The viewport auto-fit
+      // centers the drawing visually; mutating these coordinates would corrupt
+      // surveyed alignment ref points (for example, a 0..2 m line becomes -1..1 m).
       if (generatedLines.length > 0) {
-        let bbMinN = Infinity, bbMaxN = -Infinity;
-        let bbMinE = Infinity, bbMaxE = -Infinity;
-        const updateBounds = (n: number, e: number) => {
-          if (n < bbMinN) bbMinN = n;
-          if (n > bbMaxN) bbMaxN = n;
-          if (e < bbMinE) bbMinE = e;
-          if (e > bbMaxE) bbMaxE = e;
-        };
-        for (const line of generatedLines) {
-          if (line.layer === "virtual_boundary") continue; // skip if already present
-          if (line.from) updateBounds(line.from.x, line.from.y);
-          if (line.to) updateBounds(line.to.x, line.to.y);
-          if (line.entity?.preview_points) {
-            for (const pt of line.entity.preview_points) {
-              updateBounds(pt.north, pt.east);
-            }
-          }
-        }
-        if (isFinite(bbMinN) && isFinite(bbMaxN) && isFinite(bbMinE) && isFinite(bbMaxE)) {
-          // Calculate geometric midpoint of the plan
-          const planCenterN = (bbMinN + bbMaxN) / 2;
-          const planCenterE = (bbMinE + bbMaxE) / 2;
-
-          // Translate all non-virtual_boundary coordinates so the plan is centered at (0, 0)
-          for (const line of generatedLines) {
-            if (line.layer === "virtual_boundary") continue;
-            if (line.from) {
-              line.from = { ...line.from, x: line.from.x - planCenterN, y: line.from.y - planCenterE };
-            }
-            if (line.to) {
-              line.to = { ...line.to, x: line.to.x - planCenterN, y: line.to.y - planCenterE };
-            }
-            if (line.entity?.preview_points) {
-              line.entity.preview_points = line.entity.preview_points.map((pt) => ({
-                ...pt,
-                north: pt.north - planCenterN,
-                east: pt.east - planCenterE,
-              }));
-            }
-          }
-
-          // Remove any existing virtual_boundary lines before adding updated ones
-          const nonVirtual = generatedLines.filter((l) => l.layer !== "virtual_boundary");
-          generatedLines.length = 0;
-          generatedLines.push(...nonVirtual);
-
-          // Check if there is already a user-created virtual_boundary in lines from Step 1
-          const existingVirtual = lines.filter((l: PlanLine) => l.layer === "virtual_boundary");
-          if (existingVirtual.length > 0) {
-            // Re-use the exact virtual boundary applied by the user in Step 1
-            generatedLines.push(...existingVirtual);
-          }
+        const existingVirtual = lines.filter((l: PlanLine) => l.layer === "virtual_boundary");
+        if (existingVirtual.length > 0) {
+          generatedLines.push(...existingVirtual);
         }
       }
       const normalized = sanitizePlanLines(
