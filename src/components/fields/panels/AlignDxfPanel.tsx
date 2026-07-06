@@ -194,8 +194,8 @@ export function AlignDxfPanel({
             const cos = Math.cos(rotRad);
             const sin = Math.sin(rotRad);
             const applyOriginTransform = (pt: { x: number; y: number }) => ({
-              x: pt.x * cos - pt.y * sin + offsetE,
-              y: pt.x * sin + pt.y * cos + offsetN,
+              x: pt.x * cos - pt.y * sin + offsetN,
+              y: pt.x * sin + pt.y * cos + offsetE,
             });
             setLines((prev) =>
               prev.map((line) => {
