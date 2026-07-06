@@ -1902,33 +1902,6 @@ export default function App() {
           if (existingVirtual.length > 0) {
             // Re-use the exact virtual boundary applied by the user in Step 1
             generatedLines.push(...existingVirtual);
-          } else {
-            // Determine bounding box dimensions: use 1m padding around centered geometry
-            const BOX_PAD = 1.0; // meters
-            const bMinN = (bbMinN - planCenterN) - BOX_PAD;
-            const bMaxN = (bbMaxN - planCenterN) + BOX_PAD;
-            const bMinE = (bbMinE - planCenterE) - BOX_PAD;
-            const bMaxE = (bbMaxE - planCenterE) + BOX_PAD;
-
-            // Corner order: BL → BR → TR → TL → BL (closed rectangle)
-            const corners = [
-              { n: bMinN, e: bMinE }, // 0: Bottom-Left
-              { n: bMinN, e: bMaxE }, // 1: Bottom-Right
-              { n: bMaxN, e: bMaxE }, // 2: Top-Right
-              { n: bMaxN, e: bMinE }, // 3: Top-Left
-            ];
-            for (let i = 0; i < 4; i++) {
-              const from = corners[i];
-              const to = corners[(i + 1) % 4];
-              generatedLines.push({
-                id: `vbox-edge-${i}`,
-                label: `Virtual Box Edge ${i + 1}`,
-                layer: "virtual_boundary",
-                from: { id: 800000 + i * 2, x: from.n, y: from.e },
-                to: { id: 800000 + i * 2 + 1, x: to.n, y: to.e },
-                width: 0.1,
-              });
-            }
           }
         }
       }
