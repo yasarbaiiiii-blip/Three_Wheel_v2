@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Alert, Platform, Pressable, ScrollView, Switch, Text, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
 import { ChevronDown, ChevronRight, Upload, X } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
@@ -85,10 +86,55 @@ export function UploadAndPreviewStep({
         } as any);
       }
 
-      const res =
-        ext === "dxf"
-          ? await pathApi.parseDxf(apiBaseUrl, formData)
-          : await pathApi.uploadPath(apiBaseUrl, formData);
+      let res;
+      if (ext === "dxf") {
+        res = await pathApi.parseDxf(apiBaseUrl, formData);
+      } else if (ext === "csv") {
+        try {
+          // Read the file and strip BOM if present
+          let text = "";
+          if (Platform.OS === "web") {
+            const webFile = (pickedFile as any).file ?? (await (await fetch(pickedFile.uri)).blob());
+            text = await webFile.text();
+          } else {
+            text = await (await fetch(pickedFile.uri)).text();
+          }
+          
+          if (text.charCodeAt(0) === 0xFEFF) {
+            text = text.slice(1);
+          }
+
+          // In React Native, sending strings directly in FormData can be tricky.
+          // Since we are fixing the BOM and sending it to the backend, let's create a new FormData.
+          const cleanFormData = new FormData();
+          if (Platform.OS === "web") {
+            const cleanBlob = new Blob([text], { type: "text/csv" });
+            cleanFormData.append("file", cleanBlob as any, pickedFile.name);
+          } else {
+            const tempUri = FileSystem.cacheDirectory + "clean_" + pickedFile.name;
+            await FileSystem.writeAsStringAsync(tempUri, text, { encoding: FileSystem.EncodingType.UTF8 });
+            cleanFormData.append("file", {
+              uri: tempUri,
+              name: pickedFile.name,
+              type: "text/csv",
+            } as any);
+          }
+
+          // Call parsePointCsv to validate the file contents
+          const parseRes = await pathApi.parsePointCsv(apiBaseUrl, cleanFormData);
+          if (!parseRes.ok) {
+            res = parseRes;
+          } else {
+            // If validation succeeded, call uploadPath to actually save the file on the backend
+            res = await pathApi.uploadPath(apiBaseUrl, cleanFormData);
+          }
+        } catch (e) {
+          console.error("Error preprocessing CSV:", e);
+          res = await pathApi.uploadPath(apiBaseUrl, formData);
+        }
+      } else {
+        res = await pathApi.uploadPath(apiBaseUrl, formData);
+      }
 
       if (res.ok) {
         onInvalidateWorkflow("alignment");

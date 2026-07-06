@@ -150,6 +150,13 @@ export function parseDxf(apiBaseUrl: string, formData: FormData): Promise<Respon
   });
 }
 
+export function parsePointCsv(apiBaseUrl: string, formData: FormData): Promise<Response> {
+  return fetch(apiUrl(apiBaseUrl, "/api/path/parse-point-csv"), {
+    method: "POST",
+    body: formData,
+  });
+}
+
 export function uploadPath(apiBaseUrl: string, formData: FormData): Promise<Response> {
   return fetch(apiUrl(apiBaseUrl, "/api/path/upload"), {
     method: "POST",
