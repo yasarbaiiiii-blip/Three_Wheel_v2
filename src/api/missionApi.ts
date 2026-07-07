@@ -114,3 +114,45 @@ export async function getMissionStatus(apiBaseUrl: string, init?: RequestInit): 
   }
   return (await res.json()) as MissionStatus;
 }
+
+/**
+ * Re-fetch mission status and reconcile local workflow state.
+ * Returns the loaded path and mission state from the backend.
+ */
+export async function fetchMissionStatus(apiBaseUrl: string): Promise<{
+  state: string;
+  loaded_mission_id: string | null;
+  running_mission_id: string | null;
+}> {
+  const status = await getMissionStatus(apiBaseUrl);
+  return {
+    state: status.state ?? "idle",
+    loaded_mission_id: status.loaded_mission_id ?? null,
+    running_mission_id: status.running_mission_id ?? null,
+  };
+}
+
+/**
+ * Fetch staged mission verification status from the backend.
+ * Returns { verified, mission_id } or null if not staged.
+ */
+export async function fetchStagedMissionStatus(
+  apiBaseUrl: string,
+  missionId: string | null
+): Promise<{ verified: boolean; mission_id: string | null } | null> {
+  if (!missionId) return null;
+  try {
+    const res = await fetch(
+      `${apiBaseUrl.replace(/\/$/, "")}/api/path/staged/${encodeURIComponent(missionId)}`,
+      { method: "GET", headers: { Accept: "application/json" } }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return {
+      verified: Boolean(data?.mission_id),
+      mission_id: data?.mission_id ?? null,
+    };
+  } catch {
+    return null;
+  }
+}

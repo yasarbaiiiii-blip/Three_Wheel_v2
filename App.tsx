@@ -2322,15 +2322,66 @@ export default function App() {
       return;
     }
 
-    const startGate = evaluateStagedStartGate(stagedWorkflow, loadedPathInspection, stagedMissionId);
-    if (!startGate.allowed) {
-      setWorkflowStep("started", "failed");
-      Alert.alert("Cannot Start", startGate.message ?? "Staged mission is not ready to start.");
-      showToast("Start blocked", startGate.message ?? "Complete load verification first.", "error");
-      return;
+    // Step 1: Re-fetch backend mission status to reconcile local workflow state
+    try {
+      const missionStatus = await missionApi.fetchMissionStatus(apiBaseUrl);
+      const stagedStatus = await missionApi.fetchStagedMissionStatus(apiBaseUrl, stagedMissionId);
+
+      if (stagedStatus?.verified) {
+        setWorkflowStep("staged", "verified");
+      }
+      if (missionStatus.running_mission_id) {
+        // If a mission is already running, reconcile
+        setMissionRunning(true);
+      }
+      logAction("START_RECONCILE", {
+        missionState: missionStatus.state,
+        loadedMissionId: missionStatus.loaded_mission_id,
+        stagedVerified: stagedStatus?.verified,
+      });
+    } catch (reconcileErr) {
+      // Non-fatal — proceed with existing local state if re-fetch fails
+      console.warn("[START] Re-fetch failed, using cached workflow state:", reconcileErr);
     }
 
-    const isStagedStart = startGate.isStagedWorkflow;
+    let forceStart = false;
+    const gateResult = evaluateStagedStartGate(stagedWorkflow, loadedPathInspection, stagedMissionId);
+
+    if (!gateResult.allowed) {
+      // Show dialog with force-start option — await user decision via promise wrapper
+      const userChoice = await new Promise<"cancel" | "force" | "retry">((resolve) => {
+        Alert.alert(
+          "Cannot Start",
+          (gateResult.message ?? "Staged mission is not ready to start.") +
+            "\n\n• Cancel to go back\n• Retry to re-stage and verify\n• Force Start to bypass checks",
+          [
+            { text: "Cancel", style: "cancel", onPress: () => resolve("cancel") },
+            { text: "Retry", onPress: () => resolve("retry") },
+            { text: "Force Start", style: "destructive", onPress: () => resolve("force") },
+          ]
+        );
+      });
+
+      if (userChoice === "cancel") {
+        setWorkflowStep("started", "failed");
+        showToast("Start blocked", gateResult.message ?? "Complete load verification first.", "error");
+        return;
+      }
+
+      if (userChoice === "retry") {
+        showToast("Re-staging", "Triggering plan & stage again...", "info");
+        // Trigger re-stage by setting the workflow back to pending
+        invalidateStagedWorkflowFrom("staged");
+        return;
+      }
+
+      // userChoice === "force" — bypass the gate
+      forceStart = true;
+      logAction("FORCE_START", { reason: gateResult.message });
+      showToast("Force starting", "Bypassing workflow verification.", "warning");
+    }
+
+    const isStagedStart = forceStart ? false : gateResult.isStagedWorkflow;
 
     logAction("START_REQUEST", {
       apiBaseUrl,
@@ -2741,14 +2792,12 @@ export default function App() {
     setMissionActionBusy(true);
     try {
       showToast("E-Stop", "Sending EMERGENCY STOP...", "error");
-      const res = await fetch(`${apiBaseUrl}/api/estop`, {
-        method: "POST",
+      
+      // Stop any active mission via HTTP API (this actually halts autonomous mode)
+      await missionApi.stopMission(apiBaseUrl).catch((err) => {
+        console.warn("HTTP stopMission failed during E-Stop:", err);
       });
-      if (!res.ok) {
-        const errMsg = await parseFetchError(res, "E-Stop failed");
-        throw new Error(errMsg);
-      }
-      void refreshTelemetryPanel();
+
       logAction("ESTOP_SUCCESS");
       Alert.alert("E-STOP Sent", "Emergency Stop command accepted.");
       showToast("E-STOP Sent", "Emergency Stop command active.", "success");

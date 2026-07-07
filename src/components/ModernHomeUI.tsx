@@ -471,9 +471,8 @@ const FloatingEStop = ({ visible, onTrigger }) => {
   const dragOriginX = useSharedValue(ESTOP_INIT_X);
   const dragOriginY = useSharedValue(ESTOP_INIT_Y);
   const scale = useSharedValue(1);
-  const holdProgress = useSharedValue(0);
-  const isHolding = useSharedValue(false);
   const isDragging = useSharedValue(false);
+  const tapPulse = useSharedValue(0);
 
   const clampEStop = (x, y) => {
     "worklet";
@@ -485,71 +484,42 @@ const FloatingEStop = ({ visible, onTrigger }) => {
     };
   };
 
-  const resetHold = () => {
-    "worklet";
-    isHolding.value = false;
-    cancelAnimation(holdProgress);
-    holdProgress.value = withTiming(0, { duration: 180 });
-    scale.value = withSpring(1, { damping: 20, stiffness: 320 });
-  };
+  const triggerEStop = useCallback(() => {
+    onTrigger();
+  }, [onTrigger]);
 
-  const startHold = () => {
-    "worklet";
-    isHolding.value = true;
-    isDragging.value = false;
-    holdProgress.value = 0;
-    scale.value = withSpring(1.06, { damping: 18, stiffness: 280 });
-    holdProgress.value = withTiming(1, { duration: ESTOP_HOLD_MS }, (finished) => {
-      if (finished && isHolding.value) {
-        isHolding.value = false;
-        runOnJS(onTrigger)();
-        holdProgress.value = withTiming(0, { duration: 200 });
-        scale.value = withSpring(1);
+  const doubleTapGesture = Gesture.Tap()
+    .numberOfTaps(2)
+    .maxDelay(260)
+    .onEnd((_event, success) => {
+      if (success) {
+        runOnJS(triggerEStop)();
       }
     });
-  };
 
-  const estopGesture = Gesture.Pan()
-    .minDistance(0)
-    .onBegin(() => {
+  const panGesture = Gesture.Pan()
+    .minDistance(ESTOP_DRAG_THRESHOLD)
+    .onStart(() => {
       dragOriginX.value = posX.value;
       dragOriginY.value = posY.value;
-      startHold();
     })
     .onUpdate((event) => {
-      const dist = Math.hypot(event.translationX, event.translationY);
-      if (dist > ESTOP_DRAG_THRESHOLD) {
-        if (!isDragging.value) {
-          isDragging.value = true;
-          resetHold();
-        }
-        const next = clampEStop(
-          dragOriginX.value + event.translationX,
-          dragOriginY.value + event.translationY
-        );
-        posX.value = next.x;
-        posY.value = next.y;
-      }
+      const next = clampEStop(
+        dragOriginX.value + event.translationX,
+        dragOriginY.value + event.translationY
+      );
+      posX.value = next.x;
+      posY.value = next.y;
     })
     .onEnd(() => {
-      if (isDragging.value) {
-        const next = clampEStop(posX.value, posY.value);
-        posX.value = next.x;
-        posY.value = next.y;
-        dragOriginX.value = next.x;
-        dragOriginY.value = next.y;
-      }
-      isDragging.value = false;
-      if (isHolding.value) {
-        resetHold();
-      }
-    })
-    .onFinalize(() => {
-      isDragging.value = false;
-      if (isHolding.value) {
-        resetHold();
-      }
+      const next = clampEStop(posX.value, posY.value);
+      posX.value = next.x;
+      posY.value = next.y;
+      dragOriginX.value = next.x;
+      dragOriginY.value = next.y;
     });
+
+  const composedGesture = Gesture.Exclusive(doubleTapGesture, panGesture);
 
   const containerStyle = useAnimatedStyle(() => ({
     transform: [
@@ -559,50 +529,16 @@ const FloatingEStop = ({ visible, onTrigger }) => {
     ],
   }));
 
-  const ringWrapStyle = useAnimatedStyle(() => ({
-    opacity: isHolding.value ? 1 : 0,
-  }));
-
-  const ringAnimatedProps = useAnimatedProps(() => ({
-    strokeDashoffset: ESTOP_RING_CIRC * (1 - holdProgress.value),
-  }));
-
   if (!visible) return null;
-
-  const ringCenter = ESTOP_RING_SIZE / 2;
 
   return (
     <View style={styles.estopLayer} pointerEvents="box-none">
-      <GestureDetector gesture={estopGesture}>
+      <GestureDetector gesture={composedGesture}>
         <AnimatedReanimated.View style={[styles.estopDraggable, containerStyle]}>
-          <AnimatedReanimated.View style={[styles.estopRingWrap, ringWrapStyle]} pointerEvents="none">
-            <Svg width={ESTOP_RING_SIZE} height={ESTOP_RING_SIZE}>
-              <SvgCircle
-                cx={ringCenter}
-                cy={ringCenter}
-                r={ESTOP_RING_RADIUS}
-                stroke="rgba(244, 193, 12, 0.22)"
-                strokeWidth={ESTOP_RING_STROKE}
-                fill="none"
-              />
-              <AnimatedSvgCircle
-                cx={ringCenter}
-                cy={ringCenter}
-                r={ESTOP_RING_RADIUS}
-                stroke={COLORS.accentBrand}
-                strokeWidth={ESTOP_RING_STROKE}
-                fill="none"
-                strokeDasharray={`${ESTOP_RING_CIRC}`}
-                strokeLinecap="round"
-                transform={`rotate(-90 ${ringCenter} ${ringCenter})`}
-                animatedProps={ringAnimatedProps}
-              />
-            </Svg>
-          </AnimatedReanimated.View>
           <View style={styles.estopButton}>
             <ShieldAlert size={32} color="#fff" strokeWidth={2.5} />
             <Text style={styles.estopText}>E-STOP</Text>
-            <Text style={styles.estopSubText}>HOLD 1.5s</Text>
+            <Text style={styles.estopSubText}>2 TAP</Text>
           </View>
         </AnimatedReanimated.View>
       </GestureDetector>
