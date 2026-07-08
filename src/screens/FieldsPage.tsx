@@ -487,14 +487,16 @@ export function FieldsPage(props: FieldsPageProps) {
               importedPlan={importedPlan}
               setImportedPlan={setImportedPlan}
               onRefreshPaths={onRefreshPaths}
-              onSelectPath={(name) => {
+              onSelectPath={(name, skipAdvance) => {
                 onSelectPath(name);
                 // Auto-enable map interaction when path is loaded
                 setShowMapInteraction(true);
                 if (isPlanEditingMode !== true) {
                   onStartPlanEditing?.();
                 }
-                setActiveStep("align");
+                if (!skipAdvance) {
+                  setActiveStep("align");
+                }
               }}
               onInvalidateWorkflow={onInvalidateWorkflow}
               blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}

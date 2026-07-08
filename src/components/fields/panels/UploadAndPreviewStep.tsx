@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Alert, Platform, Pressable, TouchableOpacity, ScrollView, Switch, Text, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
@@ -13,7 +13,7 @@ type UploadAndPreviewStepProps = {
   importedPlan: ImportedPlan | null;
   setImportedPlan: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
   onRefreshPaths: () => void;
-  onSelectPath: (name: string) => void;
+  onSelectPath: (name: string, skipAdvance?: boolean) => void;
   onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
   blockProtectedWorkflowMutation: (action: string) => boolean;
   protectedResident: boolean;
@@ -46,6 +46,21 @@ export function UploadAndPreviewStep({
 
   const targetPathName = importedPlan?.fileName ?? null;
   const isDxfPath = targetPathName?.toLowerCase().endsWith(".dxf");
+
+  useEffect(() => {
+    if (isDxfPath && targetPathName && apiBaseUrl) {
+      pathApi.getExtensions(apiBaseUrl, targetPathName)
+        .then(cfg => {
+          setExtEnabled(cfg.enabled);
+          setExtPre(String(cfg.pre_extension_m ?? 0.5));
+          setExtAft(String(cfg.aft_extension_m ?? 0.5));
+          setExtPerLine(!!cfg.per_line);
+        })
+        .catch(() => {
+          // keep defaults if it fails
+        });
+    }
+  }, [targetPathName, isDxfPath, apiBaseUrl]);
 
   const handlePickFile = async () => {
     if (blockProtectedWorkflowMutation("Uploading a new path")) return;
@@ -203,7 +218,7 @@ export function UploadAndPreviewStep({
       if (res.ok) {
         setExtEnabled(enabled);
         onInvalidateWorkflow("spray");
-        onSelectPath(targetPathName); // refresh lines
+        onSelectPath(targetPathName, true); // refresh lines
       } else {
         const errText = await res.text();
         Alert.alert("Error", errText || "Failed to update extensions");
@@ -229,7 +244,7 @@ export function UploadAndPreviewStep({
       if (res.ok) {
         setExtEnabled(true);
         onInvalidateWorkflow("spray");
-        onSelectPath(targetPathName);
+        onSelectPath(targetPathName, true);
       } else {
         const errText = await res.text();
         Alert.alert("Error", errText || "Failed to save extensions");
