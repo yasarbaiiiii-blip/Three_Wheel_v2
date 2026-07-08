@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Alert, Pressable, Text, View } from "react-native";
+import { Alert, Pressable, TouchableOpacity, Text, View } from "react-native";
 import { Check as CheckIcon, Loader } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
@@ -321,10 +321,11 @@ export function PathOrderAndSprayStep({
       )}
 
       {/* Load to Controller */}
-      <Pressable
+      <TouchableOpacity
         onPress={handleLoadToController}
         disabled={isLoading || missionActionBusy || !verifiedAlignmentRequest}
-        style={({ pressed }) => ({
+        activeOpacity={0.8}
+        style={{
           height: 52,
           borderRadius: 12,
           alignItems: "center",
@@ -332,15 +333,13 @@ export function PathOrderAndSprayStep({
           backgroundColor:
             isLoading || missionActionBusy || !verifiedAlignmentRequest
               ? FIELDS_COLORS.textDim
-              : pressed
-              ? "#6d28d9"
               : "#7c3aed",
           elevation: 4,
           shadowColor: "#7c3aed",
           shadowOffset: { width: 0, height: 2 },
           shadowOpacity: 0.3,
           shadowRadius: 4,
-        })}
+        }}
       >
         {isLoading ? (
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -354,7 +353,7 @@ export function PathOrderAndSprayStep({
             Load to Controller
           </Text>
         )}
-      </Pressable>
+      </TouchableOpacity>
 
       {!verifiedAlignmentRequest && (
         <Text style={{ color: FIELDS_COLORS.warning, fontSize: 10, textAlign: "center" }}>

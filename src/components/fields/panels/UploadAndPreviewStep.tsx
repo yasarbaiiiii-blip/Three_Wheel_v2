@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Alert, Platform, Pressable, ScrollView, Switch, Text, TextInput, View } from "react-native";
+import { Alert, Platform, Pressable, TouchableOpacity, ScrollView, Switch, Text, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { ChevronDown, ChevronRight, Upload, X } from "lucide-react-native";
@@ -249,31 +249,28 @@ export function UploadAndPreviewStep({
       </Text>
 
       {!pickedFile && !targetPathName ? (
-        <Pressable
+        <TouchableOpacity
           onPress={handlePickFile}
           disabled={protectedResident}
-          style={({ pressed }) => ({
+          activeOpacity={0.8}
+          style={{
             height: 52,
             borderRadius: 12,
             alignItems: "center",
             justifyContent: "center",
             flexDirection: "row",
             gap: 8,
-            backgroundColor: protectedResident
-              ? FIELDS_COLORS.surfaceSolid
-              : pressed
-              ? "rgba(59, 130, 246, 0.15)"
-              : FIELDS_COLORS.surfaceSolid,
+            backgroundColor: FIELDS_COLORS.surfaceSolid,
             borderWidth: 1.5,
             borderColor: FIELDS_COLORS.stepActive,
             borderStyle: "dashed",
-          })}
+          }}
         >
           <Upload size={18} color={FIELDS_COLORS.stepActive} />
           <Text style={{ color: FIELDS_COLORS.stepActive, fontSize: 14, fontWeight: "700" }}>
             Select File
           </Text>
-        </Pressable>
+        </TouchableOpacity>
       ) : pickedFile ? (
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           <View
@@ -290,9 +287,10 @@ export function UploadAndPreviewStep({
               {pickedFile.name}
             </Text>
           </View>
-          <Pressable
+          <TouchableOpacity
             onPress={handleParseFile}
             disabled={isUploading || protectedResident}
+            activeOpacity={0.85}
             style={{
               height: 40,
               paddingHorizontal: 16,
@@ -305,7 +303,7 @@ export function UploadAndPreviewStep({
             <Text style={{ color: "#fff", fontSize: 13, fontWeight: "800" }}>
               {isUploading ? "..." : "Parse"}
             </Text>
-          </Pressable>
+          </TouchableOpacity>
           <Pressable onPress={() => setPickedFile(null)} style={{ padding: 4 }}>
             <X size={20} color={FIELDS_COLORS.textMuted} />
           </Pressable>

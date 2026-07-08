@@ -1,5 +1,5 @@
 import React from "react";
-import { Alert, Pressable, Text, TextInput, View } from "react-native";
+import { Alert, Pressable, TouchableOpacity, Text, TextInput, View } from "react-native";
 import { Check, CheckCircle2, Maximize2, ArrowRight } from "lucide-react-native";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
@@ -113,9 +113,10 @@ export function BoundingBoxStep({
         </View>
 
         <View style={{ flexDirection: "row", gap: 10, marginTop: 4 }}>
-          <Pressable
+          <TouchableOpacity
             onPress={handleApply}
-            style={({ pressed }) => ({
+            activeOpacity={0.85}
+            style={{
               flex: 1,
               height: 46,
               borderRadius: 10,
@@ -131,19 +132,19 @@ export function BoundingBoxStep({
               shadowOffset: { width: 0, height: 2 },
               shadowOpacity: 0.3,
               shadowRadius: 3.84,
-              opacity: pressed ? 0.85 : 1,
-            })}
+            }}
           >
             <Check size={18} color="#ffffff" />
             <Text style={{ color: "#ffffff", fontSize: 14, fontWeight: "700" }}>
               {isApplied ? "Update Bounding Box" : "Apply Bounding Box"}
             </Text>
-          </Pressable>
+          </TouchableOpacity>
 
           {isApplied && onProceedToUpload ? (
-            <Pressable
+            <TouchableOpacity
               onPress={onProceedToUpload}
-              style={({ pressed }) => ({
+              activeOpacity={0.85}
+              style={{
                 height: 46,
                 paddingHorizontal: 16,
                 borderRadius: 10,
@@ -154,12 +155,11 @@ export function BoundingBoxStep({
                 borderColor: "#3b82f6",
                 flexDirection: "row",
                 gap: 6,
-                opacity: pressed ? 0.85 : 1,
-              })}
+              }}
             >
               <Text style={{ color: "#60a5fa", fontSize: 13, fontWeight: "700" }}>Next</Text>
               <ArrowRight size={16} color="#60a5fa" />
-            </Pressable>
+            </TouchableOpacity>
           ) : null}
         </View>
       </View>
