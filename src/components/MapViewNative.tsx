@@ -1495,14 +1495,13 @@ export function MapViewNative(props: MapViewProps) {
   const refLabelsVisible = !!showRefPointLabels;
   // Active preview overrides the committed sources during a live gesture.
   const activeItemsGeo = previewItemsGeo ?? placedItemsGeo;
-
   // The inner map content (shared between editing and non-editing render).
   const mapContent = (
     <View style={styles.container}>
       <RNMapboxMapView
         ref={mapViewRef}
         style={styles.map}
-        styleURL={MAPBOX_STYLE_URL}
+        styleURL={props.styleURL ?? MAPBOX_STYLE_URL}
         onPress={handleMapPress as (f: GeoJSON.Feature) => void}
         scaleBarEnabled={false}
         logoEnabled={false}

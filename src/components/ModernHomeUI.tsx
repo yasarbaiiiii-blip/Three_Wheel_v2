@@ -628,6 +628,18 @@ const QuickSubNavItem = ({
   </Pressable>
 );
 
+const MAPBOX_STYLES = [
+  "mapbox://styles/mapbox/satellite-streets-v12",
+  "mapbox://styles/mapbox/satellite-v9",
+  "mapbox://styles/mapbox/streets-v12",
+  "mapbox://styles/mapbox/outdoors-v12",
+  "mapbox://styles/mapbox/light-v11",
+  "mapbox://styles/mapbox/dark-v11",
+  "mapbox://styles/mapbox/navigation-day-v1",
+  "mapbox://styles/mapbox/navigation-night-v1",
+  "mapbox://styles/mapbox/standard"
+];
+
 export default function ModernHomeUI(props) {
   const {
     lines = [], importedPlan, systemHealth, telemetrySnapshot, missionRunning,
@@ -659,6 +671,7 @@ export default function ModernHomeUI(props) {
   };
 
   // Local UI State
+  const [mapStyleIndex, setMapStyleIndex] = useState(0);
   const [showTelemetry, setShowTelemetry] = useState(false);
   const [showMissionControl, setShowMissionControl] = useState(false);
   const [showJoystick, setShowJoystick] = useState(false);
@@ -1290,36 +1303,17 @@ export default function ModernHomeUI(props) {
 
           <View style={{ flex: 1 }} />
 
-          {isHomePage && setMapViewEnabled ? (
-            <>
-              <View style={styles.navDivider} />
-              <View style={styles.navToolsSection}>
-                <NavBarItem
-                  icon={Maximize2}
-                  label="Fullscreen Map"
-                  active={mapFullscreen}
-                  expanded={navExpanded}
-                  onPress={() => {
-                    if (!mapViewEnabled) {
-                      setMapViewEnabled(true);
-                      setMapFullscreen(true);
-                      return;
-                    }
-                    setMapFullscreen((v) => !v);
-                  }}
-                />
-                <NavBarItem
-                  icon={MapIcon}
-                  label="Map On"
-                  active
-                  expanded={navExpanded}
-                  onPress={() => setMapViewEnabled(true)}
-                />
-              </View>
-            </>
-          ) : null}
+          {/* Removed Fullscreen Map and Map On buttons */}
 
           <View style={styles.navDivider} />
+
+          <NavBarItem
+            icon={LayoutGrid}
+            label="Cycle Map View"
+            active={false}
+            expanded={navExpanded}
+            onPress={() => setMapStyleIndex((prev) => (prev + 1) % MAPBOX_STYLES.length)}
+          />
 
           <NavBarItem
             icon={LogOut}
@@ -1662,6 +1656,7 @@ export default function ModernHomeUI(props) {
       <View style={{ ...StyleSheet.absoluteFillObject, zIndex: mapFullscreen ? 200 : 1, backgroundColor: COLORS.bgBase }}>
         {mapViewEnabled ? (
         <MapView
+          styleURL={MAPBOX_STYLES[mapStyleIndex]}
           mode={visualAlignmentItem ? "templates" : "fields"}
           placedItems={visualAlignmentItem ? [visualAlignmentItem] : []}
           selectedItemIds={visualAlignmentItem && visualSelected ? [visualAlignmentItem.id] : []}

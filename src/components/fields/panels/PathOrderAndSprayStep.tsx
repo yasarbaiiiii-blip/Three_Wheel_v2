@@ -290,8 +290,9 @@ export function PathOrderAndSprayStep({
 
                 {/* Spray checkbox */}
                 {item.entity && isSprayable ? (
-                  <Pressable
+                  <TouchableOpacity
                     onPress={() => handleToggleSpray(item.id)}
+                    activeOpacity={0.7}
                     style={{
                       width: 24,
                       height: 24,
@@ -304,7 +305,7 @@ export function PathOrderAndSprayStep({
                     }}
                   >
                     {item.entity.is_mark ? <CheckIcon size={14} color="#fff" /> : null}
-                  </Pressable>
+                  </TouchableOpacity>
                 ) : null}
               </View>
             );

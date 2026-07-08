@@ -11,6 +11,7 @@ import type { PlacedItem } from "./BoundaryEditor";
 import type { DesignPreviewAnchor } from "../types/designDocument";
 
 export interface MapViewProps {
+  styleURL?: string;
   telemetrySnapshot: TelemetrySnapshot | null;
   lines: PlanLine[];
   alignedRefPoints: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
