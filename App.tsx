@@ -771,6 +771,7 @@ export default function App() {
   const [stagedPlanResult, setStagedPlanResult] = useState<StagedPlanResultState | null>(null);
   const [stagedMissionInspection, setStagedMissionInspection] = useState<pathApi.StagedMissionResponse | null>(null);
   const [stagedMissionId, setStagedMissionId] = useState<string | null>(null);
+  const [gpsPointMission, setGpsPointMission] = useState<pathApi.ParsePointGpsCsvResponse | null>(null);
   const [loadedPathInspection, setLoadedPathInspection] = useState<missionApi.LoadedPathResponse | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   const [extensionsEnabled, setExtensionsEnabled] = useState(false);
@@ -998,6 +999,7 @@ export default function App() {
     }
     setLoadedPathInspection(null);
     setMissionLoaded(false);
+    setGpsPointMission(null);
   }, []);
 
   const reconcileLoadedMission = useCallback((
@@ -1041,6 +1043,7 @@ export default function App() {
     setStagedPlanResult(null);
     setStagedMissionInspection(null);
     setStagedMissionId(null);
+    setGpsPointMission(null);
     setLoadedPathInspection(null);
   }, [selectedPathName]);
 
@@ -2235,6 +2238,23 @@ export default function App() {
           stagedArtifact.waypoints ?? [],
           stagedArtifact.spray_flags ?? []
         );
+
+        // GPS point missions have empty waypoints — synthesize map points from point_mission_points
+        if (hydratedLines.length === 0 && (stagedArtifact as any).point_mission_points?.length) {
+          const pmPoints = (stagedArtifact as any).point_mission_points as pathApi.PointMissionPoint[];
+          for (let i = 0; i < pmPoints.length; i++) {
+            const pt = pmPoints[i];
+            hydratedLines.push({
+              id: `pt-${i}`,
+              label: `Point ${i + 1}`,
+              layer: pt.mark !== false ? "marking" : "center",
+              from: { id: 500000 + i * 2, x: pt.north_m, y: pt.east_m },
+              to: { id: 500000 + i * 2 + 1, x: pt.north_m, y: pt.east_m },
+              width: 0.1,
+            });
+          }
+        }
+
         if (hydratedLines.length === 0) {
           throw new Error(`Staged mission ${missionId} has no drawable waypoints for map preview.`);
         }
@@ -2310,6 +2330,85 @@ export default function App() {
       showToast(title, message, "error");
       if (missionError?.status === 409) void refreshMissionIdentity();
       return false;
+    } finally {
+      setMissionActionBusy(false);
+    }
+  }
+
+  function handleGpsPointMissionParsed(data: pathApi.ParsePointGpsCsvResponse) {
+    setGpsPointMission(data);
+    // GPS point missions don't need DXF alignment — anchor comes from CSV row 1
+    setVerifiedAlignmentRequest({
+      origin_gps: [data.anchor.lat, data.anchor.lon],
+      rotation_deg: 0,
+    });
+    setStagedWorkflow((prev) => ({
+      ...prev,
+      alignment: "verified",
+      spray: "pending",
+      staged: "pending",
+      loaded: "pending",
+      started: "pending",
+    }));
+  }
+
+  async function handlePlanAndStageGpsPointMission() {
+    const pathName = selectedPathName || importedPlan?.fileName;
+    if (!apiBaseUrl || !pathName || !gpsPointMission) {
+      Alert.alert("Missing data", "Upload a lat,lon CSV and parse it first.");
+      return;
+    }
+
+    setMissionActionBusy(true);
+    try {
+      const planRes = await pathApi.planAndStage(apiBaseUrl, pathName, {
+        source: pathName,
+        point_source_frame: "GPS_SURVEYED",
+        origin_gps: [gpsPointMission.anchor.lat, gpsPointMission.anchor.lon],
+        point_mission_points: gpsPointMission.point_mission_points,
+        rotation_deg: 0,
+      });
+
+      if (!planRes.ok) {
+        throw new Error(await planRes.text());
+      }
+
+      const planData = (await planRes.json()) as pathApi.PathPlanResponse;
+      const missionId =
+        planData.mission_summary?.mission_id ?? planData.mission_id;
+
+      if (!missionId) {
+        throw new Error("Plan & stage succeeded but no mission_id returned.");
+      }
+
+      setStagedMissionId(missionId);
+      setStagedPlanResult({
+        missionId,
+        numWaypoints: gpsPointMission.num_points,
+        numSegments: null,
+        totalLengthM: null,
+        markLengthM: null,
+        transitLengthM: null,
+        estimatedPaintL: null,
+        estimatedRuntimeS: null,
+        rmseM: null,
+        warnings: planData.warnings ?? [],
+      });
+      setStagedWorkflow((prev) => ({ ...prev, staged: "verified" }));
+      showToast("Staged", `Point mission staged with ${gpsPointMission.num_points} points.`, "success");
+
+      // Optional: inspect staged artifact
+      try {
+        const stagedRes = await pathApi.getStagedMission(apiBaseUrl, missionId);
+        if (stagedRes.ok) {
+          setStagedMissionInspection(await stagedRes.json());
+        }
+      } catch {
+        // inspection is optional
+      }
+    } catch (err: any) {
+      setWorkflowStep("staged", "failed");
+      Alert.alert("Plan & Stage failed", err.message ?? String(err));
     } finally {
       setMissionActionBusy(false);
     }
@@ -3365,6 +3464,9 @@ export default function App() {
                             rtkMode={rtkMode}
                             rtkDefaultMode={rtkDefaultMode}
                             setRtkDefaultMode={setRtkDefaultMode}
+                            gpsPointMission={gpsPointMission}
+                            onGpsPointMissionParsed={handleGpsPointMissionParsed}
+                            onPlanAndStageGpsPointMission={handlePlanAndStageGpsPointMission}
                           />
                         )
                       : undefined
@@ -4895,6 +4997,9 @@ function SectionPages(props: {
   onClearMission: () => Promise<void>;
   resetNorthCount?: number;
   visualAlignmentAnchor?: { originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null;
+  gpsPointMission?: pathApi.ParsePointGpsCsvResponse | null;
+  onGpsPointMissionParsed?: (data: pathApi.ParsePointGpsCsvResponse) => void;
+  onPlanAndStageGpsPointMission?: () => Promise<void>;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
 

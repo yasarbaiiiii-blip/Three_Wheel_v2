@@ -97,7 +97,26 @@ export type AlignPathRequest = {
   rotation_deg?: number;
   [key: string]: unknown;
 };
-export type PlanAndStageRequest = PathPlanRequest;
+
+export type PointMissionPoint = {
+  north_m: number;
+  east_m: number;
+  dwell_s: number;
+  source_index: number;
+  mark: boolean;
+};
+
+export type ParsePointGpsCsvResponse = {
+  num_points: number;
+  anchor: { lat: number; lon: number };
+  point_source_frame: "GPS_SURVEYED";
+  point_mission_points: PointMissionPoint[];
+};
+
+export type PlanAndStageRequest = PathPlanRequest & {
+  point_source_frame?: string;
+  point_mission_points?: PointMissionPoint[];
+};
 
 function apiUrl(apiBaseUrl: string, path: string) {
   return `${apiBaseUrl.replace(/\/$/, "")}${path}`;
@@ -152,6 +171,13 @@ export function parseDxf(apiBaseUrl: string, formData: FormData): Promise<Respon
 
 export function parsePointCsv(apiBaseUrl: string, formData: FormData): Promise<Response> {
   return fetch(apiUrl(apiBaseUrl, "/api/path/parse-point-csv"), {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export function parsePointGpsCsv(apiBaseUrl: string, formData: FormData): Promise<Response> {
+  return fetch(apiUrl(apiBaseUrl, "/api/path/parse-point-gps-csv"), {
     method: "POST",
     body: formData,
   });
@@ -249,6 +275,9 @@ export type StagedMissionResponse = {
   segment_runs: Record<string, unknown>[];
   alignment_metadata?: Record<string, unknown> | null;
   metadata?: Record<string, unknown> | null;
+  point_mission_points?: PointMissionPoint[];
+  point_source_frame?: string;
+  spray_mode?: string;
   [key: string]: unknown;
 };
 

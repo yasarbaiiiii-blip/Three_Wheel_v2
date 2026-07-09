@@ -16,7 +16,22 @@ type UploadParsePanelProps = {
   onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
   blockProtectedWorkflowMutation: (action: string) => boolean;
   protectedResident: boolean;
+  /** Called when a GPS lat/lon point CSV is successfully parsed */
+  onGpsPointMissionParsed?: (data: pathApi.ParsePointGpsCsvResponse) => void;
 };
+
+/** Peek at CSV header to decide GPS vs NED parse route */
+function detectPointCsvKind(text: string): "gps" | "ned" | "unknown" {
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const header = trimmed.split(",").map((c) => c.trim().toLowerCase());
+    if (header[0] === "lat" && header[1] === "lon") return "gps";
+    if (header[0] === "north" && header[1] === "east") return "ned";
+    return "unknown";
+  }
+  return "unknown";
+}
 
 export function UploadParsePanel({
   apiBaseUrl,
@@ -25,6 +40,7 @@ export function UploadParsePanel({
   onInvalidateWorkflow,
   blockProtectedWorkflowMutation,
   protectedResident,
+  onGpsPointMissionParsed,
 }: UploadParsePanelProps) {
   const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -100,11 +116,19 @@ export function UploadParsePanel({
             } as any);
           }
 
-          // Call parsePointCsv to validate the file contents
-          const parseRes = await pathApi.parsePointCsv(apiBaseUrl, cleanFormData);
+          // Detect GPS vs NED CSV and branch parse call
+          const kind = detectPointCsvKind(text);
+          const parseRes =
+            kind === "gps"
+              ? await pathApi.parsePointGpsCsv(apiBaseUrl, cleanFormData)
+              : await pathApi.parsePointCsv(apiBaseUrl, cleanFormData);
           if (!parseRes.ok) {
             res = parseRes;
           } else {
+            if (kind === "gps") {
+              const parsed = (await parseRes.clone().json()) as pathApi.ParsePointGpsCsvResponse;
+              onGpsPointMissionParsed?.(parsed);
+            }
             // If validation succeeded, call uploadPath to actually save the file on the backend
             res = await pathApi.uploadPath(apiBaseUrl, cleanFormData);
           }

@@ -157,7 +157,8 @@ export function PathOrderAndSprayStep({
       Alert.alert("Error", "No path selected to load.");
       return;
     }
-    if (!verifiedAlignmentRequest) {
+    const isDxfPath = targetPath?.toLowerCase().endsWith(".dxf");
+    if (!verifiedAlignmentRequest && isDxfPath) {
       Alert.alert("Missing Alignment", "Please complete the alignment step before loading.");
       return;
     }
@@ -186,7 +187,7 @@ export function PathOrderAndSprayStep({
       const result = await pathApi.loadToController(apiBaseUrl, targetPath, {
         entityOrder,
         sprayOverrides,
-        alignmentRequest: verifiedAlignmentRequest,
+        alignmentRequest: verifiedAlignmentRequest || {},
         onStep: (step) => setLoadStep(step),
       });
 
