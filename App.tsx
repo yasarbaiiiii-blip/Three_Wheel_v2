@@ -3162,6 +3162,7 @@ export default function App() {
                   }
                   importedPlan={importedPlan}
                   setImportedPlan={setImportedPlan}
+                  onSelectPath={previewSelectedPath}
                   lines={displayedLines}
                   mapSourceLines={mapSourceLines}
                   autoOriginReference={autoOriginReference}
@@ -3542,6 +3543,7 @@ type HomeViewProps = {
   autoOriginEnabled: boolean;
   importedPlan: ImportedPlan | null;
   setImportedPlan?: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
+  onSelectPath?: (name: string) => void;
   lines: PlanLine[];
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   selectedLineId: string | null;

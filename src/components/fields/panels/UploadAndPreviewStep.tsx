@@ -62,6 +62,23 @@ export function UploadAndPreviewStep({
     }
   }, [targetPathName, isDxfPath, apiBaseUrl]);
 
+  // Auto-fetch preview whenever a path is already loaded (e.g. navigating from Click-to-Mark).
+  // This covers the case where the file was uploaded externally before the user opened this step.
+  useEffect(() => {
+    if (!targetPathName || !apiBaseUrl) return;
+    // Reset stale preview when the path changes
+    setPreviewData(null);
+    pathApi.getPathPreview(apiBaseUrl, targetPathName)
+      .then(res => {
+        if (res.ok) {
+          return res.json().then((data: pathApi.PathPreviewResponse) => setPreviewData(data));
+        }
+      })
+      .catch(() => {
+        // Preview is optional — swallow errors silently
+      });
+  }, [targetPathName, apiBaseUrl]);
+
   const handlePickFile = async () => {
     if (blockProtectedWorkflowMutation("Uploading a new path")) return;
     try {
