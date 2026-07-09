@@ -59,4 +59,9 @@ export interface MapViewProps {
     originDxfNorth: number;
     originDxfEast: number;
   } | null;
+
+  /** Click-to-Mark: callback when user taps the map while drawing waypoints */
+  onMapClickToMark?: (coord: { lat: number; lon: number }) => void;
+  /** Click-to-Mark: array of user-drawn waypoints to render on the map */
+  drawnWaypoints?: { lat: number; lon: number }[];
 }

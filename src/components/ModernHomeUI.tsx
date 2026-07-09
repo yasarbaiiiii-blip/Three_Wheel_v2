@@ -4,11 +4,12 @@ import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform, Moda
 import { GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps, withSpring, withTiming, cancelAnimation, Easing, runOnJS, Keyframe } from "react-native-reanimated";
 import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText } from "react-native-svg";
-import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check } from "lucide-react-native";
+import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check, Pencil, Undo2 } from "lucide-react-native";
 import { ManualJoystick } from "./ManualJoystick";
 import { pauseMission, nextMission, exportLog } from "../api/missionApi";
 import { MapView } from "./MapView";
 import { canAcquireJoystick as canAcquireJoystickForState } from "../utils/joystickFrontendSafety";
+import * as pathApi from "../api/pathApi";
 
 // Using 127.0.0.1:5001 as fallback if window location is unavailable
 const getApiBase = () => {
@@ -700,6 +701,11 @@ export default function ModernHomeUI(props) {
   const missionPanelHeight = Math.max(300, windowHeight * BOTTOM_PANEL_HEIGHT_RATIO - HUD_PAD * 2);
   const [visualSelected, setVisualSelected] = useState(false);
 
+  // ── Click to Mark state ──
+  const [isDrawingPath, setIsDrawingPath] = useState(false);
+  const [drawnPoints, setDrawnPoints] = useState<{ lat: number; lon: number }[]>([]);
+  const [isUploadingDrawn, setIsUploadingDrawn] = useState(false);
+
   const vehicleMode = normalizeVehicleMode(telemetrySnapshot?.mode ?? systemHealth?.mode);
   const isVehicleArmed = telemetrySnapshot?.armed ?? systemHealth?.armed ?? false;
 
@@ -1091,6 +1097,110 @@ export default function ModernHomeUI(props) {
     setShowTelemetry((v) => !v);
   }, []);
 
+  // ── Click to Mark handlers ──
+  const handleToggleDrawingMode = useCallback(() => {
+    if (isDrawingPath) {
+      // Cancel drawing
+      setIsDrawingPath(false);
+      setDrawnPoints([]);
+    } else {
+      setIsDrawingPath(true);
+      setDrawnPoints([]);
+    }
+  }, [isDrawingPath]);
+
+  const handleMapClickToMark = useCallback((coord: { lat: number; lon: number }) => {
+    if (!isDrawingPath) return;
+    setDrawnPoints((prev) => [...prev, coord]);
+  }, [isDrawingPath]);
+
+  const handleUndoLastPoint = useCallback(() => {
+    setDrawnPoints((prev) => prev.slice(0, -1));
+  }, []);
+
+  const handleCancelDrawing = useCallback(() => {
+    setIsDrawingPath(false);
+    setDrawnPoints([]);
+  }, []);
+
+  const handleFinishAndUpload = useCallback(async () => {
+    if (drawnPoints.length === 0) {
+      Alert.alert("No Points", "Please tap the map to add at least one point.");
+      return;
+    }
+
+    setIsUploadingDrawn(true);
+    try {
+      const apiBaseUrl = props.apiBaseUrl || getApiBase();
+
+      // Generate a standard QGC WPL 110 format waypoints file.
+      // This allows the backend to naturally handle GPS coordinates and convert them to a local cartesian path.
+      let fileContent = "QGC WPL 110\n";
+      for (let i = 0; i < drawnPoints.length; i++) {
+        const p = drawnPoints[i];
+        // format: <INDEX> <CURRENT_WP> <COORD_FRAME> <COMMAND> <PARAM1> <PARAM2> <PARAM3> <PARAM4> <LAT> <LON> <ALT> <AUTOCONTINUE>
+        // COMMAND 16 is WAYPOINT.
+        fileContent += `${i}\t${i === 0 ? 1 : 0}\t0\t16\t0\t0\t0\t0\t${p.lat}\t${p.lon}\t0\t1\n`;
+      }
+
+      // Create a Blob/FormData and upload
+      const formData = new FormData();
+      if (Platform.OS === "web") {
+        const blob = new Blob([fileContent], { type: "text/plain" });
+        formData.append("file", blob, "click_to_mark.waypoints");
+      } else {
+        // For React Native, write to a temp file first
+        const FileSystem = require("expo-file-system/legacy");
+        const tempUri = FileSystem.cacheDirectory + "click_to_mark.waypoints";
+        await FileSystem.writeAsStringAsync(tempUri, fileContent, {
+          encoding: "utf8",
+        });
+        formData.append("file", {
+          uri: tempUri,
+          name: "click_to_mark.waypoints",
+          type: "text/plain",
+        } as any);
+      }
+
+      const uploadRes = await pathApi.uploadPath(apiBaseUrl, formData);
+      if (!uploadRes.ok) {
+        const errText = await uploadRes.text();
+        Alert.alert("Upload Error", errText || "Failed to upload the drawn path.");
+        setIsUploadingDrawn(false);
+        return;
+      }
+
+      // Success — set imported plan and navigate to fields page
+      if (props.setImportedPlan) {
+        props.setImportedPlan({
+          fileName: "click_to_mark.waypoints",
+          uri: "",
+          fileType: "waypoints",
+          source: "builtin",
+        });
+      }
+      if (props.onSelectPath) {
+        props.onSelectPath("click_to_mark.waypoints");
+      }
+
+      setIsDrawingPath(false);
+      setDrawnPoints([]);
+      Alert.alert("Success", "Path uploaded! Redirecting to Fields page for alignment.", [
+        {
+          text: "OK",
+          onPress: () => {
+            onNav("fields");
+          },
+        },
+      ]);
+    } catch (err) {
+      console.error("Click to Mark upload error:", err);
+      Alert.alert("Error", "Could not upload the drawn path. Check connection.");
+    } finally {
+      setIsUploadingDrawn(false);
+    }
+  }, [drawnPoints, onNav, props.setImportedPlan]);
+
   const renderMapToolsColumn = () => {
     if ((!isHomePage && !isFieldsPage) || !navIconsVisible) return null;
     return (
@@ -1121,6 +1231,24 @@ export default function ModernHomeUI(props) {
             <Tractor color={COLORS.accentBrand} size={18} strokeWidth={2.2} />
             <Text style={styles.focusToolLabel}>Rover</Text>
           </Pressable>
+
+          {isHomePage && (
+            <>
+              <View style={styles.mapToolsDivider} />
+              <Pressable
+                style={({ pressed }) => [
+                  styles.focusToolBtnGrouped,
+                  isDrawingPath && { backgroundColor: COLORS.accentMuted },
+                  pressed && styles.focusToolBtnPressed,
+                ]}
+                onPress={handleToggleDrawingMode}
+                accessibilityLabel="Click to Mark"
+              >
+                <Pencil color={isDrawingPath ? COLORS.accentBrand : COLORS.textMuted} size={18} strokeWidth={2.2} />
+                <Text style={[styles.focusToolLabel, isDrawingPath && { color: COLORS.accentBrand }]}>Mark</Text>
+              </Pressable>
+            </>
+          )}
         </View>
       </AnimatedReanimated.View>
     );
@@ -1694,6 +1822,8 @@ export default function ModernHomeUI(props) {
           recenterPlanTrigger={recenterPlanCount}
           resetNorthTrigger={resetNorthCount}
           onSelectPoint={props.onSelectPoint}
+          onMapClickToMark={isDrawingPath ? handleMapClickToMark : undefined}
+          drawnWaypoints={isDrawingPath ? drawnPoints : undefined}
         />
         ) : renderPlanPreview ? (
           <View style={styles.canvasContainer}>
@@ -1706,6 +1836,8 @@ export default function ModernHomeUI(props) {
             <Text style={styles.mapOffSub}>Use Map On in the navbar to enable</Text>
           </View>
         )}
+
+
       </View>
       ) : (
         <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1, backgroundColor: COLORS.bgBase }} />
@@ -1733,6 +1865,69 @@ export default function ModernHomeUI(props) {
             </View>
           ) : null}
           {isHomePage ? <FloatingEStop visible={missionRunning || isVehicleArmed} onTrigger={handleEStop} /> : null}
+
+          {/* Click to Mark floating toolbar */}
+          {isDrawingPath && (
+            <View style={[styles.drawingToolbar, { bottom: 48 }]} pointerEvents="auto">
+              <View style={styles.drawingToolbarInner}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <Pencil color={COLORS.accentBrand} size={16} strokeWidth={2.5} />
+                  <Text style={{ color: COLORS.textMain, fontWeight: "700", fontSize: 13 }}>
+                    Click to Mark
+                  </Text>
+                  <View style={{
+                    backgroundColor: COLORS.accentMuted,
+                    borderRadius: 10,
+                    paddingHorizontal: 8,
+                    paddingVertical: 2,
+                    borderWidth: 1,
+                    borderColor: COLORS.accentBorder,
+                  }}>
+                    <Text style={{ color: COLORS.accentBrand, fontSize: 11, fontWeight: "800" }}>
+                      {drawnPoints.length} {drawnPoints.length === 1 ? "point" : "points"}
+                    </Text>
+                  </View>
+                </View>
+                <Text style={{ color: COLORS.textDim, fontSize: 11, marginTop: 4 }}>
+                  Tap anywhere on the map to add waypoints
+                </Text>
+                <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+                  <Pressable
+                    style={({ pressed }) => [styles.drawingBtn, styles.drawingBtnSecondary, pressed && { opacity: 0.7 }]}
+                    onPress={handleUndoLastPoint}
+                    disabled={drawnPoints.length === 0}
+                  >
+                    <Undo2 color={drawnPoints.length === 0 ? COLORS.textDim : COLORS.textMain} size={14} strokeWidth={2.2} />
+                    <Text style={[styles.drawingBtnText, drawnPoints.length === 0 && { color: COLORS.textDim }]}>Undo</Text>
+                  </Pressable>
+                  <Pressable
+                    style={({ pressed }) => [styles.drawingBtn, styles.drawingBtnDanger, pressed && { opacity: 0.7 }]}
+                    onPress={handleCancelDrawing}
+                  >
+                    <X color={COLORS.danger} size={14} strokeWidth={2.5} />
+                    <Text style={[styles.drawingBtnText, { color: COLORS.danger }]}>Cancel</Text>
+                  </Pressable>
+                  {drawnPoints.length > 0 && (
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.drawingBtn,
+                        styles.drawingBtnPrimary,
+                        pressed && { opacity: 0.7 },
+                        isUploadingDrawn && { opacity: 0.5 },
+                      ]}
+                      onPress={handleFinishAndUpload}
+                      disabled={isUploadingDrawn}
+                    >
+                      <Check color="#ffffff" size={14} strokeWidth={2.5} />
+                      <Text style={[styles.drawingBtnText, { color: "#ffffff" }]}>
+                        {isUploadingDrawn ? "Uploading..." : "Finish & Upload"}
+                      </Text>
+                    </Pressable>
+                  )}
+                </View>
+              </View>
+            </View>
+          )}
         </View>
       ) : null}
 
@@ -2985,4 +3180,52 @@ const styles = StyleSheet.create({
   },
   estopText: { color: "#fff", fontSize: 14, fontWeight: "900", marginTop: 2 },
   estopSubText: { color: "rgba(255, 255, 255, 0.75)", fontSize: 9, fontWeight: "700", letterSpacing: 0.4 },
+
+  // ── Click to Mark toolbar styles ──
+  drawingToolbar: {
+    position: "absolute",
+    bottom: 48,
+    left: 0,
+    right: 0,
+    zIndex: 100,
+    alignItems: "center",
+  },
+  drawingToolbarInner: {
+    backgroundColor: "rgba(24, 24, 27, 0.95)",
+    borderRadius: 16,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    borderWidth: 1.5,
+    borderColor: "#2e2e34",
+    width: "90%",
+    maxWidth: 400,
+  },
+  drawingBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
+  drawingBtnText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#f8fafc",
+  },
+  drawingBtnSecondary: {
+    backgroundColor: "#252529",
+    borderWidth: 1,
+    borderColor: "#2e2e34",
+  },
+  drawingBtnDanger: {
+    backgroundColor: "#3d1818",
+    borderWidth: 1,
+    borderColor: "#7f2a2a",
+  },
+  drawingBtnPrimary: {
+    backgroundColor: "#f4c10c",
+    borderWidth: 1,
+    borderColor: "#eab308",
+  },
 });

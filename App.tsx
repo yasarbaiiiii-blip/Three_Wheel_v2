@@ -1803,12 +1803,16 @@ export default function App() {
             const body = await res.json();
             console.log(`[API GET] /api/path/${pathName}/preview - Success, loaded ${body.num_points} points`);
             const pts = Array.isArray(body?.waypoints) ? body.waypoints : [];
-            if (pts.length < 2) {
-              throw new Error("Preview returned fewer than two waypoints");
+            if (pts.length === 0) {
+              throw new Error("Preview returned no waypoints");
             }
-            for (let i = 0; i < pts.length - 1; i++) {
-              const fromPt = pts[i];
-              const toPt = pts[i + 1];
+            
+            // If only 1 point was drawn, create a zero-length segment so it can still be aligned and previewed
+            const effectivePts = pts.length === 1 ? [pts[0], pts[0]] : pts;
+
+            for (let i = 0; i < effectivePts.length - 1; i++) {
+              const fromPt = effectivePts[i];
+              const toPt = effectivePts[i + 1];
               const fromNorth = coerceFiniteNumber(fromPt?.north);
               const fromEast = coerceFiniteNumber(fromPt?.east);
               const toNorth = coerceFiniteNumber(toPt?.north);
@@ -3157,6 +3161,7 @@ export default function App() {
                         : null
                   }
                   importedPlan={importedPlan}
+                  setImportedPlan={setImportedPlan}
                   lines={displayedLines}
                   mapSourceLines={mapSourceLines}
                   autoOriginReference={autoOriginReference}
@@ -3536,6 +3541,7 @@ type HomeViewProps = {
   mapGeometryFrame: MapGeometryFrame;
   autoOriginEnabled: boolean;
   importedPlan: ImportedPlan | null;
+  setImportedPlan?: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
   lines: PlanLine[];
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   selectedLineId: string | null;
@@ -3704,6 +3710,7 @@ function HomeView(props: HomeViewProps) {
     onConfirmVisualAlignment,
     isPlanEditingMode,
     visualAlignmentAnchor,
+    setImportedPlan,
   } = props;
 
   const [sprayModalOpen, setSprayModalOpen] = useState(false);
@@ -3984,11 +3991,12 @@ function HomeView(props: HomeViewProps) {
   const [recenterRoverCount, setRecenterRoverCount] = useState(0);
   const [recenterPlanCount, setRecenterPlanCount] = useState(0);
 
-  const { page: _page, renderSectionContent: _rsc, ...modernHomeProps } = props;
+  const { page: _page, renderSectionContent: _rsc, setImportedPlan: _sip, ...modernHomeProps } = props;
 
   return (
     <ModernHomeUI
       {...modernHomeProps}
+      setImportedPlan={props.setImportedPlan}
       currentPage={page}
       renderSectionContent={renderSectionContent}
       onFocusRover={() => setRecenterRoverCount((c) => c + 1)}

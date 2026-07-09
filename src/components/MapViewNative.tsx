@@ -313,6 +313,8 @@ export function MapViewNative(props: MapViewProps) {
     onUpdatePlacedItem,
     onUpdatePlacedItems,
     multiTouchMode = "both",
+    onMapClickToMark,
+    drawnWaypoints,
   } = props;
 
   const cameraRef = useRef<Camera>(null);
@@ -1421,6 +1423,12 @@ export function MapViewNative(props: MapViewProps) {
       const [lon, lat] = feature.geometry.coordinates as Coord;
       const { lat: pLat, lon: pLon } = fromMapboxCoord([lon, lat]);
 
+      // Click-to-Mark: if drawing mode is active, emit the coordinate and return
+      if (onMapClickToMark) {
+        onMapClickToMark({ lat: pLat, lon: pLon });
+        return;
+      }
+
       if (mode === "templates") {
         onSelectionChange?.([]);
         return;
@@ -1478,7 +1486,7 @@ export function MapViewNative(props: MapViewProps) {
         onSelectLine(null);
       }
     },
-    [mode, originSig, lines, onSelectPoint, onSelectLine, onSelectionChange]
+    [mode, originSig, lines, onSelectPoint, onSelectLine, onSelectionChange, onMapClickToMark]
   );
 
   const handleItemsPress = useCallback(
@@ -1792,6 +1800,70 @@ export function MapViewNative(props: MapViewProps) {
             />
           </ShapeSource>
         )}
+
+        {/* ── Click-to-Mark drawn waypoints ── */}
+        {drawnWaypoints && drawnWaypoints.length > 0 && (() => {
+          const pointFeatures = drawnWaypoints.map((wp, i) => ({
+            type: "Feature" as const,
+            geometry: { type: "Point" as const, coordinates: toMapboxCoord(wp.lat, wp.lon) },
+            properties: { index: i + 1 },
+          }));
+          const pointsGeo: GeoJSON.FeatureCollection = {
+            type: "FeatureCollection",
+            features: pointFeatures,
+          };
+          const lineGeo: GeoJSON.FeatureCollection | null = drawnWaypoints.length >= 2
+            ? {
+                type: "FeatureCollection",
+                features: [{
+                  type: "Feature",
+                  geometry: {
+                    type: "LineString",
+                    coordinates: drawnWaypoints.map((wp) => toMapboxCoord(wp.lat, wp.lon)),
+                  },
+                  properties: {},
+                }],
+              }
+            : null;
+          return (
+            <>
+              {lineGeo && (
+                <ShapeSource id="drawn-waypoints-line" shape={lineGeo}>
+                  <LineLayer
+                    id="drawn-waypoints-line-layer"
+                    style={{
+                      lineColor: "#f4c10c",
+                      lineWidth: 3,
+                      lineDasharray: [2, 2],
+                      lineOpacity: 0.8,
+                    }}
+                  />
+                </ShapeSource>
+              )}
+              <ShapeSource id="drawn-waypoints-points" shape={pointsGeo}>
+                <CircleLayer
+                  id="drawn-waypoints-circle"
+                  style={{
+                    circleRadius: 8,
+                    circleColor: "#f4c10c",
+                    circleStrokeWidth: 2.5,
+                    circleStrokeColor: "#ffffff",
+                  }}
+                />
+                <SymbolLayer
+                  id="drawn-waypoints-label"
+                  style={{
+                    textField: ["to-string", ["get", "index"]],
+                    textColor: "#1c1c1c",
+                    textSize: 10,
+                    textFont: ["DIN Pro Bold"],
+                    textAllowOverlap: true,
+                  }}
+                />
+              </ShapeSource>
+            </>
+          );
+        })()}
 
         {/* ── Rover vehicle marker + heading ── */}
         {roverGeo.center && (
