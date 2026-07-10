@@ -94,6 +94,28 @@ export function anchorToAlignedRefPoints(
   return [{ dxf_x: 0, dxf_y: 0, lat, lon }];
 }
 
+export type PointMissionPointLike = {
+  north_m: number;
+  east_m: number;
+  mark?: boolean;
+};
+
+/** Point missions have no line geometry — render each point as a zero-length
+ * marker segment so the map preview shows something at every stop. */
+export function pointMissionPointsToPlanLines(
+  points: PointMissionPointLike[] | null | undefined
+): PlanLine[] {
+  const pts = Array.isArray(points) ? points : [];
+  return pts.map((pt, i) => ({
+    id: `pt-${i}`,
+    label: `Point ${i + 1}`,
+    layer: pt.mark !== false ? "marking" : "center",
+    from: { id: 500000 + i * 2, x: pt.north_m, y: pt.east_m },
+    to: { id: 500000 + i * 2 + 1, x: pt.north_m, y: pt.east_m },
+    width: 0.1,
+  }));
+}
+
 export function waypointsToPlanLines(
   waypoints: unknown[],
   sprayFlags: unknown[] = []

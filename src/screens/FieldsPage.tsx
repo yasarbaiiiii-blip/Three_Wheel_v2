@@ -121,7 +121,7 @@ export type FieldsPageProps = {
   }) => React.ReactNode;
   gpsPointMission?: pathApi.ParsePointGpsCsvResponse | null;
   onGpsPointMissionParsed?: (data: pathApi.ParsePointGpsCsvResponse) => void;
-  onPlanAndStageGpsPointMission?: () => Promise<void>;
+  onStageAndLoadGpsPointMission?: () => Promise<void>;
 };
 
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
@@ -192,7 +192,7 @@ export function FieldsPage(props: FieldsPageProps) {
     renderPlanPreview,
     gpsPointMission = null,
     onGpsPointMissionParsed,
-    onPlanAndStageGpsPointMission,
+    onStageAndLoadGpsPointMission,
   } = props;
 
   const [refPoints, setRefPoints] = useState<RefPoint[]>([]);
@@ -615,18 +615,14 @@ export function FieldsPage(props: FieldsPageProps) {
           </FieldsStepCard>
           )}
 
-          {/* GPS Point Mission — Plan & Stage + Load (replaces steps 3 & 4) */}
+          {/* GPS Point Mission — single Load to Controller action (replaces steps 3 & 4),
+              mirrors the DXF flow: one press stages with the parsed CSV data, commits
+              to the controller, and navigates Home. */}
           {isGpsPointFlow && (
             <FieldsStepCard
               stepNumber={3}
-              title="Plan & Stage Point Mission"
-              status={
-                stagedWorkflow.staged === "verified"
-                  ? "done"
-                  : stagedWorkflow.loaded === "verified"
-                  ? "done"
-                  : "active"
-              }
+              title="Load to Controller"
+              status={stagedWorkflow.loaded === "verified" ? "done" : "active"}
               expanded={true}
               onToggle={() => {}}
             >
@@ -634,62 +630,35 @@ export function FieldsPage(props: FieldsPageProps) {
                 <Text style={{ color: "#a1a1aa", fontSize: 12, lineHeight: 17 }}>
                   GPS Point Mission detected ({gpsPointMission.num_points} points).{"\n"}
                   Anchor: {gpsPointMission.anchor.lat.toFixed(6)}, {gpsPointMission.anchor.lon.toFixed(6)}{"\n"}
-                  Alignment is auto-verified from the CSV anchor.
+                  Alignment is auto-verified from the CSV anchor. Points are previewed on the map above.
                 </Text>
 
-                {/* Plan & Stage button */}
                 <Pressable
-                  onPress={onPlanAndStageGpsPointMission}
-                  disabled={missionActionBusy || stagedWorkflow.staged === "verified"}
+                  onPress={onStageAndLoadGpsPointMission}
+                  disabled={missionActionBusy || stagedWorkflow.loaded === "verified"}
                   style={{
                     height: 44,
                     borderRadius: 10,
                     alignItems: "center",
                     justifyContent: "center",
                     backgroundColor:
-                      stagedWorkflow.staged === "verified"
+                      stagedWorkflow.loaded === "verified"
                         ? "#22c55e"
                         : missionActionBusy
                         ? "#3f3f46"
-                        : "#6366f1",
+                        : "#0ea5e9",
                   }}
                 >
                   <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>
-                    {stagedWorkflow.staged === "verified"
-                      ? "✓ Staged"
+                    {stagedWorkflow.loaded === "verified"
+                      ? "✓ Loaded to Controller"
                       : missionActionBusy
-                      ? "Staging..."
-                      : "Plan & Stage Point Mission"}
+                      ? stagedWorkflow.staged === "verified"
+                        ? "Loading..."
+                        : "Staging..."
+                      : "Load to Controller"}
                   </Text>
                 </Pressable>
-
-                {/* Load to Controller button — available after staging */}
-                {stagedWorkflow.staged === "verified" && (
-                  <Pressable
-                    onPress={() => onLoadSelectedPath()}
-                    disabled={missionActionBusy || stagedWorkflow.loaded === "verified"}
-                    style={{
-                      height: 44,
-                      borderRadius: 10,
-                      alignItems: "center",
-                      justifyContent: "center",
-                      backgroundColor:
-                        stagedWorkflow.loaded === "verified"
-                          ? "#22c55e"
-                          : missionActionBusy
-                          ? "#3f3f46"
-                          : "#0ea5e9",
-                    }}
-                  >
-                    <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>
-                      {stagedWorkflow.loaded === "verified"
-                        ? "✓ Loaded to Controller"
-                        : missionActionBusy
-                        ? "Loading..."
-                        : "Load to Controller"}
-                    </Text>
-                  </Pressable>
-                )}
               </View>
             </FieldsStepCard>
           )}

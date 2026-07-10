@@ -135,6 +135,7 @@ import {
 } from "./src/utils/visualAlignment";
 import {
   anchorToAlignedRefPoints,
+  pointMissionPointsToPlanLines,
   stagedMissionMatchesId,
   waypointsToPlanLines,
 } from "./src/utils/stagedMissionHydration";
@@ -2234,25 +2235,14 @@ export default function App() {
           setStagedMissionInspection(stagedArtifact);
         }
 
-        const hydratedLines = waypointsToPlanLines(
+        let hydratedLines = waypointsToPlanLines(
           stagedArtifact.waypoints ?? [],
           stagedArtifact.spray_flags ?? []
         );
 
         // GPS point missions have empty waypoints — synthesize map points from point_mission_points
-        if (hydratedLines.length === 0 && (stagedArtifact as any).point_mission_points?.length) {
-          const pmPoints = (stagedArtifact as any).point_mission_points as pathApi.PointMissionPoint[];
-          for (let i = 0; i < pmPoints.length; i++) {
-            const pt = pmPoints[i];
-            hydratedLines.push({
-              id: `pt-${i}`,
-              label: `Point ${i + 1}`,
-              layer: pt.mark !== false ? "marking" : "center",
-              from: { id: 500000 + i * 2, x: pt.north_m, y: pt.east_m },
-              to: { id: 500000 + i * 2 + 1, x: pt.north_m, y: pt.east_m },
-              width: 0.1,
-            });
-          }
+        if (hydratedLines.length === 0 && stagedArtifact.point_mission_points?.length) {
+          hydratedLines = pointMissionPointsToPlanLines(stagedArtifact.point_mission_points);
         }
 
         if (hydratedLines.length === 0) {
@@ -2350,9 +2340,24 @@ export default function App() {
       loaded: "pending",
       started: "pending",
     }));
+
+    // Preview the parsed points on the map immediately — same map-hydration
+    // path the staged-load flow uses, just run before staging exists.
+    const previewLines = pointMissionPointsToPlanLines(data.point_mission_points);
+    setAlignedRefPoints(anchorToAlignedRefPoints(data.anchor));
+    setLines(sanitizePlanLines(previewLines));
+    setSelectedLineId(previewLines[0]?.id ?? null);
+    setVisualAlignmentItem(null);
+    setIsVisualAlignmentMode(false);
   }
 
-  async function handlePlanAndStageGpsPointMission() {
+  /**
+   * GPS point mission "Load to Controller" — mirrors the DXF single-button
+   * flow (pathApi.loadToController + onLoadSelectedPath): plan & stage with
+   * the parsed CSV data, then immediately commit the resulting mission_id to
+   * the controller and navigate home. No separate manual staging step.
+   */
+  async function handleStageAndLoadGpsPointMission() {
     const pathName = selectedPathName || importedPlan?.fileName;
     if (!apiBaseUrl || !pathName || !gpsPointMission) {
       Alert.alert("Missing data", "Upload a lat,lon CSV and parse it first.");
@@ -2395,7 +2400,6 @@ export default function App() {
         warnings: planData.warnings ?? [],
       });
       setStagedWorkflow((prev) => ({ ...prev, staged: "verified" }));
-      showToast("Staged", `Point mission staged with ${gpsPointMission.num_points} points.`, "success");
 
       // Optional: inspect staged artifact
       try {
@@ -2405,6 +2409,14 @@ export default function App() {
         }
       } catch {
         // inspection is optional
+      }
+
+      // Same load path the DXF flow uses: commits to the controller, verifies,
+      // hydrates the map from the staged artifact, shows its own success toast,
+      // and navigates to Home.
+      const loaded = await loadMissionOnBackend(missionId);
+      if (!loaded) {
+        setWorkflowStep("staged", "verified");
       }
     } catch (err: any) {
       setWorkflowStep("staged", "failed");
@@ -3466,7 +3478,7 @@ export default function App() {
                             setRtkDefaultMode={setRtkDefaultMode}
                             gpsPointMission={gpsPointMission}
                             onGpsPointMissionParsed={handleGpsPointMissionParsed}
-                            onPlanAndStageGpsPointMission={handlePlanAndStageGpsPointMission}
+                            onStageAndLoadGpsPointMission={handleStageAndLoadGpsPointMission}
                           />
                         )
                       : undefined
@@ -4999,7 +5011,7 @@ function SectionPages(props: {
   visualAlignmentAnchor?: { originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null;
   gpsPointMission?: pathApi.ParsePointGpsCsvResponse | null;
   onGpsPointMissionParsed?: (data: pathApi.ParsePointGpsCsvResponse) => void;
-  onPlanAndStageGpsPointMission?: () => Promise<void>;
+  onStageAndLoadGpsPointMission?: () => Promise<void>;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
 
