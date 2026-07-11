@@ -798,10 +798,13 @@ export default function App() {
       const next = !prev;
       if (!next) {
         setAutoOriginReference(null);
+      } else {
+        setPage("home");
+        setMissionLoadedPanelOpenToken((token) => token + 1);
       }
       return next;
     });
-  }, []);
+  }, [setPage]);
 
   useEffect(() => {
     missionStateRef.current = telemetrySnapshot?.mission_state ?? null;
@@ -3372,6 +3375,8 @@ export default function App() {
                             autoOriginReference={autoOriginReference}
                             mapGeometryFrame={mapGeometryFrame}
                             autoOriginEnabled={autoOriginEligible}
+                            autoOrigin={autoOrigin}
+                            onToggleAutoOrigin={toggleAutoOrigin}
                             setLines={setLines}
                             selectedLineId={selectedLineId}
                             backendPaths={backendPaths}
@@ -4918,6 +4923,8 @@ function SectionPages(props: {
   autoOriginReference?: AutoOriginReference | null;
   mapGeometryFrame?: MapGeometryFrame;
   autoOriginEnabled?: boolean;
+  autoOrigin?: boolean;
+  onToggleAutoOrigin?: () => void;
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   selectedLineId: string | null;
   onBack: () => void;

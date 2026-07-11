@@ -37,6 +37,8 @@ export type FieldsPageProps = {
   autoOriginReference?: AutoOriginReference | null;
   mapGeometryFrame?: MapGeometryFrame;
   autoOriginEnabled?: boolean;
+  autoOrigin?: boolean;
+  onToggleAutoOrigin?: () => void;
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   previewRoverPoint: { north: number; east: number } | null;
   missionRunning: boolean;
@@ -142,8 +144,11 @@ export function FieldsPage(props: FieldsPageProps) {
     autoOriginReference = null,
     mapGeometryFrame = "NONE",
     autoOriginEnabled = false,
+    autoOrigin = false,
+    onToggleAutoOrigin,
     setLines,
     previewRoverPoint,
+    missionRunning,
     telemetrySnapshot,
     selectedLineId,
     layerVisibility,
@@ -316,7 +321,7 @@ export function FieldsPage(props: FieldsPageProps) {
   const hasPath = !!selectedPathName || !!importedPlan;
   const uploadDone = hasPath;
   const isDxfPath = importedPlan?.fileType === "dxf" || selectedPathName?.toLowerCase().endsWith(".dxf");
-  const alignDone = !isDxfPath || stagedWorkflow.alignment === "verified" || !!verifiedAlignmentRequest;
+  const alignDone = !isDxfPath || stagedWorkflow.alignment === "verified" || !!verifiedAlignmentRequest || autoOrigin;
   const isGpsPointFlow = gpsPointMission != null;
 
   const stepStatus = (id: FieldsStepId): "pending" | "active" | "done" => {
@@ -575,6 +580,12 @@ export function FieldsPage(props: FieldsPageProps) {
               extractedCorners={extractedCorners}
               setExtractedCorners={setExtractedCorners}
               mapLLA={mapLLA}
+              autoOrigin={autoOrigin}
+              onToggleAutoOrigin={onToggleAutoOrigin}
+              autoOriginReference={autoOriginReference}
+              autoOriginEnabled={autoOriginEnabled}
+              stagedVerified={stagedWorkflow.staged === "verified"}
+              missionRunning={missionRunning}
             />
           </FieldsStepCard>
           )}

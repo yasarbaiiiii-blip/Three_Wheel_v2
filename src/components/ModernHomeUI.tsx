@@ -831,13 +831,13 @@ export default function ModernHomeUI(props) {
   }, [pendingJoystickOpen, vehicleMode, missionRunning]);
 
   useEffect(() => {
-    if (!missionLoaded || missionLoadedPanelOpenToken <= 0) return;
+    if (missionLoadedPanelOpenToken <= 0) return;
     setShowTelemetry(true);
     setShowMissionControl(true);
     setShowJoystick(false);
     setPendingJoystickOpen(false);
     setQuickAccessExpanded(false);
-  }, [missionLoaded, missionLoadedPanelOpenToken]);
+  }, [missionLoadedPanelOpenToken]);
 
   useEffect(() => {
     const wasOpen = wasMissionControlOpenRef.current;

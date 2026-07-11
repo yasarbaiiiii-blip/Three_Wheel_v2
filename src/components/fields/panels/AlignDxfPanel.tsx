@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Alert, Pressable, Text, TextInput, View } from "react-native";
+import { Check } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
 import { enforceAlignmentScale } from "../../../utils/designAlignmentPolicy";
@@ -10,6 +11,7 @@ import {
 } from "../../../utils/pathWorkflow";
 import type { AlignmentResultState, StagedWorkflowStatus } from "../../../types/fieldsWorkflow";
 import type { PlanLine } from "../../../types/plan";
+import type { AutoOriginReference } from "../../../types/autoOrigin";
 import type { PlacedItem } from "../../BoundaryEditor";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
@@ -41,6 +43,15 @@ type AlignDxfPanelProps = {
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null>>;
   /** Current plan LLA coordinates read from the map (for visual alignment) */
   mapLLA?: { lat: number; lon: number } | null;
+  /** Auto Origin: skips formal GPS alignment, shifts the plan to the rover's live position instead. */
+  autoOrigin?: boolean;
+  onToggleAutoOrigin?: () => void;
+  autoOriginReference?: AutoOriginReference | null;
+  /** Whether Auto Origin is currently eligible (no verified alignment yet). */
+  autoOriginEnabled?: boolean;
+  /** True once a formal GPS alignment has been staged & verified — Auto Origin is force-disabled at mission start in this state. */
+  stagedVerified?: boolean;
+  missionRunning?: boolean;
 };
 
 export function AlignDxfPanel({
@@ -67,6 +78,12 @@ export function AlignDxfPanel({
   extractedCorners,
   setExtractedCorners,
   mapLLA,
+  autoOrigin = false,
+  onToggleAutoOrigin,
+  autoOriginReference = null,
+  autoOriginEnabled = false,
+  stagedVerified = false,
+  missionRunning = false,
 }: AlignDxfPanelProps) {
   const [rotationDeg, setRotationDeg] = useState("");
   const [isFixing, setIsFixing] = useState(false);
@@ -262,6 +279,9 @@ export function AlignDxfPanel({
     setVisualAlignmentItem?.(null);
   };
 
+  // True once Auto Origin is both requested and actually eligible (no verified/staged alignment blocking it).
+  const autoOriginActive = autoOrigin && autoOriginEnabled;
+
   return (
     <View style={{ gap: 12 }}>
       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
@@ -275,6 +295,69 @@ export function AlignDxfPanel({
         ) : null}
       </View>
 
+      {!missionRunning ? (
+        <View
+          style={{
+            borderRadius: 10,
+            borderWidth: 1,
+            borderColor: autoOrigin ? "#10b981" : FIELDS_COLORS.panelBorder,
+            backgroundColor: autoOrigin ? "rgba(16, 185, 129, 0.08)" : FIELDS_COLORS.surfaceSolid,
+            padding: 10,
+            gap: 8,
+          }}
+        >
+          <Pressable
+            onPress={onToggleAutoOrigin}
+            accessibilityLabel="Auto Origin Checkbox"
+            style={{ flexDirection: "row", alignItems: "center", gap: 10 }}
+          >
+            <View
+              style={{
+                width: 22,
+                height: 22,
+                borderRadius: 6,
+                borderWidth: 1.5,
+                borderColor: autoOrigin ? "#10b981" : FIELDS_COLORS.panelBorder,
+                backgroundColor: autoOrigin ? "rgba(16, 185, 129, 0.15)" : FIELDS_COLORS.cardSolid,
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              {autoOrigin ? <Check color="#10b981" size={14} strokeWidth={3} /> : null}
+            </View>
+            <Text style={{ flex: 1, color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>
+              Auto Origin — skip GPS alignment, start from rover's current position
+            </Text>
+          </Pressable>
+
+          {autoOrigin ? (
+            <Text
+              style={{
+                color: stagedVerified || !autoOriginEnabled
+                  ? FIELDS_COLORS.danger
+                  : autoOriginReference
+                  ? FIELDS_COLORS.success
+                  : FIELDS_COLORS.textMuted,
+                fontSize: 11,
+                lineHeight: 15,
+              }}
+            >
+              {stagedVerified
+                ? "A verified GPS alignment is active — Auto Origin will have no effect until that alignment is cleared."
+                : !autoOriginEnabled
+                ? "Auto Origin is blocked by an existing alignment. Clear the ref points below to use it."
+                : autoOriginReference
+                ? `Captured — plan will start at the rover's current position (N ${autoOriginReference.roverNorth.toFixed(2)}, E ${autoOriginReference.roverEast.toFixed(2)}).`
+                : "Waiting for a valid GPS fix and position from the rover..."}
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
+
+      <View
+        style={{ gap: 12, opacity: autoOriginActive ? 0.4 : 1 }}
+        pointerEvents={autoOriginActive ? "none" : "auto"}
+      >
       <View style={{ flexDirection: "row", backgroundColor: FIELDS_COLORS.surfaceSolid, borderRadius: 8, padding: 4 }}>
         {([
           { id: "least_squares" as const, label: "2-Point Fit" },
@@ -593,6 +676,7 @@ export function AlignDxfPanel({
           ) : null}
         </View>
       )}
+      </View>
     </View>
   );
 }
