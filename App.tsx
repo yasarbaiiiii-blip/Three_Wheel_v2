@@ -793,6 +793,11 @@ export default function App() {
   const missionStateRef = useRef<string | null>(null);
   const recoveryAttemptedRef = useRef(false);
   const isRecoveringRef = useRef(false);
+  // Bumped whenever a mutating mission action (load/stage/clear/reset) starts,
+  // so an in-flight refreshMissionIdentity() poll issued before that action
+  // can't land afterward and clobber the fresher state with a stale snapshot.
+  const missionIdentityGenerationRef = useRef(0);
+  const missionIdentityInFlightRef = useRef(false);
   const [mapViewEnabled, setMapViewEnabled] = useState(true);
   const [resetNorthCount, setResetNorthCount] = useState(0);
 
@@ -990,6 +995,7 @@ export default function App() {
   }, []);
 
   const invalidateStagedWorkflowFrom = useCallback((step: "alignment" | "spray" | "staged" | "loaded") => {
+    missionIdentityGenerationRef.current += 1;
     setStagedWorkflow((prev) => invalidateWorkflowFrom(prev, step));
 
     if (step === "alignment") {
@@ -1120,6 +1126,7 @@ export default function App() {
     previousSelectedPathRef.current = selectedPathName;
     // Skip the reset when we are recovering a loaded mission on reload
     if (isRecoveringRef.current) return;
+    missionIdentityGenerationRef.current += 1;
     setStagedWorkflow((prev) => ({
       ...prev,
       alignment: "pending",
@@ -2180,16 +2187,24 @@ export default function App() {
   }
 
   async function refreshMissionIdentity() {
-    if (!apiBaseUrl) return;
+    if (!apiBaseUrl || missionIdentityInFlightRef.current) return;
+    missionIdentityInFlightRef.current = true;
+    const requestGeneration = missionIdentityGenerationRef.current;
     try {
       const [status, loaded] = await Promise.all([
         fetchMissionStatus(apiBaseUrl),
         fetchJson<missionApi.LoadedPathResponse>(`${apiBaseUrl}/api/mission/loaded-path`),
       ]);
+      // A load/stage/clear action started and finished while this request was
+      // in flight — its snapshot predates that action, discard it rather than
+      // stomp the newer state.
+      if (missionIdentityGenerationRef.current !== requestGeneration) return;
       reconcileLoadedMission(loaded, status);
       setMissionRunning(status.state === "running");
     } catch {
       // Telemetry errors are presented by the existing status refresh path.
+    } finally {
+      missionIdentityInFlightRef.current = false;
     }
   }
 
@@ -2287,6 +2302,9 @@ export default function App() {
 
     logAction("LOAD_REQUEST", { apiBaseUrl, stagedMissionId: requestedMissionId || null, fileName: importedPlan?.fileName });
     setMissionActionBusy(true);
+    // Invalidate any identity poll already in flight — its snapshot predates
+    // this load and must not be allowed to overwrite the result below.
+    missionIdentityGenerationRef.current += 1;
     try {
       showToast("Load", `Loading path...`, "info");
 
@@ -2528,17 +2546,46 @@ export default function App() {
     }
 
     // Step 1: Re-fetch backend mission status to reconcile local workflow state
+    // before evaluating the start gate. setWorkflowStep() below only takes
+    // effect on the next render, so evaluating the gate against the
+    // `stagedWorkflow`/`loadedPathInspection` closures here would still see
+    // the pre-reconcile snapshot — track the freshly-confirmed truth locally
+    // instead so a real confirmation isn't ignored by a stale read.
+    let effectiveStagedWorkflow = stagedWorkflow;
+    let effectiveLoadedInspection = loadedPathInspection;
     try {
       const missionStatus = await missionApi.fetchMissionStatus(apiBaseUrl);
       const stagedStatus = await missionApi.fetchStagedMissionStatus(apiBaseUrl, stagedMissionId);
 
       if (stagedStatus?.verified) {
+        effectiveStagedWorkflow = { ...effectiveStagedWorkflow, staged: "verified" };
         setWorkflowStep("staged", "verified");
       }
       if (missionStatus.running_mission_id) {
         // If a mission is already running, reconcile
         setMissionRunning(true);
       }
+
+      // Only upgrade "loaded" from a fresh check — never downgrade it here,
+      // that stays the background poll's job (reconcileLoadedMission).
+      if (
+        effectiveStagedWorkflow.staged === "verified" &&
+        stagedMissionId &&
+        effectiveStagedWorkflow.loaded !== "verified"
+      ) {
+        const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
+        if (loadedRes.ok) {
+          const loadedData = (await loadedRes.json()) as missionApi.LoadedPathResponse;
+          const verification = verifyStagedLoadedMission(loadedData, stagedMissionId);
+          if (verification.verified) {
+            effectiveStagedWorkflow = { ...effectiveStagedWorkflow, loaded: "verified" };
+            effectiveLoadedInspection = loadedData;
+            setWorkflowStep("loaded", "verified");
+            setLoadedPathInspection(loadedData);
+          }
+        }
+      }
+
       logAction("START_RECONCILE", {
         missionState: missionStatus.state,
         loadedMissionId: missionStatus.loaded_mission_id,
@@ -2550,7 +2597,7 @@ export default function App() {
     }
 
     let forceStart = false;
-    const gateResult = evaluateStagedStartGate(stagedWorkflow, loadedPathInspection, stagedMissionId);
+    const gateResult = evaluateStagedStartGate(effectiveStagedWorkflow, effectiveLoadedInspection, stagedMissionId);
 
     if (!gateResult.allowed) {
       // Show dialog with force-start option — await user decision via promise wrapper
@@ -2951,6 +2998,7 @@ export default function App() {
       setStagedMissionId(null);
       setLoadedPathInspection(null);
       setStagedWorkflow(INITIAL_STAGED_WORKFLOW_STATE);
+      missionIdentityGenerationRef.current += 1;
 
       void refreshMissionIdentity();
       void refreshTelemetryPanel();
