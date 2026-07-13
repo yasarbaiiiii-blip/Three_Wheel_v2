@@ -62,6 +62,10 @@ export interface MapViewProps {
 
   /** Click-to-Mark: callback when user taps the map while drawing waypoints */
   onMapClickToMark?: (coord: { lat: number; lon: number }) => void;
-  /** Click-to-Mark: array of user-drawn waypoints to render on the map */
+  /** Click-to-Mark & Manual Drawing: array of user-drawn waypoints to render on the map */
   drawnWaypoints?: { lat: number; lon: number }[];
+  /** Manual Drawing: if true, map panning is disabled and pan gestures trigger freehand drawing */
+  manualDrawingEnabled?: boolean;
+  /** Manual Drawing: callback invoked when a freehand drawing stroke finishes */
+  onMapFreehandDrawUpdate?: (coords: { lat: number; lon: number }[]) => void;
 }

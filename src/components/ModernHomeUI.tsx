@@ -1,5 +1,5 @@
 // @ts-nocheck
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform, Modal, TextInput, Dimensions, Alert, useWindowDimensions } from "react-native";
 import { GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps, withSpring, withTiming, cancelAnimation, Easing, runOnJS, Keyframe } from "react-native-reanimated";
@@ -702,8 +702,10 @@ export default function ModernHomeUI(props) {
   const [visualSelected, setVisualSelected] = useState(false);
 
   // ── Click to Mark state ──
-  const [isDrawingPath, setIsDrawingPath] = useState(false);
-  const [drawnPoints, setDrawnPoints] = useState<{ lat: number; lon: number }[]>([]);
+  const [drawingMode, setDrawingMode] = useState<"none" | "click" | "manual">("none");
+  const [showMarkMenu, setShowMarkMenu] = useState(false);
+  const [drawnStrokes, setDrawnStrokes] = useState<{ lat: number; lon: number }[][]>([]);
+  const drawnPoints = useMemo(() => drawnStrokes.flat(), [drawnStrokes]);
   const [isUploadingDrawn, setIsUploadingDrawn] = useState(false);
 
   const vehicleMode = normalizeVehicleMode(telemetrySnapshot?.mode ?? systemHealth?.mode);
@@ -1101,29 +1103,33 @@ export default function ModernHomeUI(props) {
   }, []);
 
   // ── Click to Mark handlers ──
-  const handleToggleDrawingMode = useCallback(() => {
-    if (isDrawingPath) {
-      // Cancel drawing
-      setIsDrawingPath(false);
-      setDrawnPoints([]);
-    } else {
-      setIsDrawingPath(true);
-      setDrawnPoints([]);
-    }
-  }, [isDrawingPath]);
+  const handleToggleMarkMenu = useCallback(() => {
+    setShowMarkMenu((v) => !v);
+  }, []);
+
+  const handleStartDrawingMode = useCallback((mode: "click" | "manual") => {
+    setDrawingMode(mode);
+    setDrawnStrokes([]);
+    setShowMarkMenu(false);
+  }, []);
 
   const handleMapClickToMark = useCallback((coord: { lat: number; lon: number }) => {
-    if (!isDrawingPath) return;
-    setDrawnPoints((prev) => [...prev, coord]);
-  }, [isDrawingPath]);
+    if (drawingMode !== "click") return;
+    setDrawnStrokes((prev) => [...prev, [coord]]);
+  }, [drawingMode]);
+
+  const handleMapFreehandDrawEnd = useCallback((coords: { lat: number; lon: number }[]) => {
+    if (drawingMode !== "manual" || coords.length === 0) return;
+    setDrawnStrokes((prev) => [...prev, coords]);
+  }, [drawingMode]);
 
   const handleUndoLastPoint = useCallback(() => {
-    setDrawnPoints((prev) => prev.slice(0, -1));
+    setDrawnStrokes((prev) => prev.slice(0, -1));
   }, []);
 
   const handleCancelDrawing = useCallback(() => {
-    setIsDrawingPath(false);
-    setDrawnPoints([]);
+    setDrawingMode("none");
+    setDrawnStrokes([]);
   }, []);
 
   const handleFinishAndUpload = useCallback(async () => {
@@ -1186,8 +1192,8 @@ export default function ModernHomeUI(props) {
         props.onSelectPath("click_to_mark.waypoints");
       }
 
-      setIsDrawingPath(false);
-      setDrawnPoints([]);
+      setDrawingMode("none");
+      setDrawnStrokes([]);
       Alert.alert("Success", "Path uploaded! Redirecting to Fields page for alignment.", [
         {
           text: "OK",
@@ -1238,18 +1244,84 @@ export default function ModernHomeUI(props) {
           {isHomePage && (
             <>
               <View style={styles.mapToolsDivider} />
-              <Pressable
-                style={({ pressed }) => [
-                  styles.focusToolBtnGrouped,
-                  isDrawingPath && { backgroundColor: COLORS.accentMuted },
-                  pressed && styles.focusToolBtnPressed,
-                ]}
-                onPress={handleToggleDrawingMode}
-                accessibilityLabel="Click to Mark"
-              >
-                <Pencil color={isDrawingPath ? COLORS.accentBrand : COLORS.textMuted} size={18} strokeWidth={2.2} />
-                <Text style={[styles.focusToolLabel, isDrawingPath && { color: COLORS.accentBrand }]}>Mark</Text>
-              </Pressable>
+              <View>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.focusToolBtnGrouped,
+                    drawingMode !== "none" && { backgroundColor: COLORS.accentMuted },
+                    pressed && styles.focusToolBtnPressed,
+                  ]}
+                  onPress={handleToggleMarkMenu}
+                  accessibilityLabel="Mark Options"
+                >
+                  <Pencil color={drawingMode !== "none" ? COLORS.accentBrand : COLORS.textMuted} size={18} strokeWidth={2.2} />
+                  <Text style={[styles.focusToolLabel, drawingMode !== "none" && { color: COLORS.accentBrand }]}>Mark</Text>
+                </Pressable>
+                {showMarkMenu && (
+                  <View style={{
+                    position: "absolute",
+                    top: "100%",
+                    marginTop: 14,
+                    right: 0,
+                    backgroundColor: COLORS.cardSolid,
+                    borderRadius: 12,
+                    padding: 6,
+                    minWidth: 180,
+                    borderWidth: 1,
+                    borderColor: COLORS.panelBorder,
+                    shadowColor: "#000",
+                    shadowOffset: { width: 0, height: 8 },
+                    shadowOpacity: 0.5,
+                    shadowRadius: 24,
+                    elevation: 10,
+                    zIndex: 100,
+                  }}>
+                    {/* Top Pointer Triangle */}
+                    <View style={{
+                      position: "absolute",
+                      top: -6,
+                      right: 22,
+                      width: 12,
+                      height: 12,
+                      backgroundColor: COLORS.cardSolid,
+                      borderTopWidth: 1,
+                      borderLeftWidth: 1,
+                      borderColor: COLORS.panelBorder,
+                      transform: [{ rotate: "45deg" }],
+                    }} />
+
+                    <Pressable
+                      style={({ pressed }) => [
+                        { padding: 10, borderRadius: 8 },
+                        pressed && { backgroundColor: COLORS.surfaceSolid },
+                        drawingMode === "click" && { backgroundColor: COLORS.accentMuted }
+                      ]}
+                      onPress={() => handleStartDrawingMode("click")}
+                    >
+                      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "flex-start", gap: 12 }}>
+                        <MapPin color={drawingMode === "click" ? COLORS.accentBrand : COLORS.textMain} size={18} strokeWidth={2.2} />
+                        <Text numberOfLines={1} style={{ flex: 1, color: drawingMode === "click" ? COLORS.accentBrand : COLORS.textMain, fontSize: 13, fontWeight: "600" }}>Click to Waypoint</Text>
+                      </View>
+                    </Pressable>
+
+                    <View style={{ height: 1, backgroundColor: COLORS.panelBorder, marginVertical: 4, marginHorizontal: 6 }} />
+
+                    <Pressable
+                      style={({ pressed }) => [
+                        { padding: 10, borderRadius: 8 },
+                        pressed && { backgroundColor: COLORS.surfaceSolid },
+                        drawingMode === "manual" && { backgroundColor: COLORS.accentMuted }
+                      ]}
+                      onPress={() => handleStartDrawingMode("manual")}
+                    >
+                      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "flex-start", gap: 12 }}>
+                        <Pencil color={drawingMode === "manual" ? COLORS.accentBrand : COLORS.textMain} size={18} strokeWidth={2.2} />
+                        <Text numberOfLines={1} style={{ flex: 1, color: drawingMode === "manual" ? COLORS.accentBrand : COLORS.textMain, fontSize: 13, fontWeight: "600" }}>Manual Drawing</Text>
+                      </View>
+                    </Pressable>
+                  </View>
+                )}
+              </View>
             </>
           )}
         </View>
@@ -1836,8 +1908,10 @@ export default function ModernHomeUI(props) {
           recenterPlanTrigger={recenterPlanCount}
           resetNorthTrigger={resetNorthCount}
           onSelectPoint={props.onSelectPoint}
-          onMapClickToMark={isDrawingPath ? handleMapClickToMark : undefined}
-          drawnWaypoints={isDrawingPath ? drawnPoints : undefined}
+          onMapClickToMark={drawingMode === "click" ? handleMapClickToMark : undefined}
+          drawnWaypoints={drawingMode !== "none" ? drawnPoints : undefined}
+          manualDrawingEnabled={drawingMode === "manual"}
+          onMapFreehandDrawUpdate={handleMapFreehandDrawEnd}
         />
         ) : renderPlanPreview ? (
           <View style={styles.canvasContainer}>
@@ -1880,14 +1954,14 @@ export default function ModernHomeUI(props) {
           ) : null}
           {isHomePage ? <FloatingEStop visible={missionRunning || isVehicleArmed} onTrigger={handleEStop} /> : null}
 
-          {/* Click to Mark floating toolbar */}
-          {isDrawingPath && (
+          {/* Drawing floating toolbar */}
+          {drawingMode !== "none" && (
             <View style={[styles.drawingToolbar, { bottom: 48 }]} pointerEvents="auto">
               <View style={styles.drawingToolbarInner}>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                   <Pencil color={COLORS.accentBrand} size={16} strokeWidth={2.5} />
                   <Text style={{ color: COLORS.textMain, fontWeight: "700", fontSize: 13 }}>
-                    Click to Mark
+                    {drawingMode === "click" ? "Click to Mark" : "Manual Drawing"}
                   </Text>
                   <View style={{
                     backgroundColor: COLORS.accentMuted,

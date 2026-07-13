@@ -3100,7 +3100,7 @@ export default function App() {
       showToast("E-Stop", "Sending EMERGENCY STOP...", "error");
       
       // Send E-Stop via HTTP API to halt motors immediately
-      await fetch(`${apiBaseUrl}/api/rover/estop`, { method: "POST" }).catch((err) => {
+      await fetch(`${apiBaseUrl}/api/estop`, { method: "POST" }).catch((err) => {
         console.warn("HTTP E-Stop failed:", err);
       });
 
