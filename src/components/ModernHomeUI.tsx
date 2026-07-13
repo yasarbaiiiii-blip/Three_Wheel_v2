@@ -652,7 +652,7 @@ export default function ModernHomeUI(props) {
     autoOriginEnabled, mapSourceLines, alignedRefPoints, autoOriginReference,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
     isPlanEditingMode,
-    virtualJoystick, onPausePlan, missionActionBusy = false,
+    virtualJoystick, onPausePlan, onResumePlan, isPaused = false, missionActionBusy = false,
     missionLoaded = false, missionLoadedPanelOpenToken = 0,
     mapViewEnabled = false, setMapViewEnabled, renderPlanPreview,
     onFocusRover, onFocusPlan,
@@ -976,12 +976,15 @@ export default function ModernHomeUI(props) {
 
   const handleEStop = () => {
     if (onEstopVehicle) onEstopVehicle();
-    fetch(`${getApiBase()}/api/rover/estop`, { method: "POST" }).catch(console.error);
   };
 
   const handlePause = () => {
     if (onPausePlan) onPausePlan();
     else pauseMission(getApiBase()).catch(console.error);
+  };
+
+  const handleResume = () => {
+    if (onResumePlan) onResumePlan();
   };
 
   const handleNext = () => {
@@ -1752,14 +1755,25 @@ export default function ModernHomeUI(props) {
                     </Pressable>
                   ) : null}
                 </View>
-                <MissionActionBtn
-                  icon={Pause}
-                  label="Pause"
-                  variant="warning"
-                  fullWidth
-                  big
-                  onPress={handlePause}
-                />
+                {isPaused ? (
+                  <MissionActionBtn
+                    icon={Play}
+                    label="Resume"
+                    variant="primary"
+                    fullWidth
+                    big
+                    onPress={handleResume}
+                  />
+                ) : (
+                  <MissionActionBtn
+                    icon={Pause}
+                    label="Pause"
+                    variant="warning"
+                    fullWidth
+                    big
+                    onPress={handlePause}
+                  />
+                )}
                 <View style={styles.missionSubActionsRow}>
                   <MissionActionBtn icon={SkipForward} label="Next" onPress={handleNext} />
                   <MissionActionBtn icon={Download} label="Export Log" onPress={handleExport} />

@@ -34,6 +34,7 @@ import Slider from "@react-native-community/slider";
 import * as FileSystem from "expo-file-system/legacy";
 import * as DocumentPicker from "expo-document-picker";
 import * as Network from "expo-network";
+import * as SecureStore from "expo-secure-store";
 import { SafeAreaInsetsContext, SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView, TouchableOpacity as RNGHTouchableOpacity, GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { runOnJS, useAnimatedStyle, useSharedValue, withSpring } from "react-native-reanimated";
@@ -790,6 +791,8 @@ export default function App() {
     stagedWorkflow.staged !== "verified" &&
     alignedRefPoints.length === 0;
   const missionStateRef = useRef<string | null>(null);
+  const recoveryAttemptedRef = useRef(false);
+  const isRecoveringRef = useRef(false);
   const [mapViewEnabled, setMapViewEnabled] = useState(true);
   const [resetNorthCount, setResetNorthCount] = useState(0);
 
@@ -1006,6 +1009,74 @@ export default function App() {
     setGpsPointMission(null);
   }, []);
 
+  /**
+   * Recover the frontend visual state (DXF lines, staged mission geometry)
+   * from the backend when the app reloads and finds a mission already loaded.
+   */
+  const recoverLoadedMissionContext = useCallback(async (
+    sourceName: string | null | undefined,
+    missionId: string | null | undefined
+  ) => {
+    if (!apiBaseUrl) return;
+    try {
+      console.log(`[RECOVERY] Recovering loaded mission context: source=${sourceName}, missionId=${missionId}`);
+      // Flag to prevent the selectedPathName change effect from wiping staged state
+      isRecoveringRef.current = true;
+
+      // Step 1: Re-fetch the DXF/path preview to rebuild the map lines
+      if (sourceName) {
+        await previewSelectedPath(sourceName);
+      } else {
+        console.warn("[RECOVERY] No sourceName provided, skipping DXF lines preview.");
+      }
+
+      // Step 2: If we have a mission ID, fetch the staged mission geometry
+      if (missionId) {
+        try {
+          const stagedRes = await pathApi.getStagedMission(apiBaseUrl, missionId);
+          if (stagedRes.ok) {
+            const stagedArtifact = (await stagedRes.json()) as pathApi.StagedMissionResponse;
+            setStagedMissionInspection(stagedArtifact);
+            setStagedMissionId(missionId);
+            // Mark the workflow steps as verified so the UI reflects that
+            // the plan is fully staged and loaded
+            setStagedWorkflow({
+              entities: "verified",
+              upload: "verified",
+              order: "verified",
+              alignment: "verified",
+              spray: "verified",
+              staged: "verified",
+              loaded: "verified",
+              started: "pending",
+            });
+            setMissionLoaded(true);
+            console.log(`[RECOVERY] Successfully recovered staged mission ${missionId}`);
+          } else {
+            console.warn(`[RECOVERY] Staged mission fetch failed: ${stagedRes.status}`);
+          }
+        } catch (err) {
+          console.warn("[RECOVERY] Failed to fetch staged mission:", err);
+        }
+      }
+
+      // Step 3: Re-fetch loaded-path inspection since previewSelectedPath clears it
+      try {
+        const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
+        if (loadedRes.ok) {
+          const loadedData = (await loadedRes.json()) as missionApi.LoadedPathResponse;
+          setLoadedPathInspection(loadedData);
+        }
+      } catch (err) {
+        console.warn("[RECOVERY] Failed to re-fetch loaded path:", err);
+      }
+    } catch (err) {
+      console.warn("[RECOVERY] Failed to recover loaded mission context:", err);
+    } finally {
+      isRecoveringRef.current = false;
+    }
+  }, [apiBaseUrl]);
+
   const reconcileLoadedMission = useCallback((
     loaded: missionApi.LoadedPathResponse,
     status?: missionApi.MissionStatus
@@ -1027,12 +1098,28 @@ export default function App() {
       return;
     }
 
+    const targetSourceName = inspection.source_name || inspection.name;
+
+    // If the app just booted blank (no local plan data) but the backend
+    // reports a loaded mission, auto-recover the visual state.
+    if (
+      inspection.loaded &&
+      !selectedPathName &&
+      !importedPlan &&
+      !recoveryAttemptedRef.current
+    ) {
+      recoveryAttemptedRef.current = true;
+      void recoverLoadedMissionContext(targetSourceName, inspection.mission_id);
+    }
+
     setMissionLoaded(Boolean(inspection.loaded && !isProtectedMissionResident(inspection)));
-  }, [stagedMissionId, stagedWorkflow.staged]);
+  }, [stagedMissionId, stagedWorkflow.staged, selectedPathName, importedPlan, recoverLoadedMissionContext]);
 
   useEffect(() => {
     if (previousSelectedPathRef.current === selectedPathName) return;
     previousSelectedPathRef.current = selectedPathName;
+    // Skip the reset when we are recovering a loaded mission on reload
+    if (isRecoveringRef.current) return;
     setStagedWorkflow((prev) => ({
       ...prev,
       alignment: "pending",
@@ -2706,6 +2793,84 @@ export default function App() {
     return () => clearInterval(interval);
   }, [apiBaseUrl, rtkConnecting]);
 
+  // ── RTK credential persistence ──────────────────────────────────────
+  const RTK_CREDS_KEY = "rtk_credentials";
+  const rtkCredsLoadedRef = useRef(false);
+
+  // Load saved RTK credentials once on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await SecureStore.getItemAsync(RTK_CREDS_KEY);
+        if (raw) {
+          const saved = JSON.parse(raw);
+          if (saved.caster) setRtkCaster(saved.caster);
+          if (saved.port) setRtkPort(saved.port);
+          if (saved.mountPoint) setRtkMountPoint(saved.mountPoint);
+          if (saved.username) setRtkUsername(saved.username);
+          if (saved.password) setRtkPassword(saved.password);
+          console.log("[RTK] Restored saved credentials from SecureStore");
+        }
+      } catch (err) {
+        console.warn("[RTK] Failed to load saved credentials:", err);
+      } finally {
+        rtkCredsLoadedRef.current = true;
+      }
+    })();
+  }, []);
+
+  // Save RTK credentials whenever they change (skip the initial load)
+  useEffect(() => {
+    if (!rtkCredsLoadedRef.current) return;
+    const creds = JSON.stringify({
+      caster: rtkCaster,
+      port: rtkPort,
+      mountPoint: rtkMountPoint,
+      username: rtkUsername,
+      password: rtkPassword,
+    });
+    SecureStore.setItemAsync(RTK_CREDS_KEY, creds).catch((err) =>
+      console.warn("[RTK] Failed to save credentials:", err)
+    );
+  }, [rtkCaster, rtkPort, rtkMountPoint, rtkUsername, rtkPassword]);
+
+  // ── Staged Mission persistence ──────────────────────────────────────
+  const STAGED_MISSION_KEY = "staged_mission_cache";
+  const stagedMissionLoadedRef = useRef(false);
+
+  // Load saved staged mission once on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await SecureStore.getItemAsync(STAGED_MISSION_KEY);
+        if (raw) {
+          const saved = JSON.parse(raw);
+          if (saved.missionId && !recoveryAttemptedRef.current) {
+            console.log(`[RECOVERY] Found staged mission ${saved.missionId} in SecureStore. Bypassing backend check.`);
+            recoveryAttemptedRef.current = true;
+            void recoverLoadedMissionContext(saved.sourceName, saved.missionId);
+          }
+        }
+      } catch (err) {
+        console.warn("[RECOVERY] Failed to load saved staged mission:", err);
+      } finally {
+        stagedMissionLoadedRef.current = true;
+      }
+    })();
+  }, []);
+
+  // Save staged mission whenever it successfully verifies
+  useEffect(() => {
+    if (!stagedMissionLoadedRef.current) return;
+    if (stagedWorkflow.staged === "verified" && stagedMissionId) {
+      const sourceName = selectedPathName || importedPlan?.fileName || null;
+      const data = JSON.stringify({ missionId: stagedMissionId, sourceName });
+      SecureStore.setItemAsync(STAGED_MISSION_KEY, data).catch((err) =>
+        console.warn("[RECOVERY] Failed to save staged mission:", err)
+      );
+    }
+  }, [stagedWorkflow.staged, stagedMissionId, selectedPathName, importedPlan]);
+
   async function stopMissionOnBackend() {
     if (!apiBaseUrl) {
       Alert.alert("No backend", "Connect to a backend before stopping a mission.");
@@ -2716,6 +2881,7 @@ export default function App() {
     setMissionActionBusy(true);
     try {
       showToast("Stop", "Stopping mission...", "warning");
+      SecureStore.deleteItemAsync(STAGED_MISSION_KEY).catch(() => {});
       const res = await missionApi.stopMission(apiBaseUrl);
 
       if (!res.ok) {
@@ -2755,6 +2921,7 @@ export default function App() {
     setMissionActionBusy(true);
     try {
       showToast("Clear", "Clearing resident mission...", "warning");
+      SecureStore.deleteItemAsync(STAGED_MISSION_KEY).catch(() => {});
       const res = await missionApi.clearMission(apiBaseUrl);
       if (!res.ok) {
         const errMsg = await parseFetchError(res, "Clear failed");
@@ -2810,7 +2977,7 @@ export default function App() {
     setMissionActionBusy(true);
     try {
       showToast("Pause", "Pausing mission...", "info");
-      const res = await missionApi.abortMission(apiBaseUrl);
+      const res = await missionApi.pauseMission(apiBaseUrl);
       if (!res.ok) {
         const errMsg = await parseFetchError(res, "Pause failed");
         throw new Error(errMsg);
@@ -2821,6 +2988,27 @@ export default function App() {
     } catch (error) {
       Alert.alert("Pause failed", error instanceof Error ? error.message : "Could not pause the mission.");
       showToast("Pause failed", error instanceof Error ? error.message : "Could not pause.", "error");
+    } finally {
+      setMissionActionBusy(false);
+    }
+  }
+
+  async function resumeMissionOnBackend() {
+    if (!apiBaseUrl) return;
+    setMissionActionBusy(true);
+    try {
+      showToast("Resume", "Resuming mission...", "info");
+      const res = await missionApi.resumeMission(apiBaseUrl);
+      if (!res.ok) {
+        const errMsg = await parseFetchError(res, "Resume failed");
+        throw new Error(errMsg);
+      }
+      setIsPaused(false);
+      showToast("Mission resumed", "Mission has been resumed.", "success");
+      void refreshTelemetryPanel();
+    } catch (error) {
+      Alert.alert("Resume failed", error instanceof Error ? error.message : "Could not resume the mission.");
+      showToast("Resume failed", error instanceof Error ? error.message : "Could not resume.", "error");
     } finally {
       setMissionActionBusy(false);
     }
@@ -2911,9 +3099,9 @@ export default function App() {
     try {
       showToast("E-Stop", "Sending EMERGENCY STOP...", "error");
       
-      // Stop any active mission via HTTP API (this actually halts autonomous mode)
-      await missionApi.stopMission(apiBaseUrl).catch((err) => {
-        console.warn("HTTP stopMission failed during E-Stop:", err);
+      // Send E-Stop via HTTP API to halt motors immediately
+      await fetch(`${apiBaseUrl}/api/rover/estop`, { method: "POST" }).catch((err) => {
+        console.warn("HTTP E-Stop failed:", err);
       });
 
       logAction("ESTOP_SUCCESS");
@@ -3302,6 +3490,7 @@ export default function App() {
                   onClearMission={clearResidentMissionOnBackend}
                   onStartPlan={startLoadedMission}
                   onPausePlan={pauseMissionOnBackend}
+                  onResumePlan={resumeMissionOnBackend}
                   onArmVehicle={armVehicle}
                   onSetMode={setVehicleMode}
                   onEstopVehicle={estopVehicle}
@@ -3680,6 +3869,7 @@ type HomeViewProps = {
   onClearMission: () => Promise<void>;
   onStartPlan: () => Promise<void>;
   onPausePlan: () => Promise<void>;
+  onResumePlan: () => Promise<void>;
   onArmVehicle: (arm: boolean) => Promise<void>;
   onSetMode: (mode: "MANUAL") => Promise<void>;
   onEstopVehicle: () => Promise<void>;
@@ -3772,6 +3962,7 @@ function HomeView(props: HomeViewProps) {
     onClearMission,
     onStartPlan,
     onPausePlan,
+    onResumePlan,
     onArmVehicle,
     onSetMode,
     onEstopVehicle,

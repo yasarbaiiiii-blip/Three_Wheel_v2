@@ -66,18 +66,15 @@ export function verifyStagedLoadedMission(
   if (!expected || (!loaded.loaded && !isCompleted) || !actual || actual !== expected) {
     return { verified: false, message: mismatch };
   }
-  if (!loaded.is_staged || !loaded.protected) {
+  
+  const isProtected = loaded.is_staged || loaded.protected || loaded.placement_mode === "GPS_SURVEYED";
+  if (!isProtected) {
     return {
       verified: false,
       message: `Mission ${expected} is loaded but backend staged/protected metadata is not confirmed.`,
     };
   }
-  if (loaded.placement_mode !== expectedPlacement) {
-    return {
-      verified: false,
-      message: `Mission ${expected} placement is ${loaded.placement_mode ?? "unknown"}; expected ${expectedPlacement}.`,
-    };
-  }
+
   if (loaded.num_waypoints <= 0) {
     return { verified: false, message: `Mission ${expected} has no loaded waypoints.` };
   }

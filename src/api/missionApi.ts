@@ -99,6 +99,10 @@ export function pauseMission(apiBaseUrl: string): Promise<Response> {
   return postJson(apiBaseUrl, "/api/mission/pause");
 }
 
+export function resumeMission(apiBaseUrl: string): Promise<Response> {
+  return postJson(apiBaseUrl, "/api/mission/resume");
+}
+
 export function nextMission(apiBaseUrl: string): Promise<Response> {
   return postJson(apiBaseUrl, "/api/mission/next");
 }
