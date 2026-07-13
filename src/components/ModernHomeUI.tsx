@@ -706,7 +706,6 @@ export default function ModernHomeUI(props) {
   const [showMarkMenu, setShowMarkMenu] = useState(false);
   const [drawnStrokes, setDrawnStrokes] = useState<{ lat: number; lon: number }[][]>([]);
   const [canvasStrokes, setCanvasStrokes] = useState<{ x: number; y: number }[][]>([]);
-  const [currentCanvasStroke, setCurrentCanvasStroke] = useState<{ x: number; y: number }[]>([]);
   const screenToGeoRef = useRef<((screen: { x: number; y: number }) => Promise<{ lat: number; lon: number } | null>) | null>(null);
 
   const drawnPoints = useMemo(() => {
@@ -1121,7 +1120,6 @@ export default function ModernHomeUI(props) {
     setDrawingMode(mode);
     setDrawnStrokes([]);
     setCanvasStrokes([]);
-    setCurrentCanvasStroke([]);
     setShowMarkMenu(false);
   }, []);
 
@@ -1142,7 +1140,6 @@ export default function ModernHomeUI(props) {
     setDrawingMode("none");
     setDrawnStrokes([]);
     setCanvasStrokes([]);
-    setCurrentCanvasStroke([]);
   }, []);
 
   const handleFinishAndUpload = useCallback(async () => {
@@ -1246,7 +1243,6 @@ export default function ModernHomeUI(props) {
       setDrawingMode("none");
       setDrawnStrokes([]);
       setCanvasStrokes([]);
-      setCurrentCanvasStroke([]);
       Alert.alert("Success", "Path uploaded! Redirecting to Fields page for alignment.", [
         {
           text: "OK",
@@ -1262,40 +1258,6 @@ export default function ModernHomeUI(props) {
       setIsUploadingDrawn(false);
     }
   }, [drawingMode, drawnPoints, canvasStrokes, onNav, props.setImportedPlan, props.onSelectPath, props.apiBaseUrl]);
-
-  const handleCanvasDrawBegin = useCallback((x: number, y: number) => {
-    setCurrentCanvasStroke([{ x, y }]);
-  }, []);
-
-  const handleCanvasDrawChange = useCallback((x: number, y: number) => {
-    setCurrentCanvasStroke((prev) => [...prev, { x, y }]);
-  }, []);
-
-  const handleCanvasDrawFinalize = useCallback(() => {
-    setCurrentCanvasStroke((current) => {
-      if (current.length > 1) {
-        setCanvasStrokes((prev) => [...prev, current]);
-      }
-      return [];
-    });
-  }, []);
-
-  const canvasPanGesture = useMemo(() => {
-    return Gesture.Pan()
-      .minDistance(0)
-      .onBegin((e) => {
-        "worklet";
-        runOnJS(handleCanvasDrawBegin)(e.x, e.y);
-      })
-      .onChange((e) => {
-        "worklet";
-        runOnJS(handleCanvasDrawChange)(e.x, e.y);
-      })
-      .onFinalize(() => {
-        "worklet";
-        runOnJS(handleCanvasDrawFinalize)();
-      });
-  }, [handleCanvasDrawBegin, handleCanvasDrawChange, handleCanvasDrawFinalize]);
 
   const renderMapToolsColumn = () => {
     if ((!isHomePage && !isFieldsPage) || !navIconsVisible) return null;
@@ -2002,42 +1964,13 @@ export default function ModernHomeUI(props) {
               screenToGeoRef={screenToGeoRef}
             />
             {drawingMode === "manual" && (
-              <GestureDetector gesture={canvasPanGesture}>
-                <View 
-                  style={[
-                    StyleSheet.absoluteFillObject, 
-                    { zIndex: 150, elevation: 150, backgroundColor: "rgba(0, 0, 0, 0.12)" }
-                  ]}
-                  pointerEvents="auto"
-                >
-                  <Svg style={StyleSheet.absoluteFillObject}>
-                    {canvasStrokes.map((stroke, index) => {
-                      const pointsStr = stroke.map((p) => `${p.x},${p.y}`).join(" ");
-                      return (
-                        <Polyline
-                          key={index}
-                          points={pointsStr}
-                          fill="none"
-                          stroke={COLORS.accentBrand}
-                          strokeWidth={4.5}
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      );
-                    })}
-                    {currentCanvasStroke.length > 1 && (
-                      <Polyline
-                        points={currentCanvasStroke.map((p) => `${p.x},${p.y}`).join(" ")}
-                        fill="none"
-                        stroke={COLORS.accentBrand}
-                        strokeWidth={4.5}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    )}
-                  </Svg>
-                </View>
-              </GestureDetector>
+              <FreehandCanvasOverlay
+                canvasStrokes={canvasStrokes}
+                onStrokeFinished={(stroke) => {
+                  setCanvasStrokes((prev) => [...prev, stroke]);
+                }}
+                COLORS={COLORS}
+              />
             )}
           </>
         ) : renderPlanPreview ? (
@@ -3444,3 +3377,95 @@ const styles = StyleSheet.create({
     borderColor: "#eab308",
   },
 });
+
+interface FreehandCanvasOverlayProps {
+  canvasStrokes: { x: number; y: number }[][];
+  onStrokeFinished: (stroke: { x: number; y: number }[]) => void;
+  COLORS: any;
+}
+
+export function FreehandCanvasOverlay({ canvasStrokes, onStrokeFinished, COLORS }: FreehandCanvasOverlayProps) {
+  const [currentStroke, setCurrentStroke] = useState<{ x: number; y: number }[]>([]);
+  const currentStrokeRef = useRef<{ x: number; y: number }[]>([]);
+
+  const handleDrawBegin = useCallback((x: number, y: number) => {
+    const initialStroke = [{ x, y }];
+    setCurrentStroke(initialStroke);
+    currentStrokeRef.current = initialStroke;
+  }, []);
+
+  const handleDrawChange = useCallback((x: number, y: number) => {
+    setCurrentStroke((prev) => {
+      const nextStroke = [...prev, { x, y }];
+      currentStrokeRef.current = nextStroke;
+      return nextStroke;
+    });
+  }, []);
+
+  const handleDrawFinalize = useCallback(() => {
+    const current = currentStrokeRef.current;
+    if (current.length > 1) {
+      onStrokeFinished(current);
+    }
+    setCurrentStroke([]);
+    currentStrokeRef.current = [];
+  }, [onStrokeFinished]);
+
+  const panGesture = useMemo(() => {
+    return Gesture.Pan()
+      .minDistance(0)
+      .onBegin((e) => {
+        "worklet";
+        runOnJS(handleDrawBegin)(e.x, e.y);
+      })
+      .onChange((e) => {
+        "worklet";
+        runOnJS(handleDrawChange)(e.x, e.y);
+      })
+      .onFinalize(() => {
+        "worklet";
+        runOnJS(handleDrawFinalize)();
+      });
+  }, [handleDrawBegin, handleDrawChange, handleDrawFinalize]);
+
+  return (
+    <GestureDetector gesture={panGesture}>
+      <View 
+        style={[
+          StyleSheet.absoluteFillObject, 
+          { zIndex: 150, elevation: 150, backgroundColor: "transparent" }
+        ]}
+        pointerEvents="auto"
+      >
+        <Svg style={StyleSheet.absoluteFillObject}>
+          {/* Render previously completed strokes */}
+          {canvasStrokes.map((stroke, index) => {
+            const pointsStr = stroke.map((p) => `${p.x},${p.y}`).join(" ");
+            return (
+              <Polyline
+                key={index}
+                points={pointsStr}
+                fill="none"
+                stroke={COLORS.accentBrand}
+                strokeWidth={4.5}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            );
+          })}
+          {/* Render active stroke currently being drawn */}
+          {currentStroke.length > 1 && (
+            <Polyline
+              points={currentStroke.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+              stroke={COLORS.accentBrand}
+              strokeWidth={4.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          )}
+        </Svg>
+      </View>
+    </GestureDetector>
+  );
+}
