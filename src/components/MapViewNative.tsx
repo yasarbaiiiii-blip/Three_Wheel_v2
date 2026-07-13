@@ -316,8 +316,22 @@ export function MapViewNative(props: MapViewProps) {
     onMapClickToMark,
     drawnWaypoints,
     manualDrawingEnabled,
-    onMapFreehandDrawUpdate,
+    screenToGeoRef,
   } = props;
+
+  useEffect(() => {
+    if (screenToGeoRef) {
+      screenToGeoRef.current = async (screen) => {
+        if (!mapViewRef.current) return null;
+        return screenToGeo(mapViewRef.current, screen);
+      };
+    }
+    return () => {
+      if (screenToGeoRef) {
+        screenToGeoRef.current = null;
+      }
+    };
+  }, [screenToGeoRef]);
 
   const cameraRef = useRef<Camera>(null);
   const mapViewRef = useRef<RNMapboxMapView>(null);
@@ -1305,63 +1319,6 @@ export function MapViewNative(props: MapViewProps) {
     [rotationDelta, panDeltaN, panDeltaE, pinchScale, onDragMove]
   );
 
-  // ── Manual Drawing Gesture ──
-  const isFreehandDrawing = useRef(false);
-  const freehandStrokeRef = useRef<{lat: number, lon: number}[]>([]);
-  const freehandPromiseQueue = useRef<Promise<void>>(Promise.resolve());
-  const [currentFreehandStroke, setCurrentFreehandStroke] = useState<{lat: number, lon: number}[]>([]);
-
-  const manualDrawingPanGesture = useMemo(
-    () =>
-      Gesture.Pan()
-        .minDistance(0)
-        .enabled(!!manualDrawingEnabled)
-        .onBegin((e) => {
-          "worklet";
-          runOnJS((x: number, y: number) => {
-            isFreehandDrawing.current = true;
-            freehandStrokeRef.current = [];
-            setCurrentFreehandStroke([]);
-            
-            freehandPromiseQueue.current = freehandPromiseQueue.current.then(async () => {
-              if (!mapViewRef.current) return;
-              const coord = await screenToGeo(mapViewRef.current, { x, y });
-              if (coord && isFreehandDrawing.current) {
-                freehandStrokeRef.current.push(coord);
-                setCurrentFreehandStroke([...freehandStrokeRef.current]);
-              }
-            });
-          })(e.x, e.y);
-        })
-        .onChange((e) => {
-          "worklet";
-          runOnJS((x: number, y: number) => {
-            freehandPromiseQueue.current = freehandPromiseQueue.current.then(async () => {
-              if (!mapViewRef.current) return;
-              const coord = await screenToGeo(mapViewRef.current, { x, y });
-              if (coord && isFreehandDrawing.current) {
-                freehandStrokeRef.current.push(coord);
-                setCurrentFreehandStroke([...freehandStrokeRef.current]);
-              }
-            });
-          })(e.x, e.y);
-        })
-        .onFinalize(() => {
-          "worklet";
-          runOnJS(() => {
-            isFreehandDrawing.current = false;
-            freehandPromiseQueue.current = freehandPromiseQueue.current.then(() => {
-              if (onMapFreehandDrawUpdate && freehandStrokeRef.current.length > 0) {
-                onMapFreehandDrawUpdate([...freehandStrokeRef.current]);
-              }
-              setCurrentFreehandStroke([]);
-              freehandStrokeRef.current = [];
-            });
-          })();
-        }),
-    [manualDrawingEnabled, onMapFreehandDrawUpdate]
-  );
-
   // Gate gestures based on multiTouchMode:
   // - "both": pan + pinch + rotation
   // - "scale": pan + pinch only (no rotation)
@@ -1369,7 +1326,7 @@ export function MapViewNative(props: MapViewProps) {
   const composedGesture = useMemo(
     () => {
       if (manualDrawingEnabled) {
-        return manualDrawingPanGesture;
+        return Gesture.Pan().enabled(false);
       }
       const gestures: any[] = [panGesture.enabled(!!hasEditableSelection)];
       if (multiTouchMode === "both" || multiTouchMode === "scale") {
@@ -1380,7 +1337,7 @@ export function MapViewNative(props: MapViewProps) {
       }
       return Gesture.Simultaneous(...gestures);
     },
-    [panGesture, pinchGesture, rotationGesture, multiTouchMode, hasEditableSelection, manualDrawingEnabled, manualDrawingPanGesture]
+    [panGesture, pinchGesture, rotationGesture, multiTouchMode, hasEditableSelection, manualDrawingEnabled]
   );
 
   // ── Camera helpers ──
@@ -1864,31 +1821,7 @@ export function MapViewNative(props: MapViewProps) {
           </ShapeSource>
         )}
 
-        {/* 📍 Active Freehand Stroke */}
-        {currentFreehandStroke.length > 1 && (() => {
-          const activeLineGeo: GeoJSON.FeatureCollection = {
-            type: "FeatureCollection",
-            features: [{
-              type: "Feature",
-              geometry: {
-                type: "LineString",
-                coordinates: currentFreehandStroke.map((wp) => toMapboxCoord(wp.lat, wp.lon)),
-              },
-              properties: {},
-            }],
-          };
-          return (
-            <ShapeSource id="active-freehand-stroke-source" shape={activeLineGeo}>
-              <LineLayer
-                id="active-freehand-stroke-line"
-                style={{
-                  lineColor: LAYER_COLORS["marking"],
-                  lineWidth: 3,
-                }}
-              />
-            </ShapeSource>
-          );
-        })()}
+
 
         {/* ── Click-to-Mark drawn waypoints ── */}
         {drawnWaypoints && drawnWaypoints.length > 0 && (() => {

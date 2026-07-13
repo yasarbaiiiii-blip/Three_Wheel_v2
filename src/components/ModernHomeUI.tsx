@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform, Modal, TextInput, Dimensions, Alert, useWindowDimensions } from "react-native";
 import { GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps, withSpring, withTiming, cancelAnimation, Easing, runOnJS, Keyframe } from "react-native-reanimated";
-import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText } from "react-native-svg";
+import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText, Path, Polyline } from "react-native-svg";
 import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check, Pencil, Undo2 } from "lucide-react-native";
 import { ManualJoystick } from "./ManualJoystick";
 import { pauseMission, nextMission, exportLog } from "../api/missionApi";
@@ -701,11 +701,21 @@ export default function ModernHomeUI(props) {
   const missionPanelHeight = Math.max(300, windowHeight * BOTTOM_PANEL_HEIGHT_RATIO - HUD_PAD * 2);
   const [visualSelected, setVisualSelected] = useState(false);
 
-  // ── Click to Mark state ──
+  // ── Click to Mark & Manual Canvas Drawing state ──
   const [drawingMode, setDrawingMode] = useState<"none" | "click" | "manual">("none");
   const [showMarkMenu, setShowMarkMenu] = useState(false);
   const [drawnStrokes, setDrawnStrokes] = useState<{ lat: number; lon: number }[][]>([]);
-  const drawnPoints = useMemo(() => drawnStrokes.flat(), [drawnStrokes]);
+  const [canvasStrokes, setCanvasStrokes] = useState<{ x: number; y: number }[][]>([]);
+  const [currentCanvasStroke, setCurrentCanvasStroke] = useState<{ x: number; y: number }[]>([]);
+  const screenToGeoRef = useRef<((screen: { x: number; y: number }) => Promise<{ lat: number; lon: number } | null>) | null>(null);
+
+  const drawnPoints = useMemo(() => {
+    if (drawingMode === "manual") {
+      return canvasStrokes.flat();
+    }
+    return drawnStrokes.flat();
+  }, [drawingMode, canvasStrokes, drawnStrokes]);
+
   const [isUploadingDrawn, setIsUploadingDrawn] = useState(false);
 
   const vehicleMode = normalizeVehicleMode(telemetrySnapshot?.mode ?? systemHealth?.mode);
@@ -1110,6 +1120,8 @@ export default function ModernHomeUI(props) {
   const handleStartDrawingMode = useCallback((mode: "click" | "manual") => {
     setDrawingMode(mode);
     setDrawnStrokes([]);
+    setCanvasStrokes([]);
+    setCurrentCanvasStroke([]);
     setShowMarkMenu(false);
   }, []);
 
@@ -1118,35 +1130,74 @@ export default function ModernHomeUI(props) {
     setDrawnStrokes((prev) => [...prev, [coord]]);
   }, [drawingMode]);
 
-  const handleMapFreehandDrawEnd = useCallback((coords: { lat: number; lon: number }[]) => {
-    if (drawingMode !== "manual" || coords.length === 0) return;
-    setDrawnStrokes((prev) => [...prev, coords]);
-  }, [drawingMode]);
-
   const handleUndoLastPoint = useCallback(() => {
-    setDrawnStrokes((prev) => prev.slice(0, -1));
-  }, []);
+    if (drawingMode === "manual") {
+      setCanvasStrokes((prev) => prev.slice(0, -1));
+    } else {
+      setDrawnStrokes((prev) => prev.slice(0, -1));
+    }
+  }, [drawingMode]);
 
   const handleCancelDrawing = useCallback(() => {
     setDrawingMode("none");
     setDrawnStrokes([]);
+    setCanvasStrokes([]);
+    setCurrentCanvasStroke([]);
   }, []);
 
   const handleFinishAndUpload = useCallback(async () => {
-    if (drawnPoints.length === 0) {
-      Alert.alert("No Points", "Please tap the map to add at least one point.");
-      return;
+    let pointsToUpload: { lat: number; lon: number }[] = [];
+
+    if (drawingMode === "manual") {
+      if (canvasStrokes.length === 0) {
+        Alert.alert("No Drawing", "Please draw a path on the canvas first.");
+        return;
+      }
+      if (!screenToGeoRef.current) {
+        Alert.alert("Error", "Map coordinate converter is not ready yet. Please try again.");
+        return;
+      }
+      
+      setIsUploadingDrawn(true);
+      try {
+        const converted: { lat: number; lon: number }[] = [];
+        for (const stroke of canvasStrokes) {
+          for (const pt of stroke) {
+            const coord = await screenToGeoRef.current(pt);
+            if (coord) {
+              converted.push(coord);
+            }
+          }
+        }
+        if (converted.length === 0) {
+          Alert.alert("Error", "Failed to resolve coordinates from the drawing.");
+          setIsUploadingDrawn(false);
+          return;
+        }
+        pointsToUpload = converted;
+      } catch (err) {
+        console.error("Coordinate conversion error:", err);
+        Alert.alert("Error", "An error occurred during path conversion.");
+        setIsUploadingDrawn(false);
+        return;
+      }
+    } else {
+      if (drawnPoints.length === 0) {
+        Alert.alert("No Points", "Please tap the map to add at least one point.");
+        return;
+      }
+      pointsToUpload = drawnPoints;
+      setIsUploadingDrawn(true);
     }
 
-    setIsUploadingDrawn(true);
     try {
       const apiBaseUrl = props.apiBaseUrl || getApiBase();
 
       // Generate a standard QGC WPL 110 format waypoints file.
       // This allows the backend to naturally handle GPS coordinates and convert them to a local cartesian path.
       let fileContent = "QGC WPL 110\n";
-      for (let i = 0; i < drawnPoints.length; i++) {
-        const p = drawnPoints[i];
+      for (let i = 0; i < pointsToUpload.length; i++) {
+        const p = pointsToUpload[i];
         // format: <INDEX> <CURRENT_WP> <COORD_FRAME> <COMMAND> <PARAM1> <PARAM2> <PARAM3> <PARAM4> <LAT> <LON> <ALT> <AUTOCONTINUE>
         // COMMAND 16 is WAYPOINT.
         fileContent += `${i}\t${i === 0 ? 1 : 0}\t0\t16\t0\t0\t0\t0\t${p.lat}\t${p.lon}\t0\t1\n`;
@@ -1194,6 +1245,8 @@ export default function ModernHomeUI(props) {
 
       setDrawingMode("none");
       setDrawnStrokes([]);
+      setCanvasStrokes([]);
+      setCurrentCanvasStroke([]);
       Alert.alert("Success", "Path uploaded! Redirecting to Fields page for alignment.", [
         {
           text: "OK",
@@ -1203,12 +1256,46 @@ export default function ModernHomeUI(props) {
         },
       ]);
     } catch (err) {
-      console.error("Click to Mark upload error:", err);
+      console.error("Drawing upload error:", err);
       Alert.alert("Error", "Could not upload the drawn path. Check connection.");
     } finally {
       setIsUploadingDrawn(false);
     }
-  }, [drawnPoints, onNav, props.setImportedPlan]);
+  }, [drawingMode, drawnPoints, canvasStrokes, onNav, props.setImportedPlan, props.onSelectPath, props.apiBaseUrl]);
+
+  const handleCanvasDrawBegin = useCallback((x: number, y: number) => {
+    setCurrentCanvasStroke([{ x, y }]);
+  }, []);
+
+  const handleCanvasDrawChange = useCallback((x: number, y: number) => {
+    setCurrentCanvasStroke((prev) => [...prev, { x, y }]);
+  }, []);
+
+  const handleCanvasDrawFinalize = useCallback(() => {
+    setCurrentCanvasStroke((current) => {
+      if (current.length > 1) {
+        setCanvasStrokes((prev) => [...prev, current]);
+      }
+      return [];
+    });
+  }, []);
+
+  const canvasPanGesture = useMemo(() => {
+    return Gesture.Pan()
+      .minDistance(0)
+      .onBegin((e) => {
+        "worklet";
+        runOnJS(handleCanvasDrawBegin)(e.x, e.y);
+      })
+      .onChange((e) => {
+        "worklet";
+        runOnJS(handleCanvasDrawChange)(e.x, e.y);
+      })
+      .onFinalize(() => {
+        "worklet";
+        runOnJS(handleCanvasDrawFinalize)();
+      });
+  }, [handleCanvasDrawBegin, handleCanvasDrawChange, handleCanvasDrawFinalize]);
 
   const renderMapToolsColumn = () => {
     if ((!isHomePage && !isFieldsPage) || !navIconsVisible) return null;
@@ -1869,50 +1956,90 @@ export default function ModernHomeUI(props) {
       {isHomePage ? (
       <View style={{ ...StyleSheet.absoluteFillObject, zIndex: mapFullscreen ? 200 : 1, backgroundColor: COLORS.bgBase }}>
         {mapViewEnabled ? (
-        <MapView
-          styleURL={MAPBOX_STYLES[mapStyleIndex]}
-          mode={visualAlignmentItem ? "templates" : "fields"}
-          placedItems={visualAlignmentItem ? [visualAlignmentItem] : []}
-          selectedItemIds={visualAlignmentItem && visualSelected ? [visualAlignmentItem.id] : []}
-          multiTouchMode={visualAlignmentItem ? (isPlanEditingMode ? "both" : "rotate") : "both"}
-          onSelectionChange={(ids) => {
-            if (isVisualAlignmentMode || isPlanEditingMode) {
-              setVisualSelected(visualAlignmentItem ? ids.includes(visualAlignmentItem.id) : false);
-            }
-          }}
-          onUpdatePlacedItem={(id, updates) => {
-            if (!(isVisualAlignmentMode || isPlanEditingMode)) return;
-            if (visualAlignmentItem && id !== visualAlignmentItem.id) return;
-            if (props.setVisualAlignmentItem) {
-              props.setVisualAlignmentItem((prev) => {
-                if (!prev) return prev;
-                return { ...prev, ...updates };
-              });
-            }
-          }}
-          telemetrySnapshot={telemetrySnapshot}
-          lines={
-            visualAlignmentItem
-              ? []
-              : autoOriginEnabled && mapSourceLines
-                ? mapSourceLines
-                : lines
-          }
-          alignedRefPoints={alignedRefPoints}
-          autoOriginReference={autoOriginReference}
-          mapGeometryFrame={mapGeometryFrame}
-          autoOriginEnabled={autoOriginEnabled}
-          stagedVerified={false}
-          visible={mapViewEnabled}
-          recenterRoverTrigger={recenterRoverCount}
-          recenterPlanTrigger={recenterPlanCount}
-          resetNorthTrigger={resetNorthCount}
-          onSelectPoint={props.onSelectPoint}
-          onMapClickToMark={drawingMode === "click" ? handleMapClickToMark : undefined}
-          drawnWaypoints={drawingMode !== "none" ? drawnPoints : undefined}
-          manualDrawingEnabled={drawingMode === "manual"}
-          onMapFreehandDrawUpdate={handleMapFreehandDrawEnd}
-        />
+          <>
+            <MapView
+              styleURL={MAPBOX_STYLES[mapStyleIndex]}
+              mode={visualAlignmentItem ? "templates" : "fields"}
+              placedItems={visualAlignmentItem ? [visualAlignmentItem] : []}
+              selectedItemIds={visualAlignmentItem && visualSelected ? [visualAlignmentItem.id] : []}
+              multiTouchMode={visualAlignmentItem ? (isPlanEditingMode ? "both" : "rotate") : "both"}
+              onSelectionChange={(ids) => {
+                if (isVisualAlignmentMode || isPlanEditingMode) {
+                  setVisualSelected(visualAlignmentItem ? ids.includes(visualAlignmentItem.id) : false);
+                }
+              }}
+              onUpdatePlacedItem={(id, updates) => {
+                if (!(isVisualAlignmentMode || isPlanEditingMode)) return;
+                if (visualAlignmentItem && id !== visualAlignmentItem.id) return;
+                if (props.setVisualAlignmentItem) {
+                  props.setVisualAlignmentItem((prev) => {
+                    if (!prev) return prev;
+                    return { ...prev, ...updates };
+                  });
+                }
+              }}
+              telemetrySnapshot={telemetrySnapshot}
+              lines={
+                visualAlignmentItem
+                  ? []
+                  : autoOriginEnabled && mapSourceLines
+                    ? mapSourceLines
+                    : lines
+              }
+              alignedRefPoints={alignedRefPoints}
+              autoOriginReference={autoOriginReference}
+              mapGeometryFrame={mapGeometryFrame}
+              autoOriginEnabled={autoOriginEnabled}
+              stagedVerified={false}
+              visible={mapViewEnabled}
+              recenterRoverTrigger={recenterRoverCount}
+              recenterPlanTrigger={recenterPlanCount}
+              resetNorthTrigger={resetNorthCount}
+              onSelectPoint={props.onSelectPoint}
+              onMapClickToMark={drawingMode === "click" ? handleMapClickToMark : undefined}
+              drawnWaypoints={drawingMode !== "none" ? drawnPoints : undefined}
+              manualDrawingEnabled={drawingMode === "manual"}
+              screenToGeoRef={screenToGeoRef}
+            />
+            {drawingMode === "manual" && (
+              <GestureDetector gesture={canvasPanGesture}>
+                <View 
+                  style={[
+                    StyleSheet.absoluteFillObject, 
+                    { zIndex: 150, elevation: 150, backgroundColor: "rgba(0, 0, 0, 0.12)" }
+                  ]}
+                  pointerEvents="auto"
+                >
+                  <Svg style={StyleSheet.absoluteFillObject}>
+                    {canvasStrokes.map((stroke, index) => {
+                      const pointsStr = stroke.map((p) => `${p.x},${p.y}`).join(" ");
+                      return (
+                        <Polyline
+                          key={index}
+                          points={pointsStr}
+                          fill="none"
+                          stroke={COLORS.accentBrand}
+                          strokeWidth={4.5}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      );
+                    })}
+                    {currentCanvasStroke.length > 1 && (
+                      <Polyline
+                        points={currentCanvasStroke.map((p) => `${p.x},${p.y}`).join(" ")}
+                        fill="none"
+                        stroke={COLORS.accentBrand}
+                        strokeWidth={4.5}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    )}
+                  </Svg>
+                </View>
+              </GestureDetector>
+            )}
+          </>
         ) : renderPlanPreview ? (
           <View style={styles.canvasContainer}>
             {renderPlanPreview()}
@@ -1977,7 +2104,7 @@ export default function ModernHomeUI(props) {
                   </View>
                 </View>
                 <Text style={{ color: COLORS.textDim, fontSize: 11, marginTop: 4 }}>
-                  Tap anywhere on the map to add waypoints
+                  {drawingMode === "click" ? "Tap anywhere on the map to add waypoints" : "Draw freehand on the screen canvas"}
                 </Text>
                 <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
                   <Pressable

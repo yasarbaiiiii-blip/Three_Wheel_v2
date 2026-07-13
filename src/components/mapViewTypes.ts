@@ -68,4 +68,6 @@ export interface MapViewProps {
   manualDrawingEnabled?: boolean;
   /** Manual Drawing: callback invoked when a freehand drawing stroke finishes */
   onMapFreehandDrawUpdate?: (coords: { lat: number; lon: number }[]) => void;
+  /** Ref to allow parent component to convert screen pixels to GPS coordinates */
+  screenToGeoRef?: React.MutableRefObject<((screen: { x: number; y: number }) => Promise<{ lat: number; lon: number } | null>) | null>;
 }
