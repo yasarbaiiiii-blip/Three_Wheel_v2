@@ -308,12 +308,14 @@ const RtkStreamPill = ({ mode, streaming, healthy, onPress }) => {
 const NAV_WIDTH_COLLAPSED = 72;
 const NAV_WIDTH_EXPANDED = 248;
 const NAV_WIDTH_COMPACT = 56;
+
 const NAV_HEIGHT_COMPACT = 56;
 const DOUBLE_TAP_MS = 320;
 const HUD_PAD = 20;
 const TOP_BAR_ITEM_HEIGHT = 40;
 const RIGHT_PANEL_WIDTH = 340;
 const SIDE_GAP = 14;
+
 const MISSION_PANEL_HEIGHT_SHARE = 0.55; // mission gets 55% of usable rail height, telemetry the remaining 45%
 const NAV_TIMING = { duration: 420, easing: Easing.bezier(0.4, 0, 0.2, 1) };
 const PANEL_TIMING = { duration: 260, easing: Easing.bezier(0.4, 0, 0.2, 1) };
