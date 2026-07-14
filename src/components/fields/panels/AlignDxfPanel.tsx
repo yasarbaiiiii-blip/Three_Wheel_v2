@@ -206,14 +206,21 @@ export function AlignDxfPanel({
           const rotDeg = coerceFiniteNumber(data.rotation_deg);
           const offsetE = coerceFiniteNumber(data.offset_e);
           const offsetN = coerceFiniteNumber(data.offset_n);
+          const alignScale = coerceFiniteNumber(data.scale) ?? 1;
           if (rotDeg != null && offsetE != null && offsetN != null && !data.merged_waypoints) {
             const rotRad = (rotDeg * Math.PI) / 180;
             const cos = Math.cos(rotRad);
             const sin = Math.sin(rotRad);
-            const applyOriginTransform = (pt: { x: number; y: number }) => ({
-              x: pt.x * cos - pt.y * sin + offsetN,
-              y: pt.x * sin + pt.y * cos + offsetE,
-            });
+            // Mirror the backend's affine transform exactly: NED = scale * R(theta) * DXF + offset
+            // (see path_engine/ned.py apply_affine_transform / dxf_to_ned_affine).
+            const applyOriginTransform = (pt: { x: number; y: number }) => {
+              const sx = pt.x * alignScale;
+              const sy = pt.y * alignScale;
+              return {
+                x: sx * cos - sy * sin + offsetN,
+                y: sx * sin + sy * cos + offsetE,
+              };
+            };
             setLines((prev) =>
               prev.map((line) => {
                 const transformedFrom = applyOriginTransform({ x: line.from.x, y: line.from.y });
@@ -241,14 +248,27 @@ export function AlignDxfPanel({
         }
 
         if (setAlignedRefPoints) {
-          setAlignedRefPoints(
-            validPoints.map((point) => ({
-              dxf_x: point.dxf_x,
-              dxf_y: point.dxf_y,
-              lat: point.lat,
-              lon: point.lon,
-            }))
-          );
+          // `lines` is now in local NED metres relative to `data.origin_gps` (either
+          // rebuilt from merged_waypoints, or rotated/scaled/translated above via
+          // applyOriginTransform) — NOT the raw pre-alignment DXF pick coordinates.
+          // The projection origin must match that frame: local (0,0) anchored at
+          // origin_gps, same convention as anchorToAlignedRefPoints() in
+          // stagedMissionHydration.ts for reloaded/staged alignments.
+          const originGps = Array.isArray(data.origin_gps) ? data.origin_gps : null;
+          const originLat = originGps ? coerceFiniteNumber(originGps[0]) : null;
+          const originLon = originGps ? coerceFiniteNumber(originGps[1]) : null;
+          if (originLat != null && originLon != null) {
+            setAlignedRefPoints([{ dxf_x: 0, dxf_y: 0, lat: originLat, lon: originLon }]);
+          } else {
+            setAlignedRefPoints(
+              validPoints.map((point) => ({
+                dxf_x: point.dxf_x,
+                dxf_y: point.dxf_y,
+                lat: point.lat,
+                lon: point.lon,
+              }))
+            );
+          }
         }
         setRefPoints([]);
         setExtractedCorners?.(null);
