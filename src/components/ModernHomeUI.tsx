@@ -604,8 +604,11 @@ export default function ModernHomeUI(props) {
   const navBgOpacity = useSharedValue(1);
   const quickAccessSubNavProgress = useSharedValue(0);
   const { height: windowHeight } = useWindowDimensions();
-  const telemetryPanelHeight = Math.max(280, windowHeight * 0.44 - HUD_PAD);
   const missionPanelHeight = Math.max(300, windowHeight * BOTTOM_PANEL_HEIGHT_RATIO - HUD_PAD * 2);
+  // Fill the space above the mission panel instead of sizing off an
+  // unrelated ratio — keeps a fixed HUD_PAD gap between the two panels
+  // instead of whatever gap happened to fall out of two independent ratios.
+  const telemetryPanelHeight = Math.max(280, windowHeight - HUD_PAD * 3 - missionPanelHeight);
   const [visualSelected, setVisualSelected] = useState(false);
 
   // ── Click to Mark & Manual Canvas Drawing state ──
