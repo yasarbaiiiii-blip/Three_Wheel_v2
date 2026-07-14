@@ -26,6 +26,7 @@ import {
   Satellite,
   Lock,
   Globe,
+  Square,
 } from "lucide-react-native";
 
 const COLORS = {
@@ -83,6 +84,9 @@ type ModernSettingsPageProps = {
   rtkMode?: string;
   rtkDefaultMode?: string;
   setRtkDefaultMode?: (mode: string) => void;
+  rtkAutoConnect?: boolean;
+  setRtkAutoConnect?: (v: boolean) => void;
+  stopRtk?: () => Promise<void>;
   toggleA?: boolean;
   toggleB?: boolean;
   toggleC?: boolean;
@@ -417,6 +421,9 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
     rtkMode = "idle",
     rtkDefaultMode = "NTRIP",
     setRtkDefaultMode,
+    rtkAutoConnect = false,
+    setRtkAutoConnect,
+    stopRtk,
     toggleA = false,
     toggleB = false,
     toggleC = true,
@@ -654,6 +661,17 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
     Alert.alert("Saved", `${localRtkMode} set as default RTK mode.`);
   };
 
+  const [isStoppingRtk, setIsStoppingRtk] = useState(false);
+  const handleStopRtk = async () => {
+    if (!stopRtk || isStoppingRtk) return;
+    setIsStoppingRtk(true);
+    try {
+      await stopRtk();
+    } finally {
+      setIsStoppingRtk(false);
+    }
+  };
+
   const handleImportRtkTxt = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -738,6 +756,29 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
           </Pressable>
         </View>
       </View>
+
+      <View style={styles.compactBlock}>
+        <SettingsToggle
+          label="Auto Connect"
+          hint="Automatically start RTK using the saved default mode as soon as the rover connects"
+          value={rtkAutoConnect}
+          onValueChange={(v) => setRtkAutoConnect?.(v)}
+          disabled={!setRtkAutoConnect}
+        />
+      </View>
+
+      {rtkRunning ? (
+        <View style={styles.compactBlock}>
+          <ActionButton
+            label={isStoppingRtk ? "Stopping…" : "Stop RTK"}
+            icon={Square}
+            variant="danger"
+            onPress={handleStopRtk}
+            loading={isStoppingRtk}
+            disabled={!stopRtk}
+          />
+        </View>
+      ) : null}
 
       {isNtripMode ? (
         <View style={styles.block}>

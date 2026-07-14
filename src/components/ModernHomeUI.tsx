@@ -314,7 +314,7 @@ const HUD_PAD = 20;
 const TOP_BAR_ITEM_HEIGHT = 40;
 const RIGHT_PANEL_WIDTH = 340;
 const SIDE_GAP = 14;
-const BOTTOM_PANEL_HEIGHT_RATIO = 0.46;
+const MISSION_PANEL_HEIGHT_SHARE = 0.55; // mission gets 55% of usable rail height, telemetry the remaining 45%
 const NAV_TIMING = { duration: 420, easing: Easing.bezier(0.4, 0, 0.2, 1) };
 const PANEL_TIMING = { duration: 260, easing: Easing.bezier(0.4, 0, 0.2, 1) };
 const QUICK_ACCESS_ANCHOR_FALLBACK = { top: HUD_PAD + 96, height: 58 };
@@ -604,11 +604,13 @@ export default function ModernHomeUI(props) {
   const navBgOpacity = useSharedValue(1);
   const quickAccessSubNavProgress = useSharedValue(0);
   const { height: windowHeight } = useWindowDimensions();
-  const missionPanelHeight = Math.max(300, windowHeight * BOTTOM_PANEL_HEIGHT_RATIO - HUD_PAD * 2);
-  // Fill the space above the mission panel instead of sizing off an
-  // unrelated ratio — keeps a fixed HUD_PAD gap between the two panels
-  // instead of whatever gap happened to fall out of two independent ratios.
-  const telemetryPanelHeight = Math.max(280, windowHeight - HUD_PAD * 3 - missionPanelHeight);
+  // Usable rail height after the top gap, the gap between the two panels,
+  // and the bottom gap (all HUD_PAD) are removed. Mission and telemetry
+  // split this 55/45 so they always fill it exactly, with a fixed HUD_PAD
+  // gap between them instead of whatever gap two independent ratios leave.
+  const usableRailHeight = windowHeight - HUD_PAD * 3;
+  const missionPanelHeight = Math.max(300, usableRailHeight * MISSION_PANEL_HEIGHT_SHARE);
+  const telemetryPanelHeight = Math.max(280, usableRailHeight - missionPanelHeight);
   const [visualSelected, setVisualSelected] = useState(false);
 
   // ── Click to Mark & Manual Canvas Drawing state ──
@@ -999,11 +1001,6 @@ export default function ModernHomeUI(props) {
     if (startLora) startLora();
   }, [rtkConnecting, rtkRunning, startLora]);
 
-  const handleStopRtk = useCallback(() => {
-    if (rtkConnecting || !rtkRunning) return;
-    if (stopRtk) stopRtk();
-  }, [rtkConnecting, rtkRunning, stopRtk]);
-
   const handleQuickAccessPress = useCallback(() => {
     if (!navIconsVisible) {
       setNavIconsVisible(true);
@@ -1320,18 +1317,17 @@ export default function ModernHomeUI(props) {
             <QuickSubNavDivider />
             <QuickSubNavSectionLabel label="RTK" />
             <QuickSubNavItem
-              icon={rtkRunning ? Square : RadioTower}
-              label={rtkRunning ? `Stop ${rtkDefaultMode || "NTRIP"}` : `RTK: ${rtkDefaultMode || "NTRIP"}`}
+              icon={rtkRunning ? Activity : RadioTower}
+              label={rtkRunning ? `${rtkDefaultMode || "RTK"} Connected` : `RTK: ${rtkDefaultMode || "NTRIP"}`}
               active={rtkRunning}
               danger={rtkRunning && rtkMode === "stopping"}
               signal
               healthy={rtkHealthy}
-              disabled={rtkConnecting}
+              disabled={rtkConnecting || rtkRunning}
               onPress={() => {
-                if (rtkConnecting) return;
-                if (rtkRunning) {
-                  handleStopRtk();
-                } else if ((rtkDefaultMode || "").toLowerCase() === "lora") {
+                // Stop RTK moved to Settings — this item is status-only once running.
+                if (rtkConnecting || rtkRunning) return;
+                if ((rtkDefaultMode || "").toLowerCase() === "lora") {
                   handleStartLora();
                 } else {
                   handleStartNtrip();

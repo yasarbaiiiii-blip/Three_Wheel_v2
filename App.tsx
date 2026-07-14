@@ -788,6 +788,7 @@ export default function App() {
   const [rtkMode, setRtkMode] = useState<RTKMode>("idle");
   const [rtkDefaultMode, setRtkDefaultMode] = useState("NTRIP");
   const [rtkHealthy, setRtkHealthy] = useState(false);
+  const [rtkAutoConnect, setRtkAutoConnect] = useState(false);
   const [isFloatingEStopEnabled, setIsFloatingEStopEnabled] = useState(false);
   const rtkRunning = rtkMode === "ntrip" || rtkMode === "lora" || rtkMode === "stopping";
   const [toggleA, setToggleA] = useState(false);
@@ -1061,19 +1062,44 @@ export default function App() {
       // Flag to prevent the selectedPathName change effect from wiping staged state
       isRecoveringRef.current = true;
 
-      // Step 1: Re-fetch the DXF/path preview to rebuild the map lines
-      if (sourceName) {
-        await previewSelectedPath(sourceName);
-      } else {
-        console.warn("[RECOVERY] No sourceName provided, skipping DXF lines preview.");
+      // Step 1: Only hit the filename-based preview when sourceName actually looks
+      // like a real file. /api/path/{name}/preview does a literal file lookup and
+      // 404s on anything else — in particular, the backend can report a staged
+      // mission's ID as source_name when no real DXF filename is known, and
+      // calling previewSelectedPath with that 404s and silently replaces the map
+      // with a mock placeholder line. When it IS a real filename, this still runs
+      // because it's what refreshes importedPlan/selectedPathName and the
+      // per-entity spray/extension editor state.
+      const looksLikeFilename = /\.(dxf|csv|waypoints)$/i.test(sourceName || "");
+      if (looksLikeFilename) {
+        await previewSelectedPath(sourceName!);
+      } else if (sourceName) {
+        console.warn(`[RECOVERY] sourceName "${sourceName}" is not a real filename, skipping DXF preview.`);
       }
 
-      // Step 2: If we have a mission ID, fetch the staged mission geometry
+      // Step 2: If we have a mission ID, fetch the staged mission geometry and use
+      // it as the authoritative map source — /api/path/staged/{id} works even when
+      // Step 1 was skipped or failed, so this always runs last and its geometry
+      // wins, guaranteeing the map reflects what's really loaded.
       if (missionId) {
         try {
           const stagedRes = await pathApi.getStagedMission(apiBaseUrl, missionId);
           if (stagedRes.ok) {
             const stagedArtifact = (await stagedRes.json()) as pathApi.StagedMissionResponse;
+            let hydratedLines = waypointsToPlanLines(
+              stagedArtifact.waypoints ?? [],
+              stagedArtifact.spray_flags ?? []
+            );
+            if (hydratedLines.length === 0 && stagedArtifact.point_mission_points?.length) {
+              hydratedLines = pointMissionPointsToPlanLines(stagedArtifact.point_mission_points);
+            }
+            if (hydratedLines.length > 0) {
+              setAlignedRefPoints(anchorToAlignedRefPoints(stagedArtifact.anchor));
+              setLines(sanitizePlanLines(hydratedLines));
+              setSelectedLineId(hydratedLines[0]?.id ?? null);
+            } else {
+              console.warn(`[RECOVERY] Staged mission ${missionId} had no drawable waypoints.`);
+            }
             setStagedMissionInspection(stagedArtifact);
             setStagedMissionId(missionId);
             // Mark the workflow steps as verified so the UI reflects that
@@ -1096,6 +1122,8 @@ export default function App() {
         } catch (err) {
           console.warn("[RECOVERY] Failed to fetch staged mission:", err);
         }
+      } else if (!looksLikeFilename) {
+        console.warn("[RECOVERY] No sourceName or missionId provided, skipping map preview.");
       }
 
       // Step 3: Re-fetch loaded-path inspection since previewSelectedPath clears it
@@ -2893,6 +2921,10 @@ export default function App() {
           if (saved.mountPoint) setRtkMountPoint(saved.mountPoint);
           if (saved.username) setRtkUsername(saved.username);
           if (saved.password) setRtkPassword(saved.password);
+          // defaultMode/autoConnect were added later — older saved blobs won't
+          // have them, so only apply when present rather than reset to falsy.
+          if (saved.defaultMode) setRtkDefaultMode(saved.defaultMode);
+          if (typeof saved.autoConnect === "boolean") setRtkAutoConnect(saved.autoConnect);
           console.log("[RTK] Restored saved credentials from SecureStore");
         }
       } catch (err) {
@@ -2912,11 +2944,37 @@ export default function App() {
       mountPoint: rtkMountPoint,
       username: rtkUsername,
       password: rtkPassword,
+      defaultMode: rtkDefaultMode,
+      autoConnect: rtkAutoConnect,
     });
     SecureStore.setItemAsync(RTK_CREDS_KEY, creds).catch((err) =>
       console.warn("[RTK] Failed to save credentials:", err)
     );
-  }, [rtkCaster, rtkPort, rtkMountPoint, rtkUsername, rtkPassword]);
+  }, [rtkCaster, rtkPort, rtkMountPoint, rtkUsername, rtkPassword, rtkDefaultMode, rtkAutoConnect]);
+
+  // ── RTK Auto Connect ──────────────────────────────────────────────────
+  // Fires once per socket connection: as soon as the WS reaches "connected",
+  // if Auto Connect is on and RTK isn't already running, start the saved
+  // default source. Gated on rtkCredsLoadedRef so this can't fire before
+  // SecureStore finishes restoring rtkAutoConnect/rtkDefaultMode/credentials
+  // — otherwise it could race and either use stale defaults or hit
+  // startNtrip's "Credentials needed" guard before creds are populated.
+  const autoConnectAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (wsStatus !== "connected") {
+      autoConnectAttemptedRef.current = false;
+      return;
+    }
+    if (!rtkAutoConnect || rtkRunning || autoConnectAttemptedRef.current) return;
+    if (!rtkCredsLoadedRef.current) return;
+    autoConnectAttemptedRef.current = true;
+    console.log(`[RTK] Auto Connect triggered (mode=${rtkDefaultMode})`);
+    if ((rtkDefaultMode || "").toLowerCase() === "lora") {
+      void startLora();
+    } else {
+      void startNtrip();
+    }
+  }, [wsStatus, rtkAutoConnect, rtkRunning, rtkDefaultMode]);
 
   // ── Staged Mission persistence ──────────────────────────────────────
   const STAGED_MISSION_KEY = "staged_mission_cache";
@@ -3755,6 +3813,9 @@ export default function App() {
                             rtkMode={rtkMode}
                             rtkDefaultMode={rtkDefaultMode}
                             setRtkDefaultMode={setRtkDefaultMode}
+                            rtkAutoConnect={rtkAutoConnect}
+                            setRtkAutoConnect={setRtkAutoConnect}
+                            stopRtk={stopRtk}
                             gpsPointMission={gpsPointMission}
                             onGpsPointMissionParsed={handleGpsPointMissionParsed}
                             onStageAndLoadGpsPointMission={handleStageAndLoadGpsPointMission}
@@ -5291,6 +5352,9 @@ function SectionPages(props: {
   rtkMode?: string;
   rtkDefaultMode?: string;
   setRtkDefaultMode?: React.Dispatch<React.SetStateAction<string>>;
+  rtkAutoConnect?: boolean;
+  setRtkAutoConnect?: React.Dispatch<React.SetStateAction<boolean>>;
+  stopRtk?: () => Promise<void>;
   onClearMission: () => Promise<void>;
   resetNorthCount?: number;
   visualAlignmentAnchor?: { originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null;
@@ -8323,6 +8387,9 @@ function SettingsPage(props: {
   rtkMode?: string;
   rtkDefaultMode?: string;
   setRtkDefaultMode?: React.Dispatch<React.SetStateAction<string>>;
+  rtkAutoConnect?: boolean;
+  setRtkAutoConnect?: React.Dispatch<React.SetStateAction<boolean>>;
+  stopRtk?: () => Promise<void>;
   apiBaseUrl?: string;
   selectedPathName?: string | null;
 }) {
