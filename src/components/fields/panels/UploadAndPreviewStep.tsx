@@ -246,7 +246,6 @@ export function UploadAndPreviewStep({
   };
 
   const handleToggleExtension = async (enabled: boolean) => {
-    if (blockProtectedWorkflowMutation("Changing extensions")) return;
     if (!targetPathName || !apiBaseUrl) return;
     setIsExtSetting(true);
     try {
@@ -272,7 +271,6 @@ export function UploadAndPreviewStep({
   };
 
   const handleSaveExtension = async () => {
-    if (blockProtectedWorkflowMutation("Changing extensions")) return;
     if (!targetPathName || !apiBaseUrl) return;
     setIsExtSetting(true);
     try {

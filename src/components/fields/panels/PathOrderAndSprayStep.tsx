@@ -151,7 +151,6 @@ export function PathOrderAndSprayStep({
   };
 
   const handleLoadToController = async () => {
-    if (blockProtectedWorkflowMutation("Loading to controller")) return;
     const targetPath = selectedPathName || importedPlan?.fileName;
     if (!apiBaseUrl || !targetPath) {
       Alert.alert("Error", "No path selected to load.");
