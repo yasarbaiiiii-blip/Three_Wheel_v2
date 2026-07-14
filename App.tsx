@@ -476,6 +476,26 @@ const PRIORITY_BACKEND_IPS: string[] = [];
 
 const DISCOVERY_REFRESH_MS = 5000;
 const SOCKET_CONNECT_TIMEOUT_MS = 25000;
+
+// Deadband thresholds for telemetry fields that are continuous and
+// sensor-noisy (GPS/IMU jitter). Used only to skip a re-render when a value
+// hasn't meaningfully changed — never applied to safety or discrete-state
+// fields (armed, mode, rpp_state, gps_fix, joystick_*), which always compare
+// with exact equality so a real state change is never delayed.
+const GPS_DEADBAND_DEG = 0.0000002; // ~2cm at the equator
+const POSITION_DEADBAND_M = 0.02;
+const HEADING_DEADBAND_DEG = 0.3;
+const SPEED_DEADBAND_MPS = 0.02;
+const DISTANCE_DEADBAND_M = 0.05;
+function withinDeadband(
+  a: number | null | undefined,
+  b: number | null | undefined,
+  eps: number
+): boolean {
+  if (a === b) return true;
+  if (typeof a !== "number" || typeof b !== "number") return false;
+  return Math.abs(a - b) <= eps;
+}
 const DISCOVERY_PORT = 5001;
 const SUBNET_HOST_MIN = 1;
 const SUBNET_HOST_MAX = 254;
@@ -1331,20 +1351,25 @@ export default function App() {
 
         setTelemetrySnapshot((prev) => {
           if (!prev) return data;
-          // Optimize updates: only set state if keys have actually changed
+          // Optimize updates: only set state if keys have actually changed.
+          // Continuous, sensor-noisy fields use a small deadband so GPS/IMU
+          // jitter doesn't force a re-render every packet. Safety-relevant
+          // and discrete-state fields (armed, mode, rpp_state, gps_fix,
+          // joystick_*) always use exact equality — never masked by a
+          // threshold, so an armed/disarmed or state change is never delayed.
           if (
-            prev.pos_n === data.pos_n &&
-            prev.pos_e === data.pos_e &&
-            prev.lat === data.lat &&
-            prev.lon === data.lon &&
-            prev.heading_ned_deg === data.heading_ned_deg &&
-            prev.xtrack_m === data.xtrack_m &&
-            prev.heading_err_deg === data.heading_err_deg &&
-            prev.dist_to_goal_m === data.dist_to_goal_m &&
-            prev.speed_m_s === data.speed_m_s &&
-            prev.measured_speed_m_s === data.measured_speed_m_s &&
-            prev.along_track_speed_mps === data.along_track_speed_mps &&
-            prev.cross_track_speed_mps === data.cross_track_speed_mps &&
+            withinDeadband(prev.pos_n, data.pos_n, POSITION_DEADBAND_M) &&
+            withinDeadband(prev.pos_e, data.pos_e, POSITION_DEADBAND_M) &&
+            withinDeadband(prev.lat, data.lat, GPS_DEADBAND_DEG) &&
+            withinDeadband(prev.lon, data.lon, GPS_DEADBAND_DEG) &&
+            withinDeadband(prev.heading_ned_deg, data.heading_ned_deg, HEADING_DEADBAND_DEG) &&
+            withinDeadband(prev.xtrack_m, data.xtrack_m, DISTANCE_DEADBAND_M) &&
+            withinDeadband(prev.heading_err_deg, data.heading_err_deg, HEADING_DEADBAND_DEG) &&
+            withinDeadband(prev.dist_to_goal_m, data.dist_to_goal_m, DISTANCE_DEADBAND_M) &&
+            withinDeadband(prev.speed_m_s, data.speed_m_s, SPEED_DEADBAND_MPS) &&
+            withinDeadband(prev.measured_speed_m_s, data.measured_speed_m_s, SPEED_DEADBAND_MPS) &&
+            withinDeadband(prev.along_track_speed_mps, data.along_track_speed_mps, SPEED_DEADBAND_MPS) &&
+            withinDeadband(prev.cross_track_speed_mps, data.cross_track_speed_mps, SPEED_DEADBAND_MPS) &&
             prev.rpp_state === data.rpp_state &&
             prev.rpp_state_name === data.rpp_state_name &&
             prev.armed === data.armed &&

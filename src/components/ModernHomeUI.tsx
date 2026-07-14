@@ -6,6 +6,8 @@ import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps,
 import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText, Path, Polyline } from "react-native-svg";
 import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check, Pencil, Undo2 } from "lucide-react-native";
 import { ManualJoystick } from "./ManualJoystick";
+import { Compass } from "./Compass";
+import { Navbar } from "./Navbar";
 import { pauseMission, nextMission, exportLog } from "../api/missionApi";
 import { MapView } from "./MapView";
 import { canAcquireJoystick as canAcquireJoystickForState } from "../utils/joystickFrontendSafety";
@@ -260,65 +262,6 @@ const TopBarTogglePill = ({ icon: Icon, label, active, onPress, iconFill }) => (
   </Pressable>
 );
 
-const normalizeHeadingDeg = (deg) => ((deg % 360) + 360) % 360;
-
-const TopBarCompass = ({ headingDeg, hasRoverHeading }) => {
-  const size = 34;
-  const cx = size / 2;
-  const r = size / 2 - 2;
-  const displayHeading = hasRoverHeading ? normalizeHeadingDeg(headingDeg) : null;
-
-  return (
-    <View style={styles.topBarCompass}>
-      <Svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-        <SvgCircle
-          cx={cx}
-          cy={cx}
-          r={r}
-          fill={COLORS.surfaceSolid}
-          stroke={hasRoverHeading ? COLORS.accentBorder : COLORS.panelBorder}
-          strokeWidth={1.2}
-        />
-        <SvgText x={cx} y={9} fontSize={7} fill={COLORS.danger} fontWeight="900" textAnchor="middle">N</SvgText>
-        <SvgText x={cx} y={size - 4} fontSize={6} fill={COLORS.textDim} fontWeight="700" textAnchor="middle">S</SvgText>
-        <SvgText x={size - 5} y={cx + 2} fontSize={6} fill={COLORS.textDim} fontWeight="700" textAnchor="middle">E</SvgText>
-        <SvgText x={5} y={cx + 2} fontSize={6} fill={COLORS.textDim} fontWeight="700" textAnchor="middle">W</SvgText>
-        {[0, 45, 90, 135, 180, 225, 270, 315].map((deg) => {
-          const tickR = deg % 90 === 0 ? 3 : 1.8;
-          const rad = (deg * Math.PI) / 180;
-          const inner = r - 7;
-          const outer = inner + tickR;
-          return (
-            <Line
-              key={deg}
-              x1={cx + inner * Math.sin(rad)}
-              y1={cx - inner * Math.cos(rad)}
-              x2={cx + outer * Math.sin(rad)}
-              y2={cx - outer * Math.cos(rad)}
-              stroke={COLORS.textDim}
-              strokeWidth={deg % 90 === 0 ? 1.2 : 0.8}
-            />
-          );
-        })}
-        <G transform={hasRoverHeading ? `rotate(${displayHeading} ${cx} ${cx})` : undefined}>
-          <Polygon
-            points={`${cx},${cx - 9} ${cx + 2},${cx} ${cx - 2},${cx}`}
-            fill={hasRoverHeading ? COLORS.accentBrand : COLORS.textDim}
-          />
-          <Polygon
-            points={`${cx},${cx + 9} ${cx + 2},${cx} ${cx - 2},${cx}`}
-            fill={COLORS.panelBorder}
-          />
-          <SvgCircle cx={cx} cy={cx} r={2} fill={COLORS.bgBase} stroke={COLORS.textMain} strokeWidth={0.8} />
-        </G>
-      </Svg>
-      <Text style={[styles.topBarCompassLabel, !hasRoverHeading && styles.topBarCompassLabelIdle]}>
-        {hasRoverHeading ? `${displayHeading.toFixed(0)}°` : "--"}
-      </Text>
-    </View>
-  );
-};
-
 const RtkStreamPill = ({ mode, streaming, healthy, onPress }) => {
   const tone = streaming ? (healthy ? COLORS.success : COLORS.warning) : COLORS.textMuted;
   const barLevels = streaming ? (healthy ? [1, 1, 1, 1] : [1, 1, 0.35, 0.2]) : [0.2, 0.2, 0.2, 0.2];
@@ -398,42 +341,6 @@ const ESTOP_INIT_Y = ESTOP_HUD_H - ESTOP_RING_SIZE - 36;
 
 const AnimatedSvgCircle = AnimatedReanimated.createAnimatedComponent(SvgCircle);
 
-const NavBarItem = ({ icon: Icon, label, active, expanded, onPress, danger = false }) => (
-  <Pressable
-    style={[
-      styles.navItem,
-      expanded && styles.navItemExpanded,
-      expanded && active && styles.navItemActive,
-      danger && styles.navItemDanger,
-    ]}
-    onPress={onPress}
-  >
-    <View style={[
-      styles.navIconWrap,
-      active && !danger && styles.navIconWrapActive,
-      active && !danger && !expanded && styles.navIconWrapActiveCollapsed,
-      danger && styles.navIconWrapDanger,
-    ]}>
-      <Icon
-        color={danger ? COLORS.danger : active ? COLORS.accentText : COLORS.textMuted}
-        size={20}
-        strokeWidth={2.2}
-      />
-    </View>
-    {expanded && (
-      <View style={styles.navLabelWrap}>
-        <Text style={[
-          styles.navLabel,
-          active && !danger && styles.navLabelActive,
-          danger && styles.navLabelDanger,
-        ]}>
-          {label}
-        </Text>
-        {active && !danger && <View style={styles.navActiveDot} />}
-      </View>
-    )}
-  </Pressable>
-);
 
 const MissionActionBtn = ({ icon: Icon, label, onPress, variant = "secondary", fullWidth = false, big = false }) => {
   const isPrimary = variant === "primary";
@@ -1265,7 +1172,14 @@ export default function ModernHomeUI(props) {
       <AnimatedReanimated.View style={[styles.mapToolsColumn, compassAnimatedStyle]} pointerEvents="box-none">
         <View style={styles.mapToolsGroupCard} pointerEvents="auto">
           <Pressable onPress={() => onResetNorth?.()} style={({ pressed }) => [pressed && { opacity: 0.7 }]} accessibilityLabel="Reset Map to North">
-            <TopBarCompass headingDeg={roverHeadingDeg ?? 0} hasRoverHeading={hasRoverHeading} />
+            <Compass
+              headingDeg={roverHeadingDeg ?? 0}
+              hasRoverHeading={hasRoverHeading}
+              colors={COLORS}
+              style={styles.topBarCompass}
+              labelStyle={styles.topBarCompassLabel}
+              labelIdleStyle={styles.topBarCompassLabelIdle}
+            />
           </Pressable>
 
           <View style={styles.mapToolsDivider} />
@@ -1465,119 +1379,32 @@ export default function ModernHomeUI(props) {
     handleNavPress(id);
   }, [collapseNavbar, onNav]);
 
+  const onCycleMapStyle = useCallback(() => {
+    setMapStyleIndex((prev) => (prev + 1) % MAPBOX_STYLES.length);
+  }, []);
+
+  const onExitSession = useCallback(() => {
+    onNav("connection");
+  }, [onNav]);
+
   const renderNavbar = () => (
-    <AnimatedReanimated.View style={[styles.navbar, navAnimatedStyle, !navIconsVisible && styles.navbarCompact]}>
-      <View style={[styles.navMenuGroup, !navIconsVisible && styles.navMenuGroupCompact]}>
-        <Pressable
-          style={[
-            styles.navMenuPressable,
-            !navIconsVisible && styles.navMenuPressableCompact,
-            navIconsVisible && navExpanded && styles.navItemExpanded,
-            navIconsVisible && navExpanded && styles.navItemActive,
-          ]}
-          onPress={handleMenuPress}
-        >
-          {navExpanded && navIconsVisible ? (
-            <>
-              <View style={[styles.navIconWrap, styles.navIconWrapActive]}>
-                <Menu color={COLORS.accentText} size={20} strokeWidth={2.2} />
-              </View>
-              <View style={styles.navLabelWrap}>
-                <Text style={[styles.navLabel, styles.navLabelActive]}>Menu</Text>
-                <View style={styles.navActiveDot} />
-              </View>
-            </>
-          ) : (
-            <View style={styles.navMenuCollapsed}>
-              <View style={[
-                styles.navIconWrap,
-                navIconsVisible && styles.navIconWrapActive,
-                !navIconsVisible && styles.navIconWrapCompact,
-              ]}>
-                <Menu color={navIconsVisible ? COLORS.accentText : COLORS.textMuted} size={20} strokeWidth={2.2} />
-              </View>
-            </View>
-          )}
-        </Pressable>
-        {navIconsVisible && (
-          <>
-            <Text
-              style={[styles.navFieldMarkerLabel, navExpanded && styles.navFieldMarkerLabelExpanded]}
-              numberOfLines={2}
-            >
-              Field Marker
-            </Text>
-            <View style={styles.navGroupSeparator} />
-          </>
-        )}
-      </View>
-
-      {navIconsVisible && (
-        <>
-          {isHomePage ? (
-            <>
-              <View style={styles.navGroupSeparator} />
-              <View
-                ref={quickAccessAnchorRef}
-                collapsable={false}
-                onLayout={updateQuickAccessAnchor}
-                style={styles.quickAccessAnchor}
-              >
-                <NavBarItem
-                  icon={LayoutGrid}
-                  label="Quick Access"
-                  active={quickAccessExpanded}
-                  expanded={navExpanded}
-                  onPress={handleQuickAccessPress}
-                />
-              </View>
-              <View style={styles.navGroupSeparator} />
-            </>
-          ) : null}
-
-          <View style={styles.navSection}>
-            {[
-              { id: "main", icon: Crosshair, label: "Main Screen" },
-              { id: "fields", icon: LocateFixed, label: "Fields" },
-              { id: "settings", icon: Navigation, label: "Settings" },
-              { id: "howto", icon: Circle, label: "How to" },
-            ].map((item) => (
-              <NavBarItem
-                key={item.id}
-                icon={item.icon}
-                label={item.label}
-                active={activeNav === item.id}
-                expanded={navExpanded}
-                onPress={() => handleNavItemPress(item.id)}
-              />
-            ))}
-          </View>
-
-          <View style={{ flex: 1 }} />
-
-          {/* Removed Fullscreen Map and Map On buttons */}
-
-          <View style={styles.navDivider} />
-
-          <NavBarItem
-            icon={LayoutGrid}
-            label="Cycle Map View"
-            active={false}
-            expanded={navExpanded}
-            onPress={() => setMapStyleIndex((prev) => (prev + 1) % MAPBOX_STYLES.length)}
-          />
-
-          <NavBarItem
-            icon={LogOut}
-            label="Exit Session"
-            active={false}
-            expanded={navExpanded}
-            danger={true}
-            onPress={() => onNav("connection")}
-          />
-        </>
-      )}
-    </AnimatedReanimated.View>
+    <Navbar
+      navAnimatedStyle={navAnimatedStyle}
+      navIconsVisible={navIconsVisible}
+      navExpanded={navExpanded}
+      isHomePage={isHomePage}
+      activeNav={activeNav}
+      quickAccessExpanded={quickAccessExpanded}
+      quickAccessAnchorRef={quickAccessAnchorRef}
+      handleMenuPress={handleMenuPress}
+      handleQuickAccessPress={handleQuickAccessPress}
+      handleNavItemPress={handleNavItemPress}
+      updateQuickAccessAnchor={updateQuickAccessAnchor}
+      onCycleMapStyle={onCycleMapStyle}
+      onExitSession={onExitSession}
+      colors={COLORS}
+      styles={styles}
+    />
   );
 
   const renderTelemetrySection = () => {

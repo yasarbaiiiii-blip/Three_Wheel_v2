@@ -20,6 +20,12 @@ export function DraggableReorderList({ data, onDragEnd, renderExtraRight }: Drag
       keyExtractor={(item) => item.id}
       onDragEnd={({ data: next }) => onDragEnd(next)}
       containerStyle={{ flex: 1 }}
+      // Keep clipped subviews mounted: removeClippedSubviews=true is known to
+      // break scroll/layout behavior on Reanimated-driven draggable lists.
+      removeClippedSubviews={false}
+      windowSize={5}
+      maxToRenderPerBatch={10}
+      initialNumToRender={8}
       renderItem={({ item, drag, isActive }: RenderItemParams<PlanLine>) => (
         <ScaleDecorator>
           <Pressable
