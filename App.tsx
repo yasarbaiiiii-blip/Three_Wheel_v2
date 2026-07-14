@@ -3,14 +3,18 @@ import "./global.css";
 
 import { initMapbox } from "./src/config/mapbox";
 import { SMOKE_TEST_MAPBOX, SMOKE_TEST_CENTER } from "./src/config/featureFlags";
-import MapboxHelloMap from "./src/components/MapboxHelloMap";
 
 // Apply the Mapbox public access token once, before any map component mounts.
 initMapbox();
 
-import ModernHomeUI from "./src/components/ModernHomeUI";
-import ModernSettingsPage from "./src/components/ModernSettingsPage";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+// Lazy-loaded: none of these are needed for the initial "connection" screen
+// (see the `page` state default below), so deferring them shrinks the JS
+// that must be parsed before first paint.
+const MapboxHelloMap = lazy(() => import("./src/components/MapboxHelloMap"));
+const ModernHomeUI = lazy(() => import("./src/components/ModernHomeUI"));
+const ModernSettingsPage = lazy(() => import("./src/components/ModernSettingsPage"));
 import {
   ActivityIndicator,
   Alert,
@@ -98,8 +102,12 @@ import { generateRoadSignLines, RoadSignType, ROAD_SIGN_LABELS } from "./src/uti
 import { canAcquireJoystick as canAcquireJoystickForState } from "./src/utils/joystickFrontendSafety";
 
 import type { Page, TelemetrySnapshot, LayerVisibility } from "./src/types/plan";
-import { TemplatesPage } from "./src/screens/TemplatesPage";
-import { FieldsPage } from "./src/screens/FieldsPage";
+const TemplatesPage = lazy(() =>
+  import("./src/screens/TemplatesPage").then((m) => ({ default: m.TemplatesPage }))
+);
+const FieldsPage = lazy(() =>
+  import("./src/screens/FieldsPage").then((m) => ({ default: m.FieldsPage }))
+);
 import {
   coerceFiniteNumber,
   formatFinite,
@@ -525,7 +533,11 @@ export default function App() {
   // render. This early return is gated by a build-time constant so hook order
   // stays stable. Remove this block once the smoke test is confirmed.
   if (SMOKE_TEST_MAPBOX) {
-    return <MapboxHelloMap center={SMOKE_TEST_CENTER} zoomLevel={16} />;
+    return (
+      <Suspense fallback={<ActivityIndicator />}>
+        <MapboxHelloMap center={SMOKE_TEST_CENTER} zoomLevel={16} />
+      </Suspense>
+    );
   }
 
   useImmersiveMode();
@@ -4354,6 +4366,7 @@ function HomeView(props: HomeViewProps) {
   const { page: _page, renderSectionContent: _rsc, setImportedPlan: _sip, ...modernHomeProps } = props;
 
   return (
+    <Suspense fallback={<ActivityIndicator />}>
     <ModernHomeUI
       {...modernHomeProps}
       setImportedPlan={props.setImportedPlan}
@@ -4402,6 +4415,7 @@ function HomeView(props: HomeViewProps) {
         />
       ) : undefined}
     />
+    </Suspense>
   );
 }
 
@@ -5262,6 +5276,7 @@ function SectionPages(props: {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
 
   return (
+    <Suspense fallback={<ActivityIndicator />}>
     <View style={{ flex: 1, backgroundColor: "#09090b" }}>
       {page === "fields" ? (
         <FieldsPage
@@ -5322,6 +5337,7 @@ function SectionPages(props: {
       {page === "howto" ? <HowToPage /> : null}
       {page === "about" ? <AboutPage /> : null}
     </View>
+    </Suspense>
   );
 }
 
@@ -8285,7 +8301,11 @@ function SettingsPage(props: {
   apiBaseUrl?: string;
   selectedPathName?: string | null;
 }) {
-  return <ModernSettingsPage {...props} />;
+  return (
+    <Suspense fallback={<ActivityIndicator />}>
+      <ModernSettingsPage {...props} />
+    </Suspense>
+  );
 }
 
 function HowToPage() {
