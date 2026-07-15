@@ -697,6 +697,15 @@ export default function App() {
     setVisualAlignmentItem(null);
   }
 
+  // Like stopPlanEditing, but discards the sticker WITHOUT baking its transform into
+  // `lines`. Used once alignment reference points already exist (tapped or CSV-imported):
+  // those points' dxf_x/dxf_y are only valid against the plan's original coordinates, so a
+  // further drag/scale/rotate must stay a transient visual preview, not a permanent edit.
+  function cancelPlanEditing() {
+    setIsPlanEditingMode(false);
+    setVisualAlignmentItem(null);
+  }
+
   function handleConfirmVisualAlignment() {
     console.log("[Align DXF] handleConfirmVisualAlignment: Confirming visual alignment position.");
     if (!visualAlignmentItem) {
@@ -3733,6 +3742,7 @@ export default function App() {
                             isPlanEditingMode={isPlanEditingMode}
                             onStartPlanEditing={startPlanEditing}
                             onStopPlanEditing={stopPlanEditing}
+                            onCancelPlanEditing={cancelPlanEditing}
                             extractedCorners={extractedCorners}
                             setExtractedCorners={setExtractedCorners}
                             onNav={(p) => setPage(p)}
@@ -5333,6 +5343,7 @@ function SectionPages(props: {
   isPlanEditingMode?: boolean;
   onStartPlanEditing?: () => void;
   onStopPlanEditing?: () => void;
+  onCancelPlanEditing?: () => void;
   extractedCorners?: { dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>>;
   isFloatingEStopEnabled: boolean;
@@ -6086,9 +6097,13 @@ function computeAutoFitViewport(
   lines: PlanLine[],
   width: number,
   height: number,
-  roverPoint?: { north: number; east: number } | null
+  roverPoint?: { north: number; east: number } | null,
+  extraPoints?: { north: number; east: number }[] | null
 ): PreviewViewport {
-  if (lines.length === 0 || width <= 0 || height <= 0) {
+  if (lines.length === 0 && !extraPoints?.length) {
+    return { panX: width / 2, panY: height / 2, zoom: 1 };
+  }
+  if (width <= 0 || height <= 0) {
     return { panX: width / 2, panY: height / 2, zoom: 1 };
   }
 
@@ -6100,17 +6115,30 @@ function computeAutoFitViewport(
   let minN = Number.POSITIVE_INFINITY;
   let maxN = Number.NEGATIVE_INFINITY;
 
-  const bounds = computePlanBoundingBoxLegacy(lines);
-  minN = bounds.minX;
-  maxN = bounds.maxX;
-  minE = bounds.minY;
-  maxE = bounds.maxY;
+  if (lines.length > 0) {
+    const bounds = computePlanBoundingBoxLegacy(lines);
+    minN = bounds.minX;
+    maxN = bounds.maxX;
+    minE = bounds.minY;
+    maxE = bounds.maxY;
+  }
 
   if (roverPoint) {
     minN = Math.min(minN, roverPoint.north);
     maxN = Math.max(maxN, roverPoint.north);
     minE = Math.min(minE, roverPoint.east);
     maxE = Math.max(maxE, roverPoint.east);
+  }
+
+  // Include selected alignment ref points (tapped or CSV-imported) — they may sit outside
+  // the plan's own line bounds and must never end up framed off-screen.
+  if (extraPoints?.length) {
+    for (const p of extraPoints) {
+      minN = Math.min(minN, p.north);
+      maxN = Math.max(maxN, p.north);
+      minE = Math.min(minE, p.east);
+      maxE = Math.max(maxE, p.east);
+    }
   }
 
   const bboxW = maxE - minE; // Width on screen is Easting span
@@ -6748,6 +6776,9 @@ function PlanPreview({
   }, []);
   // Track whether user has manually panned so auto-pan doesn't fight them
   const userPannedRef = React.useRef(false);
+  // Baseline for the "selected points grew" auto-fit below — initialized to the
+  // mount-time count so it never fires on first render, only on real growth.
+  const lastSelectedPointsCountRef = React.useRef(selectedPoints?.length ?? 0);
 
   const rotationRef = React.useRef(rotation);
   useEffect(() => {
@@ -6857,6 +6888,23 @@ function PlanPreview({
     setViewport(fitted);
     setRotation(0);
   }, [filteredPlanSignature, originShiftKey, hasRover, roverE, roverN, layoutSize.width, layoutSize.height]);
+
+  // Re-fit whenever the selected alignment ref points GROW (a tap-add or a bulk CSV
+  // import) — CSV-imported points in particular may sit outside the plan's own line
+  // bounds, so without this they can land off-screen with no way for the user to know.
+  // Unlike the plan-change auto-fit above, this ALWAYS re-fits (ignores userPannedRef):
+  // it's a direct response to the user's own action of adding a point, not a background
+  // geometry change fighting their manual navigation. Ignores shrinkage (point removal).
+  useEffect(() => {
+    const count = selectedPoints?.length ?? 0;
+    if (count > lastSelectedPointsCountRef.current && layoutSize.width > 0 && layoutSize.height > 0) {
+      const selectedNE = (selectedPoints ?? []).map((p) => ({ north: p.x, east: p.y }));
+      const fitted = computeAutoFitViewport(filtered, layoutSize.width, layoutSize.height, null, selectedNE);
+      viewportRef.current = fitted;
+      setViewport(fitted);
+    }
+    lastSelectedPointsCountRef.current = count;
+  }, [selectedPoints, filtered, layoutSize.width, layoutSize.height]);
 
   // Auto-follow rover if no plan and user hasn't panned
   useEffect(() => {

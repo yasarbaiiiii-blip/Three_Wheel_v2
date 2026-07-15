@@ -1,5 +1,5 @@
 import React from "react";
-import { Pressable, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, View } from "react-native";
 import { ChevronDown, ChevronRight, Check, Circle } from "lucide-react-native";
 
 import { FIELDS_COLORS } from "./fieldsTheme";
@@ -14,6 +14,14 @@ type FieldsStepCardProps = {
   onToggle: () => void;
   children?: React.ReactNode;
   disabled?: boolean;
+  /**
+   * When true and expanded, the card flexes to fill the remaining space in its parent
+   * column and its body scrolls internally instead of growing to full content height —
+   * use for steps whose content can get long (many fields/rows). Only safe for steps
+   * whose content has no VirtualizedList/FlatList of its own (nesting one inside this
+   * ScrollView breaks RN's list virtualization) — leave off for those.
+   */
+  scrollableBody?: boolean;
 };
 
 const stepIndicatorColors = (status: StepStatus) => {
@@ -30,8 +38,10 @@ export function FieldsStepCard({
   onToggle,
   children,
   disabled = false,
+  scrollableBody = false,
 }: FieldsStepCardProps) {
   const indicator = stepIndicatorColors(status);
+  const isScrolling = expanded && scrollableBody;
 
   return (
     <View
@@ -46,6 +56,7 @@ export function FieldsStepCard({
         backgroundColor: FIELDS_COLORS.cardSolid,
         overflow: "hidden",
         opacity: disabled ? 0.4 : 1,
+        ...(isScrolling ? { flex: 1, minHeight: 0 } : null),
       }}
     >
       <Pressable
@@ -104,16 +115,28 @@ export function FieldsStepCard({
       </Pressable>
 
       {expanded ? (
-        <View
-          style={{
-            padding: 14,
-            gap: 12,
-            borderTopWidth: 1,
-            borderTopColor: FIELDS_COLORS.panelBorder,
-          }}
-        >
-          {children}
-        </View>
+        isScrolling ? (
+          <ScrollView
+            style={{ flex: 1, minHeight: 0, borderTopWidth: 1, borderTopColor: FIELDS_COLORS.panelBorder }}
+            contentContainerStyle={{ padding: 14, gap: 12 }}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator
+            nestedScrollEnabled
+          >
+            {children}
+          </ScrollView>
+        ) : (
+          <View
+            style={{
+              padding: 14,
+              gap: 12,
+              borderTopWidth: 1,
+              borderTopColor: FIELDS_COLORS.panelBorder,
+            }}
+          >
+            {children}
+          </View>
+        )
       ) : null}
     </View>
   );

@@ -23,7 +23,13 @@ export interface MapViewProps {
   onSelectLine?: (id: string | null) => void;
   selectedLineId?: string | null;
   showCornerPoints?: boolean;
-  selectedPoints?: { x: number; y: number }[];
+  /**
+   * `lat`/`lon` are the point's own known real-world coordinate (typed in or CSV-imported)
+   * — when present, the marker renders THERE, not at a re-projection of `x`/`y` through
+   * whatever provisional map anchor happens to be active. Omit `lat`/`lon` only for a
+   * freshly tapped point that has no coordinate yet, so it still shows where it was tapped.
+   */
+  selectedPoints?: { x: number; y: number; lat?: number; lon?: number }[];
 
   // Interactive templates mode support
   mode?: "fields" | "templates";

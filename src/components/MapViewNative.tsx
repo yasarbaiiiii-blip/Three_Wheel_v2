@@ -341,6 +341,9 @@ export function MapViewNative(props: MapViewProps) {
   const lastRecenterRoverRef = useRef(0);
   const lastRecenterPlanRef = useRef(0);
   const lastResetNorthRef = useRef(0);
+  // Baseline for the "selected points grew" auto-fit below — initialized to the
+  // mount-time count so it never fires on first render, only on real growth.
+  const lastSelectedPointsCountRef = useRef(selectedPoints?.length ?? 0);
 
   // ── Gesture state ──
   // GestureType enum for the in-progress gesture (items drag or boundary drag).
@@ -611,13 +614,25 @@ export function MapViewNative(props: MapViewProps) {
 
   // ── Selected alignment points (highlighted in yellow) ──
   const selectedPointsFC = useMemo(() => {
-    if (!selectedPoints || selectedPoints.length === 0 || !projectionOrigin) {
+    if (!selectedPoints || selectedPoints.length === 0) {
       return featureCollection([]);
     }
-    const features = selectedPoints.map((p, i) => {
+    const features: GeoJSON.Feature<GeoJSON.Point>[] = [];
+    selectedPoints.forEach((p, i) => {
+      // A point with a known real-world coordinate (typed in or CSV-imported) renders
+      // THERE — never re-projected through the provisional plan-preview origin, which
+      // may be a stale/unrelated anchor (rover position, a prior alignment, etc.) and
+      // has nothing to do with this point's actual location.
+      if (Number.isFinite(p.lat) && Number.isFinite(p.lon)) {
+        features.push(pointFeature(toMapboxCoord(p.lat as number, p.lon as number), { id: `sp-${i}` }));
+        return;
+      }
+      // No coordinate yet (freshly tapped, not filled in) — show where it sits on the
+      // currently-previewed plan so it lines up with what the user just tapped.
+      if (!projectionOrigin) return;
       // In FieldsPage/App.tsx, p.x is Northing (dxf_y) and p.y is Easting (dxf_x)
       const gps = projectPlanNorthEastToGps(p.x, p.y, projectionOrigin);
-      return pointFeature(toMapboxCoord(gps.lat, gps.lon), { id: `sp-${i}` });
+      features.push(pointFeature(toMapboxCoord(gps.lat, gps.lon), { id: `sp-${i}` }));
     });
     return featureCollection(features);
   }, [selectedPoints, originSig]);
@@ -1352,6 +1367,8 @@ export function MapViewNative(props: MapViewProps) {
         for (const ring of f.geometry.coordinates) {
           for (const c of ring) coords.push(c as Coord);
         }
+      } else if (f.geometry.type === "Point") {
+        coords.push(f.geometry.coordinates as Coord);
       }
     };
     if (mode === "templates") {
@@ -1363,8 +1380,11 @@ export function MapViewNative(props: MapViewProps) {
     } else {
       planLinesFC.features.forEach(pushFeatureCoords);
     }
+    // Always include selected alignment ref points — CSV-imported or tapped points may sit
+    // outside the plan's own line bounds, and they must never end up framed off-screen.
+    selectedPointsFC.features.forEach(pushFeatureCoords);
     return coords;
-  }, [mode, boundaryGeo, placedItemsGeo, planLinesFC]);
+  }, [mode, boundaryGeo, placedItemsGeo, planLinesFC, selectedPointsFC]);
 
   const fitToPlan = useCallback(() => {
     const coords = collectFitCoords();
@@ -1435,6 +1455,19 @@ export function MapViewNative(props: MapViewProps) {
       hasAutoCenteredRef.current = true;
     }
   }, [visible, roverGeo.center, collectFitCoords, fitToPlan]);
+
+  // Re-fit whenever the selected alignment ref points GROW (a tap-add or a bulk CSV
+  // import) — CSV-imported points in particular may sit outside the plan's own line
+  // bounds, so without this they can land off-screen with no way for the user to know.
+  // Ignores shrinkage (point removal) so clearing/deselecting a point never yanks the
+  // camera, and is baseline-seeded so it never fires spuriously on mount.
+  useEffect(() => {
+    const count = selectedPoints?.length ?? 0;
+    if (visible && count > lastSelectedPointsCountRef.current) {
+      fitToPlan();
+    }
+    lastSelectedPointsCountRef.current = count;
+  }, [visible, selectedPoints, fitToPlan]);
 
   // ── Tap handling ──
   const handleMapPress = useCallback(

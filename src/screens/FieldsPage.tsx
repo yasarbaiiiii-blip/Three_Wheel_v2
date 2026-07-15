@@ -83,6 +83,7 @@ export type FieldsPageProps = {
   isPlanEditingMode?: boolean;
   onStartPlanEditing?: () => void;
   onStopPlanEditing?: () => void;
+  onCancelPlanEditing?: () => void;
   extractedCorners?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null>>;
   onClearMission: () => Promise<void>;
@@ -99,7 +100,7 @@ export type FieldsPageProps = {
     roverPosN?: number | null;
     roverPosE?: number | null;
     roverHeadingDeg?: number | null;
-    selectedPoints?: { x: number; y: number }[];
+    selectedPoints?: { x: number; y: number; lat?: number; lon?: number }[];
     onSelectPoint?: (pt: { x: number; y: number }) => void;
     alignedRefPoints?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
     stagedVerified?: boolean;
@@ -190,6 +191,7 @@ export function FieldsPage(props: FieldsPageProps) {
     isPlanEditingMode,
     onStartPlanEditing,
     onStopPlanEditing,
+    onCancelPlanEditing,
     extractedCorners,
     setExtractedCorners,
     onClearMission,
@@ -305,7 +307,7 @@ export function FieldsPage(props: FieldsPageProps) {
           }
           return [{ dxf_x: pt.y, dxf_y: pt.x, lat: "", lon: "" }];
         }
-        if (prev.length >= 2) return prev;
+        // least_squares: no cap — any number of reference points can be tapped.
         return [...prev, { dxf_x: pt.y, dxf_y: pt.x, lat: "", lon: "" }];
       });
     },
@@ -351,13 +353,44 @@ export function FieldsPage(props: FieldsPageProps) {
     setActiveStep(activeStep === id ? "boundingBox" : id);
   };
 
-  // Confirm transform handler — captures coordinates and reveals align step
+  // Confirm transform handler — exits plan-editing mode and restores tap-to-pick-point
+  // on the align step's map. Once reference points already exist (tapped or CSV-imported),
+  // their dxf_x/dxf_y are only meaningful against the plan's ORIGINAL coordinates, so a
+  // drag/scale/rotate at that point must stay a transient visual preview: cancel it rather
+  // than baking it into `lines` (baking would desync the points and corrupt Fix Alignment's
+  // math). With no reference points yet, baking is safe and preserves the user's positioning.
   const handleConfirmTransform = useCallback(() => {
+    if (refPoints.length > 0) {
+      onCancelPlanEditing?.();
+    } else {
+      onStopPlanEditing?.();
+    }
     setIsTransformConfirmed(true);
     setShowMapInteraction(false);
     setManipulationMode("idle");
     setActiveStep("align");
-  }, [setIsTransformConfirmed, setShowMapInteraction, setManipulationMode, setActiveStep]);
+  }, [
+    refPoints.length,
+    onCancelPlanEditing,
+    onStopPlanEditing,
+    setIsTransformConfirmed,
+    setShowMapInteraction,
+    setManipulationMode,
+    setActiveStep,
+  ]);
+
+  // Lets the user re-enter plan editing (drag/scale/rotate) from the Align DXF step as a
+  // pure visual aid — e.g. to eyeball the plan against already-placed reference points —
+  // then exit via the same confirm path used right after upload.
+  const handleToggleMovePlan = useCallback(() => {
+    if (isPlanEditingMode) {
+      handleConfirmTransform();
+      return;
+    }
+    onStartPlanEditing?.();
+    setShowMapInteraction(true);
+    setManipulationMode("drag");
+  }, [isPlanEditingMode, handleConfirmTransform, onStartPlanEditing, setShowMapInteraction, setManipulationMode]);
 
   // Navigate home handler
   const handleNavigateHome = useCallback(() => {
@@ -398,7 +431,15 @@ export function FieldsPage(props: FieldsPageProps) {
           roverHeadingDeg: telemetrySnapshot?.heading_ned_deg ?? null,
           selectedPoints:
             activeStep === "align"
-              ? refPoints.map((point) => ({ x: point.dxf_y, y: point.dxf_x }))
+              ? refPoints.map((point) => {
+                  const lat = parseFloat(point.lat);
+                  const lon = parseFloat(point.lon);
+                  return {
+                    x: point.dxf_y,
+                    y: point.dxf_x,
+                    ...(Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : {}),
+                  };
+                })
               : [],
           onSelectPoint: activeStep === "align" ? handleSelectPoint : undefined,
           alignedRefPoints,
@@ -554,6 +595,7 @@ export function FieldsPage(props: FieldsPageProps) {
             expanded={activeStep === "align"}
             onToggle={() => toggleStep("align")}
             disabled={!hasPath}
+            scrollableBody
           >
             <AlignDxfPanel
               apiBaseUrl={apiBaseUrl}
@@ -586,6 +628,8 @@ export function FieldsPage(props: FieldsPageProps) {
               autoOriginEnabled={autoOriginEnabled}
               stagedVerified={stagedWorkflow.staged === "verified"}
               missionRunning={missionRunning}
+              isPlanEditingMode={isPlanEditingMode}
+              onToggleMovePlan={handleToggleMovePlan}
             />
           </FieldsStepCard>
           )}
