@@ -1240,7 +1240,12 @@ export function MapViewNative(props: MapViewProps) {
       if (!gridEnabled || itemId !== "plan-editing-group" || !planEditingSnapAnchor || !projectionOrigin) {
         return { x: newX, y: newY, rotation: newRotation, scale: newScale };
       }
-      const snappedRotation = snapRotationDeg(newRotation, GRID_ROTATION_SNAP_DEG);
+      // Snap relative to the grid's own orientation (it's rotated to match the reference
+      // points, not compass-aligned — see alignmentGrid.ts), so a snapped plan ends up with
+      // its edges parallel to the grid lines instead of to true north.
+      const gridOrientationDeg = gridBounds?.orientationDeg ?? 0;
+      const snappedRotation =
+        gridOrientationDeg + snapRotationDeg(newRotation - gridOrientationDeg, GRID_ROTATION_SNAP_DEG);
       const placed = transformVisualDxfPoint(planEditingSnapAnchor.north, planEditingSnapAnchor.east, {
         x: newX,
         y: newY,
