@@ -83,7 +83,6 @@ export type FieldsPageProps = {
   isPlanEditingMode?: boolean;
   onStartPlanEditing?: () => void;
   onStopPlanEditing?: () => void;
-  onCancelPlanEditing?: () => void;
   extractedCorners?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null>>;
   onClearMission: () => Promise<void>;
@@ -191,7 +190,6 @@ export function FieldsPage(props: FieldsPageProps) {
     isPlanEditingMode,
     onStartPlanEditing,
     onStopPlanEditing,
-    onCancelPlanEditing,
     extractedCorners,
     setExtractedCorners,
     onClearMission,
@@ -290,6 +288,7 @@ export function FieldsPage(props: FieldsPageProps) {
 
   const handleSelectPoint = useCallback(
     (pt: { x: number; y: number }) => {
+      console.log(`[AlignDXF][Tap] Map tapped: pt.x(north)=${pt.x} pt.y(east)=${pt.y} method=${alignmentMethod}`);
       onInvalidateWorkflow("alignment");
       setMissionSummary(null);
       setAlignmentResult(null);
@@ -299,16 +298,21 @@ export function FieldsPage(props: FieldsPageProps) {
           (point) => Math.abs(point.dxf_y - pt.x) < 0.001 && Math.abs(point.dxf_x - pt.y) < 0.001
         );
         if (existingIdx >= 0) {
+          console.log(`[AlignDXF][Tap] Deselecting existing point at index ${existingIdx}`);
           return prev.filter((_, index) => index !== existingIdx);
         }
         if (alignmentMethod === "single_point") {
-          if (prev.length >= 1) {
-            return [{ dxf_x: pt.y, dxf_y: pt.x, lat: prev[0].lat, lon: prev[0].lon }];
-          }
-          return [{ dxf_x: pt.y, dxf_y: pt.x, lat: "", lon: "" }];
+          const next =
+            prev.length >= 1
+              ? [{ dxf_x: pt.y, dxf_y: pt.x, lat: prev[0].lat, lon: prev[0].lon }]
+              : [{ dxf_x: pt.y, dxf_y: pt.x, lat: "", lon: "" }];
+          console.log("[AlignDXF][Tap] single_point refPoints ->", JSON.stringify(next));
+          return next;
         }
         // least_squares: no cap — any number of reference points can be tapped.
-        return [...prev, { dxf_x: pt.y, dxf_y: pt.x, lat: "", lon: "" }];
+        const next = [...prev, { dxf_x: pt.y, dxf_y: pt.x, lat: "", lon: "" }];
+        console.log("[AlignDXF][Tap] least_squares refPoints ->", JSON.stringify(next));
+        return next;
       });
     },
     [
@@ -353,25 +357,38 @@ export function FieldsPage(props: FieldsPageProps) {
     setActiveStep(activeStep === id ? "boundingBox" : id);
   };
 
-  // Confirm transform handler — exits plan-editing mode and restores tap-to-pick-point
-  // on the align step's map. Once reference points already exist (tapped or CSV-imported),
-  // their dxf_x/dxf_y are only meaningful against the plan's ORIGINAL coordinates, so a
-  // drag/scale/rotate at that point must stay a transient visual preview: cancel it rather
-  // than baking it into `lines` (baking would desync the points and corrupt Fix Alignment's
-  // math). With no reference points yet, baking is safe and preserves the user's positioning.
+  // Confirm transform handler — bakes the plan's current drag/scale/rotate into `lines`
+  // (so the view never resets — it locks in exactly where the user left it) and exits
+  // plan-editing mode, restoring tap-to-pick-point on the align step's map. Any reference
+  // points already set (tapped or CSV-imported) are moved by that SAME transform, so they
+  // stay pinned to the same physical spot on the plan and remain valid for Fix Alignment.
   const handleConfirmTransform = useCallback(() => {
-    if (refPoints.length > 0) {
-      onCancelPlanEditing?.();
-    } else {
-      onStopPlanEditing?.();
+    if (refPoints.length > 0 && visualAlignmentItem) {
+      const { x, y, rotation = 0, scale = 1 } = visualAlignmentItem;
+      const rad = (rotation * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      // Mirrors the exact transform App.tsx's stopPlanEditing() applies to `lines`.
+      const transformPt = (n: number, e: number) => ({
+        n: n * scale * cos - e * scale * sin + y,
+        e: e * scale * cos + n * scale * sin + x,
+      });
+      setRefPoints((prev) =>
+        prev.map((point) => {
+          const t = transformPt(point.dxf_y, point.dxf_x);
+          return { ...point, dxf_y: t.n, dxf_x: t.e };
+        })
+      );
     }
+    onStopPlanEditing?.();
     setIsTransformConfirmed(true);
     setShowMapInteraction(false);
     setManipulationMode("idle");
     setActiveStep("align");
   }, [
     refPoints.length,
-    onCancelPlanEditing,
+    visualAlignmentItem,
+    setRefPoints,
     onStopPlanEditing,
     setIsTransformConfirmed,
     setShowMapInteraction,
@@ -379,9 +396,9 @@ export function FieldsPage(props: FieldsPageProps) {
     setActiveStep,
   ]);
 
-  // Lets the user re-enter plan editing (drag/scale/rotate) from the Align DXF step as a
-  // pure visual aid — e.g. to eyeball the plan against already-placed reference points —
-  // then exit via the same confirm path used right after upload.
+  // Lets the user re-enter plan editing (drag/scale/rotate) from the Align DXF step —
+  // e.g. to eyeball the plan against already-placed reference points — then exit via the
+  // same confirm path used right after upload.
   const handleToggleMovePlan = useCallback(() => {
     if (isPlanEditingMode) {
       handleConfirmTransform();

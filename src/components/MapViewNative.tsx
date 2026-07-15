@@ -344,6 +344,8 @@ export function MapViewNative(props: MapViewProps) {
   // Baseline for the "selected points grew" auto-fit below — initialized to the
   // mount-time count so it never fires on first render, only on real growth.
   const lastSelectedPointsCountRef = useRef(selectedPoints?.length ?? 0);
+  // Baseline for the "alignment just completed" auto-fit below — same reasoning.
+  const lastAlignedRefPointsCountRef = useRef(alignedRefPoints?.length ?? 0);
 
   // ── Gesture state ──
   // GestureType enum for the in-progress gesture (items drag or boundary drag).
@@ -449,7 +451,12 @@ export function MapViewNative(props: MapViewProps) {
       (it) => it.id === "visual-alignment-group" || it.id === "plan-editing-group"
     );
 
-    if (isPlanManipulation && visualAlignmentAnchor) {
+    // Not gated on isPlanManipulation: this anchor must keep being used for a while AFTER
+    // plan editing ends too (App.tsx keeps it alive post-bake for exactly this reason) —
+    // otherwise the map falls through to the generic fallback below, which re-derives its
+    // origin from `lines[0]`'s CURRENT position on every render and so cancels out
+    // whatever the just-baked drag/rotate/scale moved, making the plan appear to snap back.
+    if (visualAlignmentAnchor) {
       return {
         frame: "RAW_DESIGN",
         originLat: visualAlignmentAnchor.originLat,
@@ -525,6 +532,19 @@ export function MapViewNative(props: MapViewProps) {
   const originSig = projectionOrigin
     ? `${projectionOrigin.frame}|${projectionOrigin.originLat}|${projectionOrigin.originLon}|${projectionOrigin.originDxfNorth}|${projectionOrigin.originDxfEast}`
     : "none";
+
+  // Logs only when the resolved origin's CONTENT actually changes (originSig), not on
+  // every render/telemetry tick — so this stays readable instead of flooding the console.
+  useEffect(() => {
+    console.log(
+      `[AlignDXF][Map] projectionOrigin -> frame=${projectionOrigin?.frame ?? "null"} ` +
+        `originLat=${projectionOrigin?.originLat} originLon=${projectionOrigin?.originLon} ` +
+        `originDxfNorth=${projectionOrigin?.originDxfNorth} originDxfEast=${projectionOrigin?.originDxfEast} ` +
+        `| mode=${mode} alignedRefPoints=${JSON.stringify(alignedRefPoints)} ` +
+        `visualAlignmentAnchor=${JSON.stringify(visualAlignmentAnchor)}`
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [originSig]);
 
   const refPointsSig = useMemo(
     () =>
@@ -604,6 +624,10 @@ export function MapViewNative(props: MapViewProps) {
   // ── Reference points ──
   const refPointsFC = useMemo(() => {
     if (!alignedRefPoints || alignedRefPoints.length === 0) return featureCollection([]);
+    console.log(
+      `[AlignDXF][Map] Verified ref-point marker(s) (blue "Ref #" dots) at:`,
+      JSON.stringify(alignedRefPoints.map((p) => ({ lat: p.lat, lon: p.lon })))
+    );
     const features = alignedRefPoints.map((p, i) =>
       pointFeature(toMapboxCoord(p.lat, p.lon), {
         label: `Ref #${i + 1}`,
@@ -636,6 +660,28 @@ export function MapViewNative(props: MapViewProps) {
     });
     return featureCollection(features);
   }, [selectedPoints, originSig]);
+
+  // Content-based signature so the log below fires only on real changes, not on every
+  // FieldsPage render (selectedPoints is a fresh array reference each render there).
+  const selectedPointsSig = (selectedPoints ?? [])
+    .map((p) => `${p.x},${p.y},${p.lat ?? ""},${p.lon ?? ""}`)
+    .join("|");
+  useEffect(() => {
+    if (!selectedPoints || selectedPoints.length === 0) return;
+    console.log(
+      `[AlignDXF][Map] Yellow ref-point dots (${selectedPoints.length}):`,
+      JSON.stringify(
+        selectedPoints.map((p) => ({
+          dxf_north: p.x,
+          dxf_east: p.y,
+          usingOwnLatLon: Number.isFinite(p.lat) && Number.isFinite(p.lon),
+          lat: p.lat,
+          lon: p.lon,
+        }))
+      )
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPointsSig]);
 
   // ── Virtual bounding box corners and dimension labels ──
   const { virtualBoxCornersFC, virtualBoxLabelsFC } = useMemo(() => {
@@ -1468,6 +1514,19 @@ export function MapViewNative(props: MapViewProps) {
     }
     lastSelectedPointsCountRef.current = count;
   }, [visible, selectedPoints, fitToPlan]);
+
+  // Re-fit when a Fix Alignment just completed (alignedRefPoints going from empty to
+  // non-empty). A completed alignment relocates the WHOLE plan to its real GPS position
+  // (origin_gps), which can be far from wherever the camera was framed during the
+  // pre-alignment preview (that used a provisional/fallback anchor, not the real one) —
+  // without this, the newly-aligned plan can render entirely outside the current view.
+  useEffect(() => {
+    const count = alignedRefPoints?.length ?? 0;
+    if (visible && count > lastAlignedRefPointsCountRef.current) {
+      fitToPlan();
+    }
+    lastAlignedRefPointsCountRef.current = count;
+  }, [visible, alignedRefPoints, fitToPlan]);
 
   // ── Tap handling ──
   const handleMapPress = useCallback(

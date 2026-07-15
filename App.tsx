@@ -608,8 +608,12 @@ export default function App() {
 
     const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(lines);
 
-    const startLat = alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 28.6139;
-    const startLon = alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 77.2090;
+    // Fallback MUST match MapViewNative's stableFallbackOrigin ultimate fallback (Null
+    // Island, 0/0) — not some other constant — or the plan visibly jumps between this
+    // anchor (used while dragging) and the map's own fallback anchor (used once plan
+    // editing ends and the map falls back to its normal, non-manipulation projection).
+    const startLat = alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 0;
+    const startLon = alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 0;
     const startNorth = alignedRefPoints[0] ? alignedRefPoints[0].dxf_y : ((lines[0]?.from?.x ?? 0) - 2);
     const startEast = alignedRefPoints[0] ? alignedRefPoints[0].dxf_x : ((lines[0]?.from?.y ?? 0) - 2);
     setVisualAlignmentAnchor({ originLat: startLat, originLon: startLon, originDxfNorth: startNorth, originDxfEast: startEast });
@@ -633,8 +637,12 @@ export default function App() {
   function startPlanEditing() {
     if (lines.length === 0) return;
     const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(lines);
-    const startLat = alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 28.6139;
-    const startLon = alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 77.2090;
+    // Fallback MUST match MapViewNative's stableFallbackOrigin ultimate fallback (Null
+    // Island, 0/0) — not some other constant — or the plan visibly jumps between this
+    // anchor (used while dragging) and the map's own fallback anchor (used once plan
+    // editing ends and the map falls back to its normal, non-manipulation projection).
+    const startLat = alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 0;
+    const startLon = alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 0;
     const startNorth = alignedRefPoints[0] ? alignedRefPoints[0].dxf_y : ((lines[0]?.from?.x ?? 0) - 2);
     const startEast = alignedRefPoints[0] ? alignedRefPoints[0].dxf_x : ((lines[0]?.from?.y ?? 0) - 2);
     setVisualAlignmentAnchor({ originLat: startLat, originLon: startLon, originDxfNorth: startNorth, originDxfEast: startEast });
@@ -697,15 +705,6 @@ export default function App() {
     setVisualAlignmentItem(null);
   }
 
-  // Like stopPlanEditing, but discards the sticker WITHOUT baking its transform into
-  // `lines`. Used once alignment reference points already exist (tapped or CSV-imported):
-  // those points' dxf_x/dxf_y are only valid against the plan's original coordinates, so a
-  // further drag/scale/rotate must stay a transient visual preview, not a permanent edit.
-  function cancelPlanEditing() {
-    setIsPlanEditingMode(false);
-    setVisualAlignmentItem(null);
-  }
-
   function handleConfirmVisualAlignment() {
     console.log("[Align DXF] handleConfirmVisualAlignment: Confirming visual alignment position.");
     if (!visualAlignmentItem) {
@@ -720,8 +719,8 @@ export default function App() {
       { x: minX, y: maxY },
     ];
 
-    const baseLat = visualAlignmentAnchor?.originLat ?? alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 28.6139;
-    const baseLon = visualAlignmentAnchor?.originLon ?? alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 77.2090;
+    const baseLat = visualAlignmentAnchor?.originLat ?? alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 0;
+    const baseLon = visualAlignmentAnchor?.originLon ?? alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 0;
 
     let originDxfNorth = 0;
     let originDxfEast = 0;
@@ -755,11 +754,6 @@ export default function App() {
   const [extractedCorners, setExtractedCorners] = useState<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>(null);
   const [visualAlignmentAnchor, setVisualAlignmentAnchor] = useState<{ originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null>(null);
 
-  useEffect(() => {
-    if (!visualAlignmentItem) {
-      setVisualAlignmentAnchor(null);
-    }
-  }, [visualAlignmentItem]);
   const [layerVisibility, setLayerVisibility] = useState<LayerVisibility>({
     boundary: true,
     marking: true,
@@ -827,6 +821,24 @@ export default function App() {
   const [autoOrigin, setAutoOrigin] = useState(false);
   const [autoOriginReference, setAutoOriginReference] = useState<AutoOriginReference | null>(null);
   const [alignedRefPoints, setAlignedRefPoints] = useState<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>([]);
+
+  // Deliberately does NOT clear on every `visualAlignmentItem` -> null (i.e. every
+  // "Done"): stopPlanEditing bakes the drag into `lines` then clears the sticker, and
+  // clearing this anchor at that exact moment would make MapViewNative fall back to its
+  // generic preview origin — which re-derives itself from `lines[0]`'s CURRENT position
+  // on every render, so it silently "chases" whatever the bake just moved and cancels the
+  // drag out visually (the plan appears to snap back). Keeping this stable anchor alive
+  // across bake operations is what makes a locked-in plan position actually stick.
+  // It's cleared only once a REAL alignment exists (a completed Fix Alignment) AND plan
+  // editing isn't actively in progress — so the map hands off to that verified origin
+  // instead of a leftover provisional one, including for a second drag session done after
+  // an alignment already completed.
+  useEffect(() => {
+    if (!visualAlignmentItem && alignedRefPoints.length > 0) {
+      setVisualAlignmentAnchor(null);
+    }
+  }, [visualAlignmentItem, alignedRefPoints]);
+
   const protectedMissionResident = isProtectedMissionResident(loadedPathInspection);
   const autoOriginEligible =
     autoOrigin &&
@@ -3742,7 +3754,6 @@ export default function App() {
                             isPlanEditingMode={isPlanEditingMode}
                             onStartPlanEditing={startPlanEditing}
                             onStopPlanEditing={stopPlanEditing}
-                            onCancelPlanEditing={cancelPlanEditing}
                             extractedCorners={extractedCorners}
                             setExtractedCorners={setExtractedCorners}
                             onNav={(p) => setPage(p)}
@@ -5343,7 +5354,6 @@ function SectionPages(props: {
   isPlanEditingMode?: boolean;
   onStartPlanEditing?: () => void;
   onStopPlanEditing?: () => void;
-  onCancelPlanEditing?: () => void;
   extractedCorners?: { dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>>;
   isFloatingEStopEnabled: boolean;

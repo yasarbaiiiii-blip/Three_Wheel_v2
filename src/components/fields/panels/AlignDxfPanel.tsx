@@ -135,6 +135,49 @@ function parseRefPointsCsv(text: string): { points: ParsedCsvRefPoint[]; errors:
   return { points, errors };
 }
 
+type DxfBounds = { minNorth: number; maxNorth: number; minEast: number; maxEast: number };
+
+/** Bounding box of the currently-loaded DXF's OWN drawing coordinates (PlanLine.x=north, .y=east). */
+function computeDxfBounds(lines: PlanLine[]): DxfBounds | null {
+  if (lines.length === 0) return null;
+  let minNorth = Infinity;
+  let maxNorth = -Infinity;
+  let minEast = Infinity;
+  let maxEast = -Infinity;
+  for (const line of lines) {
+    for (const pt of [line.from, line.to]) {
+      if (pt.x < minNorth) minNorth = pt.x;
+      if (pt.x > maxNorth) maxNorth = pt.x;
+      if (pt.y < minEast) minEast = pt.y;
+      if (pt.y > maxEast) maxEast = pt.y;
+    }
+  }
+  if (!Number.isFinite(minNorth) || !Number.isFinite(minEast)) return null;
+  return { minNorth, maxNorth, minEast, maxEast };
+}
+
+/**
+ * A ref point's dxf_x/dxf_y must be expressed in the SAME coordinate system as the loaded
+ * DXF's own lines — least-squares alignment fits a similarity transform between these
+ * numbers and lat/lon, then reapplies that exact transform to the drawing's real coordinates.
+ * If a point is wildly outside the drawing's own coordinate range (a common real-world
+ * case: a raw RTK/GNSS survey export's Easting/Northing are in a project-specific grid CRS
+ * with a large false easting/northing, e.g. hundreds of thousands to millions — completely
+ * unrelated to a small CAD drawing's local origin), the fit still "succeeds" numerically but
+ * reapplying it to the drawing's tiny native coordinates lands the whole plan thousands of
+ * kilometres away. Margin is generous (20x the drawing's own span, floor of 200 units) so
+ * legitimate large-scale/state-plane-native DXFs and ref points a reasonable distance outside
+ * the drawn shape (survey control points, corner markers) aren't falsely flagged.
+ */
+function pointMatchesDxfScale(point: { dxf_x: number; dxf_y: number }, bounds: DxfBounds): boolean {
+  const spanNorth = bounds.maxNorth - bounds.minNorth;
+  const spanEast = bounds.maxEast - bounds.minEast;
+  const margin = Math.max(spanNorth, spanEast, 10) * 20 + 200;
+  const centerNorth = (bounds.minNorth + bounds.maxNorth) / 2;
+  const centerEast = (bounds.minEast + bounds.maxEast) / 2;
+  return Math.abs(point.dxf_y - centerNorth) <= margin && Math.abs(point.dxf_x - centerEast) <= margin;
+}
+
 type AlignDxfPanelProps = {
   apiBaseUrl: string;
   selectedPathName: string | null;
@@ -179,6 +222,7 @@ type AlignDxfPanelProps = {
 export function AlignDxfPanel({
   apiBaseUrl,
   selectedPathName,
+  lines,
   setLines,
   alignmentResult,
   setAlignmentResult,
@@ -258,17 +302,75 @@ export function AlignDxfPanel({
         text = await (await fetch(asset.uri)).text();
       }
       if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+      console.log(`[AlignDXF][CSV] Raw file "${asset.name}" (first 300 chars):\n${text.slice(0, 300)}`);
 
       const { points, errors } = parseRefPointsCsv(text);
+      console.log(`[AlignDXF][CSV] Parsed ${points.length} point(s), ${errors.length} error(s).`);
+      points.forEach((p, i) =>
+        console.log(
+          `[AlignDXF][CSV] Point ${i + 1}: dxf_x(east)=${p.dxf_x} dxf_y(north)=${p.dxf_y} lat="${p.latRaw}" lon="${p.lonRaw}"`
+        )
+      );
+      if (errors.length > 0) console.log("[AlignDXF][CSV] Errors:", errors);
       if (points.length === 0) {
         Alert.alert("Import Failed", errors[0] ?? "No valid coordinate rows were found in the file.");
         return;
       }
 
+      const dxfBounds = computeDxfBounds(lines);
+      const scaleMismatch = dxfBounds != null && points.every((p) => !pointMatchesDxfScale(p, dxfBounds));
+      console.log(
+        `[AlignDXF][CSV] dxfBounds=${JSON.stringify(dxfBounds)} scaleMismatch=${scaleMismatch}`
+      );
+
       onInvalidateWorkflow("alignment");
       setMissionSummary(null);
       setAlignmentResult(null);
       setVerifiedAlignmentRequest(null);
+
+      if (scaleMismatch) {
+        // The file's coordinate columns don't match this drawing's own coordinate range — a
+        // common real case: a raw RTK/GNSS survey export's Easting/Northing are in a
+        // project-specific grid CRS (often with a large false easting/northing), completely
+        // unrelated to a CAD drawing's local origin. Importing them as dxf_x/dxf_y would
+        // silently compute a similarity transform for the wrong coordinate system and, when
+        // reapplied to the drawing, place the whole plan thousands of km away. Only the
+        // file's lat/lon are trustworthy here — fill them into already-tapped points (which
+        // DO carry correct drawing-native coordinates), matched in order.
+        let filled = 0;
+        setRefPoints((prev) => {
+          const blankIdx = prev
+            .map((_, i) => i)
+            .filter((i) => prev[i].lat.trim() === "" && prev[i].lon.trim() === "");
+          filled = Math.min(blankIdx.length, points.length);
+          if (filled === 0) return prev;
+          const next = [...prev];
+          for (let k = 0; k < filled; k++) {
+            next[blankIdx[k]] = { ...next[blankIdx[k]], lat: points[k].latRaw, lon: points[k].lonRaw };
+          }
+          return next;
+        });
+        console.log(`[AlignDXF][CSV] Scale mismatch: filled lat/lon for ${filled} of ${points.length} row(s).`);
+
+        if (filled === 0) {
+          Alert.alert(
+            "Coordinates Don't Match This Drawing",
+            `This file's coordinates (e.g. ${points[0].dxf_x.toFixed(1)}, ${points[0].dxf_y.toFixed(1)}) look like real-world survey coordinates, not this drawing's own local coordinates — importing them directly would misalign the plan by a huge distance.\n\nTap ${points.length} point(s) on the drawing that correspond to this file's rows (in order), then upload the CSV again — only its Latitude/Longitude will be used to fill them in.`
+          );
+        } else {
+          const remaining = points.length - filled;
+          Alert.alert(
+            "Partially Imported",
+            `Filled in Latitude/Longitude for ${filled} tapped point(s) from the file.${
+              remaining > 0
+                ? ` ${remaining} row(s) left over — tap ${remaining} more point(s) on the drawing and upload again to fill those in too.`
+                : ""
+            }`
+          );
+        }
+        return;
+      }
+
       setRefPoints((prev) => {
         const merged = [...prev];
         points.forEach((p) => {
@@ -279,6 +381,7 @@ export function AlignDxfPanel({
           if (idx >= 0) merged[idx] = entry;
           else merged.push(entry);
         });
+        console.log("[AlignDXF][CSV] refPoints after merge:", JSON.stringify(merged));
         return merged;
       });
 
@@ -301,6 +404,10 @@ export function AlignDxfPanel({
   };
 
   const handleFixAlignment = async () => {
+    console.log(
+      `[AlignDXF][Fix] Clicked. method=${alignmentMethod} selectedPathName=${selectedPathName} refPoints=`,
+      JSON.stringify(refPoints)
+    );
     if (blockProtectedWorkflowMutation("Changing GPS alignment")) return;
     if (
       !selectedPathName ||
@@ -308,6 +415,7 @@ export function AlignDxfPanel({
       (alignmentMethod !== "visual_alignment" && refPoints.length === 0) ||
       (alignmentMethod === "visual_alignment" && !extractedCorners)
     ) {
+      console.log("[AlignDXF][Fix] Aborted: missing path/apiBaseUrl/points guard.");
       onWorkflowStep?.("alignment", "failed");
       setVerifiedAlignmentRequest(null);
       return;
@@ -348,7 +456,31 @@ export function AlignDxfPanel({
           setIsFixing(false);
           return;
         }
+
+        // Defense-in-depth: even if a mismatched point slipped through (typed in by hand,
+        // or from some other path than the CSV importer above), never send a fit whose
+        // input coordinates don't match this drawing's own scale — that computes a transform
+        // for the wrong coordinate system and, reapplied to the drawing, can misplace the
+        // whole plan by thousands of kilometres. This is a physical spraying rover; a wrong
+        // alignment is a safety issue, not just a display glitch, so this blocks outright.
+        const dxfBoundsForFix = computeDxfBounds(lines);
+        if (dxfBoundsForFix && !validPoints.every((p) => pointMatchesDxfScale(p, dxfBoundsForFix))) {
+          console.log(
+            `[AlignDXF][Fix] BLOCKED: ref point coordinates don't match drawing bounds`,
+            JSON.stringify(dxfBoundsForFix)
+          );
+          onWorkflowStep?.("alignment", "failed");
+          setVerifiedAlignmentRequest(null);
+          Alert.alert(
+            "Coordinates Don't Match This Drawing",
+            "One or more reference points' drawing coordinates are far outside this DXF's own coordinate range. This usually means a raw survey file's Easting/Northing got used directly instead of the drawing's own local coordinates — sending this would misalign the plan by a huge distance. Re-check the points below, or re-import matching them to tapped points instead."
+          );
+          setIsFixing(false);
+          return;
+        }
       }
+
+      console.log("[AlignDXF][Fix] validPoints (dxf_x=east, dxf_y=north):", JSON.stringify(validPoints));
 
       const payload: pathApi.AlignPathRequest = { ref_points: validPoints };
       if (alignmentMethod === "single_point") {
@@ -363,9 +495,13 @@ export function AlignDxfPanel({
         payload.rotation_deg = rot;
       }
 
+      console.log(`[AlignDXF][Fix] POST /api/path/${selectedPathName}/align payload:`, JSON.stringify(payload));
+
       const res = await pathApi.alignPath(apiBaseUrl, selectedPathName, payload);
+      console.log(`[AlignDXF][Fix] Response status: ${res.status} ok=${res.ok}`);
       if (res.ok) {
         const data = await res.json();
+        console.log("[AlignDXF][Fix] Response body:", JSON.stringify(data));
         if (data.mission_summary) {
           setMissionSummary(data.mission_summary);
           if (data.merged_waypoints) {
@@ -412,12 +548,21 @@ export function AlignDxfPanel({
           const offsetE = coerceFiniteNumber(data.offset_e);
           const offsetN = coerceFiniteNumber(data.offset_n);
           const alignScale = coerceFiniteNumber(data.scale) ?? 1;
+          console.log(
+            `[AlignDXF][Fix] Transform params: rotDeg=${rotDeg} offsetN=${offsetN} offsetE=${offsetE} scale=${alignScale} data.origin_gps=${JSON.stringify(data.origin_gps)} merged_waypoints=${!!data.merged_waypoints}`
+          );
           if (rotDeg != null && offsetE != null && offsetN != null && !data.merged_waypoints) {
             const rotRad = (rotDeg * Math.PI) / 180;
             const cos = Math.cos(rotRad);
             const sin = Math.sin(rotRad);
             // Mirror the backend's affine transform exactly: NED = scale * R(theta) * DXF + offset
             // (see path_engine/ned.py apply_affine_transform / dxf_to_ned_affine).
+            // pt.x/pt.y follow the SAME dxf_x=east / dxf_y=north contract used when ref_points
+            // were sent to the backend (see handleSelectPoint in FieldsPage.tsx and
+            // buildVisualAlignmentRefPoints in visualAlignment.ts, and the documented contract
+            // in visualAlignment.ts's header) — pt.x is dxf_x (east), pt.y is dxf_y (north).
+            // Output is {x: north, y: east}: offsetN pairs with the north output, offsetE with
+            // east, matching PlanLine's own x=north/y=east convention.
             const applyOriginTransform = (pt: { x: number; y: number }) => {
               const sx = pt.x * alignScale;
               const sy = pt.y * alignScale;
@@ -426,28 +571,33 @@ export function AlignDxfPanel({
                 y: sx * sin + sy * cos + offsetE,
               };
             };
-            setLines((prev) =>
-              prev.map((line) => {
-                const transformedFrom = applyOriginTransform({ x: line.from.x, y: line.from.y });
-                const transformedTo = applyOriginTransform({ x: line.to.x, y: line.to.y });
+            setLines((prev) => {
+              console.log(`[AlignDXF][Fix] Transforming ${prev.length} line(s). Before -> After (north,east):`);
+              const next = prev.map((line) => {
+                const transformedFrom = applyOriginTransform({ x: line.from.y, y: line.from.x });
+                const transformedTo = applyOriginTransform({ x: line.to.y, y: line.to.x });
                 let updatedEntity = line.entity;
                 if (updatedEntity?.preview_points) {
                   updatedEntity = {
                     ...updatedEntity,
                     preview_points: updatedEntity.preview_points.map((pt: { north: number; east: number }) => {
-                      const transformed = applyOriginTransform({ x: pt.north, y: pt.east });
+                      const transformed = applyOriginTransform({ x: pt.east, y: pt.north });
                       return { ...pt, north: transformed.x, east: transformed.y };
                     }),
                   };
                 }
+                console.log(
+                  `[AlignDXF][Fix]   ${line.id}: from (${line.from.x},${line.from.y}) -> (${transformedFrom.x.toFixed(3)},${transformedFrom.y.toFixed(3)}) | to (${line.to.x},${line.to.y}) -> (${transformedTo.x.toFixed(3)},${transformedTo.y.toFixed(3)})`
+                );
                 return {
                   ...line,
                   from: { ...line.from, x: transformedFrom.x, y: transformedFrom.y },
                   to: { ...line.to, x: transformedTo.x, y: transformedTo.y },
                   ...(updatedEntity ? { entity: updatedEntity } : {}),
                 };
-              })
-            );
+              });
+              return next;
+            });
           }
           Alert.alert("Success", "Alignment verified.");
         }
@@ -462,17 +612,21 @@ export function AlignDxfPanel({
           const originGps = Array.isArray(data.origin_gps) ? data.origin_gps : null;
           const originLat = originGps ? coerceFiniteNumber(originGps[0]) : null;
           const originLon = originGps ? coerceFiniteNumber(originGps[1]) : null;
+          console.log(
+            `[AlignDXF][Fix] origin_gps raw=${JSON.stringify(data.origin_gps)} -> parsed originLat=${originLat} originLon=${originLon}`
+          );
           if (originLat != null && originLon != null) {
+            console.log(`[AlignDXF][Fix] setAlignedRefPoints -> [{dxf_x:0, dxf_y:0, lat:${originLat}, lon:${originLon}}]`);
             setAlignedRefPoints([{ dxf_x: 0, dxf_y: 0, lat: originLat, lon: originLon }]);
           } else {
-            setAlignedRefPoints(
-              validPoints.map((point) => ({
-                dxf_x: point.dxf_x,
-                dxf_y: point.dxf_y,
-                lat: point.lat,
-                lon: point.lon,
-              }))
-            );
+            const fallbackAligned = validPoints.map((point) => ({
+              dxf_x: point.dxf_x,
+              dxf_y: point.dxf_y,
+              lat: point.lat,
+              lon: point.lon,
+            }));
+            console.log("[AlignDXF][Fix] origin_gps missing/invalid, setAlignedRefPoints -> validPoints:", JSON.stringify(fallbackAligned));
+            setAlignedRefPoints(fallbackAligned);
           }
         }
         setRefPoints([]);
@@ -482,12 +636,13 @@ export function AlignDxfPanel({
         onWorkflowStep?.("alignment", "failed");
         setVerifiedAlignmentRequest(null);
         const errText = await res.text();
+        console.log(`[AlignDXF][Fix] Backend rejected alignment (status ${res.status}):`, errText);
         Alert.alert("Alignment Failed", errText || "Unknown error occurred.");
       }
     } catch (err) {
       onWorkflowStep?.("alignment", "failed");
       setVerifiedAlignmentRequest(null);
-      console.log("Error aligning path:", err);
+      console.log("[AlignDXF][Fix] Error aligning path:", err);
       Alert.alert("Error", "Could not connect to the rover to apply alignment.");
     } finally {
       setIsFixing(false);
@@ -651,11 +806,7 @@ export function AlignDxfPanel({
               fontWeight: "700",
             }}
           >
-            {isPlanEditingMode
-              ? refPoints.length > 0
-                ? "Done — Keep Points, Reset View"
-                : "Done — Lock Plan Position"
-              : "Move / Scale / Rotate Plan"}
+            {isPlanEditingMode ? "Done — Lock Plan Position" : "Move / Scale / Rotate Plan"}
           </Text>
         </Pressable>
       ) : null}
@@ -663,7 +814,7 @@ export function AlignDxfPanel({
       {isPlanEditingMode ? (
         <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontStyle: "italic" }}>
           {refPoints.length > 0
-            ? "Drag, pinch, or twist the plan to compare it with your reference points — this is just a visual preview and won't move the points or affect Fix Alignment."
+            ? "Drag, pinch, or twist the plan on the map. Your reference points move with it, so they stay valid — tap-to-pick-point is paused until you lock it in."
             : "Drag, pinch, or twist the plan into position on the map. Tap-to-pick-point is paused until you lock it in."}
         </Text>
       ) : null}
@@ -808,7 +959,7 @@ export function AlignDxfPanel({
       ) : isPlanEditingMode ? null : refPoints.length === 0 ? (
         <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 12, fontStyle: "italic", textAlign: "center" }}>
           {alignmentMethod === "least_squares"
-            ? "Tap points on the canvas or upload a CSV to set alignment references (2 minimum)."
+            ? "Tap points on the canvas to set alignment references (2 minimum), or upload a CSV with this drawing's own coordinates. If your file has real-world survey Easting/Northing instead, tap the matching points first — the CSV will fill in their Latitude/Longitude."
             : "Tap 1 point on the canvas to set anchor."}
         </Text>
       ) : (
