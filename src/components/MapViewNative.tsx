@@ -60,16 +60,32 @@ import {
   getPlanLineRenderPoints,
   isCircleLikeLine,
   isCurveEntity,
+  computePlanBoundingBoxLegacy,
 } from "../utils/curveGeometry";
 import {
   transformVisualDxfPoint,
   projectGpsToLocalMeters,
+  projectLocalMetersToGps,
 } from "../utils/visualAlignment";
+import {
+  computeGridBounds,
+  buildGridLineSegments,
+  snapRotationDeg,
+  findSnapTarget,
+  type LocalMeters,
+} from "../utils/alignmentGrid";
 import { toMapboxCoord, fromMapboxCoord } from "../utils/mapboxCoords";
 import { MAPBOX_STYLE_URL } from "../config/mapbox";
 import type { MapViewProps } from "./mapViewTypes";
 import { pixelDeltaToMetres, clampToIndent, type BoundingRect } from "../utils/mapGestureUtils";
 import { deriveMetersPerPixel, screenToGeo } from "../utils/mapScreenGeo";
+
+/** Rotation snap increment for the Multi-Point Fit grid-snap feature (degrees). */
+const GRID_ROTATION_SNAP_DEG = 15;
+/** Point-to-point snap radius for the Multi-Point Fit grid-snap feature (metres). Bigger than
+ * the grid spacing would ever get for a tightly-clustered set of reference points would be
+ * wrong, so this is intentionally small and fixed rather than scaled to the grid. */
+const GRID_POINT_SNAP_RADIUS_M = 0.3;
 
 // ── Layer colours (parity with legacy LAYER_COLORS in MapView.tsx) ──
 const LAYER_COLORS: Record<string, string> = {
@@ -317,6 +333,8 @@ export function MapViewNative(props: MapViewProps) {
     drawnWaypoints,
     manualDrawingEnabled,
     screenToGeoRef,
+    gridEnabled = false,
+    gridAnchorPoints,
   } = props;
 
   useEffect(() => {
@@ -545,6 +563,52 @@ export function MapViewNative(props: MapViewProps) {
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [originSig]);
+
+  // ── Multi-Point Fit grid + snap ──
+  // The grid is anchored purely to the reference points' own real-world position — it has
+  // nothing to do with the DXF plan's coordinate system. All grid/snap math happens in
+  // "metres relative to (originLat, originLon)" — the SAME frame `current` is computed in
+  // inside onDragMove/onDragCommit below (see the DXF-offset subtraction there), so a point
+  // computed here is directly comparable to a point computed there without any extra step.
+  const gridAnchorLocalPoints = useMemo((): LocalMeters[] => {
+    if (!gridEnabled || !gridAnchorPoints || gridAnchorPoints.length === 0 || !projectionOrigin) return [];
+    return gridAnchorPoints
+      .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon))
+      .map((p) => projectGpsToLocalMeters(p.lat, p.lon, projectionOrigin.originLat, projectionOrigin.originLon));
+  }, [gridEnabled, gridAnchorPoints, projectionOrigin?.originLat, projectionOrigin?.originLon]);
+
+  const gridBounds = useMemo(
+    () => (gridEnabled ? computeGridBounds(gridAnchorLocalPoints) : null),
+    [gridEnabled, gridAnchorLocalPoints]
+  );
+
+  const gridLinesFC = useMemo(() => {
+    if (!gridEnabled || !gridBounds || !projectionOrigin) return featureCollection([]);
+    const segments = buildGridLineSegments(gridBounds);
+    const features = segments.map((seg, i) => {
+      const a = projectLocalMetersToGps(seg[0].north, seg[0].east, projectionOrigin.originLat, projectionOrigin.originLon);
+      const b = projectLocalMetersToGps(seg[1].north, seg[1].east, projectionOrigin.originLat, projectionOrigin.originLon);
+      return {
+        type: "Feature" as const,
+        properties: { id: `grid-${i}` },
+        geometry: {
+          type: "LineString" as const,
+          coordinates: [toMapboxCoord(a.lat, a.lon), toMapboxCoord(b.lat, b.lon)],
+        },
+      };
+    });
+    return featureCollection(features);
+  }, [gridEnabled, gridBounds, projectionOrigin?.originLat, projectionOrigin?.originLon]);
+
+  // Fixed DXF-space point the snap logic tracks for the plan — its own bounding-box centroid.
+  // Computed once per geometry change, NOT per drag frame.
+  const planEditingSnapAnchor = useMemo((): LocalMeters | null => {
+    if (!gridEnabled) return null;
+    const item = placedItems?.find((it) => it.id === "plan-editing-group");
+    if (!item || !item.lines || item.lines.length === 0) return null;
+    const bounds = computePlanBoundingBoxLegacy(item.lines);
+    return { north: (bounds.minX + bounds.maxX) / 2, east: (bounds.minY + bounds.maxY) / 2 };
+  }, [gridEnabled, placedItems]);
 
   const refPointsSig = useMemo(
     () =>
@@ -1165,6 +1229,42 @@ export function MapViewNative(props: MapViewProps) {
    * Reads the current panDeltaN/E shared values, applies them to the snapshot
    * positions, rebuilds preview geometry, and sets previewItemsGeo state.
    */
+  // Applies the Multi-Point Fit grid/point snap to a proposed transform. A no-op unless the
+  // grid is enabled and the item being moved is specifically the "plan-editing-group"
+  // sticker (never the Visual method's own "visual-alignment-group" sticker, which this
+  // feature deliberately leaves untouched). Runs on the JS thread (called from onDragMove/
+  // onDragCommit below, never from inside a reanimated worklet), so it can freely do the
+  // GPS<->metres math without any UI-thread/worklet constraints.
+  const applyGridSnap = useCallback(
+    (itemId: string, newX: number, newY: number, newRotation: number, newScale: number) => {
+      if (!gridEnabled || itemId !== "plan-editing-group" || !planEditingSnapAnchor || !projectionOrigin) {
+        return { x: newX, y: newY, rotation: newRotation, scale: newScale };
+      }
+      const snappedRotation = snapRotationDeg(newRotation, GRID_ROTATION_SNAP_DEG);
+      const placed = transformVisualDxfPoint(planEditingSnapAnchor.north, planEditingSnapAnchor.east, {
+        x: newX,
+        y: newY,
+        rotation: snappedRotation,
+        scale: newScale,
+      });
+      const current: LocalMeters = {
+        north: placed.north - projectionOrigin.originDxfNorth,
+        east: placed.east - projectionOrigin.originDxfEast,
+      };
+      const target = findSnapTarget(current, gridAnchorLocalPoints, gridBounds, GRID_POINT_SNAP_RADIUS_M);
+      if (!target) {
+        return { x: newX, y: newY, rotation: snappedRotation, scale: newScale };
+      }
+      return {
+        x: newX + (target.east - current.east),
+        y: newY + (target.north - current.north),
+        rotation: snappedRotation,
+        scale: newScale,
+      };
+    },
+    [gridEnabled, planEditingSnapAnchor, projectionOrigin, gridAnchorLocalPoints, gridBounds]
+  );
+
   const onDragMove = useCallback(
     (dN: number, dE: number, rotDeg: number, scaleF: number) => {
       const starts = dragStartPositionsRef.current;
@@ -1191,12 +1291,13 @@ export function MapViewNative(props: MapViewProps) {
         const newY = start.y + dN;
         const newRotation = start.rotation + rotDeg;
         const newScale = start.scale * scaleF;
-        return { ...item, x: newX, y: newY, rotation: newRotation, scale: newScale };
+        const snapped = applyGridSnap(item.id, newX, newY, newRotation, newScale);
+        return { ...item, ...snapped };
       });
 
       setPreviewItemsGeo(buildItemsGeoForItems(shifted));
     },
-    [placedItems, selectedItemIds, buildIndentRect, buildItemsGeoForItems]
+    [placedItems, selectedItemIds, buildIndentRect, buildItemsGeoForItems, applyGridSnap]
   );
 
   /**
@@ -1242,7 +1343,8 @@ export function MapViewNative(props: MapViewProps) {
         const newY = start.y + finalDN;
         const newRotation = start.rotation + finalRotDeg;
         const newScale = start.scale * finalScaleF;
-        return { ...item, x: newX, y: newY, rotation: newRotation, scale: newScale };
+        const snapped = applyGridSnap(item.id, newX, newY, newRotation, newScale);
+        return { ...item, ...snapped };
       });
 
       // Single commit to parent — parity with legacy itemsMoved handler.
@@ -1261,7 +1363,16 @@ export function MapViewNative(props: MapViewProps) {
       setPreviewItemsGeo(null);
       dragStartPositionsRef.current = {};
     },
-    [placedItems, selectedItemIds, buildIndentRect, onUpdatePlacedItems, onUpdatePlacedItem, onMoveBoundary, onRotateBoundary]
+    [
+      placedItems,
+      selectedItemIds,
+      buildIndentRect,
+      onUpdatePlacedItems,
+      onUpdatePlacedItem,
+      onMoveBoundary,
+      onRotateBoundary,
+      applyGridSnap,
+    ]
   );
 
   /**
@@ -1735,6 +1846,19 @@ export function MapViewNative(props: MapViewProps) {
               textOffset: [0, -1.4],
               textAnchor: "bottom",
               textOpacity: refLabelsVisible ? 1 : 0,
+            }}
+          />
+        </ShapeSource>
+
+        {/* ── Multi-Point Fit placement grid, anchored to the reference points ── */}
+        <ShapeSource id="alignment-grid" shape={gridLinesFC}>
+          <LineLayer
+            id="alignment-grid-layer"
+            style={{
+              lineColor: "#38bdf8",
+              lineWidth: 1,
+              lineOpacity: 0.45,
+              lineDasharray: [2, 2],
             }}
           />
         </ShapeSource>

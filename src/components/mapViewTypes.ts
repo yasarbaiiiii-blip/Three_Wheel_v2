@@ -76,4 +76,14 @@ export interface MapViewProps {
   onMapFreehandDrawUpdate?: (coords: { lat: number; lon: number }[]) => void;
   /** Ref to allow parent component to convert screen pixels to GPS coordinates */
   screenToGeoRef?: React.MutableRefObject<((screen: { x: number; y: number }) => Promise<{ lat: number; lon: number } | null>) | null>;
+
+  /**
+   * Align DXF "Multi-Point Fit" placement aid: when true, a grid is drawn anchored to
+   * `gridAnchorPoints` (the reference points), and the "plan-editing-group" placed item
+   * snaps to it (or to an individual reference point within a tight radius) while being
+   * dragged/rotated. Purely a manual-placement guide — never affects any computed fit.
+   */
+  gridEnabled?: boolean;
+  /** Real-world reference points the grid is anchored to (same source as the yellow dots). */
+  gridAnchorPoints?: { lat: number; lon: number }[];
 }

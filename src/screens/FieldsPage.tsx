@@ -120,6 +120,8 @@ export type FieldsPageProps = {
     onRotateBoundary?: (rotation: number) => void;
     sketchMode?: boolean;
     showBoundaryPoints?: boolean;
+    gridEnabled?: boolean;
+    gridAnchorPoints?: { lat: number; lon: number }[];
   }) => React.ReactNode;
   gpsPointMission?: pathApi.ParsePointGpsCsvResponse | null;
   onGpsPointMissionParsed?: (data: pathApi.ParsePointGpsCsvResponse) => void;
@@ -203,6 +205,9 @@ export function FieldsPage(props: FieldsPageProps) {
   const [refPoints, setRefPoints] = useState<RefPoint[]>([]);
   const [missionSummary, setMissionSummary] = useState<any | null>(null);
   const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "single_point" | "visual_alignment">("least_squares");
+  // Multi-Point Fit placement aid: a grid anchored to the reference points, with the plan
+  // snapping to it (or to an individual point) while being dragged/rotated.
+  const [gridEnabled, setGridEnabled] = useState(false);
 
   const [boundaryMode, setBoundaryMode] = useState(false);
   const [boundaryWidthStr, setBoundaryWidthStr] = useState("4.0");
@@ -496,6 +501,13 @@ export function FieldsPage(props: FieldsPageProps) {
           onRotateBoundary: (rot: number) => setBoundaryRotation(rot),
           sketchMode,
           showBoundaryPoints: showSnapPoints,
+          gridEnabled: activeStep === "align" && alignmentMethod === "least_squares" && gridEnabled,
+          gridAnchorPoints:
+            activeStep === "align" && alignmentMethod === "least_squares"
+              ? refPoints
+                  .map((p) => ({ lat: parseFloat(p.lat), lon: parseFloat(p.lon) }))
+                  .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon))
+              : [],
         })}
       </View>
 
@@ -665,6 +677,8 @@ export function FieldsPage(props: FieldsPageProps) {
               missionRunning={missionRunning}
               isPlanEditingMode={isPlanEditingMode}
               onToggleMovePlan={handleToggleMovePlan}
+              gridEnabled={gridEnabled}
+              onToggleGrid={() => setGridEnabled((prev) => !prev)}
             />
           </FieldsStepCard>
           )}

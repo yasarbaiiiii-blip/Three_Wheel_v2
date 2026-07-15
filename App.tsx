@@ -6491,6 +6491,8 @@ function PlanPreview({
   recenterPlanTrigger,
   resetNorthTrigger,
   hideRefocusControls = false,
+  gridEnabled = false,
+  gridAnchorPoints,
 }: {
   lines: PlanLine[];
   mapSourceLines?: PlanLine[];
@@ -6537,6 +6539,8 @@ function PlanPreview({
   recenterPlanTrigger?: number;
   resetNorthTrigger?: number;
   hideRefocusControls?: boolean;
+  gridEnabled?: boolean;
+  gridAnchorPoints?: { lat: number; lon: number }[];
 }) {
   const [visualSelected, setVisualSelected] = useState(true);
   const [boundarySelected, setBoundarySelected] = useState(true);
@@ -7208,6 +7212,8 @@ function PlanPreview({
             onRotateBoundary={onRotateBoundary}
             sketchMode={sketchMode}
             showBoundaryPoints={showBoundaryPoints}
+            gridEnabled={gridEnabled}
+            gridAnchorPoints={gridAnchorPoints}
             placedItems={isPlacedItemActive && visualAlignmentItem ? [visualAlignmentItem] : []}
             selectedItemIds={
               isEditablePlacedItemMode && visualSelected && placedItemId
