@@ -18,15 +18,6 @@ import { FIELDS_COLORS } from "../fieldsTheme";
 
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
 
-type ParsedCsvRefPoint = { dxf_x: number; dxf_y: number; latRaw: string; lonRaw: string };
-
-const CSV_COLUMN_ALIASES: Record<"dxf_x" | "dxf_y" | "lat" | "lon", string[]> = {
-  dxf_x: ["dxf_x", "x", "east", "easting"],
-  dxf_y: ["dxf_y", "y", "north", "northing"],
-  lat: ["lat", "latitude"],
-  lon: ["lon", "lng", "long", "longitude"],
-};
-
 /** Splits one CSV line into trimmed cells, honoring double-quoted values. */
 function splitCsvCells(line: string): string[] {
   const cells: string[] = [];
@@ -58,12 +49,17 @@ function splitCsvCells(line: string): string[] {
   return cells.map((cell) => cell.trim());
 }
 
+type GuidePoint = { latRaw: string; lonRaw: string };
+
 /**
- * Parses a reference-point CSV: a header row with dxf_x/x/east, dxf_y/y/north, lat, lon
- * columns (any order, case-insensitive), or — with no recognizable header — 4 bare numeric
- * columns in that exact order (dxf_x, dxf_y, lat, lon).
+ * Parses a PURE visual reference-point CSV: only Latitude/Longitude are read (any other
+ * columns, e.g. a survey device's own Easting/Northing in some arbitrary project grid, are
+ * ignored — they don't need to correspond to this drawing's coordinate system at all, since
+ * these points are just a visual marker on the map, not an input to a computed fit).
+ * Accepts a header row (lat/latitude, lon/lng/long/longitude, any order) or, with no
+ * recognizable header, 2 bare numeric columns in that order (lat, lon).
  */
-function parseRefPointsCsv(text: string): { points: ParsedCsvRefPoint[]; errors: string[] } {
+function parseGuidePointsCsv(text: string): { points: GuidePoint[]; errors: string[] } {
   const errors: string[] = [];
   const lines = text
     .split(/\r?\n/)
@@ -73,63 +69,51 @@ function parseRefPointsCsv(text: string): { points: ParsedCsvRefPoint[]; errors:
   if (lines.length === 0) return { points: [], errors: ["The file is empty."] };
 
   const headerCells = splitCsvCells(lines[0]).map((cell) => cell.toLowerCase());
-  const colIndex: Partial<Record<"dxf_x" | "dxf_y" | "lat" | "lon", number>> = {};
-  (Object.keys(CSV_COLUMN_ALIASES) as (keyof typeof CSV_COLUMN_ALIASES)[]).forEach((key) => {
-    const idx = headerCells.findIndex((cell) => CSV_COLUMN_ALIASES[key].includes(cell));
-    if (idx >= 0) colIndex[key] = idx;
-  });
-
-  const hasFullHeader =
-    colIndex.dxf_x != null && colIndex.dxf_y != null && colIndex.lat != null && colIndex.lon != null;
+  const latAliases = ["lat", "latitude"];
+  const lonAliases = ["lon", "lng", "long", "longitude"];
+  let latIdx = headerCells.findIndex((cell) => latAliases.includes(cell));
+  let lonIdx = headerCells.findIndex((cell) => lonAliases.includes(cell));
 
   let dataLines: string[];
-  if (hasFullHeader) {
+  if (latIdx >= 0 && lonIdx >= 0) {
     dataLines = lines.slice(1);
   } else {
-    colIndex.dxf_x = 0;
-    colIndex.dxf_y = 1;
-    colIndex.lat = 2;
-    colIndex.lon = 3;
+    latIdx = 0;
+    lonIdx = 1;
     const firstRowIsNumeric =
-      headerCells.length >= 4 && headerCells.slice(0, 4).every((cell) => cell !== "" && Number.isFinite(Number(cell)));
+      headerCells.length >= 2 && headerCells.slice(0, 2).every((cell) => cell !== "" && Number.isFinite(Number(cell)));
     if (!firstRowIsNumeric && lines.length < 2) {
       return {
         points: [],
-        errors: ["Could not find dxf_x/x, dxf_y/y, lat, and lon columns. Expected a header row like: dxf_x,dxf_y,lat,lon"],
+        errors: ["Could not find Latitude/Longitude columns. Expected a header row like: lat,lon"],
       };
     }
     dataLines = firstRowIsNumeric ? lines : lines.slice(1);
   }
 
-  const points: ParsedCsvRefPoint[] = [];
+  const points: GuidePoint[] = [];
   dataLines.forEach((line, i) => {
     const cells = splitCsvCells(line);
     if (cells.every((cell) => cell === "")) return;
     const rowNum = i + (dataLines.length === lines.length ? 1 : 2);
 
-    const rawDxfX = cells[colIndex.dxf_x!] ?? "";
-    const rawDxfY = cells[colIndex.dxf_y!] ?? "";
-    const rawLat = cells[colIndex.lat!] ?? "";
-    const rawLon = cells[colIndex.lon!] ?? "";
-    if ([rawDxfX, rawDxfY, rawLat, rawLon].some((v) => v === "")) {
-      errors.push(`Row ${rowNum}: missing a coordinate value.`);
+    const rawLat = cells[latIdx] ?? "";
+    const rawLon = cells[lonIdx] ?? "";
+    if (rawLat === "" || rawLon === "") {
+      errors.push(`Row ${rowNum}: missing latitude/longitude.`);
       return;
     }
-
-    const dxfX = Number(rawDxfX);
-    const dxfY = Number(rawDxfY);
     const lat = Number(rawLat);
     const lon = Number(rawLon);
-    if (![dxfX, dxfY, lat, lon].every((v) => Number.isFinite(v))) {
-      errors.push(`Row ${rowNum}: could not parse numeric coordinates.`);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      errors.push(`Row ${rowNum}: could not parse latitude/longitude.`);
       return;
     }
     if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
       errors.push(`Row ${rowNum}: latitude/longitude out of range.`);
       return;
     }
-
-    points.push({ dxf_x: dxfX, dxf_y: dxfY, latRaw: rawLat, lonRaw: rawLon });
+    points.push({ latRaw: rawLat, lonRaw: rawLon });
   });
 
   return { points, errors };
@@ -272,8 +256,13 @@ export function AlignDxfPanel({
     setRefPoints((prev) => prev.filter((_, i) => i !== idx));
   };
 
+  // Reference points are a PURE visual guide (any count, 1+) — only Latitude/Longitude are
+  // read from the file (a survey device's own Easting/Northing, in whatever arbitrary
+  // project-specific grid CRS, is ignored entirely). They're never sent anywhere for a
+  // computed fit: the user drags/scales/rotates the plan (Move Plan) using these dots as a
+  // guide, then "Use This Position" captures wherever they actually placed it.
   const handleUploadRefPointsCsv = async () => {
-    if (blockProtectedWorkflowMutation("Importing alignment points")) return;
+    if (blockProtectedWorkflowMutation("Importing reference points")) return;
 
     let asset: DocumentPicker.DocumentPickerAsset | null = null;
     try {
@@ -281,7 +270,7 @@ export function AlignDxfPanel({
       if (result.canceled || !result.assets || result.assets.length === 0) return;
       asset = result.assets[0];
     } catch (err) {
-      console.log("Error picking ref-point CSV:", err);
+      console.log("[AlignDXF][CSV] Error picking CSV:", err);
       Alert.alert("Error", "Could not open the file picker.");
       return;
     }
@@ -304,86 +293,22 @@ export function AlignDxfPanel({
       if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
       console.log(`[AlignDXF][CSV] Raw file "${asset.name}" (first 300 chars):\n${text.slice(0, 300)}`);
 
-      const { points, errors } = parseRefPointsCsv(text);
+      const { points, errors } = parseGuidePointsCsv(text);
       console.log(`[AlignDXF][CSV] Parsed ${points.length} point(s), ${errors.length} error(s).`);
-      points.forEach((p, i) =>
-        console.log(
-          `[AlignDXF][CSV] Point ${i + 1}: dxf_x(east)=${p.dxf_x} dxf_y(north)=${p.dxf_y} lat="${p.latRaw}" lon="${p.lonRaw}"`
-        )
-      );
       if (errors.length > 0) console.log("[AlignDXF][CSV] Errors:", errors);
       if (points.length === 0) {
-        Alert.alert("Import Failed", errors[0] ?? "No valid coordinate rows were found in the file.");
+        Alert.alert("Import Failed", errors[0] ?? "No valid Latitude/Longitude rows were found in the file.");
         return;
       }
-
-      const dxfBounds = computeDxfBounds(lines);
-      const scaleMismatch = dxfBounds != null && points.every((p) => !pointMatchesDxfScale(p, dxfBounds));
-      console.log(
-        `[AlignDXF][CSV] dxfBounds=${JSON.stringify(dxfBounds)} scaleMismatch=${scaleMismatch}`
-      );
 
       onInvalidateWorkflow("alignment");
       setMissionSummary(null);
       setAlignmentResult(null);
       setVerifiedAlignmentRequest(null);
-
-      if (scaleMismatch) {
-        // The file's coordinate columns don't match this drawing's own coordinate range — a
-        // common real case: a raw RTK/GNSS survey export's Easting/Northing are in a
-        // project-specific grid CRS (often with a large false easting/northing), completely
-        // unrelated to a CAD drawing's local origin. Importing them as dxf_x/dxf_y would
-        // silently compute a similarity transform for the wrong coordinate system and, when
-        // reapplied to the drawing, place the whole plan thousands of km away. Only the
-        // file's lat/lon are trustworthy here — fill them into already-tapped points (which
-        // DO carry correct drawing-native coordinates), matched in order.
-        let filled = 0;
-        setRefPoints((prev) => {
-          const blankIdx = prev
-            .map((_, i) => i)
-            .filter((i) => prev[i].lat.trim() === "" && prev[i].lon.trim() === "");
-          filled = Math.min(blankIdx.length, points.length);
-          if (filled === 0) return prev;
-          const next = [...prev];
-          for (let k = 0; k < filled; k++) {
-            next[blankIdx[k]] = { ...next[blankIdx[k]], lat: points[k].latRaw, lon: points[k].lonRaw };
-          }
-          return next;
-        });
-        console.log(`[AlignDXF][CSV] Scale mismatch: filled lat/lon for ${filled} of ${points.length} row(s).`);
-
-        if (filled === 0) {
-          Alert.alert(
-            "Coordinates Don't Match This Drawing",
-            `This file's coordinates (e.g. ${points[0].dxf_x.toFixed(1)}, ${points[0].dxf_y.toFixed(1)}) look like real-world survey coordinates, not this drawing's own local coordinates — importing them directly would misalign the plan by a huge distance.\n\nTap ${points.length} point(s) on the drawing that correspond to this file's rows (in order), then upload the CSV again — only its Latitude/Longitude will be used to fill them in.`
-          );
-        } else {
-          const remaining = points.length - filled;
-          Alert.alert(
-            "Partially Imported",
-            `Filled in Latitude/Longitude for ${filled} tapped point(s) from the file.${
-              remaining > 0
-                ? ` ${remaining} row(s) left over — tap ${remaining} more point(s) on the drawing and upload again to fill those in too.`
-                : ""
-            }`
-          );
-        }
-        return;
-      }
-
-      setRefPoints((prev) => {
-        const merged = [...prev];
-        points.forEach((p) => {
-          const idx = merged.findIndex(
-            (existing) => Math.abs(existing.dxf_x - p.dxf_x) < 0.001 && Math.abs(existing.dxf_y - p.dxf_y) < 0.001
-          );
-          const entry: RefPoint = { dxf_x: p.dxf_x, dxf_y: p.dxf_y, lat: p.latRaw, lon: p.lonRaw };
-          if (idx >= 0) merged[idx] = entry;
-          else merged.push(entry);
-        });
-        console.log("[AlignDXF][CSV] refPoints after merge:", JSON.stringify(merged));
-        return merged;
-      });
+      // dxf_x/dxf_y are unused placeholders — rendering prioritizes lat/lon whenever present
+      // (see MapViewNative's selectedPointsFC), which every one of these points has.
+      setRefPoints((prev) => [...prev, ...points.map((p) => ({ dxf_x: 0, dxf_y: 0, lat: p.latRaw, lon: p.lonRaw }))]);
+      console.log(`[AlignDXF][CSV] Added ${points.length} reference point(s).`);
 
       if (errors.length > 0) {
         Alert.alert(
@@ -393,10 +318,13 @@ export function AlignDxfPanel({
           }`
         );
       } else {
-        Alert.alert("Import Successful", `${points.length} point(s) imported from CSV.`);
+        Alert.alert(
+          "Reference Points Loaded",
+          `${points.length} point(s) shown on the map. Drag, scale, or rotate the plan to position it — these points are just a visual guide.`
+        );
       }
     } catch (err) {
-      console.log("Error importing ref-point CSV:", err);
+      console.log("[AlignDXF][CSV] Error importing CSV:", err);
       Alert.alert("Error", "Could not read or parse the selected CSV file.");
     } finally {
       setIsImportingCsv(false);
@@ -409,11 +337,12 @@ export function AlignDxfPanel({
       JSON.stringify(refPoints)
     );
     if (blockProtectedWorkflowMutation("Changing GPS alignment")) return;
+    const usesManualPlacement = alignmentMethod === "visual_alignment" || alignmentMethod === "least_squares";
     if (
       !selectedPathName ||
       !apiBaseUrl ||
-      (alignmentMethod !== "visual_alignment" && refPoints.length === 0) ||
-      (alignmentMethod === "visual_alignment" && !extractedCorners)
+      (usesManualPlacement && !extractedCorners) ||
+      (alignmentMethod === "single_point" && refPoints.length === 0)
     ) {
       console.log("[AlignDXF][Fix] Aborted: missing path/apiBaseUrl/points guard.");
       onWorkflowStep?.("alignment", "failed");
@@ -425,7 +354,11 @@ export function AlignDxfPanel({
     try {
       let validPoints: { dxf_x: number; dxf_y: number; lat: number; lon: number }[] = [];
 
-      if (alignmentMethod === "visual_alignment") {
+      if (usesManualPlacement) {
+        // Both Visual and Multi-Point Fit now work the same way: the reference points (tapped
+        // or CSV-imported) are just an on-screen guide — the actual alignment comes from
+        // wherever the user manually dragged/scaled/rotated the plan to (captured via "Use
+        // This Position" / "Capture & Confirm" into extractedCorners), not a computed fit.
         validPoints = extractedCorners!.map((point) => ({
           dxf_x: point.dxf_x,
           dxf_y: point.dxf_y,
@@ -433,6 +366,8 @@ export function AlignDxfPanel({
           lon: point.lon,
         }));
       } else {
+        // single_point (1-Point + Angle): still a computed fit from one tapped point + a
+        // given heading, so its dxf_x/dxf_y must genuinely correspond to this drawing.
         validPoints = refPoints
           .filter((point) => point.lat.trim() !== "" && point.lon.trim() !== "")
           .map((point) => ({
@@ -442,14 +377,7 @@ export function AlignDxfPanel({
             lon: parseFloat(point.lon),
           }));
 
-        if (alignmentMethod === "least_squares" && validPoints.length < 2) {
-          onWorkflowStep?.("alignment", "failed");
-          setVerifiedAlignmentRequest(null);
-          Alert.alert("Validation", "Please select at least 2 points and enter their WGS84 coordinates.");
-          setIsFixing(false);
-          return;
-        }
-        if (alignmentMethod === "single_point" && validPoints.length === 0) {
+        if (validPoints.length === 0) {
           onWorkflowStep?.("alignment", "failed");
           setVerifiedAlignmentRequest(null);
           Alert.alert("Validation", "Please select a point and enter its coordinates.");
@@ -457,12 +385,10 @@ export function AlignDxfPanel({
           return;
         }
 
-        // Defense-in-depth: even if a mismatched point slipped through (typed in by hand,
-        // or from some other path than the CSV importer above), never send a fit whose
-        // input coordinates don't match this drawing's own scale — that computes a transform
-        // for the wrong coordinate system and, reapplied to the drawing, can misplace the
-        // whole plan by thousands of kilometres. This is a physical spraying rover; a wrong
-        // alignment is a safety issue, not just a display glitch, so this blocks outright.
+        // Defense-in-depth: never send a fit whose input coordinates don't match this
+        // drawing's own scale — that computes a transform for the wrong coordinate system
+        // and, reapplied to the drawing, can misplace the whole plan by thousands of
+        // kilometres. This is a physical spraying rover; a wrong alignment is a safety issue.
         const dxfBoundsForFix = computeDxfBounds(lines);
         if (dxfBoundsForFix && !validPoints.every((p) => pointMatchesDxfScale(p, dxfBoundsForFix))) {
           console.log(
@@ -473,7 +399,7 @@ export function AlignDxfPanel({
           setVerifiedAlignmentRequest(null);
           Alert.alert(
             "Coordinates Don't Match This Drawing",
-            "One or more reference points' drawing coordinates are far outside this DXF's own coordinate range. This usually means a raw survey file's Easting/Northing got used directly instead of the drawing's own local coordinates — sending this would misalign the plan by a huge distance. Re-check the points below, or re-import matching them to tapped points instead."
+            "This point's drawing coordinates are far outside this DXF's own coordinate range. This usually means a raw survey file's Easting/Northing got used directly instead of a point actually tapped on the drawing — sending this would misalign the plan by a huge distance."
           );
           setIsFixing(false);
           return;
@@ -777,7 +703,7 @@ export function AlignDxfPanel({
         ))}
       </View>
 
-      {alignmentMethod !== "visual_alignment" ? (
+      {alignmentMethod !== "visual_alignment" && !(alignmentMethod === "least_squares" && extractedCorners) ? (
         <Pressable
           onPress={onToggleMovePlan}
           disabled={isFixing || missionRunning}
@@ -806,20 +732,26 @@ export function AlignDxfPanel({
               fontWeight: "700",
             }}
           >
-            {isPlanEditingMode ? "Done — Lock Plan Position" : "Move / Scale / Rotate Plan"}
+            {isPlanEditingMode
+              ? alignmentMethod === "least_squares"
+                ? "Use This Position"
+                : "Done — Lock Plan Position"
+              : "Move / Scale / Rotate Plan"}
           </Text>
         </Pressable>
       ) : null}
 
       {isPlanEditingMode ? (
         <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontStyle: "italic" }}>
-          {refPoints.length > 0
+          {alignmentMethod === "least_squares"
+            ? "Drag, pinch, or twist the plan on the map, using the reference points as a guide. Tap \"Use This Position\" to capture wherever you place it as the alignment."
+            : refPoints.length > 0
             ? "Drag, pinch, or twist the plan on the map. Your reference points move with it, so they stay valid — tap-to-pick-point is paused until you lock it in."
             : "Drag, pinch, or twist the plan into position on the map. Tap-to-pick-point is paused until you lock it in."}
         </Text>
       ) : null}
 
-      {alignmentMethod === "least_squares" && !isPlanEditingMode ? (
+      {alignmentMethod === "least_squares" && !isPlanEditingMode && !extractedCorners ? (
         <Pressable
           onPress={handleUploadRefPointsCsv}
           disabled={isImportingCsv || isFixing || missionRunning}
@@ -838,7 +770,7 @@ export function AlignDxfPanel({
         >
           <Upload color={FIELDS_COLORS.stepActive} size={15} />
           <Text style={{ color: FIELDS_COLORS.stepActive, fontSize: 13, fontWeight: "700" }}>
-            {isImportingCsv ? "Importing CSV..." : "Upload Points CSV"}
+            {isImportingCsv ? "Importing CSV..." : "Upload Reference Points CSV"}
           </Text>
         </Pressable>
       ) : null}
@@ -956,18 +888,95 @@ export function AlignDxfPanel({
             </View>
           )}
         </View>
+      ) : alignmentMethod === "least_squares" && extractedCorners ? (
+        <View style={{ gap: 8 }}>
+          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>Captured Position</Text>
+          {extractedCorners.map((point, index) => (
+            <View
+              key={index}
+              style={{
+                backgroundColor: FIELDS_COLORS.surfaceSolid,
+                padding: 8,
+                borderRadius: 6,
+                borderWidth: 1,
+                borderColor: FIELDS_COLORS.panelBorder,
+              }}
+            >
+              <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "600" }}>Corner {index + 1}</Text>
+              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontFamily: "monospace" }}>
+                Lat: {point.lat.toFixed(6)}
+              </Text>
+              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontFamily: "monospace" }}>
+                Lon: {point.lon.toFixed(6)}
+              </Text>
+            </View>
+          ))}
+          <Pressable
+            onPress={handleFixAlignment}
+            disabled={isFixing || !selectedPathName}
+            style={{
+              height: 44,
+              borderRadius: 10,
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: isFixing || !selectedPathName ? FIELDS_COLORS.textDim : FIELDS_COLORS.warning,
+            }}
+          >
+            <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>
+              {isFixing ? "Fixing..." : "Fix Alignment"}
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              setExtractedCorners?.(null);
+              setVisualAlignmentItem?.(null);
+            }}
+            style={{
+              marginTop: 4,
+              padding: 10,
+              alignItems: "center",
+              backgroundColor: FIELDS_COLORS.surfaceSolid,
+              borderRadius: 6,
+            }}
+          >
+            <Text style={{ color: FIELDS_COLORS.danger, fontSize: 13, fontWeight: "600" }}>Clear & Reposition</Text>
+          </Pressable>
+          {alignmentResult ? (
+            <View
+              style={{
+                marginTop: 4,
+                padding: 12,
+                backgroundColor: FIELDS_COLORS.successMuted,
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: FIELDS_COLORS.successBorder,
+                gap: 4,
+              }}
+            >
+              <Text style={{ color: FIELDS_COLORS.success, fontWeight: "800", fontSize: 13 }}>Alignment Verified</Text>
+              <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
+                Scale: {formatFinite(alignmentResult.scale, 6)}
+              </Text>
+              <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
+                Rotation: {formatFinite(alignmentResult.rotation_deg, 3)} deg
+              </Text>
+              <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
+                RMSE: {formatFinite(alignmentResult.rmse_m, 3)}
+              </Text>
+            </View>
+          ) : null}
+        </View>
       ) : isPlanEditingMode ? null : refPoints.length === 0 ? (
         <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 12, fontStyle: "italic", textAlign: "center" }}>
           {alignmentMethod === "least_squares"
-            ? "Tap points on the canvas to set alignment references (2 minimum), or upload a CSV with this drawing's own coordinates. If your file has real-world survey Easting/Northing instead, tap the matching points first — the CSV will fill in their Latitude/Longitude."
+            ? "Tap points on the canvas, or upload a CSV, to show reference points on the map — any number, purely a visual guide. Then use \"Move / Scale / Rotate Plan\" to position the plan."
             : "Tap 1 point on the canvas to set anchor."}
         </Text>
       ) : (
         <View style={{ gap: 8 }}>
           {alignmentMethod === "least_squares" ? (
             <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11 }}>
-              {refPoints.length} point{refPoints.length === 1 ? "" : "s"} selected
-              {refPoints.length < 2 ? " — at least 2 required." : "."}
+              {refPoints.length} reference point{refPoints.length === 1 ? "" : "s"} shown on the map — a visual guide only.
             </Text>
           ) : null}
           <View style={{ gap: 8 }}>
@@ -984,10 +993,12 @@ export function AlignDxfPanel({
               >
                 <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 6 }}>
                   <Text style={{ flex: 1, color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
-                    Point {index + 1}{" "}
-                    <Text style={{ fontWeight: "400", color: FIELDS_COLORS.textMuted }}>
-                      (X: {point.dxf_x.toFixed(2)}, Y: {point.dxf_y.toFixed(2)})
-                    </Text>
+                    Point {index + 1}
+                    {alignmentMethod === "single_point" ? (
+                      <Text style={{ fontWeight: "400", color: FIELDS_COLORS.textMuted }}>
+                        {" "}(X: {point.dxf_x.toFixed(2)}, Y: {point.dxf_y.toFixed(2)})
+                      </Text>
+                    ) : null}
                   </Text>
                   <Pressable onPress={() => handleRemoveRefPoint(index)} hitSlop={8}>
                     <X size={14} color={FIELDS_COLORS.danger} />
@@ -1071,68 +1082,60 @@ export function AlignDxfPanel({
             </View>
           ) : null}
 
-          {alignmentMethod === "least_squares" && refPoints.length >= 2 ? (
-            <View
-              style={{
-                backgroundColor: FIELDS_COLORS.panelBorder,
-                padding: 10,
-                borderRadius: 8,
-                alignItems: "center",
-              }}
-            >
-              <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>
-                Distance (Point 1 → 2):{" "}
-                {Math.hypot(refPoints[1].dxf_x - refPoints[0].dxf_x, refPoints[1].dxf_y - refPoints[0].dxf_y).toFixed(2)} meters
-              </Text>
-            </View>
-          ) : null}
-
-          <Pressable
-            onPress={handleFixAlignment}
-            disabled={isFixing || !selectedPathName}
-            style={{
-              height: 44,
-              borderRadius: 10,
-              alignItems: "center",
-              justifyContent: "center",
-              backgroundColor: isFixing || !selectedPathName ? FIELDS_COLORS.textDim : FIELDS_COLORS.warning,
-            }}
-          >
-            <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>
-              {isFixing ? "Fixing..." : "Fix Alignment"}
+          {alignmentMethod === "least_squares" ? (
+            <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontStyle: "italic", textAlign: "center" }}>
+              Now tap "Move / Scale / Rotate Plan" above to position the plan using these points as a guide.
             </Text>
-          </Pressable>
+          ) : (
+            <>
+              <Pressable
+                onPress={handleFixAlignment}
+                disabled={isFixing || !selectedPathName}
+                style={{
+                  height: 44,
+                  borderRadius: 10,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: isFixing || !selectedPathName ? FIELDS_COLORS.textDim : FIELDS_COLORS.warning,
+                }}
+              >
+                <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>
+                  {isFixing ? "Fixing..." : "Fix Alignment"}
+                </Text>
+              </Pressable>
 
-          {alignmentResult ? (
-            <View
-              style={{
-                marginTop: 4,
-                padding: 12,
-                backgroundColor: FIELDS_COLORS.successMuted,
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: FIELDS_COLORS.successBorder,
-                gap: 4,
-              }}
-            >
-              <Text style={{ color: FIELDS_COLORS.success, fontWeight: "800", fontSize: 13 }}>Alignment Verified</Text>
-              <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
-                Method: {alignmentResult.method != null ? String(alignmentResult.method) : "n/a"}
-              </Text>
-              <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
-                Scale: {formatFinite(alignmentResult.scale, 6)}
-              </Text>
-              <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
-                Rotation: {formatFinite(alignmentResult.rotation_deg, 3)} deg
-              </Text>
-              <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
-                Offset: N {formatFinite(alignmentResult.offset_n, 3)} / E {formatFinite(alignmentResult.offset_e, 3)}
-              </Text>
-              <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
-                RMSE: {formatFinite(alignmentResult.rmse_m, 3)}
-              </Text>
-            </View>
-          ) : null}
+              {alignmentResult ? (
+                <View
+                  style={{
+                    marginTop: 4,
+                    padding: 12,
+                    backgroundColor: FIELDS_COLORS.successMuted,
+                    borderRadius: 8,
+                    borderWidth: 1,
+                    borderColor: FIELDS_COLORS.successBorder,
+                    gap: 4,
+                  }}
+                >
+                  <Text style={{ color: FIELDS_COLORS.success, fontWeight: "800", fontSize: 13 }}>Alignment Verified</Text>
+                  <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
+                    Method: {alignmentResult.method != null ? String(alignmentResult.method) : "n/a"}
+                  </Text>
+                  <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
+                    Scale: {formatFinite(alignmentResult.scale, 6)}
+                  </Text>
+                  <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
+                    Rotation: {formatFinite(alignmentResult.rotation_deg, 3)} deg
+                  </Text>
+                  <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
+                    Offset: N {formatFinite(alignmentResult.offset_n, 3)} / E {formatFinite(alignmentResult.offset_e, 3)}
+                  </Text>
+                  <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
+                    RMSE: {formatFinite(alignmentResult.rmse_m, 3)}
+                  </Text>
+                </View>
+              ) : null}
+            </>
+          )}
         </View>
       )}
       </View>

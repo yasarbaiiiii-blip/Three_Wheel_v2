@@ -401,13 +401,31 @@ export function FieldsPage(props: FieldsPageProps) {
   // same confirm path used right after upload.
   const handleToggleMovePlan = useCallback(() => {
     if (isPlanEditingMode) {
+      if (alignmentMethod === "least_squares") {
+        // Multi-Point Fit: the reference points are just a visual guide — the manual
+        // drag/scale/rotate IS the alignment. Capture wherever the user placed it as the
+        // final GPS-referenced corners (same mechanism the Visual method uses), instead of
+        // just baking the transform into `lines` with no GPS computed.
+        onConfirmVisualAlignment?.();
+        setShowMapInteraction(false);
+        setManipulationMode("idle");
+        return;
+      }
       handleConfirmTransform();
       return;
     }
     onStartPlanEditing?.();
     setShowMapInteraction(true);
     setManipulationMode("drag");
-  }, [isPlanEditingMode, handleConfirmTransform, onStartPlanEditing, setShowMapInteraction, setManipulationMode]);
+  }, [
+    isPlanEditingMode,
+    alignmentMethod,
+    onConfirmVisualAlignment,
+    handleConfirmTransform,
+    onStartPlanEditing,
+    setShowMapInteraction,
+    setManipulationMode,
+  ]);
 
   // Navigate home handler
   const handleNavigateHome = useCallback(() => {

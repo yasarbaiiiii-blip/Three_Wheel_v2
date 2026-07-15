@@ -750,6 +750,10 @@ export default function App() {
     setExtractedCorners(extractedLLA);
     setAlignedRefPoints(extractedLLA);
     setIsVisualAlignmentMode(false);
+    // Also used from the Multi-Point Fit tab's "Use This Position" (Move Plan flow), which
+    // drives the SAME sticker via isPlanEditingMode rather than isVisualAlignmentMode — clear
+    // it here too so that tab's UI exits drag mode once a position is confirmed.
+    setIsPlanEditingMode(false);
   }
   const [extractedCorners, setExtractedCorners] = useState<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>(null);
   const [visualAlignmentAnchor, setVisualAlignmentAnchor] = useState<{ originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null>(null);
