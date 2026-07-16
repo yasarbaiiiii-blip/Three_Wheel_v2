@@ -2,10 +2,26 @@ import React, { useState, useMemo, useRef, useEffect, useCallback, memo } from "
 import { View, Text, Pressable, PanResponder, Switch, LayoutChangeEvent } from "react-native";
 import Svg, { Path, G, Line, Rect, Circle, Polygon, Polyline, Text as SvgText } from "react-native-svg";
 import type { PlanLine } from "../types/plan";
+import { getPlanLineRenderPoints } from "../utils/curveGeometry";
 import { screenToDesignMeters, designToSvg, simplifyPath } from "../utils/designTransform";
 import type { DesignVertex, DesignEntity } from "../types/designDocument";
 import { createDesignEntity } from "../types/designDocument";
 import { snapToGrid, findSnapCandidate } from "../utils/designSnap";
+
+/**
+ * BoundaryEditor item local space: x = east * m2px, y = -north * m2px (screen Y down).
+ * Uses the shared tessellation path so CIRCLE/ARC entities are dense polylines, not a
+ * single from→to chord (which collapses a full circle to a degenerate segment).
+ */
+function planLineToItemSvgPath(line: PlanLine, meterToPx: number): string {
+  const pts = getPlanLineRenderPoints(line, false);
+  if (pts.length < 2) return "";
+  let d = `M${pts[0].east * meterToPx} ${-pts[0].north * meterToPx}`;
+  for (let i = 1; i < pts.length; i++) {
+    d += `L${pts[i].east * meterToPx} ${-pts[i].north * meterToPx}`;
+  }
+  return d;
+}
 
 export interface PlacedItem {
   id: string;
@@ -324,16 +340,21 @@ export const BoundaryEditor = memo(function BoundaryEditor({
       
       const itemArea = item.width * item.height;
 
-      // Check line hits (precise)
+      // Check line hits (precise) — tessellated curve samples so arcs/circles are pickable
+      // along the drawn path, not only on the raw from→to chord.
       let minItemLineDistSq = Infinity;
       for (const l of item.lines) {
-         const x1 = l.from.y * METER_TO_PX;
-         const y1 = -l.from.x * METER_TO_PX;
-         const x2 = l.to.y * METER_TO_PX;
-         const y2 = -l.to.x * METER_TO_PX;
-         const d2 = distToSegmentSquared(localTapX, localTapY, x1, y1, x2, y2) * ((item.scale || 1) ** 2);
-         if (d2 < minItemLineDistSq) {
-            minItemLineDistSq = d2;
+         const pts = getPlanLineRenderPoints(l, false);
+         if (pts.length < 2) continue;
+         for (let i = 1; i < pts.length; i++) {
+           const x1 = pts[i - 1].east * METER_TO_PX;
+           const y1 = -pts[i - 1].north * METER_TO_PX;
+           const x2 = pts[i].east * METER_TO_PX;
+           const y2 = -pts[i].north * METER_TO_PX;
+           const d2 = distToSegmentSquared(localTapX, localTapY, x1, y1, x2, y2) * ((item.scale || 1) ** 2);
+           if (d2 < minItemLineDistSq) {
+              minItemLineDistSq = d2;
+           }
          }
       }
 
@@ -969,9 +990,9 @@ export const BoundaryEditor = memo(function BoundaryEditor({
               key={item.id} 
               transform={`translate(${item.x * METER_TO_PX}, ${-item.y * METER_TO_PX}) rotate(${item.rotation}) scale(${item.scale || 1})`}
             >
-               {/* Item SVG Lines - batched into single <Path> per item (Step 4) */}
+               {/* Item SVG Lines - batched into single <Path> per item; curves tessellated */}
                <Path
-                 d={item.lines.map(l => `M${l.from.y * METER_TO_PX} ${-l.from.x * METER_TO_PX}L${l.to.y * METER_TO_PX} ${-l.to.x * METER_TO_PX}`).join('')}
+                 d={item.lines.map((l) => planLineToItemSvgPath(l, METER_TO_PX)).join("")}
                  stroke={isSelected ? "#ef4444" : "#0f172a"}
                  strokeWidth={isSelected ? ((3 * sizeScale) / camera.zoom) / (item.scale || 1) : ((2 * sizeScale) / camera.zoom) / (item.scale || 1)}
                  strokeLinecap="round"

@@ -543,6 +543,16 @@ export function MapViewNative(props: MapViewProps) {
     ? `${projectionOrigin.frame}|${projectionOrigin.originLat}|${projectionOrigin.originLon}|${projectionOrigin.originDxfNorth}|${projectionOrigin.originDxfEast}`
     : "none";
 
+  // `placedItems` is passed as an inline array literal from the parent (e.g.
+  // `placedItems={isPlacedItemActive && visualAlignmentItem ? [visualAlignmentItem] : []}`
+  // in App.tsx), so it gets a NEW reference on every parent render even when it's the
+  // same empty/unchanged list — same class of problem originSig solves above.
+  const placedItemsSig = placedItems && placedItems.length > 0
+    ? placedItems
+        .map((it) => `${it.id}:${it.x}:${it.y}:${it.rotation}:${it.scale}:${it.width}:${it.height}:${it.lines.length}`)
+        .join("|")
+    : "none";
+
   // Logs only when the resolved origin's CONTENT actually changes (originSig), not on
   // every render/telemetry tick — so this stays readable instead of flooding the console.
   useEffect(() => {
@@ -810,9 +820,9 @@ export function MapViewNative(props: MapViewProps) {
 
     const center = toMapboxCoord(lat, lon);
     // 1.5 m real-world range circle via Turf (circleRadius px cannot do metres).
-    // 16 steps is visually smooth at field zoom and ~3x cheaper than 48 on the
-    // per-tick rover path.
-    const rangeCircle = circle(center, 1.5, { steps: 16, units: "meters" }) as GeoJSON.Feature<GeoJSON.Polygon>;
+    // 48 steps stays smooth at editing zooms (19–22) without Mapbox overzoom faceting
+    // once the ShapeSource uses PLAN_SOURCE_MAX_ZOOM / TOLERANCE below.
+    const rangeCircle = circle(center, 1.5, { steps: 48, units: "meters" }) as GeoJSON.Feature<GeoJSON.Polygon>;
 
     // Next-target: active waypoint or plan start point ahead of the rover
     let targetPoint: Coord | null = null;
@@ -939,7 +949,9 @@ export function MapViewNative(props: MapViewProps) {
       lines: featureCollection(lineFeatures),
       boxes: featureCollection(boxFeatures),
     };
-  }, [mode, placedItems, selectedItemIds, originSig]);
+    // placedItemsSig (not placedItems) is the dependency — see its definition above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, placedItemsSig, selectedItemIds, originSig]);
 
   // ── Boundary box (Templates): outer + indent + control points ──
   const boundaryGeo = useMemo(() => {
@@ -2044,7 +2056,16 @@ export function MapViewNative(props: MapViewProps) {
         )}
 
         {/* ── Placed template items (Templates) ── */}
-        <ShapeSource id="placed-item-boxes" shape={activeItemsGeo.boxes} onPress={handleItemsPress}>
+        {/* Same tile fidelity as plan-lines/selected-line: default maxZoomLevel=18 +
+            tolerance=0.375 simplifies dense circle rings into faceted polygons once the
+            camera overzooms past generation zoom (alignment / Templates often sit at 19+). */}
+        <ShapeSource
+          id="placed-item-boxes"
+          shape={activeItemsGeo.boxes}
+          onPress={handleItemsPress}
+          maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
+          tolerance={PLAN_SOURCE_TOLERANCE}
+        >
           <FillLayer
             id="placed-item-boxes-fill"
             style={{
@@ -2055,7 +2076,13 @@ export function MapViewNative(props: MapViewProps) {
             }}
           />
         </ShapeSource>
-        <ShapeSource id="placed-item-lines" shape={activeItemsGeo.lines} onPress={handleItemsPress}>
+        <ShapeSource
+          id="placed-item-lines"
+          shape={activeItemsGeo.lines}
+          onPress={handleItemsPress}
+          maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
+          tolerance={PLAN_SOURCE_TOLERANCE}
+        >
           <LineLayer
             id="placed-item-lines-layer"
             style={{
@@ -2071,7 +2098,12 @@ export function MapViewNative(props: MapViewProps) {
         </ShapeSource>
         {/* ── Rover range circle + next-target line (isolated source) ── */}
         {roverGeo.rangeCircle && (
-          <ShapeSource id="rover-range" shape={roverGeo.rangeCircle}>
+          <ShapeSource
+            id="rover-range"
+            shape={roverGeo.rangeCircle}
+            maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
+            tolerance={PLAN_SOURCE_TOLERANCE}
+          >
             <FillLayer id="rover-range-fill" style={{ fillColor: "#3b82f6", fillOpacity: 0.12 }} />
             <LineLayer
               id="rover-range-outline"
@@ -2080,7 +2112,12 @@ export function MapViewNative(props: MapViewProps) {
           </ShapeSource>
         )}
         {roverGeo.targetLine && (
-          <ShapeSource id="rover-target" shape={roverGeo.targetLine}>
+          <ShapeSource
+            id="rover-target"
+            shape={roverGeo.targetLine}
+            maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
+            tolerance={PLAN_SOURCE_TOLERANCE}
+          >
             <LineLayer
               id="rover-target-layer"
               style={{ lineColor: "#f59e0b", lineWidth: 2, lineDasharray: [4, 4] }}

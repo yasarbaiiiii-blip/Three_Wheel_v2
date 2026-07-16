@@ -143,6 +143,10 @@ import {
   computeLineBoundingBox,
 } from "./src/utils/visualAlignment";
 import {
+  similarityTransform,
+  transformPlanLinesGeometry,
+} from "./src/utils/planLineTransform";
+import {
   anchorToAlignedRefPoints,
   pointMissionPointsToPlanLines,
   stagedMissionMatchesId,
@@ -665,41 +669,15 @@ export default function App() {
   function stopPlanEditing() {
     if (visualAlignmentItem && isPlanEditingMode) {
       const { x, y, rotation = 0, scale = 1 } = visualAlignmentItem;
-      const rad = (rotation * Math.PI) / 180;
-      const cos = Math.cos(rad);
-      const sin = Math.sin(rad);
-
-      const transformPt = (n: number, e: number) => {
-        return {
-          n: n * scale * cos - e * scale * sin + y,
-          e: e * scale * cos + n * scale * sin + x,
-        };
-      };
-
-      setLines((prev) =>
-        prev.map((line) => {
-          const transformedFrom = transformPt(line.from.x, line.from.y);
-          const transformedTo = transformPt(line.to.x, line.to.y);
-          let updatedEntity = line.entity;
-          
-          if (updatedEntity?.preview_points) {
-            updatedEntity = {
-              ...updatedEntity,
-              preview_points: updatedEntity.preview_points.map((pt: { north: number; east: number }) => {
-                const transformed = transformPt(pt.north, pt.east);
-                return { ...pt, north: transformed.n, east: transformed.e };
-              }),
-            };
-          }
-          
-          return {
-            ...line,
-            from: { ...line.from, x: transformedFrom.n, y: transformedFrom.e },
-            to: { ...line.to, x: transformedTo.n, y: transformedTo.e },
-            ...(updatedEntity ? { entity: updatedEntity } : {}),
-          };
-        })
-      );
+      // Shared bake: from/to + preview_points + entity.geometry (circles/arcs stay frame-consistent).
+      // PlacedItem.x = east, PlacedItem.y = north (see docs/coordinate-conventions.md).
+      const transformPt = similarityTransform({
+        rotationDeg: rotation,
+        scale,
+        offsetN: y,
+        offsetE: x,
+      });
+      setLines((prev) => transformPlanLinesGeometry(prev, transformPt));
     }
     setIsPlanEditingMode(false);
     setVisualAlignmentItem(null);

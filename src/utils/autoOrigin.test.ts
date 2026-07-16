@@ -9,6 +9,7 @@ import {
   planStartMatchesReference,
 } from "./autoOrigin";
 import { getPlanStartPoint } from "./planGeometry";
+import { getCurveGeometry } from "./curveGeometry";
 import {
   projectPlanNorthEastToGps,
   resolveMapGeometryFrame,
@@ -124,6 +125,46 @@ describe("Auto Origin Canvas shift", () => {
     const rawStart = getPlanStartPoint(baseLines);
     expect(rawStart!.north).toBe(10);
     expect(rawStart!.east).toBe(5);
+  });
+
+  it("shifts entity.geometry circle center with from/to (no stale center)", () => {
+    const circle: PlanLine = {
+      id: "circle-1",
+      label: "circle",
+      layer: "marking",
+      from: { id: 1, x: 10, y: 5 },
+      to: { id: 2, x: 10, y: 5 },
+      width: 0.1,
+      entity: {
+        entity_id: "c1",
+        entity_type: "CIRCLE",
+        layer: "marking",
+        color: 1,
+        is_mark: true,
+        length_m: 6.28,
+        geometry: {
+          center: [10, 5],
+          centerNorth: 10,
+          centerEast: 5,
+          radius: 1,
+          startAngle: 0,
+          endAngle: 360,
+        },
+        preview_points: [
+          { north: 10, east: 6 },
+          { north: 11, east: 5 },
+          { north: 10, east: 4 },
+          { north: 9, east: 5 },
+        ],
+      },
+    };
+    const shifted = applyAutoOriginShift([circle], reference);
+    const curve = getCurveGeometry(shifted[0])!;
+    // dN = 40, dE = 25 from reference
+    expect(curve.centerNorth).toBeCloseTo(50, 9);
+    expect(curve.centerEast).toBeCloseTo(30, 9);
+    expect(shifted[0].from.x).toBeCloseTo(50, 9);
+    expect(shifted[0].from.y).toBeCloseTo(30, 9);
   });
 });
 

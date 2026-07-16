@@ -10,6 +10,10 @@ import {
   formatFinite,
   sanitizePlanLines,
 } from "../../../utils/pathWorkflow";
+import {
+  similarityTransform,
+  transformPlanLinesGeometry,
+} from "../../../utils/planLineTransform";
 import type { AlignmentResultState, StagedWorkflowStatus } from "../../../types/fieldsWorkflow";
 import type { PlanLine } from "../../../types/plan";
 import type { AutoOriginReference } from "../../../types/autoOrigin";
@@ -478,55 +482,27 @@ export function AlignDxfPanel({
             `[AlignDXF][Fix] Transform params: rotDeg=${rotDeg} offsetN=${offsetN} offsetE=${offsetE} scale=${alignScale} data.origin_gps=${JSON.stringify(data.origin_gps)} merged_waypoints=${!!data.merged_waypoints}`
           );
           if (rotDeg != null && offsetE != null && offsetN != null && !data.merged_waypoints) {
-            const rotRad = (rotDeg * Math.PI) / 180;
-            const cos = Math.cos(rotRad);
-            const sin = Math.sin(rotRad);
             // Mirror the backend's affine transform exactly: NED = scale * R(theta) * DXF + offset
-            // (see path_engine/ned.py apply_affine_transform: point=(dxf_y=north, dxf_x=east),
-            // north' = north*scale*cos(θ) - east*scale*sin(θ) + offset_n,
-            // east'  = north*scale*sin(θ) + east*scale*cos(θ) + offset_e).
-            // A prior version of this function swapped which raw component (north vs east) fed
-            // the cos/sin terms — it read correctly by variable name (pt.x=east, pt.y=north) but
-            // then ran them through the rotation in the wrong order, so for any non-zero
-            // rotation this preview didn't match the backend's own transform (verified against
-            // path_engine/tests/test_ned.py::test_affine_rotation_90deg: DXF-north must rotate
-            // *into* NED-east at 90°, not into NED-south). That's why the plan only "sometimes"
-            // shifted after Fix Alignment — whenever the backend's fitted rotation was near 0 the
-            // bug was invisible, and it self-corrected once Load to Controller re-rendered from
-            // the backend's own authoritative geometry instead of this local recompute.
-            const applyOriginTransform = (pt: { north: number; east: number }) => {
-              const sn = pt.north * alignScale;
-              const se = pt.east * alignScale;
-              return {
-                north: sn * cos - se * sin + offsetN,
-                east: sn * sin + se * cos + offsetE,
-              };
-            };
+            // (see path_engine/ned.py apply_affine_transform). Routed through the shared bake
+            // helper so from/to, preview_points, AND entity.geometry.center (circles/arcs) all
+            // move together — baking only endpoints left getCurveGeometry() reading a stale
+            // center and the AlignDXF map jumped after Fix until Load rehydrated waypoints.
+            const applyOriginTransform = similarityTransform({
+              rotationDeg: rotDeg,
+              scale: alignScale,
+              offsetN,
+              offsetE,
+            });
             setLines((prev) => {
               console.log(`[AlignDXF][Fix] Transforming ${prev.length} line(s). Before -> After (north,east):`);
-              const next = prev.map((line) => {
-                const transformedFrom = applyOriginTransform({ north: line.from.x, east: line.from.y });
-                const transformedTo = applyOriginTransform({ north: line.to.x, east: line.to.y });
-                let updatedEntity = line.entity;
-                if (updatedEntity?.preview_points) {
-                  updatedEntity = {
-                    ...updatedEntity,
-                    preview_points: updatedEntity.preview_points.map((pt: { north: number; east: number }) => {
-                      const transformed = applyOriginTransform({ north: pt.north, east: pt.east });
-                      return { ...pt, north: transformed.north, east: transformed.east };
-                    }),
-                  };
-                }
+              const next = transformPlanLinesGeometry(prev, applyOriginTransform);
+              for (let i = 0; i < Math.min(prev.length, next.length); i++) {
+                const line = prev[i];
+                const out = next[i];
                 console.log(
-                  `[AlignDXF][Fix]   ${line.id}: from (${line.from.x},${line.from.y}) -> (${transformedFrom.north.toFixed(3)},${transformedFrom.east.toFixed(3)}) | to (${line.to.x},${line.to.y}) -> (${transformedTo.north.toFixed(3)},${transformedTo.east.toFixed(3)})`
+                  `[AlignDXF][Fix]   ${line.id}: from (${line.from.x},${line.from.y}) -> (${out.from.x.toFixed(3)},${out.from.y.toFixed(3)}) | to (${line.to.x},${line.to.y}) -> (${out.to.x.toFixed(3)},${out.to.y.toFixed(3)})`
                 );
-                return {
-                  ...line,
-                  from: { ...line.from, x: transformedFrom.north, y: transformedFrom.east },
-                  to: { ...line.to, x: transformedTo.north, y: transformedTo.east },
-                  ...(updatedEntity ? { entity: updatedEntity } : {}),
-                };
-              });
+              }
               return next;
             });
           }

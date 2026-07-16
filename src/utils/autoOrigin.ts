@@ -1,6 +1,10 @@
 import type { PlanLine, TelemetrySnapshot } from "../types/plan";
 import type { AutoOriginReference } from "../types/autoOrigin";
 import { getPlanStartPoint, sanitizePlanLines } from "./planGeometry";
+import {
+  transformPlanLinesGeometry,
+  translationTransform,
+} from "./planLineTransform";
 
 export type { AutoOriginReference } from "../types/autoOrigin";
 
@@ -70,26 +74,8 @@ export function applyAutoOriginShift(
 ): PlanLine[] {
   const dN = reference.roverNorth - reference.planStartNorth;
   const dE = reference.roverEast - reference.planStartEast;
-
-  return lines.map((line) => {
-    const shiftedEntity = line.entity
-      ? {
-          ...line.entity,
-          preview_points: line.entity.preview_points?.map((pt) => ({
-            ...pt,
-            north: pt.north + dN,
-            east: pt.east + dE,
-          })),
-        }
-      : undefined;
-
-    return {
-      ...line,
-      from: { ...line.from, x: line.from.x + dN, y: line.from.y + dE },
-      to: { ...line.to, x: line.to.x + dN, y: line.to.y + dE },
-      ...(shiftedEntity ? { entity: shiftedEntity } : {}),
-    };
-  });
+  // Shared bake: from/to + preview_points + entity.geometry center (circles/arcs).
+  return transformPlanLinesGeometry(lines, translationTransform(dN, dE));
 }
 
 export function planStartMatchesReference(
