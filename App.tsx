@@ -2060,6 +2060,14 @@ export default function App() {
         normalizePlanLinesForCurves(normalizePlanLines(generatedLines))
       );
       setLines(normalized);
+      // Keep the plan-editing/visual-alignment "sticker" (if one is active) in sync with
+      // freshly fetched geometry — e.g. toggling DXF extensions while a Move/Rotate Plan
+      // or Visual Alignment session is still open (not yet confirmed). The sticker only
+      // holds its own copy of `lines` for live rendering; without this it would keep
+      // showing the pre-refresh geometry until the user confirms/re-enters the mode. Its
+      // x/y/rotation/scale (the user's in-progress drag) are left untouched — only the
+      // underlying line geometry is refreshed.
+      setVisualAlignmentItem((prev) => (prev ? { ...prev, lines: normalized } : prev));
       setImportedPlan({
         fileName: pathName,
         uri: "",

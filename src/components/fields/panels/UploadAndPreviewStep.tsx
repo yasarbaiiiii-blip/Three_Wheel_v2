@@ -13,7 +13,12 @@ type UploadAndPreviewStepProps = {
   importedPlan: ImportedPlan | null;
   setImportedPlan: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
   onRefreshPaths: () => void;
-  onSelectPath: (name: string, skipAdvance?: boolean) => void;
+  /**
+   * `refreshOnly=true` tells the parent this call is just re-fetching `lines` for the
+   * already-loaded path (e.g. after saving extension config) — it must not advance the
+   * step or toggle plan-editing/map-interaction on, unlike a genuine new path selection.
+   */
+  onSelectPath: (name: string, refreshOnly?: boolean) => void;
   onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
   blockProtectedWorkflowMutation: (action: string) => boolean;
   protectedResident: boolean;
@@ -254,7 +259,7 @@ export function UploadAndPreviewStep({
       if (res.ok) {
         setExtEnabled(enabled);
         onInvalidateWorkflow("spray");
-        onSelectPath(targetPathName, true); // refresh lines
+        onSelectPath(targetPathName, true); // refreshOnly — re-fetch lines, stay out of edit mode
       } else {
         const errText = await res.text();
         Alert.alert("Error", errText || "Failed to update extensions");
@@ -283,7 +288,7 @@ export function UploadAndPreviewStep({
       if (res.ok) {
         setExtEnabled(nextEnabled);
         onInvalidateWorkflow("spray");
-        onSelectPath(targetPathName, true);
+        onSelectPath(targetPathName, true); // refreshOnly — re-fetch lines, stay out of edit mode
       } else {
         const errText = await res.text();
         Alert.alert("Error", errText || `Failed to ${nextEnabled ? "save" : "disable"} extensions`);

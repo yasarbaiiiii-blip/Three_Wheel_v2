@@ -558,16 +558,21 @@ export function FieldsPage(props: FieldsPageProps) {
               importedPlan={importedPlan}
               setImportedPlan={setImportedPlan}
               onRefreshPaths={onRefreshPaths}
-              onSelectPath={(name, skipAdvance) => {
+              onSelectPath={(name, refreshOnly) => {
                 onSelectPath(name);
-                // Auto-enable map interaction when path is loaded
+                // refreshOnly is set by the extension toggle/apply handlers, which call
+                // back in here purely to re-fetch `lines` after the backend recomputes
+                // extension geometry — they must NOT also flip on plan-editing mode or
+                // the map interaction overlay, or the Move/Rotate Plan button lights up
+                // uninvited and the live `lines` update gets masked by the frozen
+                // plan-editing sticker (see PlanPreview's isPlacedItemActive in App.tsx).
+                if (refreshOnly) return;
+                // Auto-enable map interaction when a path is newly loaded/selected
                 setShowMapInteraction(true);
                 if (isPlanEditingMode !== true) {
                   onStartPlanEditing?.();
                 }
-                if (!skipAdvance) {
-                  setActiveStep("align");
-                }
+                setActiveStep("align");
               }}
               onInvalidateWorkflow={onInvalidateWorkflow}
               blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
