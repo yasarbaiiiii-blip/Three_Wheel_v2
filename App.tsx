@@ -6589,9 +6589,9 @@ function PlanPreview({
     }
   }, [boundaryMode]);
 
-  const filtered = useMemo(
-    () =>
-      sanitizePlanLines(lines).filter((line) => {
+  const applyLayerVisibility = useCallback(
+    (source: PlanLine[]) =>
+      sanitizePlanLines(source).filter((line) => {
         // Segment-type (line/arc/circle/...) visibility only applies to real plan
         // geometry — not the synthetic transit/extension/virtual_boundary layers.
         if (line.layer === "boundary") return visibility.boundary && isSegmentKindVisible(line, visibility.segmentTypes);
@@ -6601,7 +6601,19 @@ function PlanPreview({
         if (line.layer === "extension") return visibility.extension;
         return true;
       }),
-    [lines, visibility]
+    [visibility]
+  );
+
+  const filtered = useMemo(() => applyLayerVisibility(lines), [lines, applyLayerVisibility]);
+
+  // The Mapbox <MapView> below uses raw `mapSourceLines` instead of `filtered`
+  // whenever autoOriginEnabled (it needs pre-origin-shift coordinates for its own
+  // GPS georeferencing) — that swap must not also bypass layer-visibility
+  // filtering, or unchecking a Layers toggle (e.g. Extension) has no effect
+  // whenever auto-origin is active, which is the common connected-rover case.
+  const filteredMapSourceLines = useMemo(
+    () => applyLayerVisibility(mapSourceLines ?? []),
+    [mapSourceLines, applyLayerVisibility]
   );
 
   const filteredPlanSignature = useMemo(() => {
@@ -7275,7 +7287,7 @@ function PlanPreview({
               isPlacedItemActive
                 ? []
                 : autoOriginEnabled && mapSourceLines
-                  ? mapSourceLines
+                  ? filteredMapSourceLines
                   : filtered
             }
             alignedRefPoints={alignedRefPoints}
