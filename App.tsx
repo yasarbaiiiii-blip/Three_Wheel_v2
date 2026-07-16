@@ -1918,9 +1918,28 @@ export default function App() {
                 const wps = Array.isArray(planData.merged_waypoints) ? planData.merged_waypoints : [];
                 const sprayFlags = Array.isArray(planData.spray_flags) ? planData.spray_flags : [];
                 if (wps.length >= 2) {
+                  const nonSprayIdxs: number[] = [];
+                  for (let i = 0; i < wps.length - 1; i++) {
+                    if (!(sprayFlags[i] ?? true)) nonSprayIdxs.push(i);
+                  }
+                  // The runtime /plan overlay has no layer tag of its own — it only
+                  // knows spray vs non-spray, so extension run-ups are otherwise
+                  // indistinguishable from ordinary inter-shape transit. Rather than
+                  // try to relabel them by matching coordinates against a different
+                  // API response (fragile: /plan's merged_waypoints and /entities'
+                  // preview_points can carry different rounding/tessellation and
+                  // fail to match exactly), skip drawing the non-spray run here
+                  // whenever it's structurally a run-up — always the very first
+                  // pre-mark and very last post-mark non-spray run when extensions
+                  // are enabled, no matter how many marks/shapes/inter-shape
+                  // transits sit in between — and let the already-correctly-tagged
+                  // fallbackExtLines (pushed unconditionally below) draw it instead.
+                  const firstNonSprayIdx = nonSprayIdxs[0];
+                  const lastNonSprayIdx = nonSprayIdxs[nonSprayIdxs.length - 1];
                   for (let i = 0; i < wps.length - 1; i++) {
                     const isMark = sprayFlags[i] ?? true;
                     if (isMark) continue; // marks already drawn as editable entity lines
+                    if (isEnabled && (i === firstNonSprayIdx || i === lastNonSprayIdx)) continue; // drawn via fallbackExtLines instead
                     const fromNorth = coerceFiniteNumber(wps[i]?.[0]);
                     const fromEast = coerceFiniteNumber(wps[i]?.[1]);
                     const toNorth = coerceFiniteNumber(wps[i + 1]?.[0]);
@@ -1944,13 +1963,12 @@ export default function App() {
               console.log("[API POST] /api/path/plan - overlay failed, using legacy preview:", planErr);
             }
 
-            // Extension run-ups belong in the list only when the runtime /plan
-            // overlay is unavailable. When runtimePathApplied, non-spray PRE/AFT
-            // segments are already drawn as runtime-transit-* lines — pushing
-            // fallbackExtLines too would duplicate the path on canvas and map.
-            if (!runtimePathApplied) {
-              generatedLines.push(...fallbackExtLines);
-            }
+            // fallbackExtLines (built directly from each entity's own
+            // extension_preview, always correctly tagged layer:"extension") are
+            // pushed unconditionally — the runtime overlay above omits its own
+            // first/last non-spray run precisely so this is the one and only
+            // source of extension geometry, regardless of which overlay path ran.
+            generatedLines.push(...fallbackExtLines);
 
             if (!runtimePathApplied) {
               if (body.transit_preview && Array.isArray(body.transit_preview)) {
@@ -3629,6 +3647,7 @@ export default function App() {
                   autoOriginReference={autoOriginReference}
                   mapGeometryFrame={mapGeometryFrame}
                   autoOriginEnabled={autoOriginEligible}
+                  extensionsEnabled={extensionsEnabled}
                   setLines={setLines}
                   selectedLineId={selectedLineId}
                   onSelectLine={setSelectedLineId}
@@ -4011,6 +4030,7 @@ type HomeViewProps = {
   onFocusPlan?: () => void;
   recenterRoverCount?: number;
   recenterPlanCount?: number;
+  extensionsEnabled?: boolean;
   previewRoverPoint: { north: number; east: number } | null;
   originShiftKey?: string | null;
   mapSourceLines: PlanLine[];

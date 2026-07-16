@@ -227,10 +227,23 @@ function PulsingDot({
   );
 }
 
-/** Rover vehicle icon — react-native-svg port of the legacy inline SVG. */
-function RoverVehicle({ heading }: { heading: number | null | undefined }) {
+/**
+ * Rover vehicle icon — react-native-svg port of the legacy inline SVG.
+ *
+ * MarkerView content is always screen/viewport-aligned (Mapbox never rotates a
+ * view annotation's own content to match the camera — only its projected screen
+ * position). Rotating just by `heading` therefore only looks correct at camera
+ * bearing 0: the moment the user twists the map, the icon stays fixed in screen
+ * orientation while the plan lines/basemap rotate underneath it, which reads as
+ * the rover "spinning" relative to its own plan. Subtracting the live camera
+ * bearing counter-rotates the icon so it keeps tracking its true heading exactly
+ * as it appears on the (possibly rotated) map — i.e. it turns WITH the map
+ * instead of appearing to drift/spin against it.
+ */
+function RoverVehicle({ heading, mapBearing }: { heading: number | null | undefined; mapBearing?: number }) {
+  const rotationDeg = (heading ?? 0) - (mapBearing ?? 0);
   return (
-    <View style={{ transform: [{ rotate: `${heading ?? 0}deg` }] }}>
+    <View style={{ transform: [{ rotate: `${rotationDeg}deg` }] }}>
       <Svg width={40} height={40} viewBox="-20 -20 40 40">
         <SvgCircle cx={0} cy={0} r={18.7} fill="rgba(14,165,233,0.12)" />
         <SvgPolygon
@@ -252,10 +265,13 @@ function RoverVehicle({ heading }: { heading: number | null | undefined }) {
 
 /** Start-direction arrow — rotated red triangle pointing along the plan's
  *  initial travel direction (parity with the legacy rotated CSS triangle).
- *  At bearing 0 the arrow points up (North); rotation is clockwise from North. */
-function StartArrow({ bearing }: { bearing: number }) {
+ *  At bearing 0 the arrow points up (North); rotation is clockwise from North.
+ *  Counter-rotated against live camera bearing for the same reason as
+ *  RoverVehicle — MarkerView content never rotates with the map on its own. */
+function StartArrow({ bearing, mapBearing }: { bearing: number; mapBearing?: number }) {
+  const rotationDeg = bearing - (mapBearing ?? 0);
   return (
-    <View style={{ transform: [{ rotate: `${bearing}deg` }] }}>
+    <View style={{ transform: [{ rotate: `${rotationDeg}deg` }] }}>
       <Svg width={14} height={16} viewBox="0 0 14 16">
         <SvgPolygon
           points="7,0 13,15 1,15"
@@ -333,6 +349,14 @@ export function MapViewNative(props: MapViewProps) {
   const cameraRef = useRef<Camera>(null);
   const mapViewRef = useRef<RNMapboxMapView>(null);
   const hasAutoCenteredRef = useRef(false);
+  // Live camera bearing (0 = north-up), tracked so heading-indicator markers can
+  // counter-rotate against it — otherwise a marker's screen-fixed rotation only
+  // shows the correct facing direction at bearing 0, and visibly drifts out of
+  // alignment with the map's own content the moment the user rotates the camera.
+  const [cameraBearing, setCameraBearing] = useState(0);
+  const handleCameraChanged = useCallback((state: { properties: { heading: number } }) => {
+    setCameraBearing(state.properties.heading ?? 0);
+  }, []);
   // Track the last trigger value we acted on, so recenter/fit fire exactly once
   // per button press and never on telemetry/geometry changes.
   const lastRecenterRoverRef = useRef(0);
@@ -1813,6 +1837,7 @@ export function MapViewNative(props: MapViewProps) {
         style={styles.map}
         styleURL={props.styleURL ?? MAPBOX_STYLE_URL}
         onPress={handleMapPress as (f: GeoJSON.Feature) => void}
+        onCameraChanged={handleCameraChanged}
         scaleBarEnabled={false}
         logoEnabled={false}
         attributionEnabled={false}
@@ -2207,14 +2232,14 @@ export function MapViewNative(props: MapViewProps) {
         {/* ── Rover vehicle marker + heading ── */}
         {showRover && roverGeo.center && (
           <MarkerView coordinate={roverGeo.center} anchor={{ x: 0.5, y: 0.5 }} allowOverlap>
-            <RoverVehicle heading={roverGeo.heading} />
+            <RoverVehicle heading={roverGeo.heading} mapBearing={cameraBearing} />
           </MarkerView>
         )}
 
         {/* ── Start-direction arrow (rotated to plan start bearing) ── */}
         {startArrow && (
           <MarkerView coordinate={startArrow.coord} anchor={{ x: 0.5, y: 0.5 }} allowOverlap>
-            <StartArrow bearing={startArrow.bearing} />
+            <StartArrow bearing={startArrow.bearing} mapBearing={cameraBearing} />
           </MarkerView>
         )}
 

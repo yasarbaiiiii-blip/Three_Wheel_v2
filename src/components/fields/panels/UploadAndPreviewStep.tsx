@@ -266,23 +266,27 @@ export function UploadAndPreviewStep({
     }
   };
 
-  const handleSaveExtension = async () => {
+  // Once extension is applied (enabled), this same button flips into a "Disable
+  // Extension" action so the operator doesn't have to scroll back up to the
+  // switch — pressing it again sends enabled:false instead of re-applying.
+  const handleToggleApplyExtension = async () => {
     if (!targetPathName || !apiBaseUrl) return;
+    const nextEnabled = !extEnabled;
     setIsExtSetting(true);
     try {
       const res = await pathApi.saveExtensions(apiBaseUrl, targetPathName, {
-        enabled: true,
+        enabled: nextEnabled,
         pre_extension_m: parseFloat(extPre) || 0,
         aft_extension_m: parseFloat(extAft) || 0,
         per_line: extPerLine,
       });
       if (res.ok) {
-        setExtEnabled(true);
+        setExtEnabled(nextEnabled);
         onInvalidateWorkflow("spray");
         onSelectPath(targetPathName, true);
       } else {
         const errText = await res.text();
-        Alert.alert("Error", errText || "Failed to save extensions");
+        Alert.alert("Error", errText || `Failed to ${nextEnabled ? "save" : "disable"} extensions`);
       }
     } catch (err: any) {
       Alert.alert("Error", err.message || "Failed to connect to backend");
@@ -455,88 +459,86 @@ export function UploadAndPreviewStep({
             />
           </View>
 
-          {extEnabled && (
-            <View style={{ padding: 12, paddingTop: 0, gap: 10 }}>
-              <View style={{ flexDirection: "row", gap: 8 }}>
-                <View style={{ flex: 1, gap: 3 }}>
-                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, fontWeight: "700" }}>PRE (m)</Text>
-                  <TextInput
-                    style={{
-                      height: 36,
-                      backgroundColor: FIELDS_COLORS.cardSolid,
-                      borderWidth: 1,
-                      borderColor: FIELDS_COLORS.panelBorder,
-                      borderRadius: 6,
-                      paddingHorizontal: 8,
-                      fontSize: 13,
-                      color: FIELDS_COLORS.textMain,
-                    }}
-                    value={extPre}
-                    onChangeText={(v) => {
-                      onInvalidateWorkflow("spray");
-                      setExtPre(v);
-                    }}
-                    keyboardType="numeric"
-                  />
-                </View>
-                <View style={{ flex: 1, gap: 3 }}>
-                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, fontWeight: "700" }}>AFT (m)</Text>
-                  <TextInput
-                    style={{
-                      height: 36,
-                      backgroundColor: FIELDS_COLORS.cardSolid,
-                      borderWidth: 1,
-                      borderColor: FIELDS_COLORS.panelBorder,
-                      borderRadius: 6,
-                      paddingHorizontal: 8,
-                      fontSize: 13,
-                      color: FIELDS_COLORS.textMain,
-                    }}
-                    value={extAft}
-                    onChangeText={(v) => {
-                      onInvalidateWorkflow("spray");
-                      setExtAft(v);
-                    }}
-                    keyboardType="numeric"
-                  />
-                </View>
-              </View>
-
-              <View
-                style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                }}
-              >
-                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "600" }}>Per-line</Text>
-                <Switch
-                  value={extPerLine}
-                  onValueChange={(v) => {
-                    onInvalidateWorkflow("spray");
-                    setExtPerLine(v);
+          <View style={{ padding: 12, paddingTop: 0, gap: 10 }}>
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <View style={{ flex: 1, gap: 3 }}>
+                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, fontWeight: "700" }}>PRE (m)</Text>
+                <TextInput
+                  style={{
+                    height: 36,
+                    backgroundColor: FIELDS_COLORS.cardSolid,
+                    borderWidth: 1,
+                    borderColor: FIELDS_COLORS.panelBorder,
+                    borderRadius: 6,
+                    paddingHorizontal: 8,
+                    fontSize: 13,
+                    color: FIELDS_COLORS.textMain,
                   }}
-                  trackColor={{ false: FIELDS_COLORS.panelBorder, true: "#8b5cf6" }}
+                  value={extPre}
+                  onChangeText={(v) => {
+                    onInvalidateWorkflow("spray");
+                    setExtPre(v);
+                  }}
+                  keyboardType="numeric"
                 />
               </View>
-
-              <Pressable
-                onPress={handleSaveExtension}
-                disabled={isExtSetting}
-                style={{
-                  height: 36,
-                  borderRadius: 8,
-                  alignItems: "center",
-                  justifyContent: "center",
-                  backgroundColor: isExtSetting ? FIELDS_COLORS.textDim : "#8b5cf6",
-                }}
-              >
-                <Text style={{ color: "#fff", fontSize: 12, fontWeight: "800" }}>
-                  {isExtSetting ? "Saving..." : "Apply Extension"}
-                </Text>
-              </Pressable>
+              <View style={{ flex: 1, gap: 3 }}>
+                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, fontWeight: "700" }}>AFT (m)</Text>
+                <TextInput
+                  style={{
+                    height: 36,
+                    backgroundColor: FIELDS_COLORS.cardSolid,
+                    borderWidth: 1,
+                    borderColor: FIELDS_COLORS.panelBorder,
+                    borderRadius: 6,
+                    paddingHorizontal: 8,
+                    fontSize: 13,
+                    color: FIELDS_COLORS.textMain,
+                  }}
+                  value={extAft}
+                  onChangeText={(v) => {
+                    onInvalidateWorkflow("spray");
+                    setExtAft(v);
+                  }}
+                  keyboardType="numeric"
+                />
+              </View>
             </View>
-          )}
+
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "600" }}>Per-line</Text>
+              <Switch
+                value={extPerLine}
+                onValueChange={(v) => {
+                  onInvalidateWorkflow("spray");
+                  setExtPerLine(v);
+                }}
+                trackColor={{ false: FIELDS_COLORS.panelBorder, true: "#8b5cf6" }}
+              />
+            </View>
+
+            <Pressable
+              onPress={handleToggleApplyExtension}
+              disabled={isExtSetting}
+              style={{
+                height: 36,
+                borderRadius: 8,
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: isExtSetting ? FIELDS_COLORS.textDim : extEnabled ? "#ef4444" : "#8b5cf6",
+              }}
+            >
+              <Text style={{ color: "#fff", fontSize: 12, fontWeight: "800" }}>
+                {isExtSetting ? "Saving..." : extEnabled ? "Disable Extension" : "Apply Extension"}
+              </Text>
+            </Pressable>
+          </View>
         </View>
       ) : null}
 

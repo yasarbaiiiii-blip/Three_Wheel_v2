@@ -588,7 +588,7 @@ export default function ModernHomeUI(props) {
     autoOriginEnabled, mapSourceLines, alignedRefPoints, autoOriginReference,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
     isPlanEditingMode,
-    layerVisibility, setLayerVisibility,
+    layerVisibility, setLayerVisibility, extensionsEnabled,
     virtualJoystick, onPausePlan, onResumePlan, isPaused = false, missionActionBusy = false,
     missionLoaded = false, missionLoadedPanelOpenToken = 0,
     mapViewEnabled = false, setMapViewEnabled, renderPlanPreview,
@@ -667,6 +667,14 @@ export default function ModernHomeUI(props) {
   const [showLayersMenu, setShowLayersMenu] = useState(false);
   const [showLayersPlanSubmenu, setShowLayersPlanSubmenu] = useState(false);
   const showRoverMarker = layerVisibility?.rover !== false;
+  // Prefer the backend-confirmed extensionsEnabled flag (authoritative, set from
+  // extension_config.enabled on every path refresh) over inferring purely from
+  // line tags — some renderer paths may not tag layer:"extension" precisely, but
+  // this flag reflects the actual saved config regardless of how lines render.
+  const hasExtensionLines = useMemo(
+    () => Boolean(extensionsEnabled) || lines.some((line) => line.layer === "extension"),
+    [lines, extensionsEnabled]
+  );
   const availableSegmentKinds = useMemo(() => {
     const kinds = new Set();
     for (const line of lines) {
@@ -1400,12 +1408,14 @@ export default function ModernHomeUI(props) {
                       transform: [{ rotate: "45deg" }],
                     }} />
 
-                    <LayerCheckboxRow
-                      label="Extension"
-                      checked={layerVisibility?.extension !== false}
-                      onPress={() => toggleLayerFlag("extension")}
-                      colors={COLORS}
-                    />
+                    {hasExtensionLines && (
+                      <LayerCheckboxRow
+                        label="Extension"
+                        checked={layerVisibility?.extension !== false}
+                        onPress={() => toggleLayerFlag("extension")}
+                        colors={COLORS}
+                      />
+                    )}
                     <LayerCheckboxRow
                       label="Rover"
                       checked={showRoverMarker}
