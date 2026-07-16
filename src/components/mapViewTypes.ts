@@ -16,6 +16,8 @@ export interface MapViewProps {
   lines: PlanLine[];
   alignedRefPoints: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
   visible: boolean;
+  /** Layers filter: whether the rover marker itself is drawn. Defaults to visible when omitted. */
+  showRover?: boolean;
   recenterRoverTrigger?: number;
   recenterPlanTrigger?: number;
   resetNorthTrigger?: number;

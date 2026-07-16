@@ -38,7 +38,7 @@ const INITIAL_TRANSFORM: TransformHUDData = {
 
 export function useFieldsWorkflow(baseVisibility: LayerVisibility) {
   // New step-based state
-  const [activeStep, setActiveStep] = useState<FieldsStepId>("boundingBox");
+  const [activeStep, setActiveStep] = useState<FieldsStepId>("upload");
   const [isTransformConfirmed, setIsTransformConfirmed] = useState(false);
   const [isAlignmentComplete, setIsAlignmentComplete] = useState(false);
   const [manipulationMode, setManipulationMode] = useState<PlanManipulationMode>("idle");

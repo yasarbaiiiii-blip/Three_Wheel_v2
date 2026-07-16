@@ -275,6 +275,7 @@ export function MapViewNative(props: MapViewProps) {
     lines,
     alignedRefPoints,
     visible,
+    showRover = true,
     recenterRoverTrigger,
     recenterPlanTrigger,
     resetNorthTrigger,
@@ -2204,7 +2205,7 @@ export function MapViewNative(props: MapViewProps) {
         })()}
 
         {/* ── Rover vehicle marker + heading ── */}
-        {roverGeo.center && (
+        {showRover && roverGeo.center && (
           <MarkerView coordinate={roverGeo.center} anchor={{ x: 0.5, y: 0.5 }} allowOverlap>
             <RoverVehicle heading={roverGeo.heading} />
           </MarkerView>

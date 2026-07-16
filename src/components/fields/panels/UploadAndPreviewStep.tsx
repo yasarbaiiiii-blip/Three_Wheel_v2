@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Alert, Platform, Pressable, TouchableOpacity, ScrollView, Switch, Text, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
-import { ChevronDown, ChevronRight, Upload, X } from "lucide-react-native";
+import { Upload, X } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
 import type { ImportedPlan } from "../../../types/plan";
@@ -17,8 +17,6 @@ type UploadAndPreviewStepProps = {
   onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
   blockProtectedWorkflowMutation: (action: string) => boolean;
   protectedResident: boolean;
-  /** Injected TemplatePanel component */
-  renderTemplates?: () => React.ReactNode;
   /** Called when a GPS lat/lon point CSV is successfully parsed */
   onGpsPointMissionParsed?: (data: pathApi.ParsePointGpsCsvResponse) => void;
 };
@@ -45,13 +43,11 @@ export function UploadAndPreviewStep({
   onInvalidateWorkflow,
   blockProtectedWorkflowMutation,
   protectedResident,
-  renderTemplates,
   onGpsPointMissionParsed,
 }: UploadAndPreviewStepProps) {
   const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [previewData, setPreviewData] = useState<pathApi.PathPreviewResponse | null>(null);
-  const [showTemplates, setShowTemplates] = useState(false);
 
   // Extension state (inline, no modal)
   const [extEnabled, setExtEnabled] = useState(false);
@@ -543,43 +539,6 @@ export function UploadAndPreviewStep({
           )}
         </View>
       ) : null}
-
-      {/* Templates Section (collapsible) */}
-      {renderTemplates && (
-        <View>
-          <Pressable
-            onPress={() => setShowTemplates(!showTemplates)}
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 8,
-              paddingVertical: 8,
-            }}
-          >
-            {showTemplates ? (
-              <ChevronDown size={14} color={FIELDS_COLORS.textMuted} />
-            ) : (
-              <ChevronRight size={14} color={FIELDS_COLORS.textDim} />
-            )}
-            <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "700" }}>
-              Templates
-            </Text>
-          </Pressable>
-          {showTemplates && (
-            <View
-              style={{
-                borderRadius: 10,
-                backgroundColor: FIELDS_COLORS.surfaceSolid,
-                borderWidth: 1,
-                borderColor: FIELDS_COLORS.panelBorder,
-                padding: 12,
-              }}
-            >
-              {renderTemplates()}
-            </View>
-          )}
-        </View>
-      )}
 
       {protectedResident && (
         <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11 }}>

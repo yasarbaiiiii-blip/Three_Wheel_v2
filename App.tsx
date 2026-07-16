@@ -132,9 +132,11 @@ import {
   buildPlanLineSvgPath,
   computePlanBoundingBoxLegacy,
   getCurveGeometry,
+  getPlanLineSegmentKind,
   getPreviewCircleElements,
   isCircleLikeLine,
   isCurveEntity,
+  isSegmentKindVisible,
   normalizeDxfEntityGeometry,
   normalizePlanLinesForCurves,
 } from "./src/utils/curveGeometry";
@@ -742,6 +744,8 @@ export default function App() {
     center: true,
     transit: true,
     extension: true,
+    rover: true,
+    segmentTypes: {},
   });
   const [showRefPointLabels, setShowRefPointLabels] = useState(false);
   const [activeRefPointLabelIndex, setActiveRefPointLabelIndex] = useState<number | null>(null);
@@ -836,6 +840,11 @@ export default function App() {
   const missionIdentityInFlightRef = useRef(false);
   const [mapViewEnabled, setMapViewEnabled] = useState(true);
   const [resetNorthCount, setResetNorthCount] = useState(0);
+  // Shared across every page (Home, Fields, Templates) so the top toolbar's
+  // Plan/Rover focus buttons drive whichever map instance is currently mounted,
+  // instead of each page owning its own disconnected counter pair.
+  const [recenterRoverCount, setRecenterRoverCount] = useState(0);
+  const [recenterPlanCount, setRecenterPlanCount] = useState(0);
 
   const toggleAutoOrigin = useCallback(() => {
     setAutoOrigin((prev) => {
@@ -1275,7 +1284,7 @@ export default function App() {
     setSelectedLineId(null);
     setImportedPlan(null);
     setAutoOriginReference(null);
-    setLayerVisibility({ boundary: true, marking: true, center: true, transit: true, extension: true });
+    setLayerVisibility({ boundary: true, marking: true, center: true, transit: true, extension: true, rover: true, segmentTypes: {} });
   };
 
   const connectSelectedWebsocket = async () => {
@@ -3600,6 +3609,10 @@ export default function App() {
                   onToggleAutoOrigin={toggleAutoOrigin}
                   onResetNorth={() => setResetNorthCount((c) => c + 1)}
                   resetNorthCount={resetNorthCount}
+                  onFocusRover={() => setRecenterRoverCount((c) => c + 1)}
+                  onFocusPlan={() => setRecenterPlanCount((c) => c + 1)}
+                  recenterRoverCount={recenterRoverCount}
+                  recenterPlanCount={recenterPlanCount}
                   previewRoverPoint={previewRoverPoint}
                   originShiftKey={
                     autoOriginReference
@@ -3727,6 +3740,8 @@ export default function App() {
                             activeRefPointLabelIndex={activeRefPointLabelIndex}
                             setActiveRefPointLabelIndex={setActiveRefPointLabelIndex}
                             resetNorthCount={resetNorthCount}
+                            recenterRoverCount={recenterRoverCount}
+                            recenterPlanCount={recenterPlanCount}
                             isVisualAlignmentMode={isVisualAlignmentMode}
                             visualAlignmentItem={visualAlignmentItem}
                             setVisualAlignmentItem={setVisualAlignmentItem}
@@ -3992,6 +4007,10 @@ type HomeViewProps = {
   onToggleAutoOrigin: () => void;
   onResetNorth?: () => void;
   resetNorthCount?: number;
+  onFocusRover?: () => void;
+  onFocusPlan?: () => void;
+  recenterRoverCount?: number;
+  recenterPlanCount?: number;
   previewRoverPoint: { north: number; east: number } | null;
   originShiftKey?: string | null;
   mapSourceLines: PlanLine[];
@@ -4172,6 +4191,10 @@ function HomeView(props: HomeViewProps) {
     isPlanEditingMode,
     visualAlignmentAnchor,
     setImportedPlan,
+    onFocusRover,
+    onFocusPlan,
+    recenterRoverCount = 0,
+    recenterPlanCount = 0,
   } = props;
 
   const [sprayModalOpen, setSprayModalOpen] = useState(false);
@@ -4449,9 +4472,6 @@ function HomeView(props: HomeViewProps) {
     telemetrySnapshot?.measured_speed_m_s ??
     telemetrySnapshot?.speed_m_s;
 
-  const [recenterRoverCount, setRecenterRoverCount] = useState(0);
-  const [recenterPlanCount, setRecenterPlanCount] = useState(0);
-
   const { page: _page, renderSectionContent: _rsc, setImportedPlan: _sip, ...modernHomeProps } = props;
 
   return (
@@ -4461,8 +4481,8 @@ function HomeView(props: HomeViewProps) {
       setImportedPlan={props.setImportedPlan}
       currentPage={page}
       renderSectionContent={renderSectionContent}
-      onFocusRover={() => setRecenterRoverCount((c) => c + 1)}
-      onFocusPlan={() => setRecenterPlanCount((c) => c + 1)}
+      onFocusRover={onFocusRover}
+      onFocusPlan={onFocusPlan}
       recenterRoverCount={recenterRoverCount}
       recenterPlanCount={recenterPlanCount}
       onResetNorth={props.onResetNorth}
@@ -5360,6 +5380,8 @@ function SectionPages(props: {
   stopRtk?: () => Promise<void>;
   onClearMission: () => Promise<void>;
   resetNorthCount?: number;
+  recenterRoverCount?: number;
+  recenterPlanCount?: number;
   visualAlignmentAnchor?: { originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null;
   gpsPointMission?: pathApi.ParsePointGpsCsvResponse | null;
   onGpsPointMissionParsed?: (data: pathApi.ParsePointGpsCsvResponse) => void;
@@ -5392,6 +5414,9 @@ function SectionPages(props: {
               visualAlignmentAnchor={props.visualAlignmentAnchor}
               isPlanEditingMode={props.isPlanEditingMode}
               resetNorthTrigger={props.resetNorthCount}
+              recenterRoverTrigger={props.recenterRoverCount}
+              recenterPlanTrigger={props.recenterPlanCount}
+              hideRefocusControls
             />
           )}
         />
@@ -5418,6 +5443,9 @@ function SectionPages(props: {
               setVisualAlignmentItem={props.setVisualAlignmentItem}
               visualAlignmentAnchor={props.visualAlignmentAnchor}
               resetNorthTrigger={props.resetNorthCount}
+              recenterRoverTrigger={props.recenterRoverCount}
+              recenterPlanTrigger={props.recenterPlanCount}
+              hideRefocusControls
             />
           )}
         />
@@ -6544,9 +6572,11 @@ function PlanPreview({
   const filtered = useMemo(
     () =>
       sanitizePlanLines(lines).filter((line) => {
-        if (line.layer === "boundary") return visibility.boundary;
-        if (line.layer === "marking") return visibility.marking;
-        if (line.layer === "center") return visibility.center;
+        // Segment-type (line/arc/circle/...) visibility only applies to real plan
+        // geometry — not the synthetic transit/extension/virtual_boundary layers.
+        if (line.layer === "boundary") return visibility.boundary && isSegmentKindVisible(line, visibility.segmentTypes);
+        if (line.layer === "marking") return visibility.marking && isSegmentKindVisible(line, visibility.segmentTypes);
+        if (line.layer === "center") return visibility.center && isSegmentKindVisible(line, visibility.segmentTypes);
         if (line.layer === "transit") return visibility.transit;
         if (line.layer === "extension") return visibility.extension;
         return true;
@@ -7608,7 +7638,7 @@ function PlanPreview({
             })}
 
             {/* ── Rover icon (top-down car shape) ── */}
-            {hasRover && layoutSize.width > 0 && (() => {
+            {hasRover && visibility.rover !== false && layoutSize.width > 0 && (() => {
               const cx = roverScreenX;
               const cy = roverScreenY;
               // Car dimensions in screen pixels
@@ -7617,8 +7647,10 @@ function PlanPreview({
               const noseLength = 7;
               // heading_ned_deg: 0=North(up), 90=East(right), clockwise
               // SVG rotation: 0=up, positive=clockwise, matches NED heading directly.
-              // We also add map rotation.
-              const headingRot = roverDisplayPose.headingDeg + rotation;
+              // Deliberately NOT combined with the plan view's own `rotation` state:
+              // the rover icon must always show the rover's true facing direction and
+              // stay static under a map rotate gesture, never spin with the view.
+              const headingRot = roverDisplayPose.headingDeg;
               return (
                 <G transform={`translate(${cx}, ${cy}) rotate(${headingRot})`}>
                   {/* Glow shadow */}

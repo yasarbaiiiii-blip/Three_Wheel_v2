@@ -65,6 +65,25 @@ export function isCurveEntity(line: PlanLine): boolean {
   return type === "circle" || type === "arc";
 }
 
+/**
+ * Buckets a line into a user-facing segment "kind" for the Layers visibility filter.
+ * Entities with no `entity` tag (plain DXF LINE records) fall back to "line", and
+ * LWPOLYLINE/POLYLINE are merged into "polyline" — anything else passes through as-is
+ * so no DXF entity type is ever silently dropped from the filter list.
+ */
+export function getPlanLineSegmentKind(line: PlanLine): string {
+  const raw = normalizeCurveEntityType(line.entity?.entity_type);
+  if (!raw || raw === "line") return "line";
+  if (raw === "lwpolyline") return "polyline";
+  return raw;
+}
+
+/** True when the line's segment kind is visible per the Layers filter (absent = visible). */
+export function isSegmentKindVisible(line: PlanLine, segmentTypes?: Record<string, boolean>): boolean {
+  if (!segmentTypes) return true;
+  return segmentTypes[getPlanLineSegmentKind(line)] !== false;
+}
+
 /** True when the line should render as a smooth closed circle (entity tag or fitted preview). */
 export function isCircleLikeLine(line: PlanLine): boolean {
   const entityType = normalizeCurveEntityType(line.entity?.entity_type);

@@ -4,13 +4,14 @@ import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform, Moda
 import { GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps, withSpring, withTiming, cancelAnimation, Easing, runOnJS, Keyframe } from "react-native-reanimated";
 import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText, Path, Polyline } from "react-native-svg";
-import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check, Pencil, Undo2 } from "lucide-react-native";
+import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check, Pencil, Undo2, Layers, ChevronRight } from "lucide-react-native";
 import { ManualJoystick } from "./ManualJoystick";
 import { Compass } from "./Compass";
 import { Navbar } from "./Navbar";
 import { pauseMission, nextMission, exportLog } from "../api/missionApi";
 import { MapView } from "./MapView";
 import { canAcquireJoystick as canAcquireJoystickForState } from "../utils/joystickFrontendSafety";
+import { getPlanLineSegmentKind, isSegmentKindVisible } from "../utils/curveGeometry";
 import * as pathApi from "../api/pathApi";
 
 // Using 127.0.0.1:5001 as fallback if window location is unavailable
@@ -132,6 +133,32 @@ const PanelHeader = ({ icon: Icon, title, subtitle, onClose, accent = COLORS.acc
       </Pressable>
     ) : null}
   </View>
+);
+
+const LayerCheckboxRow = ({ label, checked, onPress, colors }) => (
+  <Pressable
+    style={({ pressed }) => [
+      { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 10, borderRadius: 8, gap: 12 },
+      pressed && { backgroundColor: colors.surfaceSolid },
+    ]}
+    onPress={onPress}
+  >
+    <Text numberOfLines={1} style={{ flex: 1, color: colors.textMain, fontSize: 13, fontWeight: "600" }}>{label}</Text>
+    <View
+      style={{
+        width: 18,
+        height: 18,
+        borderRadius: 5,
+        alignItems: "center",
+        justifyContent: "center",
+        borderWidth: 1.5,
+        borderColor: checked ? colors.accentBrand : colors.panelBorder,
+        backgroundColor: checked ? colors.accentBrand : "transparent",
+      }}
+    >
+      {checked ? <Check color="#fff" size={13} strokeWidth={3} /> : null}
+    </View>
+  </Pressable>
 );
 
 const StatTile = ({ icon: Icon, label, value, tone = COLORS.textMain, accent = COLORS.accentBrand, wide = false }) => (
@@ -561,6 +588,7 @@ export default function ModernHomeUI(props) {
     autoOriginEnabled, mapSourceLines, alignedRefPoints, autoOriginReference,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
     isPlanEditingMode,
+    layerVisibility, setLayerVisibility,
     virtualJoystick, onPausePlan, onResumePlan, isPaused = false, missionActionBusy = false,
     missionLoaded = false, missionLoadedPanelOpenToken = 0,
     mapViewEnabled = false, setMapViewEnabled, renderPlanPreview,
@@ -611,8 +639,10 @@ export default function ModernHomeUI(props) {
   // split this 55/45 so they always fill it exactly, with a fixed HUD_PAD
   // gap between them instead of whatever gap two independent ratios leave.
   const usableRailHeight = windowHeight - HUD_PAD * 3;
-  const missionPanelHeight = Math.max(300, usableRailHeight * MISSION_PANEL_HEIGHT_SHARE);
-  const telemetryPanelHeight = Math.max(280, usableRailHeight - missionPanelHeight);
+  // Mission Control is now content-sized (see missionPanelAuto), so Telemetry's
+  // height is computed directly from its own share instead of "whatever's left
+  // after Mission" — the two panels no longer need to be arithmetically coupled.
+  const telemetryPanelHeight = Math.max(280, usableRailHeight * (1 - MISSION_PANEL_HEIGHT_SHARE));
   const [visualSelected, setVisualSelected] = useState(false);
 
   // ── Click to Mark & Manual Canvas Drawing state ──
@@ -630,6 +660,45 @@ export default function ModernHomeUI(props) {
   }, [drawingMode, canvasStrokes, drawnStrokes]);
 
   const [isUploadingDrawn, setIsUploadingDrawn] = useState(false);
+
+  // ── Layers visibility filter (extension / rover / plan segment type) ──
+  // Applies the same filter the SVG PlanPreview already honors to the native
+  // Mapbox map, which otherwise never saw `layerVisibility` at all.
+  const [showLayersMenu, setShowLayersMenu] = useState(false);
+  const [showLayersPlanSubmenu, setShowLayersPlanSubmenu] = useState(false);
+  const showRoverMarker = layerVisibility?.rover !== false;
+  const availableSegmentKinds = useMemo(() => {
+    const kinds = new Set();
+    for (const line of lines) {
+      if (line.layer === "extension" || line.layer === "transit" || line.layer === "virtual_boundary") continue;
+      kinds.add(getPlanLineSegmentKind(line));
+    }
+    return Array.from(kinds).sort();
+  }, [lines]);
+  const mapSourceLinesRaw = visualAlignmentItem
+    ? []
+    : autoOriginEnabled && mapSourceLines
+      ? mapSourceLines
+      : lines;
+  const visibleMapLines = useMemo(
+    () =>
+      mapSourceLinesRaw.filter((line) => {
+        if (line.layer === "extension") return layerVisibility?.extension !== false;
+        return isSegmentKindVisible(line, layerVisibility?.segmentTypes);
+      }),
+    [mapSourceLinesRaw, layerVisibility]
+  );
+
+  const toggleLayerFlag = useCallback((key) => {
+    setLayerVisibility?.((prev) => ({ ...(prev || {}), [key]: prev?.[key] === false ? true : false }));
+  }, [setLayerVisibility]);
+
+  const toggleSegmentKind = useCallback((kind) => {
+    setLayerVisibility?.((prev) => {
+      const prevTypes = prev?.segmentTypes || {};
+      return { ...(prev || {}), segmentTypes: { ...prevTypes, [kind]: prevTypes[kind] === false ? true : false } };
+    });
+  }, [setLayerVisibility]);
 
   const vehicleMode = normalizeVehicleMode(telemetrySnapshot?.mode ?? systemHealth?.mode);
   const isVehicleArmed = telemetrySnapshot?.armed ?? systemHealth?.armed ?? false;
@@ -1287,6 +1356,100 @@ export default function ModernHomeUI(props) {
                   </View>
                 )}
               </View>
+
+              <View style={styles.mapToolsDivider} />
+              <View>
+                <Pressable
+                  style={({ pressed }) => [styles.focusToolBtnGrouped, pressed && styles.focusToolBtnPressed]}
+                  onPress={() => setShowLayersMenu((v) => !v)}
+                  accessibilityLabel="Layers"
+                >
+                  <Layers color={COLORS.accentBrand} size={18} strokeWidth={2.2} />
+                  <Text style={styles.focusToolLabel}>Layers</Text>
+                </Pressable>
+                {showLayersMenu && (
+                  <View style={{
+                    position: "absolute",
+                    top: "100%",
+                    marginTop: 14,
+                    right: 0,
+                    backgroundColor: COLORS.cardSolid,
+                    borderRadius: 12,
+                    padding: 6,
+                    minWidth: 200,
+                    borderWidth: 1,
+                    borderColor: COLORS.panelBorder,
+                    shadowColor: "#000",
+                    shadowOffset: { width: 0, height: 8 },
+                    shadowOpacity: 0.5,
+                    shadowRadius: 24,
+                    elevation: 10,
+                    zIndex: 100,
+                  }}>
+                    {/* Top Pointer Triangle */}
+                    <View style={{
+                      position: "absolute",
+                      top: -6,
+                      right: 22,
+                      width: 12,
+                      height: 12,
+                      backgroundColor: COLORS.cardSolid,
+                      borderTopWidth: 1,
+                      borderLeftWidth: 1,
+                      borderColor: COLORS.panelBorder,
+                      transform: [{ rotate: "45deg" }],
+                    }} />
+
+                    <LayerCheckboxRow
+                      label="Extension"
+                      checked={layerVisibility?.extension !== false}
+                      onPress={() => toggleLayerFlag("extension")}
+                      colors={COLORS}
+                    />
+                    <LayerCheckboxRow
+                      label="Rover"
+                      checked={showRoverMarker}
+                      onPress={() => toggleLayerFlag("rover")}
+                      colors={COLORS}
+                    />
+
+                    <View style={{ height: 1, backgroundColor: COLORS.panelBorder, marginVertical: 4, marginHorizontal: 6 }} />
+
+                    <Pressable
+                      style={({ pressed }) => [
+                        { padding: 10, borderRadius: 8, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+                        pressed && { backgroundColor: COLORS.surfaceSolid },
+                      ]}
+                      onPress={() => setShowLayersPlanSubmenu((v) => !v)}
+                    >
+                      <Text style={{ color: COLORS.textMain, fontSize: 13, fontWeight: "600" }}>Plan</Text>
+                      <ChevronRight
+                        color={COLORS.textMuted}
+                        size={16}
+                        style={{ transform: [{ rotate: showLayersPlanSubmenu ? "90deg" : "0deg" }] }}
+                      />
+                    </Pressable>
+
+                    {showLayersPlanSubmenu && (
+                      <View style={{ paddingLeft: 10 }}>
+                        {availableSegmentKinds.length === 0 ? (
+                          <Text style={{ color: COLORS.textMuted, fontSize: 12, padding: 10 }}>No plan loaded</Text>
+                        ) : (
+                          availableSegmentKinds.map((kind) => (
+                            <LayerCheckboxRow
+                              key={kind}
+                              label={kind.charAt(0).toUpperCase() + kind.slice(1)}
+                              checked={layerVisibility?.segmentTypes?.[kind] !== false}
+                              onPress={() => toggleSegmentKind(kind)}
+                              colors={COLORS}
+                            />
+                          ))
+                        )}
+                      </View>
+                    )}
+                  </View>
+                )}
+              </View>
             </>
           )}
         </View>
@@ -1552,8 +1715,8 @@ export default function ModernHomeUI(props) {
         style={[
           styles.rightPanelBase,
           styles.missionPanel,
-          showJoystick && styles.missionPanelJoystick,
-          { height: showJoystick ? undefined : missionPanelHeight, opacity: 1 },
+          styles.missionPanelAuto,
+          { opacity: 1 },
         ]}
       >
         <PanelHeader
@@ -1583,11 +1746,8 @@ export default function ModernHomeUI(props) {
           } : undefined}
         />
 
-        <ScrollView
-          style={styles.panelScroll}
-          contentContainerStyle={[styles.panelScrollContent, showJoystick && styles.joystickScrollContent]}
-          showsVerticalScrollIndicator={false}
-          nestedScrollEnabled
+        <View
+          style={[styles.panelScrollContent, showJoystick && styles.joystickScrollContent]}
         >
           {showJoystick && vehicleMode === "MANUAL" && !missionRunning ? (
             <>
@@ -1733,7 +1893,7 @@ export default function ModernHomeUI(props) {
               </View>
             </>
           )}
-        </ScrollView>
+        </View>
       </View>
     );
   };
@@ -1769,13 +1929,8 @@ export default function ModernHomeUI(props) {
                 }
               }}
               telemetrySnapshot={telemetrySnapshot}
-              lines={
-                visualAlignmentItem
-                  ? []
-                  : autoOriginEnabled && mapSourceLines
-                    ? mapSourceLines
-                    : lines
-              }
+              lines={visibleMapLines}
+              showRover={showRoverMarker}
               alignedRefPoints={alignedRefPoints}
               autoOriginReference={autoOriginReference}
               mapGeometryFrame={mapGeometryFrame}
@@ -2601,7 +2756,10 @@ const styles = StyleSheet.create({
   },
   telemetryPanel: { top: HUD_PAD, right: HUD_PAD },
   missionPanel: { bottom: HUD_PAD, right: HUD_PAD },
-  missionPanelJoystick: { maxHeight: "68%", height: "auto" },
+  // Content-sized with a ceiling, never a hard pinned height — matches every
+  // other floating HUD panel (mapToolsGroupCard, quickAccessSubNav, joystickPanel).
+  // Applies in both Mission Control and Manual Control (joystick) modes.
+  missionPanelAuto: { maxHeight: "68%", height: "auto" },
   joystickPanel: {
     bottom: HUD_PAD,
     left: HUD_PAD + NAV_WIDTH_COLLAPSED + SIDE_GAP + 8,
@@ -2610,7 +2768,6 @@ const styles = StyleSheet.create({
     maxHeight: "58%",
     zIndex: 110,
   },
-  panelScroll: { flex: 1 },
   panelScrollContent: { paddingBottom: 10, gap: 12 },
 
   panelHeader: {

@@ -1,5 +1,6 @@
 import React, { useCallback, useState } from "react";
 import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
+import { ChevronDown, ChevronRight } from "lucide-react-native";
 
 import * as missionApi from "../api/missionApi";
 import * as pathApi from "../api/pathApi";
@@ -129,13 +130,6 @@ export type FieldsPageProps = {
 
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
 
-const STEP_DEFS: { id: FieldsStepId; title: string; stepNumber: number }[] = [
-  { id: "boundingBox", title: "Bounding Box", stepNumber: 1 },
-  { id: "upload", title: "Upload & Parse", stepNumber: 2 },
-  { id: "align", title: "Align DXF", stepNumber: 3 },
-  { id: "orderAndSpray", title: "Path Order & Load", stepNumber: 4 },
-];
-
 export function FieldsPage(props: FieldsPageProps) {
   const {
     importedPlan,
@@ -205,6 +199,7 @@ export function FieldsPage(props: FieldsPageProps) {
   const [missionSummary, setMissionSummary] = useState<any | null>(null);
   const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "single_point" | "visual_alignment">("least_squares");
 
+  const [showTemplates, setShowTemplates] = useState(false);
   const [boundaryMode, setBoundaryMode] = useState(false);
   const [boundaryWidthStr, setBoundaryWidthStr] = useState("4.0");
   const [boundaryHeightStr, setBoundaryHeightStr] = useState("3.0");
@@ -355,7 +350,7 @@ export function FieldsPage(props: FieldsPageProps) {
   };
 
   const toggleStep = (id: FieldsStepId) => {
-    setActiveStep(activeStep === id ? "boundingBox" : id);
+    setActiveStep(activeStep === id ? "upload" : id);
   };
 
   // Confirm transform handler — bakes the plan's current drag/scale/rotate into `lines`
@@ -550,29 +545,9 @@ export function FieldsPage(props: FieldsPageProps) {
       >
         <FieldsClearBar onClear={onClearMission} busy={missionActionBusy} />
         <View style={{ flex: 1, padding: 12, gap: 10, paddingBottom: 24 }}>
-          {/* Step 1: Bounding Box */}
+          {/* Step 1: Upload & Parse */}
           <FieldsStepCard
             stepNumber={1}
-            title="Bounding Box"
-            status={stepStatus("boundingBox")}
-            expanded={activeStep === "boundingBox"}
-            onToggle={() => toggleStep("boundingBox")}
-          >
-            <BoundingBoxStep
-              widthStr={boundaryWidthStr}
-              onChangeWidthStr={setBoundaryWidthStr}
-              heightStr={boundaryHeightStr}
-              onChangeHeightStr={setBoundaryHeightStr}
-              onApplyBoundary={handleApplyBoundary}
-              activeWidth={activeBoundaryWidth}
-              activeHeight={activeBoundaryHeight}
-              onProceedToUpload={() => setActiveStep("upload")}
-            />
-          </FieldsStepCard>
-
-          {/* Step 2: Upload & Parse */}
-          <FieldsStepCard
-            stepNumber={2}
             title="Upload & Parse"
             status={stepStatus("upload")}
             expanded={activeStep === "upload"}
@@ -598,34 +573,88 @@ export function FieldsPage(props: FieldsPageProps) {
               blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
               protectedResident={protectedResident}
               onGpsPointMissionParsed={onGpsPointMissionParsed}
-              renderTemplates={() => (
-                <TemplatePanel
-                  apiBaseUrl={apiBaseUrl}
-                  onRefreshPaths={onRefreshPaths}
-                  onSelectPath={(name) => {
-                    onSelectPath(name);
-                    setShowMapInteraction(true);
-                    if (isPlanEditingMode !== true) {
-                      onStartPlanEditing?.();
-                    }
-                    setActiveStep("align");
-                  }}
-                  boundaryMode={boundaryMode}
-                  onToggleBoundaryMode={handleToggleBoundaryMode}
-                  boundaryWidthStr={boundaryWidthStr}
-                  onChangeBoundaryWidthStr={setBoundaryWidthStr}
-                  boundaryHeightStr={boundaryHeightStr}
-                  onChangeBoundaryHeightStr={setBoundaryHeightStr}
-                  onApplyBoundary={handleApplyBoundary}
-                  sketchMode={sketchMode}
-                  onToggleSketchMode={setSketchMode}
-                  showSnapPoints={showSnapPoints}
-                  onToggleShowSnapPoints={setShowSnapPoints}
-                  telemetryPosN={telemetrySnapshot?.pos_n ?? null}
-                  telemetryPosE={telemetrySnapshot?.pos_e ?? null}
-                />
-              )}
             />
+          </FieldsStepCard>
+
+          {/* Step 2: Bounding Box + Templates */}
+          <FieldsStepCard
+            stepNumber={2}
+            title="Bounding Box"
+            status={stepStatus("boundingBox")}
+            expanded={activeStep === "boundingBox"}
+            onToggle={() => toggleStep("boundingBox")}
+          >
+            <View style={{ gap: 14 }}>
+              <BoundingBoxStep
+                widthStr={boundaryWidthStr}
+                onChangeWidthStr={setBoundaryWidthStr}
+                heightStr={boundaryHeightStr}
+                onChangeHeightStr={setBoundaryHeightStr}
+                onApplyBoundary={handleApplyBoundary}
+                activeWidth={activeBoundaryWidth}
+                activeHeight={activeBoundaryHeight}
+                onProceedNext={() => setActiveStep("align")}
+              />
+
+              {/* Templates Section (collapsible) */}
+              <View>
+                <Pressable
+                  onPress={() => setShowTemplates(!showTemplates)}
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 8,
+                    paddingVertical: 8,
+                  }}
+                >
+                  {showTemplates ? (
+                    <ChevronDown size={14} color={FIELDS_COLORS.textMuted} />
+                  ) : (
+                    <ChevronRight size={14} color={FIELDS_COLORS.textDim} />
+                  )}
+                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "700" }}>
+                    Templates
+                  </Text>
+                </Pressable>
+                {showTemplates && (
+                  <View
+                    style={{
+                      borderRadius: 10,
+                      backgroundColor: FIELDS_COLORS.surfaceSolid,
+                      borderWidth: 1,
+                      borderColor: FIELDS_COLORS.panelBorder,
+                      padding: 12,
+                    }}
+                  >
+                    <TemplatePanel
+                      apiBaseUrl={apiBaseUrl}
+                      onRefreshPaths={onRefreshPaths}
+                      onSelectPath={(name) => {
+                        onSelectPath(name);
+                        setShowMapInteraction(true);
+                        if (isPlanEditingMode !== true) {
+                          onStartPlanEditing?.();
+                        }
+                        setActiveStep("align");
+                      }}
+                      boundaryMode={boundaryMode}
+                      onToggleBoundaryMode={handleToggleBoundaryMode}
+                      boundaryWidthStr={boundaryWidthStr}
+                      onChangeBoundaryWidthStr={setBoundaryWidthStr}
+                      boundaryHeightStr={boundaryHeightStr}
+                      onChangeBoundaryHeightStr={setBoundaryHeightStr}
+                      onApplyBoundary={handleApplyBoundary}
+                      sketchMode={sketchMode}
+                      onToggleSketchMode={setSketchMode}
+                      showSnapPoints={showSnapPoints}
+                      onToggleShowSnapPoints={setShowSnapPoints}
+                      telemetryPosN={telemetrySnapshot?.pos_n ?? null}
+                      telemetryPosE={telemetrySnapshot?.pos_e ?? null}
+                    />
+                  </View>
+                )}
+              </View>
+            </View>
           </FieldsStepCard>
 
           {/* Step 3: Align DXF — visible after plan is loaded, hidden for GPS point flow and non-DXF files */}

@@ -11,7 +11,7 @@ type BoundingBoxStepProps = {
   onApplyBoundary: (w: number, h: number) => void;
   activeWidth: number | null;
   activeHeight: number | null;
-  onProceedToUpload?: () => void;
+  onProceedNext?: () => void;
 };
 
 export function BoundingBoxStep({
@@ -22,7 +22,7 @@ export function BoundingBoxStep({
   onApplyBoundary,
   activeWidth,
   activeHeight,
-  onProceedToUpload,
+  onProceedNext,
 }: BoundingBoxStepProps) {
   const isApplied = activeWidth != null && activeHeight != null;
 
@@ -140,9 +140,9 @@ export function BoundingBoxStep({
             </Text>
           </TouchableOpacity>
 
-          {isApplied && onProceedToUpload ? (
+          {isApplied && onProceedNext ? (
             <TouchableOpacity
-              onPress={onProceedToUpload}
+              onPress={onProceedNext}
               activeOpacity={0.85}
               style={{
                 height: 46,
