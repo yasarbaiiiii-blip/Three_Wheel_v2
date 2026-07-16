@@ -1,8 +1,29 @@
 import type { DxfEntity, DxfPoint, PlanLine } from "../types/plan";
 
+// Map-mode tessellation is adaptive (see adaptiveMapSteps below): these are now the MAX cap,
+// not a fixed count. A fixed 256-point circle looks fine at the zoom the static Fields preview
+// normally sits at, but Align DXF's editing view zooms in much closer and DXF circles vary
+// hugely in real-world radius — a fixed count makes small circles waste points (extra transform
+// work every drag frame, worsening drag/rotate lag) while large circles still show visible
+// polygon facets once their fixed-256-point chord length exceeds a pixel or two on screen.
 export const MAP_CIRCLE_STEPS = 256;
 export const MAP_ARC_STEPS = 256;
+// Below this, planShapeSnapPoints.ts's MIN_POINTS_FOR_ELLIPSE_FIT (32) can no longer tell a real
+// tessellated circle apart from a many-sided hand-drawn polygon — keep a safe margin above it.
+const MAP_CIRCLE_MIN_STEPS = 48;
+// Target chord length between adjacent samples, in real-world metres — small enough to stay
+// visually smooth at any practical editing zoom without over-sampling small circles.
+const MAP_CIRCLE_TARGET_CHORD_M = 0.1;
 export const SVG_CIRCLE_STEPS = 256;
+
+/** Segment count for map-mode circle/arc tessellation: scales with real-world radius so the
+ *  chord length (and therefore on-screen faceting) stays roughly constant regardless of size,
+ *  instead of a fixed count that's excessive for small circles and too coarse for large ones. */
+function adaptiveMapSteps(radius: number): number {
+  if (!Number.isFinite(radius) || radius <= 0) return MAP_CIRCLE_MIN_STEPS;
+  const raw = Math.ceil((2 * Math.PI * radius) / MAP_CIRCLE_TARGET_CHORD_M);
+  return Math.min(MAP_CIRCLE_STEPS, Math.max(MAP_CIRCLE_MIN_STEPS, raw));
+}
 
 export type PlanBoundingBox = {
   minNorth: number;
@@ -349,11 +370,11 @@ export function sampleCurveEntityPoints(
   if (!curve) return [];
 
   const sweep = normalizedArcSweep(curve.startAngle, curve.endAngle);
-  const circleSteps = mapMode ? MAP_CIRCLE_STEPS : steps;
-  const arcSteps = mapMode ? MAP_ARC_STEPS : steps;
+  const circleSteps = mapMode ? adaptiveMapSteps(curve.radius) : steps;
+  const arcSteps = mapMode ? adaptiveMapSteps(curve.radius) : steps;
   const isFullCircle = isFullCircleCurve(line, curve);
   const count = isFullCircle
-    ? Math.max(circleSteps, 32)
+    ? Math.max(circleSteps, MAP_CIRCLE_MIN_STEPS)
     : Math.max(8, Math.ceil((sweep / FULL_CIRCLE_SWEEP) * arcSteps));
   const points: DxfPoint[] = [];
 

@@ -482,43 +482,48 @@ export function AlignDxfPanel({
             const cos = Math.cos(rotRad);
             const sin = Math.sin(rotRad);
             // Mirror the backend's affine transform exactly: NED = scale * R(theta) * DXF + offset
-            // (see path_engine/ned.py apply_affine_transform / dxf_to_ned_affine).
-            // pt.x/pt.y follow the SAME dxf_x=east / dxf_y=north contract used when ref_points
-            // were sent to the backend (see handleSelectPoint in FieldsPage.tsx and
-            // buildVisualAlignmentRefPoints in visualAlignment.ts, and the documented contract
-            // in visualAlignment.ts's header) — pt.x is dxf_x (east), pt.y is dxf_y (north).
-            // Output is {x: north, y: east}: offsetN pairs with the north output, offsetE with
-            // east, matching PlanLine's own x=north/y=east convention.
-            const applyOriginTransform = (pt: { x: number; y: number }) => {
-              const sx = pt.x * alignScale;
-              const sy = pt.y * alignScale;
+            // (see path_engine/ned.py apply_affine_transform: point=(dxf_y=north, dxf_x=east),
+            // north' = north*scale*cos(θ) - east*scale*sin(θ) + offset_n,
+            // east'  = north*scale*sin(θ) + east*scale*cos(θ) + offset_e).
+            // A prior version of this function swapped which raw component (north vs east) fed
+            // the cos/sin terms — it read correctly by variable name (pt.x=east, pt.y=north) but
+            // then ran them through the rotation in the wrong order, so for any non-zero
+            // rotation this preview didn't match the backend's own transform (verified against
+            // path_engine/tests/test_ned.py::test_affine_rotation_90deg: DXF-north must rotate
+            // *into* NED-east at 90°, not into NED-south). That's why the plan only "sometimes"
+            // shifted after Fix Alignment — whenever the backend's fitted rotation was near 0 the
+            // bug was invisible, and it self-corrected once Load to Controller re-rendered from
+            // the backend's own authoritative geometry instead of this local recompute.
+            const applyOriginTransform = (pt: { north: number; east: number }) => {
+              const sn = pt.north * alignScale;
+              const se = pt.east * alignScale;
               return {
-                x: sx * cos - sy * sin + offsetN,
-                y: sx * sin + sy * cos + offsetE,
+                north: sn * cos - se * sin + offsetN,
+                east: sn * sin + se * cos + offsetE,
               };
             };
             setLines((prev) => {
               console.log(`[AlignDXF][Fix] Transforming ${prev.length} line(s). Before -> After (north,east):`);
               const next = prev.map((line) => {
-                const transformedFrom = applyOriginTransform({ x: line.from.y, y: line.from.x });
-                const transformedTo = applyOriginTransform({ x: line.to.y, y: line.to.x });
+                const transformedFrom = applyOriginTransform({ north: line.from.x, east: line.from.y });
+                const transformedTo = applyOriginTransform({ north: line.to.x, east: line.to.y });
                 let updatedEntity = line.entity;
                 if (updatedEntity?.preview_points) {
                   updatedEntity = {
                     ...updatedEntity,
                     preview_points: updatedEntity.preview_points.map((pt: { north: number; east: number }) => {
-                      const transformed = applyOriginTransform({ x: pt.east, y: pt.north });
-                      return { ...pt, north: transformed.x, east: transformed.y };
+                      const transformed = applyOriginTransform({ north: pt.north, east: pt.east });
+                      return { ...pt, north: transformed.north, east: transformed.east };
                     }),
                   };
                 }
                 console.log(
-                  `[AlignDXF][Fix]   ${line.id}: from (${line.from.x},${line.from.y}) -> (${transformedFrom.x.toFixed(3)},${transformedFrom.y.toFixed(3)}) | to (${line.to.x},${line.to.y}) -> (${transformedTo.x.toFixed(3)},${transformedTo.y.toFixed(3)})`
+                  `[AlignDXF][Fix]   ${line.id}: from (${line.from.x},${line.from.y}) -> (${transformedFrom.north.toFixed(3)},${transformedFrom.east.toFixed(3)}) | to (${line.to.x},${line.to.y}) -> (${transformedTo.north.toFixed(3)},${transformedTo.east.toFixed(3)})`
                 );
                 return {
                   ...line,
-                  from: { ...line.from, x: transformedFrom.x, y: transformedFrom.y },
-                  to: { ...line.to, x: transformedTo.x, y: transformedTo.y },
+                  from: { ...line.from, x: transformedFrom.north, y: transformedFrom.east },
+                  to: { ...line.to, x: transformedTo.north, y: transformedTo.east },
                   ...(updatedEntity ? { entity: updatedEntity } : {}),
                 };
               });
