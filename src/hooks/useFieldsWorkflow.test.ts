@@ -11,24 +11,24 @@ const baseVisibility = {
 };
 
 describe("getEffectiveLayerVisibility", () => {
-  it("hides transit and extension during orderAndSpray step", () => {
+  it("hides transit but keeps extension visible during orderAndSpray step", () => {
     const result = getEffectiveLayerVisibility(baseVisibility, "orderAndSpray");
     expect(result.transit).toBe(false);
-    expect(result.extension).toBe(false);
+    expect(result.extension).toBe(true);
     expect(result.marking).toBe(true);
   });
 
-  it("hides transit and extension during legacy pathOrder step", () => {
+  it("hides transit but keeps extension visible during legacy pathOrder step", () => {
     const result = getEffectiveLayerVisibility(baseVisibility, "pathOrder");
     expect(result.transit).toBe(false);
-    expect(result.extension).toBe(false);
+    expect(result.extension).toBe(true);
     expect(result.marking).toBe(true);
   });
 
-  it("hides transit and extension during legacy sprayVerify step", () => {
+  it("hides transit but keeps extension visible during legacy sprayVerify step", () => {
     const result = getEffectiveLayerVisibility(baseVisibility, "sprayVerify");
     expect(result.transit).toBe(false);
-    expect(result.extension).toBe(false);
+    expect(result.extension).toBe(true);
   });
 
   it("keeps all layers for other steps like align or upload", () => {

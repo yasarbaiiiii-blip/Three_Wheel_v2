@@ -12,7 +12,11 @@ export function getEffectiveLayerVisibility(
     activeStep === "pathOrder" ||
     activeStep === "sprayVerify"
   ) {
-    return { ...baseVisibility, transit: false, extension: false };
+    // Transit legs are derived from the currently-SAVED entity order, so while the user
+    // is dragging to reorder here the transit preview would show stale/misleading paths
+    // until the new order is saved — keep it hidden. Extension run-up/run-out segments
+    // are per-entity and don't depend on order, so they stay visible and correct here.
+    return { ...baseVisibility, transit: false };
   }
   return baseVisibility;
 }
@@ -23,7 +27,7 @@ export function getEffectiveLayerVisibilityLegacy(
   activeAccordion: FieldsAccordionId | null
 ): LayerVisibility {
   if (activeAccordion === "pathOrder" || activeAccordion === "sprayVerify") {
-    return { ...baseVisibility, transit: false, extension: false };
+    return { ...baseVisibility, transit: false };
   }
   return baseVisibility;
 }
