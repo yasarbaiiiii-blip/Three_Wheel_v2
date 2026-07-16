@@ -55,7 +55,6 @@ import {
   type MapProjectionOrigin,
 } from "../utils/mapGeometryProjection";
 import {
-  getCurveGeometry,
   getCurveSelectionAnchors,
   getPlanLineRenderPoints,
   isCircleLikeLine,
@@ -109,18 +108,6 @@ const LAYER_COLORS: Record<string, string> = {
 const DEFAULT_LINE_COLOR = "#0f172a";
 const PLAN_SOURCE_MAX_ZOOM = 22;
 const PLAN_SOURCE_TOLERANCE = 0;
-const WEB_MERCATOR_WORLD_METERS = 40075016.68557849;
-const MAPBOX_TILE_SIZE = 512;
-const TRUE_CIRCLE_MAX_ZOOM = 22;
-const TRUE_CIRCLE_RADIUS_EXPRESSION = [
-  "interpolate",
-  ["exponential", 2],
-  ["zoom"],
-  0,
-  ["*", ["get", "meterRadius"], ["get", "pixelsPerMeterZoom0"]],
-  TRUE_CIRCLE_MAX_ZOOM,
-  ["*", ["get", "meterRadius"], ["get", "pixelsPerMeterMaxZoom"]],
-] as const;
 
 /** Colour for a plan line layer, with a safe fallback for unknown values. */
 function colorForLayer(layer: string): string {
@@ -170,33 +157,6 @@ function pointFeature(
     type: "Feature",
     properties,
     geometry: { type: "Point", coordinates: coord },
-  };
-}
-
-/** A GeoJSON point's "true circle" sizing properties — used ONLY for the steady-state (not
- *  actively dragging) placed-item render. Mapbox's CircleLayer draws a real, GPU-rendered
- *  circle that stays perfectly smooth at any zoom level, unlike a polyline approximation which
- *  always has *some* zoom where its facets become visible. This is intentionally NOT used for
- *  the live drag preview (buildItemsGeoForItems) — during an active drag the GeoJSON source
- *  updates continuously, and a data-driven, zoom-interpolated circle-radius style property
- *  visibly desynced from position under that update rate (this is what looked like the circle
- *  "shrinking" while being moved). Restricting this to the steady state keeps the previously
- *  fixed drag behavior (plain tessellated polyline, immune to that desync) while restoring full
- *  native smoothness for the common case: looking at the plan before/after a drag, not mid-drag. */
-function trueCircleProperties(
-  coord: Coord,
-  meterRadius: number,
-  properties: GeoJSON.GeoJsonProperties = {}
-): GeoJSON.GeoJsonProperties {
-  const lat = coord[1];
-  const latitudeScale = Math.max(Math.cos((lat * Math.PI) / 180), 1e-6);
-  const pixelsPerMeterZoom0 =
-    MAPBOX_TILE_SIZE / (WEB_MERCATOR_WORLD_METERS * latitudeScale);
-  return {
-    ...properties,
-    meterRadius,
-    pixelsPerMeterZoom0,
-    pixelsPerMeterMaxZoom: pixelsPerMeterZoom0 * Math.pow(2, TRUE_CIRCLE_MAX_ZOOM),
   };
 }
 
@@ -909,47 +869,26 @@ export function MapViewNative(props: MapViewProps) {
   ]);
 
   // ── Placed items (Templates): lines + bounding boxes ──
-  // This is the STEADY-STATE render (the committed item, not an active drag) — circles use the
-  // native "true circle" CircleLayer (see trueCircleProperties above) so they stay perfectly
-  // smooth at any zoom instead of showing polyline facets. The live drag preview
-  // (buildItemsGeoForItems below) deliberately does NOT do this — during an active drag the
-  // source updates continuously and the data-driven circle-radius style visibly desynced from
-  // position under that update rate (reported as the circle "shrinking" while being moved), so
-  // it uses a plain tessellated polyline instead. Splitting the two keeps both fixed: smooth
-  // circles when idle, no shrink/jitter while actively dragging.
+  // Circle/arc entities are intentionally NOT special-cased here — they flow through the same
+  // getPlanLineRenderPoints() tessellation + per-point transformVisualDxfPoint() path as every
+  // other shape (matches planLinesFC's static Fields preview). A native Mapbox CircleLayer
+  // ("true circle", zoom-interpolated from a meterRadius property) was tried twice here — once
+  // for all placed-item circles, once restricted to only the non-dragging steady state — and
+  // both times reproduced the same visible shrink. Whatever the underlying cause turns out to
+  // be, plain tessellated polyline points are what has actually been confirmed shrink-free, so
+  // that's what both the steady state and the live drag preview use — do not reintroduce
+  // CircleLayer for placed-item circles without a way to actually verify the fix on-device.
   const placedItemsGeo = useMemo(() => {
     if (mode !== "templates" || !placedItems || placedItems.length === 0 || !projectionOrigin) {
-      return { lines: featureCollection([]), circles: featureCollection([]), boxes: featureCollection([]) };
+      return { lines: featureCollection([]), boxes: featureCollection([]) };
     }
     const lineFeatures: GeoJSON.Feature[] = [];
-    const circleFeatures: GeoJSON.Feature[] = [];
     const boxFeatures: GeoJSON.Feature[] = [];
 
     for (const item of placedItems) {
       const selected = selectedItemIds?.includes(item.id) ?? false;
       // Item lines via the shared visual transform (north/east → GPS).
       for (const l of item.lines) {
-        const circleGeometry = isCircleLikeLine(l) ? getCurveGeometry(l) : null;
-        if (circleGeometry) {
-          const center = transformVisualDxfPoint(
-            circleGeometry.centerNorth,
-            circleGeometry.centerEast,
-            item
-          );
-          const centerGps = projectPlanNorthEastToGps(center.north, center.east, projectionOrigin);
-          const centerCoord = toMapboxCoord(centerGps.lat, centerGps.lon);
-          circleFeatures.push(
-            pointFeature(
-              centerCoord,
-              trueCircleProperties(centerCoord, Math.abs(circleGeometry.radius * item.scale), {
-                itemId: item.id,
-                selected,
-              })
-            )
-          );
-          continue;
-        }
-
         const renderPoints = getPlanLineRenderPoints(l, true);
         if (renderPoints.length >= 2) {
           const coords: Coord[] = renderPoints.map((pt) => {
@@ -998,7 +937,6 @@ export function MapViewNative(props: MapViewProps) {
 
     return {
       lines: featureCollection(lineFeatures),
-      circles: featureCollection(circleFeatures),
       boxes: featureCollection(boxFeatures),
     };
   }, [mode, placedItems, selectedItemIds, originSig]);
@@ -1662,7 +1600,6 @@ export function MapViewNative(props: MapViewProps) {
       boundaryGeo.outer.features.forEach(pushFeatureCoords);
       boundaryGeo.indent.features.forEach(pushFeatureCoords);
       placedItemsGeo.lines.features.forEach(pushFeatureCoords);
-      placedItemsGeo.circles.features.forEach(pushFeatureCoords);
       placedItemsGeo.boxes.features.forEach(pushFeatureCoords);
     } else {
       planLinesFC.features.forEach(pushFeatureCoords);
@@ -1855,10 +1792,6 @@ export function MapViewNative(props: MapViewProps) {
   const refLabelsVisible = !!showRefPointLabels;
   // Active preview overrides the committed sources during a live gesture.
   const activeItemsGeo = previewItemsGeo ?? placedItemsGeo;
-  // The live drag preview has no `.circles` — during an active drag, circles are already
-  // included (as a tessellated polyline) in activeItemsGeo.lines, so the native CircleLayer
-  // source must go empty rather than double-drawing the circle via both layers.
-  const activeCircles = previewItemsGeo ? featureCollection([]) : placedItemsGeo.circles;
   // The inner map content (shared between editing and non-editing render).
   const mapContent = (
     <View style={styles.container}>
@@ -2133,19 +2066,6 @@ export function MapViewNative(props: MapViewProps) {
               lineOpacity: ["case", ["get", "selected"], 1.0, sketchMode ? 0.2 : 0.8],
               lineCap: "round",
               lineJoin: "round",
-            }}
-          />
-        </ShapeSource>
-        <ShapeSource id="placed-item-circles" shape={activeCircles} onPress={handleItemsPress}>
-          <CircleLayer
-            id="placed-item-circles-layer"
-            style={{
-              circleRadius: TRUE_CIRCLE_RADIUS_EXPRESSION as any,
-              circleColor: ["case", ["get", "selected"], "#ef4444", "#16a34a"],
-              circleOpacity: 0.01,
-              circleStrokeColor: ["case", ["get", "selected"], "#ef4444", "#16a34a"],
-              circleStrokeWidth: ["case", ["get", "selected"], 3, 2],
-              circleStrokeOpacity: ["case", ["get", "selected"], 1.0, sketchMode ? 0.2 : 0.8],
             }}
           />
         </ShapeSource>
