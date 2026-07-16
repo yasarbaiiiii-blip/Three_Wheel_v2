@@ -6491,8 +6491,7 @@ function PlanPreview({
   recenterPlanTrigger,
   resetNorthTrigger,
   hideRefocusControls = false,
-  gridEnabled = false,
-  gridAnchorPoints,
+  snapRefPoints,
 }: {
   lines: PlanLine[];
   mapSourceLines?: PlanLine[];
@@ -6539,8 +6538,7 @@ function PlanPreview({
   recenterPlanTrigger?: number;
   resetNorthTrigger?: number;
   hideRefocusControls?: boolean;
-  gridEnabled?: boolean;
-  gridAnchorPoints?: { lat: number; lon: number }[];
+  snapRefPoints?: { lat: number; lon: number }[];
 }) {
   const [visualSelected, setVisualSelected] = useState(true);
   const [boundarySelected, setBoundarySelected] = useState(true);
@@ -7212,8 +7210,7 @@ function PlanPreview({
             onRotateBoundary={onRotateBoundary}
             sketchMode={sketchMode}
             showBoundaryPoints={showBoundaryPoints}
-            gridEnabled={gridEnabled}
-            gridAnchorPoints={gridAnchorPoints}
+            snapRefPoints={snapRefPoints}
             placedItems={isPlacedItemActive && visualAlignmentItem ? [visualAlignmentItem] : []}
             selectedItemIds={
               isEditablePlacedItemMode && visualSelected && placedItemId
@@ -7222,9 +7219,7 @@ function PlanPreview({
                 ? ["boundary"]
                 : []
             }
-            multiTouchMode={
-              isEditablePlacedItemMode ? (isPlanEditingMode ? "both" : "rotate") : "both"
-            }
+            multiTouchMode={isEditablePlacedItemMode ? "rotate" : "both"}
             onSelectionChange={(ids) => {
               if (boundaryMode) {
                 setBoundarySelected(ids.includes("boundary"));

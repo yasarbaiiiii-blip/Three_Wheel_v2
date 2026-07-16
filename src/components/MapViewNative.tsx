@@ -60,32 +60,41 @@ import {
   getPlanLineRenderPoints,
   isCircleLikeLine,
   isCurveEntity,
-  computePlanBoundingBoxLegacy,
 } from "../utils/curveGeometry";
 import {
   transformVisualDxfPoint,
   projectGpsToLocalMeters,
   projectLocalMetersToGps,
 } from "../utils/visualAlignment";
-import {
-  computeGridBounds,
-  buildGridLineSegments,
-  snapRotationDeg,
-  findSnapTarget,
-  type LocalMeters,
-} from "../utils/alignmentGrid";
+import { findNearestPointWithinRadius, type LocalMeters } from "../utils/refPointSnap";
+import { computeShapeSnapPoints } from "../utils/planShapeSnapPoints";
 import { toMapboxCoord, fromMapboxCoord } from "../utils/mapboxCoords";
 import { MAPBOX_STYLE_URL } from "../config/mapbox";
 import type { MapViewProps } from "./mapViewTypes";
 import { pixelDeltaToMetres, clampToIndent, type BoundingRect } from "../utils/mapGestureUtils";
 import { deriveMetersPerPixel, screenToGeo } from "../utils/mapScreenGeo";
 
-/** Rotation snap increment for the Multi-Point Fit grid-snap feature (degrees). */
-const GRID_ROTATION_SNAP_DEG = 15;
-/** Point-to-point snap radius for the Multi-Point Fit grid-snap feature (metres). Bigger than
- * the grid spacing would ever get for a tightly-clustered set of reference points would be
- * wrong, so this is intentionally small and fixed rather than scaled to the grid. */
-const GRID_POINT_SNAP_RADIUS_M = 0.3;
+/** Distance at which the Figma/Illustrator-style snap guide line appears, connecting a nearby
+ * reference point to the plan (metres) — bigger than REF_POINT_SNAP_RADIUS_M so the guide gives
+ * advance warning before the magnetic pull actually kicks in. */
+const REF_POINT_GUIDE_RADIUS_M = 1.5;
+/** Distance at which the plan's position actually snaps onto a reference point (metres). */
+const REF_POINT_SNAP_RADIUS_M = 0.3;
+/** Once locked onto a reference point, a candidate must be dragged out past THIS (larger)
+ * radius to release — the hysteresis gap between this and REF_POINT_SNAP_RADIUS_M is what makes
+ * a snap "hold" instead of flickering in and out right at the entry boundary. */
+const REF_POINT_RELEASE_RADIUS_M = 0.6;
+
+/** A reference point in local metres, carrying its ORIGINAL lat/lon alongside — needed to
+ * identify (by value, not array index — `selectedPoints` and `snapRefPoints` can diverge when a
+ * tapped point hasn't had its lat/lon filled in yet) which point to highlight as the active snap
+ * target while the plan is being dragged near it. */
+type SnapRefPoint = LocalMeters & { lat: number; lon: number };
+
+/** Stable string key for matching a SnapRefPoint against a `selectedPoints` entry by value. */
+function refPointKey(p: { lat: number; lon: number }): string {
+  return `${p.lat.toFixed(7)},${p.lon.toFixed(7)}`;
+}
 
 // ── Layer colours (parity with legacy LAYER_COLORS in MapView.tsx) ──
 const LAYER_COLORS: Record<string, string> = {
@@ -333,8 +342,7 @@ export function MapViewNative(props: MapViewProps) {
     drawnWaypoints,
     manualDrawingEnabled,
     screenToGeoRef,
-    gridEnabled = false,
-    gridAnchorPoints,
+    snapRefPoints,
   } = props;
 
   useEffect(() => {
@@ -387,6 +395,12 @@ export function MapViewNative(props: MapViewProps) {
   // position from accumulated delta (avoids floating-point drift from incremental additions).
   const dragStartPositionsRef = useRef<Record<string, { x: number; y: number; rotation: number; scale: number }>>({});
 
+  // Multi-Point Fit snap hysteresis: once a candidate (corner/edge-midpoint/center/quadrant)
+  // locks onto a reference point, it HOLDS there — the plan won't drift off the moment a tiny
+  // hand-jitter nudges it past the (tight) entry radius. It only releases once dragged past the
+  // larger REF_POINT_RELEASE_RADIUS_M. Scoped to a single gesture — reset at drag begin/end.
+  const snapLockRef = useRef<{ candidateIndex: number; point: SnapRefPoint } | null>(null);
+
   // Preview FeatureCollection for live drag feedback (set via RAF-coalesced JS callback).
   // Null = use the normal committed sources (no active drag preview).
   const [previewItemsGeo, setPreviewItemsGeo] = useState<{
@@ -399,6 +413,15 @@ export function MapViewNative(props: MapViewProps) {
     y: number;
     rotation: number;
   } | null>(null);
+
+  // Multi-Point Fit reference-point snap guide (Figma/Illustrator-style): a line from the
+  // nearest reference point to the plan while it's being dragged close to one. Cleared once the
+  // gesture ends — it's only ever shown live, mid-drag.
+  const [snapGuideFC, setSnapGuideFC] = useState<GeoJSON.FeatureCollection>(featureCollection([]));
+  // Which reference point (by value, via refPointKey) is the active snap target right now —
+  // drives the highlighted/bigger styling on that point's own marker in selectedPointsFC below,
+  // so the point itself visibly reacts as the plan comes closer, not just a separate overlay dot.
+  const [activeSnapRefPointKey, setActiveSnapRefPointKey] = useState<string | null>(null);
 
   // rAF coalescing for preview updates — avoids calling setPreviewItemsGeo 60×/sec.
   const previewRafRef = useRef<number | null>(null);
@@ -564,51 +587,32 @@ export function MapViewNative(props: MapViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [originSig]);
 
-  // ── Multi-Point Fit grid + snap ──
-  // The grid is anchored purely to the reference points' own real-world position — it has
-  // nothing to do with the DXF plan's coordinate system. All grid/snap math happens in
-  // "metres relative to (originLat, originLon)" — the SAME frame `current` is computed in
-  // inside onDragMove/onDragCommit below (see the DXF-offset subtraction there), so a point
-  // computed here is directly comparable to a point computed there without any extra step.
-  const gridAnchorLocalPoints = useMemo((): LocalMeters[] => {
-    if (!gridEnabled || !gridAnchorPoints || gridAnchorPoints.length === 0 || !projectionOrigin) return [];
-    return gridAnchorPoints
+  // ── Multi-Point Fit reference-point snap ──
+  // Purely anchored to the reference points' own real-world position — has nothing to do with
+  // the DXF plan's coordinate system. All snap math happens in "metres relative to (originLat,
+  // originLon)" — the SAME frame `current` is computed in inside onDragMove/onDragCommit below
+  // (see the DXF-offset subtraction there), so a point computed here is directly comparable to
+  // a point computed there without any extra step.
+  const snapRefLocalPoints = useMemo((): SnapRefPoint[] => {
+    if (!snapRefPoints || snapRefPoints.length === 0 || !projectionOrigin) return [];
+    return snapRefPoints
       .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon))
-      .map((p) => projectGpsToLocalMeters(p.lat, p.lon, projectionOrigin.originLat, projectionOrigin.originLon));
-  }, [gridEnabled, gridAnchorPoints, projectionOrigin?.originLat, projectionOrigin?.originLon]);
+      .map((p) => ({
+        ...projectGpsToLocalMeters(p.lat, p.lon, projectionOrigin.originLat, projectionOrigin.originLon),
+        lat: p.lat,
+        lon: p.lon,
+      }));
+  }, [snapRefPoints, projectionOrigin?.originLat, projectionOrigin?.originLon]);
 
-  const gridBounds = useMemo(
-    () => (gridEnabled ? computeGridBounds(gridAnchorLocalPoints) : null),
-    [gridEnabled, gridAnchorLocalPoints]
-  );
-
-  const gridLinesFC = useMemo(() => {
-    if (!gridEnabled || !gridBounds || !projectionOrigin) return featureCollection([]);
-    const segments = buildGridLineSegments(gridBounds);
-    const features = segments.map((seg, i) => {
-      const a = projectLocalMetersToGps(seg[0].north, seg[0].east, projectionOrigin.originLat, projectionOrigin.originLon);
-      const b = projectLocalMetersToGps(seg[1].north, seg[1].east, projectionOrigin.originLat, projectionOrigin.originLon);
-      return {
-        type: "Feature" as const,
-        properties: { id: `grid-${i}` },
-        geometry: {
-          type: "LineString" as const,
-          coordinates: [toMapboxCoord(a.lat, a.lon), toMapboxCoord(b.lat, b.lon)],
-        },
-      };
-    });
-    return featureCollection(features);
-  }, [gridEnabled, gridBounds, projectionOrigin?.originLat, projectionOrigin?.originLon]);
-
-  // Fixed DXF-space point the snap logic tracks for the plan — its own bounding-box centroid.
+  // Fixed DXF-space snap candidates the plan tracks — shape-aware (corners, edge-midpoints,
+  // overall center; quadrants+center for a circle/ellipse) rather than just its bounding-box
+  // center, so a specific corner/edge can snap onto a reference point, not only the middle.
   // Computed once per geometry change, NOT per drag frame.
-  const planEditingSnapAnchor = useMemo((): LocalMeters | null => {
-    if (!gridEnabled) return null;
+  const planEditingSnapCandidates = useMemo((): LocalMeters[] => {
     const item = placedItems?.find((it) => it.id === "plan-editing-group");
-    if (!item || !item.lines || item.lines.length === 0) return null;
-    const bounds = computePlanBoundingBoxLegacy(item.lines);
-    return { north: (bounds.minX + bounds.maxX) / 2, east: (bounds.minY + bounds.maxY) / 2 };
-  }, [gridEnabled, placedItems]);
+    if (!item || !item.lines || item.lines.length === 0) return [];
+    return computeShapeSnapPoints(item.lines);
+  }, [placedItems]);
 
   const refPointsSig = useMemo(
     () =>
@@ -700,7 +704,8 @@ export function MapViewNative(props: MapViewProps) {
     return featureCollection(features);
   }, [refPointsSig]);
 
-  // ── Selected alignment points (highlighted in yellow) ──
+  // ── Selected alignment points (highlighted in yellow — or brighter/bigger, per
+  // isSnapActive, while the Multi-Point Fit plan is being dragged close to one of them) ──
   const selectedPointsFC = useMemo(() => {
     if (!selectedPoints || selectedPoints.length === 0) {
       return featureCollection([]);
@@ -712,7 +717,13 @@ export function MapViewNative(props: MapViewProps) {
       // may be a stale/unrelated anchor (rover position, a prior alignment, etc.) and
       // has nothing to do with this point's actual location.
       if (Number.isFinite(p.lat) && Number.isFinite(p.lon)) {
-        features.push(pointFeature(toMapboxCoord(p.lat as number, p.lon as number), { id: `sp-${i}` }));
+        // Matched by VALUE (not index) against activeSnapRefPointKey — `selectedPoints` (every
+        // ref point) and the filtered, snap-eligible `snapRefPoints` can diverge in index when a
+        // tapped point hasn't had its lat/lon filled in yet, so index correspondence isn't safe.
+        const isSnapActive = activeSnapRefPointKey === refPointKey({ lat: p.lat as number, lon: p.lon as number });
+        features.push(
+          pointFeature(toMapboxCoord(p.lat as number, p.lon as number), { id: `sp-${i}`, isSnapActive })
+        );
         return;
       }
       // No coordinate yet (freshly tapped, not filled in) — show where it sits on the
@@ -720,10 +731,10 @@ export function MapViewNative(props: MapViewProps) {
       if (!projectionOrigin) return;
       // In FieldsPage/App.tsx, p.x is Northing (dxf_y) and p.y is Easting (dxf_x)
       const gps = projectPlanNorthEastToGps(p.x, p.y, projectionOrigin);
-      features.push(pointFeature(toMapboxCoord(gps.lat, gps.lon), { id: `sp-${i}` }));
+      features.push(pointFeature(toMapboxCoord(gps.lat, gps.lon), { id: `sp-${i}`, isSnapActive: false }));
     });
     return featureCollection(features);
-  }, [selectedPoints, originSig]);
+  }, [selectedPoints, originSig, activeSnapRefPointKey]);
 
   // Content-based signature so the log below fires only on real changes, not on every
   // FieldsPage render (selectedPoints is a fresh array reference each render there).
@@ -1229,45 +1240,125 @@ export function MapViewNative(props: MapViewProps) {
    * Reads the current panDeltaN/E shared values, applies them to the snapshot
    * positions, rebuilds preview geometry, and sets previewItemsGeo state.
    */
-  // Applies the Multi-Point Fit grid/point snap to a proposed transform. A no-op unless the
-  // grid is enabled and the item being moved is specifically the "plan-editing-group"
-  // sticker (never the Visual method's own "visual-alignment-group" sticker, which this
-  // feature deliberately leaves untouched). Runs on the JS thread (called from onDragMove/
-  // onDragCommit below, never from inside a reanimated worklet), so it can freely do the
-  // GPS<->metres math without any UI-thread/worklet constraints.
-  const applyGridSnap = useCallback(
-    (itemId: string, newX: number, newY: number, newRotation: number, newScale: number) => {
-      if (!gridEnabled || itemId !== "plan-editing-group" || !planEditingSnapAnchor || !projectionOrigin) {
-        return { x: newX, y: newY, rotation: newRotation, scale: newScale };
+  // Builds the Figma/Illustrator-style snap guide line from the reference point to the plan's
+  // snap anchor. The point end uses its OWN lat/lon directly (no round-trip through local
+  // metres) — highlighting that same point is handled separately by selectedPointsFC's
+  // isSnapActive styling, driven off activeSnapRefPointKey. A `null` guide clears it (nothing
+  // nearby, or the gesture just ended).
+  const buildSnapGuideFC = useCallback(
+    (guide: { point: SnapRefPoint; anchor: LocalMeters } | null): GeoJSON.FeatureCollection => {
+      if (!guide || !projectionOrigin) return featureCollection([]);
+      const anchorGps = projectLocalMetersToGps(guide.anchor.north, guide.anchor.east, projectionOrigin.originLat, projectionOrigin.originLon);
+      const pointCoord = toMapboxCoord(guide.point.lat, guide.point.lon);
+      const anchorCoord = toMapboxCoord(anchorGps.lat, anchorGps.lon);
+      return featureCollection([lineFeature([pointCoord, anchorCoord], { id: "ref-point-snap-guide-line" })]);
+    },
+    [projectionOrigin?.originLat, projectionOrigin?.originLon]
+  );
+
+  // Applies the Multi-Point Fit reference-point snap to a proposed transform: every shape-aware
+  // candidate (corners, edge-midpoints, overall center — or quadrants+center for a circle/
+  // ellipse; see planShapeSnapPoints.ts) is transformed and checked, and the SINGLE closest
+  // candidate-to-reference-point pair wins — so a corner (or edge-midpoint, or center) can snap
+  // onto a reference point individually, not just the plan's center. Within
+  // REF_POINT_SNAP_RADIUS_M that pair magnetically snaps (a rigid translation of the whole
+  // plan) AND holds a lock (snapLockRef); once locked, it keeps holding through small jitter and
+  // only releases once dragged past the larger REF_POINT_RELEASE_RADIUS_M — otherwise the plan
+  // would flicker in and out of the snap right at the entry boundary instead of feeling "held".
+  // Within REF_POINT_GUIDE_RADIUS_M (but not yet locked), `guide` reports a Figma/Illustrator-
+  // style guide line connecting the point to that candidate for the caller to render. A no-op
+  // unless the item being moved is specifically the "plan-editing-group" sticker (never the
+  // Visual method's own "visual-alignment-group" sticker, which this feature deliberately
+  // leaves untouched). Runs on the JS thread (called from onDragMove/onDragCommit below, never
+  // from inside a reanimated worklet), so it can freely do the GPS<->metres math without any
+  // UI-thread/worklet constraints. Rotation is always passed through unchanged — this is a
+  // position-only snap.
+  const applyPointSnap = useCallback(
+    (
+      itemId: string,
+      newX: number,
+      newY: number,
+      newRotation: number,
+      newScale: number
+    ): { x: number; y: number; rotation: number; scale: number; guide: { point: SnapRefPoint; anchor: LocalMeters } | null } => {
+      if (
+        itemId !== "plan-editing-group" ||
+        planEditingSnapCandidates.length === 0 ||
+        !projectionOrigin ||
+        snapRefLocalPoints.length === 0
+      ) {
+        snapLockRef.current = null;
+        return { x: newX, y: newY, rotation: newRotation, scale: newScale, guide: null };
       }
-      // Snap relative to the grid's own orientation (it's rotated to match the reference
-      // points, not compass-aligned — see alignmentGrid.ts), so a snapped plan ends up with
-      // its edges parallel to the grid lines instead of to true north.
-      const gridOrientationDeg = gridBounds?.orientationDeg ?? 0;
-      const snappedRotation =
-        gridOrientationDeg + snapRotationDeg(newRotation - gridOrientationDeg, GRID_ROTATION_SNAP_DEG);
-      const placed = transformVisualDxfPoint(planEditingSnapAnchor.north, planEditingSnapAnchor.east, {
-        x: newX,
-        y: newY,
-        rotation: snappedRotation,
-        scale: newScale,
+
+      const transformed = planEditingSnapCandidates.map((candidate) => {
+        const placed = transformVisualDxfPoint(candidate.north, candidate.east, {
+          x: newX,
+          y: newY,
+          rotation: newRotation,
+          scale: newScale,
+        });
+        return {
+          north: placed.north - projectionOrigin.originDxfNorth,
+          east: placed.east - projectionOrigin.originDxfEast,
+        };
       });
-      const current: LocalMeters = {
-        north: placed.north - projectionOrigin.originDxfNorth,
-        east: placed.east - projectionOrigin.originDxfEast,
-      };
-      const target = findSnapTarget(current, gridAnchorLocalPoints, gridBounds, GRID_POINT_SNAP_RADIUS_M);
-      if (!target) {
-        return { x: newX, y: newY, rotation: snappedRotation, scale: newScale };
+
+      // Already locked onto a point — keep holding as long as that SAME candidate hasn't been
+      // dragged past the (larger) release radius from that SAME point, regardless of whether
+      // it's still within the tighter entry radius. This is what makes the snap feel "held".
+      const lock = snapLockRef.current;
+      if (lock && lock.candidateIndex < transformed.length) {
+        const current = transformed[lock.candidateIndex];
+        const dist = Math.hypot(current.north - lock.point.north, current.east - lock.point.east);
+        if (dist <= REF_POINT_RELEASE_RADIUS_M) {
+          return {
+            x: newX + (lock.point.east - current.east),
+            y: newY + (lock.point.north - current.north),
+            rotation: newRotation,
+            scale: newScale,
+            guide: { point: lock.point, anchor: lock.point },
+          };
+        }
+        snapLockRef.current = null; // dragged far enough away — release the hold.
       }
+
+      // No active lock — look for a new one using the tighter entry/guide radii.
+      let best: { index: number; candidate: LocalMeters; point: SnapRefPoint; dist: number } | null = null;
+      for (let index = 0; index < transformed.length; index++) {
+        const current = transformed[index];
+        const nearest = findNearestPointWithinRadius(current, snapRefLocalPoints, REF_POINT_GUIDE_RADIUS_M);
+        if (!nearest) continue;
+        const dist = Math.hypot(current.north - nearest.north, current.east - nearest.east);
+        if (!best || dist < best.dist) {
+          best = { index, candidate: current, point: nearest, dist };
+        }
+      }
+
+      if (!best) {
+        return { x: newX, y: newY, rotation: newRotation, scale: newScale, guide: null };
+      }
+      if (best.dist > REF_POINT_SNAP_RADIUS_M) {
+        return {
+          x: newX,
+          y: newY,
+          rotation: newRotation,
+          scale: newScale,
+          guide: { point: best.point, anchor: best.candidate },
+        };
+      }
+
+      // Newly entering snap range — acquire the hold so small jitter doesn't immediately break it.
+      snapLockRef.current = { candidateIndex: best.index, point: best.point };
       return {
-        x: newX + (target.east - current.east),
-        y: newY + (target.north - current.north),
-        rotation: snappedRotation,
+        x: newX + (best.point.east - best.candidate.east),
+        y: newY + (best.point.north - best.candidate.north),
+        rotation: newRotation,
         scale: newScale,
+        guide: { point: best.point, anchor: best.point },
       };
     },
-    [gridEnabled, planEditingSnapAnchor, projectionOrigin, gridAnchorLocalPoints, gridBounds]
+    [planEditingSnapCandidates, projectionOrigin, snapRefLocalPoints]
   );
 
   const onDragMove = useCallback(
@@ -1289,20 +1380,30 @@ export function MapViewNative(props: MapViewProps) {
       if (!placedItems) return;
       const indentRect = buildIndentRect();
 
-      const shifted = placedItems.map((item) => {
+      // A plain for-of (not .map()) so TS can actually track activeGuide's reassignment below —
+      // it can't follow mutations made from inside a separate callback function.
+      let activeGuide: { point: SnapRefPoint; anchor: LocalMeters } | null = null;
+      const shifted: PlacedItem[] = [];
+      for (const item of placedItems) {
         const start = starts[item.id];
-        if (!start || !ids.includes(item.id)) return item;
+        if (!start || !ids.includes(item.id)) {
+          shifted.push(item);
+          continue;
+        }
         const newX = start.x + dE;
         const newY = start.y + dN;
         const newRotation = start.rotation + rotDeg;
         const newScale = start.scale * scaleF;
-        const snapped = applyGridSnap(item.id, newX, newY, newRotation, newScale);
-        return { ...item, ...snapped };
-      });
+        const snapped = applyPointSnap(item.id, newX, newY, newRotation, newScale);
+        if (snapped.guide) activeGuide = snapped.guide;
+        shifted.push({ ...item, x: snapped.x, y: snapped.y, rotation: snapped.rotation, scale: snapped.scale });
+      }
 
       setPreviewItemsGeo(buildItemsGeoForItems(shifted));
+      setSnapGuideFC(buildSnapGuideFC(activeGuide));
+      setActiveSnapRefPointKey(activeGuide ? refPointKey(activeGuide.point) : null);
     },
-    [placedItems, selectedItemIds, buildIndentRect, buildItemsGeoForItems, applyGridSnap]
+    [placedItems, selectedItemIds, buildIndentRect, buildItemsGeoForItems, applyPointSnap, buildSnapGuideFC]
   );
 
   /**
@@ -1335,6 +1436,10 @@ export function MapViewNative(props: MapViewProps) {
         setPreviewBoundary(null);
       }
 
+      // The snap guide/highlight only ever make sense mid-drag — always clear on finalize.
+      setSnapGuideFC(featureCollection([]));
+      setActiveSnapRefPointKey(null);
+
       if (!placedItems) {
         setPreviewItemsGeo(null);
         return;
@@ -1348,8 +1453,8 @@ export function MapViewNative(props: MapViewProps) {
         const newY = start.y + finalDN;
         const newRotation = start.rotation + finalRotDeg;
         const newScale = start.scale * finalScaleF;
-        const snapped = applyGridSnap(item.id, newX, newY, newRotation, newScale);
-        return { ...item, ...snapped };
+        const snapped = applyPointSnap(item.id, newX, newY, newRotation, newScale);
+        return { ...item, x: snapped.x, y: snapped.y, rotation: snapped.rotation, scale: snapped.scale };
       });
 
       // Single commit to parent — parity with legacy itemsMoved handler.
@@ -1367,6 +1472,7 @@ export function MapViewNative(props: MapViewProps) {
       // Clear preview — parent state is now up to date.
       setPreviewItemsGeo(null);
       dragStartPositionsRef.current = {};
+      snapLockRef.current = null; // the gesture is over — nothing left to hold.
     },
     [
       placedItems,
@@ -1376,7 +1482,7 @@ export function MapViewNative(props: MapViewProps) {
       onUpdatePlacedItem,
       onMoveBoundary,
       onRotateBoundary,
-      applyGridSnap,
+      applyPointSnap,
     ]
   );
 
@@ -1401,6 +1507,7 @@ export function MapViewNative(props: MapViewProps) {
         };
       }
       dragStartPositionsRef.current = snapshot;
+      snapLockRef.current = null; // each gesture starts with no held snap.
       calibrateMetersPerPixel(touchX, touchY);
     },
     [placedItems, selectedItemIds, boundaryPosition, boundaryRotation, calibrateMetersPerPixel]
@@ -1855,15 +1962,25 @@ export function MapViewNative(props: MapViewProps) {
           />
         </ShapeSource>
 
-        {/* ── Multi-Point Fit placement grid, anchored to the reference points ── */}
-        <ShapeSource id="alignment-grid" shape={gridLinesFC}>
+        {/* ── Multi-Point Fit snap guide — a Figma/Illustrator-style line + highlight dot
+            from a nearby reference point to the plan while it's being dragged close to one ── */}
+        <ShapeSource id="ref-point-snap-guide" shape={snapGuideFC}>
           <LineLayer
-            id="alignment-grid-layer"
+            id="ref-point-snap-guide-line"
             style={{
-              lineColor: "#38bdf8",
-              lineWidth: 1,
-              lineOpacity: 0.45,
-              lineDasharray: [2, 2],
+              lineColor: "#ff2d78",
+              lineWidth: 2,
+              lineOpacity: 0.9,
+              lineDasharray: [3, 2],
+            }}
+          />
+          <CircleLayer
+            id="ref-point-snap-guide-dot"
+            style={{
+              circleRadius: 5,
+              circleColor: "#ff2d78",
+              circleStrokeWidth: 1.5,
+              circleStrokeColor: "#ffffff",
             }}
           />
         </ShapeSource>
@@ -1873,10 +1990,10 @@ export function MapViewNative(props: MapViewProps) {
           <CircleLayer
             id="selected-points-layer"
             style={{
-              circleRadius: 6.5,
-              circleColor: "#eab308",
+              circleRadius: ["case", ["get", "isSnapActive"], 11, 6.5],
+              circleColor: ["case", ["get", "isSnapActive"], "#ff2d78", "#eab308"],
               circleStrokeColor: "#ffffff",
-              circleStrokeWidth: 2,
+              circleStrokeWidth: ["case", ["get", "isSnapActive"], 3, 2],
               circleOpacity: 1,
             }}
           />

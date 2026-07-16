@@ -197,13 +197,10 @@ type AlignDxfPanelProps = {
   /** True once a formal GPS alignment has been staged & verified — Auto Origin is force-disabled at mission start in this state. */
   stagedVerified?: boolean;
   missionRunning?: boolean;
-  /** True while the whole plan is a draggable/scalable/rotatable "sticker" on the map (tap-to-pick-point is disabled meanwhile). */
+  /** True while the whole plan is a draggable/rotatable "sticker" on the map (tap-to-pick-point is disabled meanwhile). */
   isPlanEditingMode?: boolean;
-  /** Enters plan editing (drag/scale/rotate) when off, or bakes the transform back into `lines` and returns to point-picking when on. */
+  /** Enters plan editing (drag/rotate) when off, or bakes the transform back into `lines` and returns to point-picking when on. */
   onToggleMovePlan?: () => void;
-  /** Multi-Point Fit placement grid: when on, a grid anchored to the reference points is drawn on the map and the plan snaps to it (or to an individual point) while being moved. */
-  gridEnabled?: boolean;
-  onToggleGrid?: () => void;
 };
 
 export function AlignDxfPanel({
@@ -239,8 +236,6 @@ export function AlignDxfPanel({
   missionRunning = false,
   isPlanEditingMode = false,
   onToggleMovePlan,
-  gridEnabled = false,
-  onToggleGrid,
 }: AlignDxfPanelProps) {
   const [rotationDeg, setRotationDeg] = useState("");
   const [isFixing, setIsFixing] = useState(false);
@@ -741,7 +736,7 @@ export function AlignDxfPanel({
               ? alignmentMethod === "least_squares"
                 ? "Use This Position"
                 : "Done — Lock Plan Position"
-              : "Move / Scale / Rotate Plan"}
+              : "Move / Rotate Plan"}
           </Text>
         </Pressable>
       ) : null}
@@ -974,40 +969,16 @@ export function AlignDxfPanel({
       ) : isPlanEditingMode ? null : refPoints.length === 0 ? (
         <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 12, fontStyle: "italic", textAlign: "center" }}>
           {alignmentMethod === "least_squares"
-            ? "Tap points on the canvas, or upload a CSV, to show reference points on the map — any number, purely a visual guide. Then use \"Move / Scale / Rotate Plan\" to position the plan."
+            ? "Tap points on the canvas, or upload a CSV, to show reference points on the map — any number, purely a visual guide. Then use \"Move / Rotate Plan\" to position the plan."
             : "Tap 1 point on the canvas to set anchor."}
         </Text>
       ) : (
         <View style={{ gap: 8 }}>
           {alignmentMethod === "least_squares" ? (
-            <View style={{ gap: 8 }}>
-              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11 }}>
-                {refPoints.length} reference point{refPoints.length === 1 ? "" : "s"} shown on the map — a visual guide only.
-              </Text>
-              <Pressable
-                onPress={onToggleGrid}
-                accessibilityLabel="Grid Checkbox"
-                style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 2 }}
-              >
-                <View
-                  style={{
-                    width: 20,
-                    height: 20,
-                    borderRadius: 5,
-                    borderWidth: 1.5,
-                    borderColor: gridEnabled ? FIELDS_COLORS.stepActive : FIELDS_COLORS.panelBorder,
-                    backgroundColor: gridEnabled ? "rgba(59, 130, 246, 0.15)" : FIELDS_COLORS.cardSolid,
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  {gridEnabled ? <Check color={FIELDS_COLORS.stepActive} size={13} strokeWidth={3} /> : null}
-                </View>
-                <Text style={{ flex: 1, color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
-                  Grid — show a placement grid around the points and snap the plan to it while moving
-                </Text>
-              </Pressable>
-            </View>
+            <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11 }}>
+              {refPoints.length} reference point{refPoints.length === 1 ? "" : "s"} shown on the map — drag the plan close to
+              one to snap onto it.
+            </Text>
           ) : null}
           <View style={{ gap: 8 }}>
             {refPoints.map((point, index) => (
@@ -1114,7 +1085,7 @@ export function AlignDxfPanel({
 
           {alignmentMethod === "least_squares" ? (
             <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontStyle: "italic", textAlign: "center" }}>
-              Now tap "Move / Scale / Rotate Plan" above to position the plan using these points as a guide.
+              Now tap "Move / Rotate Plan" above to position the plan using these points as a guide.
             </Text>
           ) : (
             <>

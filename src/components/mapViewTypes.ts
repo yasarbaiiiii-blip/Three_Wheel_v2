@@ -78,12 +78,10 @@ export interface MapViewProps {
   screenToGeoRef?: React.MutableRefObject<((screen: { x: number; y: number }) => Promise<{ lat: number; lon: number } | null>) | null>;
 
   /**
-   * Align DXF "Multi-Point Fit" placement aid: when true, a grid is drawn anchored to
-   * `gridAnchorPoints` (the reference points), and the "plan-editing-group" placed item
-   * snaps to it (or to an individual reference point within a tight radius) while being
-   * dragged/rotated. Purely a manual-placement guide — never affects any computed fit.
+   * Align DXF "Multi-Point Fit" manual-placement aid: reference points (same source as the
+   * yellow dots) the "plan-editing-group" placed item snaps onto when dragged within a tight
+   * radius of one, showing a Figma/Illustrator-style guide line from the point to the plan
+   * while it's close. Purely a manual-placement guide — never affects any computed fit.
    */
-  gridEnabled?: boolean;
-  /** Real-world reference points the grid is anchored to (same source as the yellow dots). */
-  gridAnchorPoints?: { lat: number; lon: number }[];
+  snapRefPoints?: { lat: number; lon: number }[];
 }
