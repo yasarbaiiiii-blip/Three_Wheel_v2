@@ -566,7 +566,7 @@ export function FieldsPage(props: FieldsPageProps) {
         }}
       >
         <FieldsClearBar onClear={onClearMission} busy={missionActionBusy} />
-        <View style={{ flex: 1, padding: 12, gap: 10, paddingBottom: 24 }}>
+        <View style={{ flex: 1, minHeight: 0, padding: 12, gap: 10, paddingBottom: 24 }}>
           {/* Step 1: Upload & Parse */}
           <FieldsStepCard
             stepNumber={1}
@@ -741,6 +741,10 @@ export function FieldsPage(props: FieldsPageProps) {
             expanded={activeStep === "orderAndSpray"}
             onToggle={() => toggleStep("orderAndSpray")}
             disabled={!hasPath}
+            // Own scrolling list (DraggableFlatList) — fill leftover panel height so the
+            // list viewport is bounded and can scroll; do not use scrollableBody here
+            // (nested VirtualizedList inside ScrollView breaks list scroll).
+            fillAvailable={activeStep === "orderAndSpray"}
           >
             <PathOrderAndSprayStep
               apiBaseUrl={apiBaseUrl}

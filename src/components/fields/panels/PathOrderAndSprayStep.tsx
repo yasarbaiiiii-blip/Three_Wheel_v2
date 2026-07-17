@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Alert, Pressable, TouchableOpacity, Text, View } from "react-native";
-import { Check as CheckIcon, Loader } from "lucide-react-native";
+import { Alert, TouchableOpacity, Text, View } from "react-native";
+import { Loader } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
 import type {
@@ -10,15 +10,12 @@ import type {
 } from "../../../types/fieldsWorkflow";
 import type { ImportedPlan, PlanLine } from "../../../types/plan";
 import {
-  formatFinite,
-  getLineLengthM,
+  buildPathOrderRows,
   groupExtensionLinesForList,
-  isExtensionGroupSelected,
   isPrimaryEditableLine,
-  normalizeEntityType,
   type SelectLineFn,
 } from "../../../utils/pathWorkflow";
-import { DraggableReorderList } from "../DraggableReorderList";
+import { PathOrderUnifiedList } from "../PathOrderUnifiedList";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 type PathOrderAndSprayStepProps = {
@@ -106,11 +103,7 @@ export function PathOrderAndSprayStep({
   setLines,
   selectedLineId,
   onSelectLine,
-  onRefreshPaths,
-  onSelectPath,
   onInvalidateWorkflow,
-  blockProtectedWorkflowMutation,
-  protectedResident,
   verifiedAlignmentRequest,
   onWorkflowStep,
   setSegmentVerification,
@@ -130,28 +123,28 @@ export function PathOrderAndSprayStep({
   const [isLoading, setIsLoading] = useState(false);
   const [loadStep, setLoadStep] = useState<pathApi.LoadToControllerStep | null>(null);
 
-  // Filter to primary editable lines for reorder + spray
+  // Primary paths only — drag/reorder + spray
   const primaryLines = useMemo(() => lines.filter(isPrimaryEditableLine), [lines]);
 
-  // Keep reordered list in sync
   useEffect(() => {
     setReorderedLines(primaryLines);
   }, [primaryLines]);
 
-  // One row per unique (pre, aft) extension distance group. Multiple configs/plans
-  // with different lengths (0.5 m vs 0.8 m) yield multiple Extension rows.
+  // One Extension row per unique (pre, aft) distance; 0.5 vs 0.2 → two rows.
   const extensionGroups = useMemo(
     () => groupExtensionLinesForList(lines, extPre, extAft),
     [lines, extPre, extAft]
   );
 
-  // One row per transit leg — individual entity like line/arc/circle (not grouped).
-  // Geometry only regenerates on a full path refetch (Save/reload), not live while
-  // dragging (ambient transit is force-hidden during this step in useFieldsWorkflow).
+  // One row per transit leg (same list as paths; not a separate section).
   const transitLines = useMemo(() => lines.filter((l) => l.layer === "transit"), [lines]);
 
-  // Primary + transit: single-line select (clears any multi-highlight via atomic API).
-  // Extension groups: multi-highlight every segment in that Pre/Aft group.
+  // Flat list: primaries → all transits → extension group(s). No section headers.
+  const pathOrderRows = useMemo(
+    () => buildPathOrderRows(reorderedLines, transitLines, extensionGroups),
+    [reorderedLines, transitLines, extensionGroups]
+  );
+
   const handleSelectPrimaryOrTransit = (line: PlanLine) => {
     onSelectLine(line.id);
   };
@@ -173,7 +166,6 @@ export function PathOrderAndSprayStep({
       };
     }
     setReorderedLines(next);
-    // Also update parent lines
     setLines((prev) => {
       const updated = [...prev];
       const parentIdx = updated.findIndex((l) => l.id === lineId);
@@ -203,12 +195,10 @@ export function PathOrderAndSprayStep({
     setLoadStep(null);
 
     try {
-      // Build entity order from reordered lines
       const entityOrder = reorderedLines
         .filter((line) => line.entity?.entity_id)
         .map((line) => line.entity!.entity_id);
 
-      // Build spray overrides
       const overridesMap = new Map<string, boolean>();
       reorderedLines
         .filter((line) => line.entity?.entity_id)
@@ -273,183 +263,48 @@ export function PathOrderAndSprayStep({
   };
 
   return (
-    <View style={{ gap: 12 }}>
+    <View style={{ flex: 1, minHeight: 0, gap: 12 }}>
       <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
-        Drag to reorder path segments. Check/uncheck to toggle spray. Tap a row to highlight it
-        on the preview (Extension highlights the whole distance group).
+        One list: paths, transit, and extension. Drag paths to reorder. Check paths to toggle spray.
+        Tap a row to highlight it on the preview (Extension highlights its whole distance group).
       </Text>
 
-      {/* Reorderable list with spray checkboxes */}
+      {/* Bounded flex shell so DraggableFlatList scrolls when rows exceed the viewport. */}
       <View
         style={{
-          height: 320,
+          flex: 1,
+          minHeight: 220,
           borderRadius: 12,
           borderWidth: 1,
           borderColor: FIELDS_COLORS.panelBorder,
           overflow: "hidden",
+          backgroundColor: FIELDS_COLORS.cardSolid,
         }}
       >
-        <DraggableReorderList
-          data={reorderedLines}
-          onDragEnd={(next) => {
+        <PathOrderUnifiedList
+          rows={pathOrderRows}
+          onReorderPrimaries={(next) => {
             onInvalidateWorkflow("spray");
             setReorderedLines(next);
           }}
-          onPressItem={handleSelectPrimaryOrTransit}
-          selectedRowId={selectedLineId}
-          footer={
-            (transitLines.length > 0 || extensionGroups.length > 0) && (
-              <View style={{ gap: 8, padding: 10 }}>
-                {transitLines.length > 0 && (
-                  <View style={{ gap: 6 }}>
-                    <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10 }}>
-                      Transit (last-saved order — shown on plan preview)
-                    </Text>
-                    {transitLines.map((line, idx) => {
-                      const lengthM = getLineLengthM(line);
-                      const selected = line.id === selectedLineId && !(highlightLineIds && highlightLineIds.length > 0);
-                      return (
-                        <Pressable
-                          key={line.id}
-                          onPress={() => handleSelectPrimaryOrTransit(line)}
-                          style={{
-                            flexDirection: "row",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            paddingHorizontal: 10,
-                            paddingVertical: 10,
-                            borderRadius: 10,
-                            borderWidth: 1,
-                            borderColor: selected ? FIELDS_COLORS.teal : FIELDS_COLORS.panelBorder,
-                            backgroundColor: selected ? FIELDS_COLORS.accentMuted : "transparent",
-                          }}
-                        >
-                          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "600" }}>
-                            Transit {idx + 1}
-                          </Text>
-                          <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11 }}>
-                            {lengthM != null ? `${formatFinite(lengthM, 2)} m` : "n/a"}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                )}
-
-                {extensionGroups.map((group, groupIndex) => {
-                  const selected = isExtensionGroupSelected(group, selectedLineId, highlightLineIds);
-                  const title =
-                    extensionGroups.length > 1 ? `Extension ${groupIndex + 1}` : "Extension";
-                  return (
-                    <View
-                      key={group.key}
-                      style={{
-                        flexDirection: "row",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        paddingHorizontal: 10,
-                        paddingVertical: 10,
-                        borderRadius: 10,
-                        borderWidth: 1,
-                        borderColor: selected ? FIELDS_COLORS.teal : FIELDS_COLORS.panelBorder,
-                        backgroundColor: selected ? FIELDS_COLORS.accentMuted : "transparent",
-                      }}
-                    >
-                      <Pressable
-                        onPress={() => handleSelectExtensionGroup(group.lineIds)}
-                        style={{ flex: 1 }}
-                      >
-                        <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "600" }}>
-                          {title}
-                        </Text>
-                        <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-                          Pre {formatFinite(group.preM, 2)} m · Aft {formatFinite(group.aftM, 2)} m
-                        </Text>
-                      </Pressable>
-                      <TouchableOpacity
-                        onPress={onToggleExtensionVisible}
-                        activeOpacity={0.7}
-                        style={{
-                          width: 24,
-                          height: 24,
-                          borderRadius: 6,
-                          borderWidth: 1.5,
-                          borderColor: extensionVisible ? FIELDS_COLORS.teal : FIELDS_COLORS.textDim,
-                          backgroundColor: extensionVisible ? FIELDS_COLORS.teal : "transparent",
-                          alignItems: "center",
-                          justifyContent: "center",
-                        }}
-                      >
-                        {extensionVisible ? <CheckIcon size={14} color="#fff" /> : null}
-                      </TouchableOpacity>
-                    </View>
-                  );
-                })}
-              </View>
-            )
-          }
-          renderExtraRight={(item) => {
-            const entityType = normalizeEntityType(item.entity?.entity_type);
-            const isSprayable =
-              entityType === "line" || entityType === "arc" || entityType === "circle";
-
-            return (
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                {/* Type badge */}
-                <View
-                  style={{
-                    paddingHorizontal: 6,
-                    paddingVertical: 2,
-                    borderRadius: 4,
-                    backgroundColor: FIELDS_COLORS.surfaceSolid,
-                    borderWidth: 1,
-                    borderColor: FIELDS_COLORS.panelBorder,
-                  }}
-                >
-                  <Text
-                    style={{
-                      color: FIELDS_COLORS.textDim,
-                      fontSize: 9,
-                      fontWeight: "700",
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    {entityType || item.layer}
-                  </Text>
-                </View>
-
-                {/* Spray checkbox */}
-                {item.entity && isSprayable ? (
-                  <TouchableOpacity
-                    onPress={() => handleToggleSpray(item.id)}
-                    activeOpacity={0.7}
-                    style={{
-                      width: 24,
-                      height: 24,
-                      borderRadius: 6,
-                      borderWidth: 1.5,
-                      borderColor: item.entity.is_mark ? FIELDS_COLORS.teal : FIELDS_COLORS.textDim,
-                      backgroundColor: item.entity.is_mark ? FIELDS_COLORS.teal : "transparent",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                  >
-                    {item.entity.is_mark ? <CheckIcon size={14} color="#fff" /> : null}
-                  </TouchableOpacity>
-                ) : null}
-              </View>
-            );
-          }}
+          onPressPrimary={handleSelectPrimaryOrTransit}
+          onPressTransit={handleSelectPrimaryOrTransit}
+          onPressExtension={handleSelectExtensionGroup}
+          selectedLineId={selectedLineId}
+          highlightLineIds={highlightLineIds}
+          extensionVisible={extensionVisible}
+          onToggleExtensionVisible={onToggleExtensionVisible}
+          onToggleSpray={handleToggleSpray}
         />
       </View>
 
-      {/* Load to Controller */}
       <TouchableOpacity
         onPress={handleLoadToController}
         disabled={isLoading || missionActionBusy || !verifiedAlignmentRequest}
         activeOpacity={0.8}
         style={{
           height: 52,
+          flexShrink: 0,
           borderRadius: 12,
           alignItems: "center",
           justifyContent: "center",

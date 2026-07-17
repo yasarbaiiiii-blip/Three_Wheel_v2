@@ -238,6 +238,51 @@ export function isExtensionGroupSelected(
   return selectedLineId != null && group.lineIds.includes(selectedLineId);
 }
 
+/**
+ * Unified Path Order list row — paths, each transit leg, and one Extension row per
+ * Pre/Aft distance group share a single list (no separate sections).
+ */
+export type PathOrderRow =
+  | { kind: "primary"; id: string; line: PlanLine }
+  | { kind: "transit"; id: string; line: PlanLine; index: number }
+  | { kind: "extension"; id: string; group: ExtensionListGroup; title: string };
+
+/**
+ * Build the flat Path Order list:
+ *   [all primary paths in drag order] + [each transit leg] + [extension group(s)].
+ *
+ * Transit and extension are never interleaved into the reorderable primary block —
+ * drag only reorders primaries; this helper always re-appends transit/extension after.
+ */
+export function buildPathOrderRows(
+  primaryLines: PlanLine[],
+  transitLines: PlanLine[],
+  extensionGroups: ExtensionListGroup[]
+): PathOrderRow[] {
+  const rows: PathOrderRow[] = [];
+  for (const line of primaryLines) {
+    rows.push({ kind: "primary", id: `primary:${line.id}`, line });
+  }
+  transitLines.forEach((line, index) => {
+    rows.push({ kind: "transit", id: `transit:${line.id}`, line, index });
+  });
+  const multi = extensionGroups.length > 1;
+  extensionGroups.forEach((group, i) => {
+    rows.push({
+      kind: "extension",
+      id: `extension:${group.key}`,
+      group,
+      title: multi ? `Extension ${i + 1}` : "Extension",
+    });
+  });
+  return rows;
+}
+
+/** After a mixed-list drag, recover primary order and ignore transit/extension positions. */
+export function extractPrimaryLinesFromPathOrderRows(rows: PathOrderRow[]): PlanLine[] {
+  return rows.filter((row): row is Extract<PathOrderRow, { kind: "primary" }> => row.kind === "primary").map((row) => row.line);
+}
+
 export function isPrimaryEditableLine(line: PlanLine) {
   if (line.layer === "transit" || line.layer === "extension") {
     return false;

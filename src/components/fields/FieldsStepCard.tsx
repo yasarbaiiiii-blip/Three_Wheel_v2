@@ -22,6 +22,12 @@ type FieldsStepCardProps = {
    * ScrollView breaks RN's list virtualization) — leave off for those.
    */
   scrollableBody?: boolean;
+  /**
+   * When true and expanded, the card grows to fill leftover column space (`flex: 1`)
+   * and the body becomes a flex container. Use for steps that own an internal scrolling
+   * list (e.g. Path Order DraggableFlatList) so that list gets a real height budget.
+   */
+  fillAvailable?: boolean;
 };
 
 const stepIndicatorColors = (status: StepStatus) => {
@@ -39,9 +45,11 @@ export function FieldsStepCard({
   children,
   disabled = false,
   scrollableBody = false,
+  fillAvailable = false,
 }: FieldsStepCardProps) {
   const indicator = stepIndicatorColors(status);
   const isScrolling = expanded && scrollableBody;
+  const isFilling = expanded && (scrollableBody || fillAvailable);
 
   return (
     <View
@@ -56,7 +64,7 @@ export function FieldsStepCard({
         backgroundColor: FIELDS_COLORS.cardSolid,
         overflow: "hidden",
         opacity: disabled ? 0.4 : 1,
-        ...(isScrolling ? { flex: 1, minHeight: 0 } : null),
+        ...(isFilling ? { flex: 1, minHeight: 0 } : null),
       }}
     >
       <Pressable
@@ -132,6 +140,7 @@ export function FieldsStepCard({
               gap: 12,
               borderTopWidth: 1,
               borderTopColor: FIELDS_COLORS.panelBorder,
+              ...(fillAvailable && expanded ? { flex: 1, minHeight: 0 } : null),
             }}
           >
             {children}
