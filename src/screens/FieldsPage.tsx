@@ -598,12 +598,9 @@ export function FieldsPage(props: FieldsPageProps) {
                 // uninvited and the live `lines` update gets masked by the frozen
                 // plan-editing sticker (see PlanPreview's isPlacedItemActive in App.tsx).
                 if (refreshOnly) return;
-                // Auto-enable map interaction when a path is newly loaded/selected
+                // Stay on Upload & Parse after import/parse. Operator opens Align DXF
+                // (or Bounding Box) when ready — do not auto-jump the accordion.
                 setShowMapInteraction(true);
-                if (isPlanEditingMode !== true) {
-                  onStartPlanEditing?.();
-                }
-                setActiveStep("align");
               }}
               onInvalidateWorkflow={onInvalidateWorkflow}
               blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
