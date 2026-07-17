@@ -1,15 +1,24 @@
 import { describe, it, expect } from "vitest";
-import { computeShapeSnapPoints, type LocalMeters } from "./planShapeSnapPoints";
+import {
+  computeShapeSnapPoints,
+  isPlanSnapGeometryLine,
+  type LocalMeters,
+} from "./planShapeSnapPoints";
 import type { PlanLine } from "../types/plan";
 
 let nextId = 1;
 
-function segLine(from: LocalMeters, to: LocalMeters): PlanLine {
-  const id = `seg-${nextId++}`;
+function segLine(
+  from: LocalMeters,
+  to: LocalMeters,
+  layer: PlanLine["layer"] = "boundary",
+  idPrefix = "seg"
+): PlanLine {
+  const id = `${idPrefix}-${nextId++}`;
   return {
     id,
     label: id,
-    layer: "boundary",
+    layer,
     from: { id: nextId++, x: from.north, y: from.east },
     to: { id: nextId++, x: to.north, y: to.east },
     width: 0.1,
@@ -174,5 +183,56 @@ describe("computeShapeSnapPoints", () => {
     expect(hasPointClose(points, { north: 0, east: 0 })).toBe(true);
     expect(hasPointClose(points, { north: 4, east: 0 })).toBe(true);
     expect(hasPointClose(points, { north: 2, east: 0 })).toBe(true);
+  });
+
+  it("isPlanSnapGeometryLine rejects path scaffolding layers and ids", () => {
+    expect(isPlanSnapGeometryLine(segLine({ north: 0, east: 0 }, { north: 1, east: 0 }, "marking"))).toBe(true);
+    expect(isPlanSnapGeometryLine(segLine({ north: 0, east: 0 }, { north: 1, east: 0 }, "boundary"))).toBe(true);
+    expect(isPlanSnapGeometryLine(segLine({ north: 0, east: 0 }, { north: 1, east: 0 }, "extension"))).toBe(false);
+    expect(isPlanSnapGeometryLine(segLine({ north: 0, east: 0 }, { north: 1, east: 0 }, "transit"))).toBe(false);
+    expect(isPlanSnapGeometryLine(segLine({ north: 0, east: 0 }, { north: 1, east: 0 }, "virtual_boundary"))).toBe(false);
+    expect(
+      isPlanSnapGeometryLine(segLine({ north: 0, east: 0 }, { north: 1, east: 0 }, "marking", "ext-pre"))
+    ).toBe(false);
+  });
+
+  it("ignores PRE/AFT extension tips so snap candidates match the plan-only set", () => {
+    const plan = polygonLines([
+      { north: 0, east: 0 },
+      { north: 0, east: 10 },
+      { north: 6, east: 10 },
+      { north: 6, east: 0 },
+    ]);
+    // PRE sticks out past SW corner; AFT past NE — without filtering these become hull vertices.
+    const pre = segLine({ north: -2, east: -2 }, { north: 0, east: 0 }, "extension", "ext-pre");
+    const aft = segLine({ north: 6, east: 10 }, { north: 8, east: 12 }, "extension", "ext-aft");
+    const transit = segLine({ north: -5, east: 5 }, { north: 0, east: 5 }, "transit", "runtime-transit");
+
+    const withoutExt = computeShapeSnapPoints(plan);
+    const withExt = computeShapeSnapPoints([...plan, pre, aft, transit]);
+
+    expect(withExt.length).toBe(withoutExt.length);
+    expect(withExt.length).toBe(9);
+    // Extension free ends must NOT be snap magnets
+    expect(hasPointClose(withExt, { north: -2, east: -2 })).toBe(false);
+    expect(hasPointClose(withExt, { north: 8, east: 12 })).toBe(false);
+    expect(hasPointClose(withExt, { north: -5, east: 5 })).toBe(false);
+    // Plan corners still present
+    for (const corner of [
+      { north: 0, east: 0 },
+      { north: 0, east: 10 },
+      { north: 6, east: 10 },
+      { north: 6, east: 0 },
+    ]) {
+      expect(hasPointClose(withExt, corner)).toBe(true);
+    }
+  });
+
+  it("returns [] when the sticker only has extension/transit lines", () => {
+    const onlyScaffold = [
+      segLine({ north: 0, east: 0 }, { north: 1, east: 0 }, "extension", "ext-pre"),
+      segLine({ north: 1, east: 0 }, { north: 2, east: 0 }, "transit"),
+    ];
+    expect(computeShapeSnapPoints(onlyScaffold)).toEqual([]);
   });
 });

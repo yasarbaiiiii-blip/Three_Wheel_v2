@@ -14,11 +14,38 @@
  *     center (2N+1 points), so a rectangle gives 9, a triangle 7, a pentagon 11, and an
  *     irregular multi-segment spray path collapses to whatever its outer boundary corners are —
  *     always a small, stable set, never one candidate per internal segment.
+ *
+ * Path scaffolding is excluded: PRE/AFT extension run-ups, inter-shape transit, and virtual
+ * boundary aids must NOT enter the hull. Survey CSV refs land on field/plan corners; including
+ * extension tips made Multi-Point Fit snap "slightly off" to where the extension finished.
  */
 import type { PlanLine } from "../types/plan";
 import { getPlanLineRenderPoints } from "./curveGeometry";
 
 export type LocalMeters = { north: number; east: number };
+
+/**
+ * True for design/spray geometry that should define Multi-Point Fit object snaps.
+ * Generated path scaffolding (extensions, transit, virtual boundary) is visual/path context
+ * only — never a snap target for uploaded survey refs.
+ */
+export function isPlanSnapGeometryLine(line: PlanLine): boolean {
+  const layer = line.layer;
+  if (layer === "extension" || layer === "transit" || layer === "virtual_boundary") {
+    return false;
+  }
+  // Defense if a stub was mis-tagged but still uses client-built ids.
+  const id = String(line.id ?? "");
+  if (
+    id.startsWith("ext-pre-") ||
+    id.startsWith("ext-aft-") ||
+    id.startsWith("runtime-transit-") ||
+    id.startsWith("transit-")
+  ) {
+    return false;
+  }
+  return true;
+}
 
 /**
  * Below this UNIQUE point count, a "good" circle/ellipse fit proves nothing — a regular polygon
@@ -139,13 +166,18 @@ function convexHull(points: LocalMeters[]): LocalMeters[] {
  * center + 4 quadrant points (5); any other shape yields its convex hull's corners + edge-
  * midpoints + overall center (2N+1). Returns an empty array for an empty plan, and a single
  * point for a fully degenerate (all-coincident) one.
+ *
+ * Extension / transit / virtual_boundary lines are filtered out first so enabling DXF
+ * extensions never moves snap magnets onto run-up/run-out tips.
  */
 export function computeShapeSnapPoints(lines: PlanLine[]): LocalMeters[] {
   if (lines.length === 0) return [];
+  const geometryLines = lines.filter(isPlanSnapGeometryLine);
+  if (geometryLines.length === 0) return [];
   // Dedupe up front — shared vertices between adjacent segments would otherwise double-count
   // toward MIN_POINTS_FOR_ELLIPSE_FIT and skew nothing (duplicates don't affect variance) but
   // waste work; convexHull's own internal dedupe then becomes a cheap no-op on this input.
-  const cloud = dedupe(collectPointCloud(lines));
+  const cloud = dedupe(collectPointCloud(geometryLines));
   if (cloud.length === 0) return [];
 
   const ellipse = fitAxisAlignedEllipse(cloud);

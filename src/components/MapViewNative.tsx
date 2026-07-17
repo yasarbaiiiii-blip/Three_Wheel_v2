@@ -604,7 +604,8 @@ export function MapViewNative(props: MapViewProps) {
   // Fixed DXF-space snap candidates the plan tracks — shape-aware (corners, edge-midpoints,
   // overall center; quadrants+center for a circle/ellipse) rather than just its bounding-box
   // center, so a specific corner/edge can snap onto a reference point, not only the middle.
-  // Computed once per geometry change, NOT per drag frame.
+  // computeShapeSnapPoints excludes extension/transit/virtual_boundary so enabling DXF
+  // extensions never moves magnets onto run-up tips. Computed once per geometry change.
   const planEditingSnapCandidates = useMemo((): LocalMeters[] => {
     const item = placedItems?.find((it) => it.id === "plan-editing-group");
     if (!item || !item.lines || item.lines.length === 0) return [];
