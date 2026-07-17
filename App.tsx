@@ -162,6 +162,7 @@ import {
   waypointsToPlanLines,
 } from "./src/utils/stagedMissionHydration";
 import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
+import { rehydrateAlignedPlanLines } from "./src/utils/rehydrateAlignedPlan";
 import type { AutoOriginReference, MapGeometryFrame } from "./src/types/autoOrigin";
 import {
   applyAutoOriginShift,
@@ -806,6 +807,11 @@ export default function App() {
   const [selectedPathName, setSelectedPathName] = useState<string | null>(null);
   const [stagedWorkflow, setStagedWorkflow] = useState<StagedWorkflowState>(INITIAL_STAGED_WORKFLOW_STATE);
   const [alignmentResult, setAlignmentResult] = useState<AlignmentResultState | null>(null);
+  // Always-current Fix Alignment params for async path rehydrates (extension toggle, re-select).
+  // previewSelectedPath awaits network I/O; reading this ref at setLines time avoids a stale
+  // closure that would drop the bake and leave design-frame geometry under a NED origin.
+  const alignmentResultRef = useRef<AlignmentResultState | null>(null);
+  alignmentResultRef.current = alignmentResult;
   const [verifiedAlignmentRequest, setVerifiedAlignmentRequest] = useState<pathApi.AlignPathRequest | null>(null);
   const [segmentVerification, setSegmentVerification] = useState<pathApi.PathSegmentsResponse | null>(null);
   const [stagedPlanResult, setStagedPlanResult] = useState<StagedPlanResultState | null>(null);
@@ -2116,9 +2122,9 @@ export default function App() {
           width: 0.1,
         }];
       }
-      // Keep backend/imported DXF coordinates canonical. The viewport auto-fit
-      // centers the drawing visually; mutating these coordinates would corrupt
-      // surveyed alignment ref points (for example, a 0..2 m line becomes -1..1 m).
+      // Keep backend/imported DXF coordinates canonical until a verified Fix Alignment
+      // rehydrate bakes them into NED. Viewport auto-fit must not mutate design coords
+      // (e.g. a 0..2 m line becoming -1..1 m would corrupt surveyed ref points).
       if (generatedLines.length > 0) {
         const existingVirtual = lines.filter((l: PlanLine) => l.layer === "virtual_boundary");
         if (existingVirtual.length > 0) {
@@ -2128,15 +2134,26 @@ export default function App() {
       const normalized = sanitizePlanLines(
         normalizePlanLinesForCurves(normalizePlanLines(generatedLines))
       );
-      setLines(normalized);
+      // Backend /entities + /plan always return design-frame (raw DXF) geometry. After Fix
+      // Alignment, map projection uses origin_gps with local (0,0) and `lines` must stay in
+      // that NED frame. Extension toggle / path re-select re-fetch design-frame geometry —
+      // re-apply the stored Fix similarity transform here so pose never jumps. Unaligned
+      // previews pass through unchanged. Input is always design-frame (never re-bake NED).
+      const forMap = rehydrateAlignedPlanLines(normalized, alignmentResultRef.current);
+      if (alignmentResultRef.current && forMap !== normalized) {
+        console.log(
+          `[AlignDXF][Rehydrate] Applied verified Fix transform to ${normalized.length} design-frame line(s) after path preview refresh`
+        );
+      }
+      setLines(forMap);
       // Keep the plan-editing/visual-alignment "sticker" (if one is active) in sync with
       // freshly fetched geometry — e.g. toggling DXF extensions while a Move/Rotate Plan
       // or Visual Alignment session is still open (not yet confirmed). The sticker only
       // holds its own copy of `lines` for live rendering; without this it would keep
       // showing the pre-refresh geometry until the user confirms/re-enters the mode. Its
       // x/y/rotation/scale (the user's in-progress drag) are left untouched — only the
-      // underlying line geometry is refreshed.
-      setVisualAlignmentItem((prev) => (prev ? { ...prev, lines: normalized } : prev));
+      // underlying line geometry is refreshed (already NED-baked when alignment is verified).
+      setVisualAlignmentItem((prev) => (prev ? { ...prev, lines: forMap } : prev));
       setImportedPlan({
         fileName: pathName,
         uri: "",

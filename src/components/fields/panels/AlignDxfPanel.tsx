@@ -492,7 +492,10 @@ export function AlignDxfPanel({
           const rotDeg = coerceFiniteNumber(data.rotation_deg);
           const offsetE = coerceFiniteNumber(data.offset_e);
           const offsetN = coerceFiniteNumber(data.offset_n);
-          const alignScale = coerceFiniteNumber(data.scale) ?? 1;
+          // Same scale policy as setAlignmentResult above and rehydrateAlignedPlanLines —
+          // Fix bake, stored result, and post-refresh rehydrate must agree or extension
+          // toggle would reintroduce a small pose shift.
+          const alignScale = enforceAlignmentScale(coerceFiniteNumber(data.scale) ?? 1.0);
           console.log(
             `[AlignDXF][Fix] Transform params: rotDeg=${rotDeg} offsetN=${offsetN} offsetE=${offsetE} scale=${alignScale} data.origin_gps=${JSON.stringify(data.origin_gps)} merged_waypoints=${!!data.merged_waypoints}`
           );
