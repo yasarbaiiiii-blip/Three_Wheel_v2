@@ -113,6 +113,7 @@ import {
   formatFinite,
   formatSprayFlagSample,
   formatWaypointPair,
+  getLineLengthM,
   isPrimaryEditableLine,
   normalizeEntityType,
   parsePathSegmentsResponse,
@@ -132,6 +133,7 @@ import {
   buildPlanLineSvgPath,
   computePlanBoundingBoxLegacy,
   getCurveGeometry,
+  getPlanLineRenderPoints,
   getPlanLineSegmentKind,
   getPreviewCircleElements,
   isCircleLikeLine,
@@ -596,6 +598,15 @@ export default function App() {
   const [importedPlan, setImportedPlan] = useState<ImportedPlan | null>(null);
   const [lines, setLines] = useState<PlanLine[]>([]);
   const [selectedLineId, setSelectedLineId] = useState<string | null>(null);
+  // Explicit multi-line highlight set (Path Order "Extension" groups). When null, only
+  // `selectedLineId` is highlighted. Set atomically via `handleSelectLine` so a list
+  // row can never race with a clear-from-single-select path (the previous broadcastLayer
+  // + separate setters left multi-highlight always cleared).
+  const [highlightLineIds, setHighlightLineIds] = useState<string[] | null>(null);
+  const handleSelectLine = useCallback((id: string | null, options?: { highlightLineIds?: string[] | null }) => {
+    setSelectedLineId(id);
+    setHighlightLineIds(options?.highlightLineIds ?? null);
+  }, []);
 
   // 1. Mode Toggle State
   const [isVisualAlignmentMode, setIsVisualAlignmentMode] = useState(false);
@@ -1261,6 +1272,13 @@ export default function App() {
     if (!selectedLineId) return;
     if (protectedMissionResident) {
       Alert.alert("Mission conflict", "Editing the plan is blocked while a protected surveyed mission is resident.");
+      return;
+    }
+    const targetLine = lines.find((line) => line.id === selectedLineId);
+    if (targetLine?.layer === "transit" || targetLine?.layer === "extension") {
+      // These are auto-generated from the primary entities + extension/spacing config, not
+      // independently editable — deleting one directly would desync from that config.
+      Alert.alert("Cannot delete", "Transit and extension segments are generated automatically and can't be deleted directly.");
       return;
     }
     logAction("DELETE_LINE", { selectedLineId });
@@ -3658,7 +3676,7 @@ export default function App() {
                   extensionsEnabled={extensionsEnabled}
                   setLines={setLines}
                   selectedLineId={selectedLineId}
-                  onSelectLine={setSelectedLineId}
+                  onSelectLine={handleSelectLine}
                   onDeleteSelectedLine={deleteSelectedLine}
                   onConfirmDeletePlan={deleteEntirePlan}
                   menuOpen={menuOpen}
@@ -3781,7 +3799,8 @@ export default function App() {
                             extractedCorners={extractedCorners}
                             setExtractedCorners={setExtractedCorners}
                             onNav={(p) => setPage(p)}
-                            onSelectLine={setSelectedLineId}
+                            onSelectLine={handleSelectLine}
+                            highlightLineIds={highlightLineIds}
                             onGenerateTemplate={(name, generatedLines) => {
                               if (protectedMissionResident) {
                                 Alert.alert("Mission conflict", "Generating a new template is blocked while a protected surveyed mission is resident.");
@@ -4051,7 +4070,7 @@ type HomeViewProps = {
   lines: PlanLine[];
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   selectedLineId: string | null;
-  onSelectLine: (id: string | null) => void;
+  onSelectLine: (id: string | null, options?: { highlightLineIds?: string[] | null }) => void;
   onDeleteSelectedLine: () => void;
   onConfirmDeletePlan: () => void;
   menuOpen: boolean;
@@ -5318,7 +5337,9 @@ function SectionPages(props: {
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   selectedLineId: string | null;
   onBack: () => void;
-  onSelectLine: (id: string | null) => void;
+  onSelectLine: (id: string | null, options?: { highlightLineIds?: string[] | null }) => void;
+  /** Multi-line highlight set from Path Order Extension group selection. */
+  highlightLineIds?: string[] | null;
   onGenerateTemplate: (name: string, lines: PlanLine[]) => void;
   layerVisibility: LayerVisibility;
   setLayerVisibility: React.Dispatch<React.SetStateAction<LayerVisibility>>;
@@ -6489,6 +6510,7 @@ function PlanPreview({
   visibility,
   selectedLineId,
   onSelectLine,
+  highlightLineIds = null,
   originShiftKey = null,
   roverPosN,
   roverPosE,
@@ -6535,7 +6557,12 @@ function PlanPreview({
   stagedVerified?: boolean;
   visibility: LayerVisibility;
   selectedLineId: string | null;
-  onSelectLine?: (id: string | null) => void;
+  onSelectLine?: (id: string | null, options?: { highlightLineIds?: string[] | null }) => void;
+  /**
+   * Explicit multi-line highlight set (e.g. every extension segment in a Path Order
+   * Pre/Aft group). When null/empty, only `selectedLineId` is highlighted.
+   */
+  highlightLineIds?: string[] | null;
   originShiftKey?: string | null;
   roverPosN?: number | null;
   roverPosE?: number | null;
@@ -6698,14 +6725,61 @@ function PlanPreview({
       };
     });
   }, [filtered]);
+
   const primarySequenceLines = useMemo(
     () => filtered.filter(isPrimaryEditableLine),
     [filtered]
   );
-  const selectedLine = useMemo(
-    () => filtered.find((line) => line.id === selectedLineId) ?? null,
-    [filtered, selectedLineId]
-  );
+  // Deliberately derived from the UNFILTERED `lines` prop (not `filtered`) so a clicked
+  // Transit/Extension row from the Fields "Path Order & Load" list still highlights on
+  // demand even while that layer's ambient visibility is off (e.g. transit is force-hidden
+  // during reorder) — only the specifically-selected line(s) render, not the whole layer.
+  const selectedLines = useMemo(() => {
+    const selectable = sanitizePlanLines(lines);
+    if (highlightLineIds && highlightLineIds.length > 0) {
+      const idSet = new Set(highlightLineIds);
+      return selectable.filter((line) => idSet.has(line.id));
+    }
+    const single = selectable.find((line) => line.id === selectedLineId);
+    return single ? [single] : [];
+  }, [lines, highlightLineIds, selectedLineId]);
+
+  // Distance label(s) for the currently highlighted line(s) — one per line in `selectedLines`,
+  // positioned at the tessellated midpoint (correct for curves, not just a chord midpoint) and
+  // offset perpendicular to the line's local direction so the label sits beside it rather than
+  // on top of it.
+  const selectionLabels = useMemo(() => {
+    return selectedLines
+      .map((line) => {
+        const points = getPlanLineRenderPoints(line);
+        if (points.length < 2) return null;
+        const midIdx = Math.floor(points.length / 2);
+        const mid = points[midIdx];
+        const a = points[Math.max(0, midIdx - 1)];
+        const b = points[Math.min(points.length - 1, midIdx + 1)];
+        const dN = b.north - a.north;
+        const dE = b.east - a.east;
+        const dirLen = Math.hypot(dN, dE);
+        // Perpendicular to the local direction, in (north, east); falls back to a fixed
+        // east-ward offset for a degenerate (near-zero-length) direction sample.
+        const perpN = dirLen > 1e-9 ? -dE / dirLen : 0;
+        const perpE = dirLen > 1e-9 ? dN / dirLen : 1;
+        const lengthM = getLineLengthM(line);
+        if (lengthM == null) return null;
+        return {
+          id: line.id,
+          midN: mid.north,
+          midE: mid.east,
+          text: `${formatFinite(lengthM, 2)} m`,
+          anchor: "middle" as const,
+          // Screen-space pixel offset (added post-projection, like virtualBoxLabels above) —
+          // north maps to screen Y inverted, so the Y component is negated.
+          offsetX: perpE * 14,
+          offsetY: -perpN * 14,
+        };
+      })
+      .filter((label): label is NonNullable<typeof label> => label != null);
+  }, [selectedLines]);
   const pathChunksByLayer = useMemo(
     () => ({
       virtual_boundary: buildSvgPathChunks(filtered.filter((line) => line.layer === "virtual_boundary")),
@@ -6785,6 +6859,7 @@ function PlanPreview({
   const [layoutSize, setLayoutSize] = useState({ width: 0, height: 0 });
   const [viewport, setViewport] = useState<PreviewViewport>({ panX: 0, panY: 0, zoom: 1 });
   const [rotation, setRotation] = useState(0);
+  const selectedLineIdSet = useMemo(() => new Set(selectedLines.map((line) => line.id)), [selectedLines]);
   const arrowheadsByLayer = useMemo(() => {
     const result: Record<PreviewRenderedLayer, string[]> = {
       virtual_boundary: [],
@@ -6797,7 +6872,7 @@ function PlanPreview({
     };
 
     for (const line of filtered) {
-      if (line.id === selectedLineId) continue;
+      if (selectedLineIdSet.has(line.id)) continue;
 
       const layer = getPreviewRenderedLayer(line);
       if (!layer) continue;
@@ -6812,7 +6887,7 @@ function PlanPreview({
     }
 
     return result;
-  }, [filtered, layoutSize, rotation, selectedLineId, viewport]);
+  }, [filtered, layoutSize, rotation, selectedLineIdSet, viewport]);
 
   /* ── RAF throttle for viewport (pan/pinch) ── */
   const rafViewportRef = React.useRef<PreviewViewport | null>(null);
@@ -7311,6 +7386,7 @@ function PlanPreview({
             onSelectPoint={onSelectPoint}
             onSelectLine={onSelectLine}
             selectedLineId={selectedLineId}
+            highlightedLines={selectedLines}
             showCornerPoints={true}
             selectedPoints={selectedPoints}
           />
@@ -7395,31 +7471,35 @@ function PlanPreview({
                   />
                 ))
               )}
-              {selectedLine && isCircleLikeLine(selectedLine) ? (() => {
-                const curve = getCurveGeometry(selectedLine);
-                if (!curve) return null;
-                return (
-                  <Circle
-                    cx={curve.centerEast}
-                    cy={curve.centerNorth}
-                    r={curve.radius}
+              {selectedLines.map((line) =>
+                isCircleLikeLine(line) ? (() => {
+                  const curve = getCurveGeometry(line);
+                  if (!curve) return null;
+                  return (
+                    <Circle
+                      key={`sel-${line.id}`}
+                      cx={curve.centerEast}
+                      cy={curve.centerNorth}
+                      r={curve.radius}
+                      stroke="#ef4444"
+                      strokeWidth={3 / viewport.zoom}
+                      fill="none"
+                      opacity={1}
+                    />
+                  );
+                })() : (
+                  <Path
+                    key={`sel-${line.id}`}
+                    d={buildSvgPathForLine(line)}
                     stroke="#ef4444"
                     strokeWidth={3 / viewport.zoom}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
                     fill="none"
                     opacity={1}
                   />
-                );
-              })() : selectedLine ? (
-                <Path
-                  d={buildSvgPathForLine(selectedLine)}
-                  stroke="#ef4444"
-                  strokeWidth={3 / viewport.zoom}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  fill="none"
-                  opacity={1}
-                />
-              ) : null}
+                )
+              )}
               {/* ── Endpoints / Corners ── */}
               {cornerPoints.map((pt, i) => (
                 <Circle key={`ep-${i}`} cx={pt.y} cy={pt.x} r={2.5 / viewport.zoom} fill="#3b82f6" opacity={0.8} />
@@ -7493,13 +7573,14 @@ function PlanPreview({
                 />
               ))
             )}
-            {selectedLine ? (() => {
-              const segment = getPreviewArrowSegment(selectedLine, viewport, rotation, layoutSize);
+            {selectedLines.map((line) => {
+              const segment = getPreviewArrowSegment(line, viewport, rotation, layoutSize);
               if (!segment) return null;
 
               const points = buildPreviewArrowheadPoints(segment.from, segment.to);
               return points ? (
                 <Polygon
+                  key={`sel-arrow-${line.id}`}
                   points={points}
                   fill="#ef4444"
                   stroke="#ffffff"
@@ -7507,7 +7588,7 @@ function PlanPreview({
                   strokeLinejoin="round"
                 />
               ) : null;
-            })() : null}
+            })}
             {/* ── Rover-to-Plan distance indicator ── */}
             {hasRealTelemetry && filtered.length > 0 && (() => {
               let nextDist = Infinity;
@@ -7668,6 +7749,45 @@ function PlanPreview({
                     y={sy}
                     fontSize={11}
                     fill="#0891b2"
+                    fontWeight="700"
+                    textAnchor={lbl.anchor}
+                  >
+                    {lbl.text}
+                  </SvgText>
+                </G>
+              );
+            })}
+
+            {/* ── Distance label(s) for the currently highlighted/selected line(s) ── */}
+            {selectionLabels.map((lbl) => {
+              const rawSX = lbl.midE * viewport.zoom + viewport.panX;
+              const rawSY = -lbl.midN * viewport.zoom + viewport.panY;
+              let sx = rawSX + lbl.offsetX;
+              let sy = rawSY + lbl.offsetY;
+              if (rotation !== 0 && layoutSize.width > 0 && layoutSize.height > 0) {
+                const rotated = rotatePoint(sx, sy, layoutSize.width / 2, layoutSize.height / 2, rotation);
+                sx = rotated.x;
+                sy = rotated.y;
+              }
+              return (
+                <G key={`sel-label-${lbl.id}`}>
+                  <SvgText
+                    x={sx}
+                    y={sy}
+                    fontSize={11}
+                    fill="#ffffff"
+                    stroke="#ffffff"
+                    strokeWidth={3.5}
+                    fontWeight="700"
+                    textAnchor={lbl.anchor}
+                  >
+                    {lbl.text}
+                  </SvgText>
+                  <SvgText
+                    x={sx}
+                    y={sy}
+                    fontSize={11}
+                    fill="#ef4444"
                     fontWeight="700"
                     textAnchor={lbl.anchor}
                   >

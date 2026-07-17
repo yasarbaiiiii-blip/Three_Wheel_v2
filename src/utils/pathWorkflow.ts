@@ -125,6 +125,119 @@ export function formatSprayFlagSample(loaded: missionApi.LoadedPathResponse): st
   return `mark ${loaded.num_mark} / transit ${loaded.num_transit}`;
 }
 
+/**
+ * Best-available physical length for a PlanLine, in metres.
+ *
+ * Extension lines (`layer==="extension"`) need special handling: they carry a
+ * COPY of the parent entity (see App.tsx's fallbackExtLines construction), so
+ * `entity.length_m` on them is the parent mark's length, not this run-up/
+ * run-out segment's own length. The correct per-role length lives in
+ * `entity.extension_preview.pre_length_m` / `aft_length_m`, keyed by the
+ * `ext-pre-`/`ext-aft-` id prefix.
+ */
+export function getLineLengthM(line: PlanLine): number | null {
+  if (line.layer === "extension" && line.entity?.extension_preview) {
+    if (line.id.startsWith("ext-pre-")) {
+      return coerceFiniteNumber(line.entity.extension_preview.pre_length_m);
+    }
+    if (line.id.startsWith("ext-aft-")) {
+      return coerceFiniteNumber(line.entity.extension_preview.aft_length_m);
+    }
+  }
+  const entityLength = coerceFiniteNumber(line.entity?.length_m);
+  if (entityLength != null) return entityLength;
+  return coerceFiniteNumber(Math.hypot(line.to.x - line.from.x, line.to.y - line.from.y));
+}
+
+/**
+ * Optional second argument for plan-line selection.
+ *
+ * When `highlightLineIds` is a non-empty array, the preview highlights every
+ * listed line (used for Path Order "Extension" rows so all pre/aft segments of
+ * that distance group light up together). When omitted/null, only `id` is
+ * highlighted — the default for canvas taps and for individual entities
+ * (line/arc/circle/transit).
+ */
+export type SelectLineOptions = {
+  highlightLineIds?: string[] | null;
+};
+
+export type SelectLineFn = (id: string | null, options?: SelectLineOptions) => void;
+
+/** One Path Order list row for a unique (pre, aft) extension-distance group. */
+export type ExtensionListGroup = {
+  key: string;
+  preM: number | null;
+  aftM: number | null;
+  lineIds: string[];
+  lines: PlanLine[];
+};
+
+/** Stable key for grouping extension segments that share the same Pre/Aft distances. */
+export function getExtensionGroupKey(preM: number | null, aftM: number | null): string {
+  const fmt = (v: number | null) => (v == null ? "na" : v.toFixed(4));
+  return `${fmt(preM)}|${fmt(aftM)}`;
+}
+
+/**
+ * Resolve the Pre/Aft distances that should label an extension line in the list.
+ * Prefer per-entity `extension_preview` lengths (authoritative for that segment's
+ * parent), then fall back to the global Step-1 config values.
+ */
+export function getExtensionListDistances(
+  line: PlanLine,
+  fallbackPre?: unknown,
+  fallbackAft?: unknown
+): { preM: number | null; aftM: number | null } {
+  const preview = line.entity?.extension_preview;
+  return {
+    preM: coerceFiniteNumber(preview?.pre_length_m) ?? coerceFiniteNumber(fallbackPre),
+    aftM: coerceFiniteNumber(preview?.aft_length_m) ?? coerceFiniteNumber(fallbackAft),
+  };
+}
+
+/**
+ * Group extension-layer lines for the Path Order list.
+ *
+ * Same (pre, aft) → one "Extension" row that multi-highlights all members.
+ * Different distances (e.g. 0.5 m vs 0.8 m) → separate rows, as required when
+ * multiple plans/configs contribute distinct extension lengths.
+ */
+export function groupExtensionLinesForList(
+  lines: PlanLine[],
+  fallbackPre?: unknown,
+  fallbackAft?: unknown
+): ExtensionListGroup[] {
+  const groups = new Map<string, ExtensionListGroup>();
+  for (const line of lines) {
+    if (line.layer !== "extension") continue;
+    const { preM, aftM } = getExtensionListDistances(line, fallbackPre, fallbackAft);
+    const key = getExtensionGroupKey(preM, aftM);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.lines.push(line);
+      existing.lineIds.push(line.id);
+    } else {
+      groups.set(key, { key, preM, aftM, lines: [line], lineIds: [line.id] });
+    }
+  }
+  return Array.from(groups.values());
+}
+
+/** True when the current multi-highlight set is exactly this extension group. */
+export function isExtensionGroupSelected(
+  group: ExtensionListGroup,
+  selectedLineId: string | null,
+  highlightLineIds: string[] | null | undefined
+): boolean {
+  if (highlightLineIds && highlightLineIds.length > 0) {
+    if (highlightLineIds.length !== group.lineIds.length) return false;
+    const set = new Set(highlightLineIds);
+    return group.lineIds.every((id) => set.has(id));
+  }
+  return selectedLineId != null && group.lineIds.includes(selectedLineId);
+}
+
 export function isPrimaryEditableLine(line: PlanLine) {
   if (line.layer === "transit" || line.layer === "extension") {
     return false;

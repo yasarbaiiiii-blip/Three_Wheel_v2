@@ -68,6 +68,7 @@ import {
 import { findNearestPointWithinRadius, type LocalMeters } from "../utils/refPointSnap";
 import { computeShapeSnapPoints } from "../utils/planShapeSnapPoints";
 import { toMapboxCoord, fromMapboxCoord } from "../utils/mapboxCoords";
+import { getLineLengthM, formatFinite } from "../utils/pathWorkflow";
 import { MAPBOX_STYLE_URL } from "../config/mapbox";
 import type { MapViewProps } from "./mapViewTypes";
 import { pixelDeltaToMetres, clampToIndent, type BoundingRect } from "../utils/mapGestureUtils";
@@ -298,6 +299,7 @@ export function MapViewNative(props: MapViewProps) {
     onSelectPoint,
     onSelectLine,
     selectedLineId,
+    highlightedLines,
     selectedPoints,
     mode = "fields",
     placedItems,
@@ -665,33 +667,61 @@ export function MapViewNative(props: MapViewProps) {
     return { coord: [lon1, lat1], bearing };
   }, [planLinesFC, originSig, lines.length, mode]);
 
-  // ── Fields selection: highlighted line + corner points ──
-  const selectionFC = useMemo(() => {
-    if (mode !== "fields" || !projectionOrigin || !selectedLineId) {
-      return { line: featureCollection([]), corners: featureCollection([]) };
-    }
+  // ── Fields selection: highlighted line(s) + corner points ──
+  // `highlightedLines`, when provided, is an explicit, already-resolved set (e.g. every
+  // extension-layer or transit-layer line for a "select all of this type" broadcast click
+  // from the Path Order & Load list) — it may include lines this component's own `lines`
+  // prop doesn't contain (that prop is already visibility-filtered by the caller), so the
+  // caller resolves the set rather than this component re-deriving it from `lines`.
+  // Falls back to the single `selectedLineId` match against `lines` when absent, matching
+  // the original single-select behavior used by every other caller of this component.
+  const linesToHighlight = useMemo(() => {
+    if (highlightedLines && highlightedLines.length > 0) return highlightedLines;
+    if (!selectedLineId) return [];
     const selected = lines.find((l) => l.id === selectedLineId);
-    if (!selected) {
-      return { line: featureCollection([]), corners: featureCollection([]) };
+    return selected ? [selected] : [];
+  }, [highlightedLines, selectedLineId, lines]);
+
+  const selectionFC = useMemo(() => {
+    if (mode !== "fields" || !projectionOrigin || linesToHighlight.length === 0) {
+      return { line: featureCollection([]), corners: featureCollection([]), labels: featureCollection([]) };
     }
-    const segs = projectPlanLineToGpsSegments(selected, projectionOrigin);
-    if (segs.length < 2) {
-      return { line: featureCollection([]), corners: featureCollection([]) };
+    const lineFeatures: GeoJSON.Feature[] = [];
+    const cornerFeatures: GeoJSON.Feature[] = [];
+    const labelFeatures: GeoJSON.Feature[] = [];
+    for (const selected of linesToHighlight) {
+      const segs = projectPlanLineToGpsSegments(selected, projectionOrigin);
+      if (segs.length < 2) continue;
+      const coords = segs.map(([lat, lon]) => toMapboxCoord(lat, lon));
+      const closedRing = isClosedCoordRing(coords);
+      lineFeatures.push(lineFeature(coords, { closedRing }));
+
+      const cornerAnchors = isCurveEntity(selected) || isCircleLikeLine(selected)
+        ? getCurveSelectionAnchors(selected).map((pt) => {
+            const gps = projectPlanNorthEastToGps(pt.north, pt.east, projectionOrigin);
+            return pointFeature(toMapboxCoord(gps.lat, gps.lon));
+          })
+        : coords.map((c) => pointFeature(c));
+      cornerFeatures.push(...cornerAnchors);
+
+      const midSeg = segs[Math.floor(segs.length / 2)];
+      const lengthM = getLineLengthM(selected);
+      if (midSeg && lengthM != null) {
+        const [midLat, midLon] = midSeg;
+        labelFeatures.push(
+          pointFeature(toMapboxCoord(midLat, midLon), {
+            label: `${formatFinite(lengthM, 2)} m`,
+            offset: [0, -1.4],
+          })
+        );
+      }
     }
-    const coords = segs.map(([lat, lon]) => toMapboxCoord(lat, lon));
-    const closedRing = isClosedCoordRing(coords);
-    const cornerAnchors = isCurveEntity(selected) || isCircleLikeLine(selected)
-      ? getCurveSelectionAnchors(selected).map((pt) => {
-          const gps = projectPlanNorthEastToGps(pt.north, pt.east, projectionOrigin);
-          return pointFeature(toMapboxCoord(gps.lat, gps.lon));
-        })
-      : coords.map((c) => pointFeature(c));
-    const corners = cornerAnchors;
     return {
-      line: featureCollection([lineFeature(coords, { closedRing })]),
-      corners: featureCollection(corners),
+      line: featureCollection(lineFeatures),
+      corners: featureCollection(cornerFeatures),
+      labels: featureCollection(labelFeatures),
     };
-  }, [mode, originSig, selectedLineId, lines]);
+  }, [mode, originSig, linesToHighlight]);
 
   // ── Reference points ──
   const refPointsFC = useMemo(() => {
@@ -1923,6 +1953,20 @@ export function MapViewNative(props: MapViewProps) {
               circleOpacity: 0.9,
               circleStrokeColor: "#ffffff",
               circleStrokeWidth: 1.5,
+            }}
+          />
+        </ShapeSource>
+        <ShapeSource id="selection-labels" shape={selectionFC.labels}>
+          <SymbolLayer
+            id="selection-labels-layer"
+            style={{
+              textField: ["get", "label"],
+              textColor: "#ef4444",
+              textHaloColor: "#ffffff",
+              textHaloWidth: 2,
+              textSize: 12,
+              textOffset: ["get", "offset"],
+              textAllowOverlap: true,
             }}
           />
         </ShapeSource>

@@ -46,12 +46,23 @@ export type FieldsPageProps = {
   telemetrySnapshot: TelemetrySnapshot | null;
   selectedLineId: string | null;
   layerVisibility: LayerVisibility;
+  setLayerVisibility?: React.Dispatch<React.SetStateAction<LayerVisibility>>;
   backendPaths: any[];
   selectedPathName: string | null;
   onSelectPath: (name: string) => void;
   onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
   missionActionBusy: boolean;
-  onSelectLine: (id: string | null) => void;
+  onSelectLine: (id: string | null, options?: { highlightLineIds?: string[] | null }) => void;
+  /**
+   * Explicit multi-line highlight set from Path Order Extension group selection.
+   * When set, the plan preview highlights every listed line (not only selectedLineId).
+   */
+  highlightLineIds?: string[] | null;
+  /** Global DXF extension config (enabled + pre/aft distance), already fetched by the
+   * parent — reused here so the Path Order & Load Extension row shows the same values
+   * as Step 1's Upload panel without a second fetch. */
+  extPre?: string;
+  extAft?: string;
   apiBaseUrl: string;
   onRefreshPaths: () => void;
   onWorkflowStep?: (step: StagedWorkflowStep, status: StagedWorkflowStatus) => void;
@@ -96,7 +107,8 @@ export type FieldsPageProps = {
     autoOriginEnabled?: boolean;
     visibility: LayerVisibility;
     selectedLineId: string | null;
-    onSelectLine?: (id: string | null) => void;
+    onSelectLine?: (id: string | null, options?: { highlightLineIds?: string[] | null }) => void;
+    highlightLineIds?: string[] | null;
     roverPosN?: number | null;
     roverPosE?: number | null;
     roverHeadingDeg?: number | null;
@@ -147,12 +159,16 @@ export function FieldsPage(props: FieldsPageProps) {
     telemetrySnapshot,
     selectedLineId,
     layerVisibility,
+    setLayerVisibility,
     backendPaths,
     selectedPathName,
     onSelectPath,
     onLoadSelectedPath,
     missionActionBusy,
     onSelectLine,
+    highlightLineIds = null,
+    extPre,
+    extAft,
     apiBaseUrl,
     onRefreshPaths,
     onWorkflowStep,
@@ -428,6 +444,11 @@ export function FieldsPage(props: FieldsPageProps) {
     onNavigateHome?.();
   }, [onNavigateHome]);
 
+  // Toggles whether the extension (run-up/run-out) layer draws on the plan preview.
+  const handleToggleExtensionVisible = useCallback(() => {
+    setLayerVisibility?.((prev) => ({ ...prev, extension: prev.extension === false }));
+  }, [setLayerVisibility]);
+
   // Build mapLLA from visualAlignmentItem or telemetry
   const mapLLA = visualAlignmentItem
     ? { lat: telemetrySnapshot?.lat ?? 0, lon: telemetrySnapshot?.lon ?? 0 }
@@ -457,6 +478,7 @@ export function FieldsPage(props: FieldsPageProps) {
           visibility: effectiveLayerVisibility,
           selectedLineId,
           onSelectLine,
+          highlightLineIds,
           roverPosN: previewRoverPoint?.north ?? null,
           roverPosE: previewRoverPoint?.east ?? null,
           roverHeadingDeg: telemetrySnapshot?.heading_ned_deg ?? null,
@@ -742,6 +764,11 @@ export function FieldsPage(props: FieldsPageProps) {
               onLoadSelectedPath={onLoadSelectedPath}
               missionActionBusy={missionActionBusy}
               onNavigateHome={handleNavigateHome}
+              extensionVisible={layerVisibility.extension !== false}
+              onToggleExtensionVisible={handleToggleExtensionVisible}
+              highlightLineIds={highlightLineIds}
+              extPre={extPre}
+              extAft={extAft}
             />
           </FieldsStepCard>
           )}

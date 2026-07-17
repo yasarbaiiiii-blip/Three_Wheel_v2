@@ -9,7 +9,15 @@ import type {
   StagedWorkflowStep,
 } from "../../../types/fieldsWorkflow";
 import type { ImportedPlan, PlanLine } from "../../../types/plan";
-import { isPrimaryEditableLine, normalizeEntityType } from "../../../utils/pathWorkflow";
+import {
+  formatFinite,
+  getLineLengthM,
+  groupExtensionLinesForList,
+  isExtensionGroupSelected,
+  isPrimaryEditableLine,
+  normalizeEntityType,
+  type SelectLineFn,
+} from "../../../utils/pathWorkflow";
 import { DraggableReorderList } from "../DraggableReorderList";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
@@ -20,7 +28,7 @@ type PathOrderAndSprayStepProps = {
   lines: PlanLine[];
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   selectedLineId: string | null;
-  onSelectLine: (id: string | null) => void;
+  onSelectLine: SelectLineFn;
   onRefreshPaths: () => void;
   onSelectPath: (name: string) => void;
   onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
@@ -35,6 +43,14 @@ type PathOrderAndSprayStepProps = {
   onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
   missionActionBusy: boolean;
   onNavigateHome: () => void;
+  extensionVisible: boolean;
+  onToggleExtensionVisible: () => void;
+  /** Current multi-line highlight set (used to paint Extension group row selection). */
+  highlightLineIds?: string[] | null;
+  /** Global DXF extension config, reused from Step 1 so Extension rows show the same
+   * pre/aft distance without a second fetch when per-entity preview lengths are missing. */
+  extPre?: string;
+  extAft?: string;
 };
 
 const LOAD_STEP_LABELS: Record<pathApi.LoadToControllerStep, string> = {
@@ -104,6 +120,11 @@ export function PathOrderAndSprayStep({
   onLoadSelectedPath,
   missionActionBusy,
   onNavigateHome,
+  extensionVisible,
+  onToggleExtensionVisible,
+  highlightLineIds = null,
+  extPre,
+  extAft,
 }: PathOrderAndSprayStepProps) {
   const [reorderedLines, setReorderedLines] = useState<PlanLine[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -117,12 +138,28 @@ export function PathOrderAndSprayStep({
     setReorderedLines(primaryLines);
   }, [primaryLines]);
 
-  // All lines (including transit/extension) for display
-  const allDisplayLines = useMemo(() => {
-    const primary = new Set(primaryLines.map((l) => l.id));
-    const nonPrimary = lines.filter((l) => !primary.has(l.id));
-    return [...reorderedLines, ...nonPrimary];
-  }, [reorderedLines, primaryLines, lines]);
+  // One row per unique (pre, aft) extension distance group. Multiple configs/plans
+  // with different lengths (0.5 m vs 0.8 m) yield multiple Extension rows.
+  const extensionGroups = useMemo(
+    () => groupExtensionLinesForList(lines, extPre, extAft),
+    [lines, extPre, extAft]
+  );
+
+  // One row per transit leg — individual entity like line/arc/circle (not grouped).
+  // Geometry only regenerates on a full path refetch (Save/reload), not live while
+  // dragging (ambient transit is force-hidden during this step in useFieldsWorkflow).
+  const transitLines = useMemo(() => lines.filter((l) => l.layer === "transit"), [lines]);
+
+  // Primary + transit: single-line select (clears any multi-highlight via atomic API).
+  // Extension groups: multi-highlight every segment in that Pre/Aft group.
+  const handleSelectPrimaryOrTransit = (line: PlanLine) => {
+    onSelectLine(line.id);
+  };
+
+  const handleSelectExtensionGroup = (lineIds: string[]) => {
+    if (lineIds.length === 0) return;
+    onSelectLine(lineIds[0], { highlightLineIds: lineIds });
+  };
 
   const handleToggleSpray = (lineId: string) => {
     onInvalidateWorkflow("spray");
@@ -238,8 +275,8 @@ export function PathOrderAndSprayStep({
   return (
     <View style={{ gap: 12 }}>
       <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
-        Drag to reorder path segments. Check/uncheck to toggle spray. Transit and extension are
-        visible but non-interactive.
+        Drag to reorder path segments. Check/uncheck to toggle spray. Tap a row to highlight it
+        on the preview (Extension highlights the whole distance group).
       </Text>
 
       {/* Reorderable list with spray checkboxes */}
@@ -258,6 +295,99 @@ export function PathOrderAndSprayStep({
             onInvalidateWorkflow("spray");
             setReorderedLines(next);
           }}
+          onPressItem={handleSelectPrimaryOrTransit}
+          selectedRowId={selectedLineId}
+          footer={
+            (transitLines.length > 0 || extensionGroups.length > 0) && (
+              <View style={{ gap: 8, padding: 10 }}>
+                {transitLines.length > 0 && (
+                  <View style={{ gap: 6 }}>
+                    <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10 }}>
+                      Transit (reflects last-saved order)
+                    </Text>
+                    {transitLines.map((line, idx) => {
+                      const lengthM = getLineLengthM(line);
+                      const selected = line.id === selectedLineId && !(highlightLineIds && highlightLineIds.length > 0);
+                      return (
+                        <Pressable
+                          key={line.id}
+                          onPress={() => handleSelectPrimaryOrTransit(line)}
+                          style={{
+                            flexDirection: "row",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            paddingHorizontal: 10,
+                            paddingVertical: 10,
+                            borderRadius: 10,
+                            borderWidth: 1,
+                            borderColor: selected ? FIELDS_COLORS.teal : FIELDS_COLORS.panelBorder,
+                            backgroundColor: selected ? FIELDS_COLORS.accentMuted : "transparent",
+                          }}
+                        >
+                          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "600" }}>
+                            Transit {idx + 1}
+                          </Text>
+                          <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11 }}>
+                            {lengthM != null ? `${formatFinite(lengthM, 2)} m` : "n/a"}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                )}
+
+                {extensionGroups.map((group, groupIndex) => {
+                  const selected = isExtensionGroupSelected(group, selectedLineId, highlightLineIds);
+                  const title =
+                    extensionGroups.length > 1 ? `Extension ${groupIndex + 1}` : "Extension";
+                  return (
+                    <View
+                      key={group.key}
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        paddingHorizontal: 10,
+                        paddingVertical: 10,
+                        borderRadius: 10,
+                        borderWidth: 1,
+                        borderColor: selected ? FIELDS_COLORS.teal : FIELDS_COLORS.panelBorder,
+                        backgroundColor: selected ? FIELDS_COLORS.accentMuted : "transparent",
+                      }}
+                    >
+                      <Pressable
+                        onPress={() => handleSelectExtensionGroup(group.lineIds)}
+                        style={{ flex: 1 }}
+                      >
+                        <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "600" }}>
+                          {title}
+                        </Text>
+                        <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
+                          Pre {formatFinite(group.preM, 2)} m · Aft {formatFinite(group.aftM, 2)} m
+                        </Text>
+                      </Pressable>
+                      <TouchableOpacity
+                        onPress={onToggleExtensionVisible}
+                        activeOpacity={0.7}
+                        style={{
+                          width: 24,
+                          height: 24,
+                          borderRadius: 6,
+                          borderWidth: 1.5,
+                          borderColor: extensionVisible ? FIELDS_COLORS.teal : FIELDS_COLORS.textDim,
+                          backgroundColor: extensionVisible ? FIELDS_COLORS.teal : "transparent",
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        {extensionVisible ? <CheckIcon size={14} color="#fff" /> : null}
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })}
+              </View>
+            )
+          }
           renderExtraRight={(item) => {
             const entityType = normalizeEntityType(item.entity?.entity_type);
             const isSprayable =
@@ -312,14 +442,6 @@ export function PathOrderAndSprayStep({
           }}
         />
       </View>
-
-      {/* Non-primary lines info */}
-      {lines.filter((l) => !isPrimaryEditableLine(l)).length > 0 && (
-        <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, fontStyle: "italic" }}>
-          {lines.filter((l) => l.layer === "transit").length} transit ·{" "}
-          {lines.filter((l) => l.layer === "extension").length} extension segments (auto-generated)
-        </Text>
-      )}
 
       {/* Load to Controller */}
       <TouchableOpacity

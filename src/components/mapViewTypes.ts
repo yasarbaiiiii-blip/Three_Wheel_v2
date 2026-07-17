@@ -24,6 +24,16 @@ export interface MapViewProps {
   onSelectPoint?: (pt: { x: number; y: number }) => void;
   onSelectLine?: (id: string | null) => void;
   selectedLineId?: string | null;
+  /**
+   * Explicit, already-resolved set of lines to highlight, in place of the single
+   * `selectedLineId` line — used by the Fields "Path Order & Load" list so clicking
+   * the Extension or Transit row highlights every segment of that type at once
+   * ("same-type broadcast"). Resolved by the caller (not derived here) because the
+   * `lines` prop this component receives is already visibility-filtered — a hidden
+   * layer's lines wouldn't be present to filter from if this component tried to
+   * derive the set itself from `lines` + a layer name.
+   */
+  highlightedLines?: PlanLine[] | null;
   showCornerPoints?: boolean;
   /**
    * `lat`/`lon` are the point's own known real-world coordinate (typed in or CSV-imported)

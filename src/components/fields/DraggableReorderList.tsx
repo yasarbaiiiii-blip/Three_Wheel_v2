@@ -11,9 +11,27 @@ type DraggableReorderListProps = {
   onDragEnd: (next: PlanLine[]) => void;
   /** Optional render function for extra content on the right side of each item */
   renderExtraRight?: (item: PlanLine) => React.ReactNode;
+  /** Tap (not long-press) a row — separate gesture from `onLongPress={drag}`, so tap-to-select
+   * and hold-to-reorder coexist without conflict. */
+  onPressItem?: (item: PlanLine) => void;
+  /** Highlights the currently tap-selected row's background. */
+  selectedRowId?: string | null;
+  /**
+   * Extra rows appended below the draggable ones, in the SAME scroll region (single
+   * scrollbar) but NOT reorderable — used for Extension/Transit rows, which the backend
+   * places automatically rather than the user reordering.
+   */
+  footer?: React.ReactNode;
 };
 
-export function DraggableReorderList({ data, onDragEnd, renderExtraRight }: DraggableReorderListProps) {
+export function DraggableReorderList({
+  data,
+  onDragEnd,
+  renderExtraRight,
+  onPressItem,
+  selectedRowId = null,
+  footer,
+}: DraggableReorderListProps) {
   return (
     <DraggableFlatList
       data={data}
@@ -26,17 +44,23 @@ export function DraggableReorderList({ data, onDragEnd, renderExtraRight }: Drag
       windowSize={5}
       maxToRenderPerBatch={10}
       initialNumToRender={8}
+      ListFooterComponent={footer ? () => <>{footer}</> : undefined}
       renderItem={({ item, drag, isActive }: RenderItemParams<PlanLine>) => (
         <ScaleDecorator>
           <Pressable
             onLongPress={drag}
+            onPress={() => onPressItem?.(item)}
             disabled={isActive}
             style={{
               flexDirection: "row",
               alignItems: "center",
               padding: 10,
               gap: 8,
-              backgroundColor: isActive ? FIELDS_COLORS.accentMuted : FIELDS_COLORS.cardSolid,
+              backgroundColor: isActive
+                ? FIELDS_COLORS.accentMuted
+                : item.id === selectedRowId
+                ? FIELDS_COLORS.accentMuted
+                : FIELDS_COLORS.cardSolid,
               borderBottomWidth: 1,
               borderBottomColor: FIELDS_COLORS.panelBorder,
             }}
