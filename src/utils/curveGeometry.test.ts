@@ -120,4 +120,52 @@ describe("curveGeometry", () => {
     expect(path).not.toContain("L");
   });
 
+  it("renders extension stubs as pre/aft polylines even when parent metadata is CIRCLE", () => {
+    const prePoints = [
+      { north: 0, east: -1 },
+      { north: 0, east: 0 },
+    ];
+    // Legacy shape: extension line that still carried parent circle entity_type/geometry.
+    const extensionLine: PlanLine = {
+      id: "ext-pre-e1",
+      label: "Pre-extension",
+      layer: "extension",
+      from: { id: 1, x: 0, y: -1 },
+      to: { id: 2, x: 0, y: 0 },
+      width: 0.1,
+      entity: {
+        entity_id: "e1",
+        entity_type: "CIRCLE",
+        layer: "0",
+        color: 7,
+        is_mark: true,
+        length_m: 99,
+        geometry: {
+          centerNorth: 0,
+          centerEast: 0,
+          radius: 2,
+          startAngle: 0,
+          endAngle: 360,
+        },
+        preview_points: prePoints,
+        extension_preview: {
+          enabled: true,
+          pre_length_m: 1,
+          aft_length_m: 1,
+          pre_points: prePoints,
+          aft_points: [],
+        },
+      },
+    };
+
+    expect(isCircleLikeLine(extensionLine)).toBe(false);
+    const points = getPlanLineRenderPoints(extensionLine);
+    expect(points).toHaveLength(2);
+    expect(points[0]).toEqual({ north: 0, east: -1 });
+    expect(points[1]).toEqual({ north: 0, east: 0 });
+    const path = buildPlanLineSvgPath(extensionLine);
+    expect(path).toContain("L");
+    expect(path).not.toContain("A");
+  });
+
 });

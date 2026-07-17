@@ -3,32 +3,26 @@ import { useMemo, useState } from "react";
 import type { FieldsAccordionId, FieldsStepId, PlanManipulationMode, TransformHUDData } from "../types/fieldsWorkflow";
 import type { LayerVisibility } from "../types/plan";
 
+/**
+ * Layer visibility applied to the Fields plan preview for the current step.
+ *
+ * Path Order used to force `transit: false` so reordering wouldn't show stale transit
+ * until Save. Product requirement is the **entire plan** ambient-visible on every step
+ * (marks + transit + extension), so this no longer overrides base visibility. Transit
+ * still reflects last-saved order until Load/Save — operators prefer seeing it.
+ */
 export function getEffectiveLayerVisibility(
   baseVisibility: LayerVisibility,
-  activeStep: FieldsStepId | FieldsAccordionId | null
+  _activeStep: FieldsStepId | FieldsAccordionId | null
 ): LayerVisibility {
-  if (
-    activeStep === "orderAndSpray" ||
-    activeStep === "pathOrder" ||
-    activeStep === "sprayVerify"
-  ) {
-    // Transit legs are derived from the currently-SAVED entity order, so while the user
-    // is dragging to reorder here the transit preview would show stale/misleading paths
-    // until the new order is saved — keep it hidden. Extension run-up/run-out segments
-    // are per-entity and don't depend on order, so they stay visible and correct here.
-    return { ...baseVisibility, transit: false };
-  }
   return baseVisibility;
 }
 
 /** @deprecated backward compat — old accordion-based overload */
 export function getEffectiveLayerVisibilityLegacy(
   baseVisibility: LayerVisibility,
-  activeAccordion: FieldsAccordionId | null
+  _activeAccordion: FieldsAccordionId | null
 ): LayerVisibility {
-  if (activeAccordion === "pathOrder" || activeAccordion === "sprayVerify") {
-    return { ...baseVisibility, transit: false };
-  }
   return baseVisibility;
 }
 

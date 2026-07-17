@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { getEffectiveLayerVisibility } from "./useFieldsWorkflow";
+import { getEffectiveLayerVisibility, getEffectiveLayerVisibilityLegacy } from "./useFieldsWorkflow";
 
 const baseVisibility = {
   boundary: true,
@@ -11,23 +11,23 @@ const baseVisibility = {
 };
 
 describe("getEffectiveLayerVisibility", () => {
-  it("hides transit but keeps extension visible during orderAndSpray step", () => {
+  it("keeps the full plan (including transit + extension) during orderAndSpray", () => {
     const result = getEffectiveLayerVisibility(baseVisibility, "orderAndSpray");
-    expect(result.transit).toBe(false);
+    expect(result).toEqual(baseVisibility);
+    expect(result.transit).toBe(true);
     expect(result.extension).toBe(true);
-    expect(result.marking).toBe(true);
   });
 
-  it("hides transit but keeps extension visible during legacy pathOrder step", () => {
+  it("keeps the full plan during legacy pathOrder step", () => {
     const result = getEffectiveLayerVisibility(baseVisibility, "pathOrder");
-    expect(result.transit).toBe(false);
+    expect(result.transit).toBe(true);
     expect(result.extension).toBe(true);
     expect(result.marking).toBe(true);
   });
 
-  it("hides transit but keeps extension visible during legacy sprayVerify step", () => {
+  it("keeps the full plan during legacy sprayVerify step", () => {
     const result = getEffectiveLayerVisibility(baseVisibility, "sprayVerify");
-    expect(result.transit).toBe(false);
+    expect(result.transit).toBe(true);
     expect(result.extension).toBe(true);
   });
 
@@ -35,5 +35,16 @@ describe("getEffectiveLayerVisibility", () => {
     expect(getEffectiveLayerVisibility(baseVisibility, "align")).toEqual(baseVisibility);
     expect(getEffectiveLayerVisibility(baseVisibility, "upload")).toEqual(baseVisibility);
     expect(getEffectiveLayerVisibility(baseVisibility, "alignDxf")).toEqual(baseVisibility);
+  });
+
+  it("does not revive layers the operator already turned off", () => {
+    const hiddenTransit = { ...baseVisibility, transit: false, extension: false };
+    expect(getEffectiveLayerVisibility(hiddenTransit, "orderAndSpray")).toEqual(hiddenTransit);
+  });
+});
+
+describe("getEffectiveLayerVisibilityLegacy", () => {
+  it("matches the full-plan policy for pathOrder accordion", () => {
+    expect(getEffectiveLayerVisibilityLegacy(baseVisibility, "pathOrder")).toEqual(baseVisibility);
   });
 });

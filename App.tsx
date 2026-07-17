@@ -1882,7 +1882,9 @@ export default function App() {
                 entity: normalizeDxfEntityGeometry(ent),
               });
 
-              // Add extensions if enabled (buffered — only drawn in fallback)
+              // Add extensions if enabled (buffered — only drawn in fallback).
+              // Do NOT copy parent circle/arc entity_type/geometry onto these lines — renderers
+              // would draw the full parent shape instead of the short pre/aft run-up polyline.
               if (ent.extension_preview && ent.extension_preview.enabled) {
                 if (ent.extension_preview.pre_points && ent.extension_preview.pre_points.length >= 2) {
                   const pre = ent.extension_preview.pre_points;
@@ -1893,7 +1895,14 @@ export default function App() {
                     from: { id: i * 100 + 1, x: pre[0].north, y: pre[0].east },
                     to: { id: i * 100 + 2, x: pre[pre.length - 1].north, y: pre[pre.length - 1].east },
                     width: 0.1,
-                    entity: { ...ent, preview_points: pre }
+                    entity: {
+                      ...ent,
+                      entity_type: "line",
+                      geometry: undefined,
+                      preview_points: pre,
+                      length_m: ent.extension_preview.pre_length_m ?? ent.length_m,
+                      extension_preview: ent.extension_preview,
+                    },
                   });
                 }
                 if (ent.extension_preview.aft_points && ent.extension_preview.aft_points.length >= 2) {
@@ -1905,7 +1914,14 @@ export default function App() {
                     from: { id: i * 100 + 3, x: aft[0].north, y: aft[0].east },
                     to: { id: i * 100 + 4, x: aft[aft.length - 1].north, y: aft[aft.length - 1].east },
                     width: 0.1,
-                    entity: { ...ent, preview_points: aft }
+                    entity: {
+                      ...ent,
+                      entity_type: "line",
+                      geometry: undefined,
+                      preview_points: aft,
+                      length_m: ent.extension_preview.aft_length_m ?? ent.length_m,
+                      extension_preview: ent.extension_preview,
+                    },
                   });
                 }
               }

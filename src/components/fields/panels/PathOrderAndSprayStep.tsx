@@ -303,7 +303,7 @@ export function PathOrderAndSprayStep({
                 {transitLines.length > 0 && (
                   <View style={{ gap: 6 }}>
                     <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10 }}>
-                      Transit (reflects last-saved order)
+                      Transit (last-saved order — shown on plan preview)
                     </Text>
                     {transitLines.map((line, idx) => {
                       const lengthM = getLineLengthM(line);

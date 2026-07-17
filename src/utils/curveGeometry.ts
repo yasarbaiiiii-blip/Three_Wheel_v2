@@ -61,6 +61,9 @@ export function isArcEntity(line: PlanLine): boolean {
 }
 
 export function isCurveEntity(line: PlanLine): boolean {
+  // Extension run-ups copy parent entity metadata (circle/arc type + geometry) but their
+  // real shape is the pre/aft polyline in preview_points / from→to — never treat them as curves.
+  if (line.layer === "extension") return false;
   const type = normalizeCurveEntityType(line.entity?.entity_type);
   return type === "circle" || type === "arc";
 }
@@ -86,6 +89,8 @@ export function isSegmentKindVisible(line: PlanLine, segmentTypes?: Record<strin
 
 /** True when the line should render as a smooth closed circle (entity tag or fitted preview). */
 export function isCircleLikeLine(line: PlanLine): boolean {
+  // See isCurveEntity — extension stubs must not draw as the parent circle.
+  if (line.layer === "extension") return false;
   const entityType = normalizeCurveEntityType(line.entity?.entity_type);
   if (entityType === "circle") return true;
   if (entityType === "arc") return false;
@@ -415,7 +420,8 @@ export function sampleCurveEntityPoints(
 
 /** Points used for map/GPS projection — native curve samples when available. */
 export function getPlanLineRenderPoints(line: PlanLine, mapMode = false): DxfPoint[] {
-  if (isCurveEntity(line) || isCircleLikeLine(line)) {
+  // Extension pre/aft segments always use their own polyline (never parent circle/arc samples).
+  if (line.layer !== "extension" && (isCurveEntity(line) || isCircleLikeLine(line))) {
     const sampled = sampleCurveEntityPoints(line, CURVE_SAMPLE_STEPS, mapMode);
     if (sampled.length >= 2) return sampled;
   }
@@ -483,9 +489,12 @@ function buildSvgArcPath(curve: CurveGeometry): string {
 export function buildPlanLineSvgPath(line: PlanLine): string {
   if (!line.from || !line.to) return "";
 
-  const curve = getCurveGeometry(line);
-  if (curve && (isCurveEntity(line) || isCircleLikeLine(line))) {
-    return buildSvgArcPath(curve);
+  // Extension stubs: polyline only (parent entity may still look like circle/arc in metadata).
+  if (line.layer !== "extension") {
+    const curve = getCurveGeometry(line);
+    if (curve && (isCurveEntity(line) || isCircleLikeLine(line))) {
+      return buildSvgArcPath(curve);
+    }
   }
 
   const preview = line.entity?.preview_points;
