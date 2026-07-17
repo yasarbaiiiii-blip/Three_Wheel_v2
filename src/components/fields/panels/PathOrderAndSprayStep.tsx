@@ -11,6 +11,7 @@ import type {
 import type { ImportedPlan, PlanLine } from "../../../types/plan";
 import {
   buildPathOrderRows,
+  getInterShapeTransitLines,
   groupExtensionLinesForList,
   isPrimaryEditableLine,
   type SelectLineFn,
@@ -122,6 +123,8 @@ export function PathOrderAndSprayStep({
   const [reorderedLines, setReorderedLines] = useState<PlanLine[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [loadStep, setLoadStep] = useState<pathApi.LoadToControllerStep | null>(null);
+  // Transit legs live under a single collapsible "Transit" dropdown (not flat-listed).
+  const [transitDropdownExpanded, setTransitDropdownExpanded] = useState(false);
 
   // Primary paths only — drag/reorder + spray
   const primaryLines = useMemo(() => lines.filter(isPrimaryEditableLine), [lines]);
@@ -131,18 +134,22 @@ export function PathOrderAndSprayStep({
   }, [primaryLines]);
 
   // One Extension row per unique (pre, aft) distance; 0.5 vs 0.2 → two rows.
+  // Extension stubs are never also shown under Transit.
   const extensionGroups = useMemo(
     () => groupExtensionLinesForList(lines, extPre, extAft),
     [lines, extPre, extAft]
   );
 
-  // One row per transit leg (same list as paths; not a separate section).
-  const transitLines = useMemo(() => lines.filter((l) => l.layer === "transit"), [lines]);
+  // Inter-shape transit only (excludes extension run-ups already covered by Extension row).
+  const transitLines = useMemo(() => getInterShapeTransitLines(lines), [lines]);
 
-  // Flat list: primaries → all transits → extension group(s). No section headers.
+  // Flat list: paths → extension group(s) → Transit dropdown (+ children when open).
   const pathOrderRows = useMemo(
-    () => buildPathOrderRows(reorderedLines, transitLines, extensionGroups),
-    [reorderedLines, transitLines, extensionGroups]
+    () =>
+      buildPathOrderRows(reorderedLines, transitLines, extensionGroups, {
+        transitExpanded: transitDropdownExpanded,
+      }),
+    [reorderedLines, transitLines, extensionGroups, transitDropdownExpanded]
   );
 
   const handleSelectPrimaryOrTransit = (line: PlanLine) => {
@@ -265,8 +272,8 @@ export function PathOrderAndSprayStep({
   return (
     <View style={{ flex: 1, minHeight: 0, gap: 12 }}>
       <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
-        One list: paths, transit, and extension. Drag paths to reorder. Check paths to toggle spray.
-        Tap a row to highlight it on the preview (Extension highlights its whole distance group).
+        Paths and Extension are listed separately. Open Transit to see inter-shape legs only
+        (extension run-ups are not listed there). Drag paths to reorder; tap a row to highlight.
       </Text>
 
       {/* Bounded flex shell so DraggableFlatList scrolls when rows exceed the viewport. */}
@@ -290,6 +297,7 @@ export function PathOrderAndSprayStep({
           onPressPrimary={handleSelectPrimaryOrTransit}
           onPressTransit={handleSelectPrimaryOrTransit}
           onPressExtension={handleSelectExtensionGroup}
+          onToggleTransitDropdown={() => setTransitDropdownExpanded((v) => !v)}
           selectedLineId={selectedLineId}
           highlightLineIds={highlightLineIds}
           extensionVisible={extensionVisible}

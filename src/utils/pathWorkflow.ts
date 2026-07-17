@@ -239,33 +239,59 @@ export function isExtensionGroupSelected(
 }
 
 /**
- * Unified Path Order list row — paths, each transit leg, and one Extension row per
- * Pre/Aft distance group share a single list (no separate sections).
+ * Unified Path Order list row.
+ *
+ * Layout: paths → extension group(s) → transit dropdown (optional expanded children).
+ * Extension run-ups are never listed as transit (they already have their own row).
  */
 export type PathOrderRow =
   | { kind: "primary"; id: string; line: PlanLine }
-  | { kind: "transit"; id: string; line: PlanLine; index: number }
-  | { kind: "extension"; id: string; group: ExtensionListGroup; title: string };
+  | { kind: "extension"; id: string; group: ExtensionListGroup; title: string }
+  | { kind: "transitDropdown"; id: string; count: number; expanded: boolean }
+  | { kind: "transit"; id: string; line: PlanLine; index: number };
 
 /**
- * Build the flat Path Order list:
- *   [all primary paths in drag order] + [each transit leg] + [extension group(s)].
+ * True for inter-shape transit legs only — not extension run-ups/run-outs.
+ * Extension geometry is listed under the Extension entity row(s), never under Transit.
+ */
+export function isInterShapeTransitLine(line: PlanLine): boolean {
+  if (line.layer !== "transit") return false;
+  const id = String(line.id ?? "").toLowerCase();
+  // Client-built extension stubs use ext-pre- / ext-aft- ids; never treat as transit.
+  if (id.startsWith("ext-pre-") || id.startsWith("ext-aft-") || id.includes("extension")) {
+    return false;
+  }
+  // Defensive: a line that still carries enabled extension_preview is extension geometry.
+  if (line.entity?.extension_preview?.enabled) return false;
+  return true;
+}
+
+/** Inter-shape transit legs for the Path Order transit dropdown (excludes extension stubs). */
+export function getInterShapeTransitLines(lines: PlanLine[]): PlanLine[] {
+  return lines.filter(isInterShapeTransitLine);
+}
+
+/**
+ * Build the Path Order list:
+ *   [primary paths] → [extension group(s)] → [Transit dropdown] → [transit children if open]
  *
- * Transit and extension are never interleaved into the reorderable primary block —
- * drag only reorders primaries; this helper always re-appends transit/extension after.
+ * Drag only reorders primaries; extension/transit always trail that block.
  */
 export function buildPathOrderRows(
   primaryLines: PlanLine[],
   transitLines: PlanLine[],
-  extensionGroups: ExtensionListGroup[]
+  extensionGroups: ExtensionListGroup[],
+  options?: { transitExpanded?: boolean }
 ): PathOrderRow[] {
+  const transitExpanded = options?.transitExpanded === true;
+  // Always re-filter so callers can pass raw lines without double-listing extensions.
+  const safeTransit = transitLines.filter(isInterShapeTransitLine);
+
   const rows: PathOrderRow[] = [];
   for (const line of primaryLines) {
     rows.push({ kind: "primary", id: `primary:${line.id}`, line });
   }
-  transitLines.forEach((line, index) => {
-    rows.push({ kind: "transit", id: `transit:${line.id}`, line, index });
-  });
+
   const multi = extensionGroups.length > 1;
   extensionGroups.forEach((group, i) => {
     rows.push({
@@ -275,6 +301,21 @@ export function buildPathOrderRows(
       title: multi ? `Extension ${i + 1}` : "Extension",
     });
   });
+
+  if (safeTransit.length > 0) {
+    rows.push({
+      kind: "transitDropdown",
+      id: "transit-dropdown",
+      count: safeTransit.length,
+      expanded: transitExpanded,
+    });
+    if (transitExpanded) {
+      safeTransit.forEach((line, index) => {
+        rows.push({ kind: "transit", id: `transit:${line.id}`, line, index });
+      });
+    }
+  }
+
   return rows;
 }
 
