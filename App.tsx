@@ -4276,7 +4276,7 @@ function HomeView(props: HomeViewProps) {
     onInvalidateWorkflow,
     alignedRefPoints = [],
     setAlignedRefPoints,
-    mapViewEnabled = false,
+    mapViewEnabled = true,
     setMapViewEnabled,
     showRefPointLabels = false,
     setShowRefPointLabels,
@@ -6584,7 +6584,7 @@ function PlanPreview({
   telemetryPosLat = null,
   telemetryPosLon = null,
   telemetryPosAlt = null,
-  mapViewEnabled = false,
+  mapViewEnabled = true,
   showRefPointLabels = false,
   activeRefPointLabelIndex = null,
   onToggleRefPointLabel,
@@ -7439,7 +7439,7 @@ function PlanPreview({
             autoOriginEnabled={autoOriginEnabled}
             stagedVerified={stagedVerified}
             visualAlignmentAnchor={visualAlignmentAnchor}
-            visible={true}
+            visible
             recenterRoverTrigger={recenterRoverTrigger || recenterRoverCount}
             recenterPlanTrigger={recenterPlanTrigger || recenterPlanCount}
             resetNorthTrigger={resetNorthTrigger}

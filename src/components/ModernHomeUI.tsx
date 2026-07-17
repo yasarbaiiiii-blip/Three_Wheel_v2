@@ -591,7 +591,7 @@ export default function ModernHomeUI(props) {
     layerVisibility, setLayerVisibility, extensionsEnabled,
     virtualJoystick, onPausePlan, onResumePlan, isPaused = false, missionActionBusy = false,
     missionLoaded = false, missionLoadedPanelOpenToken = 0,
-    mapViewEnabled = false, setMapViewEnabled, renderPlanPreview,
+    mapViewEnabled = true, setMapViewEnabled, renderPlanPreview,
     onFocusRover, onFocusPlan,
     recenterRoverCount, recenterPlanCount,
     onResetNorth, resetNorthCount, autoOrigin, onToggleAutoOrigin,
@@ -1946,11 +1946,15 @@ export default function ModernHomeUI(props) {
               mapGeometryFrame={mapGeometryFrame}
               autoOriginEnabled={autoOriginEnabled}
               stagedVerified={false}
+              // Keep plan projection stable after Fix Alignment / plan-edit (same anchor as Fields).
+              visualAlignmentAnchor={props.visualAlignmentAnchor ?? null}
               visible={mapViewEnabled}
               recenterRoverTrigger={recenterRoverCount}
               recenterPlanTrigger={recenterPlanCount}
               resetNorthTrigger={resetNorthCount}
               onSelectPoint={props.onSelectPoint}
+              onSelectLine={onSelectLine}
+              selectedLineId={selectedLineId}
               onMapClickToMark={drawingMode === "click" ? handleMapClickToMark : undefined}
               drawnWaypoints={drawingMode !== "none" ? drawnPoints : undefined}
               manualDrawingEnabled={drawingMode === "manual"}

@@ -1,30 +1,14 @@
 /**
- * MapView dispatcher.
+ * MapView dispatcher — native Mapbox (`MapViewNative`).
  *
- * Selects the map implementation based on the `USE_NATIVE_MAPBOX` feature flag:
- *   - false (default) → legacy Leaflet WebView (`MapViewLeaflet`)
- *   - true            → native Mapbox renderer (`MapViewNative`)
- *
- * Both implementations satisfy the same `MapViewProps`, so the two call sites
- * (App.tsx, TemplatesPage.tsx) never change — flipping the flag is the only
- * switch needed.
- *
- * ── HOW TO ENABLE THE NATIVE MAP FOR ON-DEVICE TESTING ──────────────────────
- *   1. Open `src/config/featureFlags.ts`
- *   2. Set `USE_NATIVE_MAPBOX = true`
- *   3. Rebuild: `cd android && ./gradlew assembleRelease` (or run a dev client)
- *   To roll back instantly, set it back to `false` and rebuild. No other code
- *   changes are required.
- *
- * Implementations are loaded with `React.lazy` so the bundle/runtime only
- * evaluates the module for the active path (the inactive implementation's
- * module code — e.g. @rnmapbox/maps + turf, or the Leaflet WebView HTML — is
- * not executed at startup).
+ * `USE_NATIVE_MAPBOX` is the rollout flag in featureFlags (currently always native).
+ * Lazy-load keeps the heavy @rnmapbox/maps module off the critical path; the
+ * wrapper fills its parent so the map is never laid out at 0×0 while loading.
  */
 import React, { Suspense } from "react";
+import { ActivityIndicator, StyleSheet, View } from "react-native";
 
 import type { MapViewProps } from "./mapViewTypes";
-import { USE_NATIVE_MAPBOX } from "../config/featureFlags";
 
 // Re-export the shared props type so existing `import { MapViewProps } from
 // "./MapView"` style usages (if any) keep working.
@@ -33,11 +17,36 @@ export type { MapViewProps } from "./mapViewTypes";
 const MapViewNativeLazy = React.lazy(() => import("./MapViewNative"));
 
 export function MapView(props: MapViewProps) {
+  // If the host sets visible={false}, stay unmounted (Home Map Off path).
+  if (props.visible === false) {
+    return null;
+  }
+
   return (
-    <Suspense fallback={null}>
-      <MapViewNativeLazy {...props} />
-    </Suspense>
+    <View style={styles.fill} collapsable={false}>
+      <Suspense
+        fallback={
+          <View style={styles.fallback}>
+            <ActivityIndicator color="#94a3b8" />
+          </View>
+        }
+      >
+        <MapViewNativeLazy {...props} visible />
+      </Suspense>
+    </View>
   );
 }
+
+const styles = StyleSheet.create({
+  fill: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  fallback: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#0f172a",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+});
 
 export default MapView;

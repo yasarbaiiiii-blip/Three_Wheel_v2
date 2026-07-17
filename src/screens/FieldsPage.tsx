@@ -197,7 +197,7 @@ export function FieldsPage(props: FieldsPageProps) {
     onInvalidateWorkflow,
     alignedRefPoints = [],
     setAlignedRefPoints,
-    mapViewEnabled = false,
+    mapViewEnabled = true,
     showRefPointLabels = false,
     activeRefPointLabelIndex = null,
     setActiveRefPointLabelIndex,
