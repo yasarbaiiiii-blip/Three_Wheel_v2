@@ -90,6 +90,14 @@ export type FieldsPageProps = {
   isVisualAlignmentMode?: boolean;
   visualAlignmentItem?: PlacedItem | null;
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
+  setVisualAlignmentAnchor?: React.Dispatch<
+    React.SetStateAction<{
+      originLat: number;
+      originLon: number;
+      originDxfNorth: number;
+      originDxfEast: number;
+    } | null>
+  >;
   onStartVisualAlignment?: () => void;
   onConfirmVisualAlignment?: () => void;
   isPlanEditingMode?: boolean;
@@ -196,6 +204,7 @@ export function FieldsPage(props: FieldsPageProps) {
     isVisualAlignmentMode,
     visualAlignmentItem,
     setVisualAlignmentItem,
+    setVisualAlignmentAnchor,
     onStartVisualAlignment,
     onConfirmVisualAlignment,
     isPlanEditingMode,
@@ -715,6 +724,7 @@ export function FieldsPage(props: FieldsPageProps) {
               isVisualAlignmentMode={isVisualAlignmentMode}
               visualAlignmentItem={visualAlignmentItem}
               setVisualAlignmentItem={setVisualAlignmentItem}
+              setVisualAlignmentAnchor={setVisualAlignmentAnchor}
               onStartVisualAlignment={onStartVisualAlignment}
               onConfirmVisualAlignment={onConfirmVisualAlignment}
               extractedCorners={extractedCorners}

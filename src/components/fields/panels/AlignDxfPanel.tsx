@@ -186,6 +186,20 @@ type AlignDxfPanelProps = {
   isVisualAlignmentMode?: boolean;
   visualAlignmentItem?: PlacedItem | null;
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
+  /**
+   * Clears the provisional map projection anchor used during plan-edit / visual placement.
+   * Must be invoked synchronously on Fix Alignment success (same turn as setAlignedRefPoints
+   * + line transform) so MapViewNative does not paint transformed lines under the old origin
+   * for one frame (shift-then-settle).
+   */
+  setVisualAlignmentAnchor?: React.Dispatch<
+    React.SetStateAction<{
+      originLat: number;
+      originLon: number;
+      originDxfNorth: number;
+      originDxfEast: number;
+    } | null>
+  >;
   onStartVisualAlignment?: () => void;
   onConfirmVisualAlignment?: () => void;
   extractedCorners?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null;
@@ -227,6 +241,7 @@ export function AlignDxfPanel({
   isVisualAlignmentMode,
   visualAlignmentItem,
   setVisualAlignmentItem,
+  setVisualAlignmentAnchor,
   onStartVisualAlignment,
   onConfirmVisualAlignment,
   extractedCorners,
@@ -536,9 +551,15 @@ export function AlignDxfPanel({
             setAlignedRefPoints(fallbackAligned);
           }
         }
+        // Atomic origin handoff (same React event turn as transform + alignedRefPoints):
+        // clear sticker + provisional projection anchor together so MapViewNative never
+        // paints transformed NED lines under visualAlignmentAnchor for one intermediate frame
+        // (the shift-then-settle bug). Do not rely on App's useEffect for this first paint.
         setRefPoints([]);
         setExtractedCorners?.(null);
         setVisualAlignmentItem?.(null);
+        setVisualAlignmentAnchor?.(null);
+        console.log("[AlignDXF][Fix] Cleared visualAlignmentItem + visualAlignmentAnchor (atomic handoff)");
       } else {
         onWorkflowStep?.("alignment", "failed");
         setVerifiedAlignmentRequest(null);
@@ -564,6 +585,7 @@ export function AlignDxfPanel({
     setRefPoints([]);
     setExtractedCorners?.(null);
     setVisualAlignmentItem?.(null);
+    setVisualAlignmentAnchor?.(null);
   };
 
   // True once Auto Origin is both requested and actually eligible (no verified/staged alignment blocking it).

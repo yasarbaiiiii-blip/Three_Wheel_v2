@@ -8,6 +8,13 @@ export interface PlanPoint {
   y: number;
 }
 
+/**
+ * Path-segment role for synthetic / runtime legs.
+ * - `pre` / `aft`: extension run-up / run-out (must not appear under Path Order Transit)
+ * - `none`: ordinary inter-shape transit (or unset on older lines)
+ */
+export type PlanSegmentRole = "pre" | "aft" | "none";
+
 export interface PlanLine {
   id: string;
   label: string;
@@ -17,6 +24,8 @@ export interface PlanLine {
   width: number;
   is_mark?: boolean;
   entity?: DxfEntity;
+  /** Set when the client classifies a leg as extension pre/aft vs inter-shape transit. */
+  segmentRole?: PlanSegmentRole;
 }
 
 export interface DxfPoint {

@@ -253,9 +253,14 @@ export type PathOrderRow =
 /**
  * True for inter-shape transit legs only — not extension run-ups/run-outs.
  * Extension geometry is listed under the Extension entity row(s), never under Transit.
+ *
+ * Prefers `segmentRole` (set at path-load when /plan non-spray was classified against
+ * the /entities extension catalog). Falls back to id / extension_preview guards.
  */
 export function isInterShapeTransitLine(line: PlanLine): boolean {
   if (line.layer !== "transit") return false;
+  // Authoritative when load-time classification ran.
+  if (line.segmentRole === "pre" || line.segmentRole === "aft") return false;
   const id = String(line.id ?? "").toLowerCase();
   // Client-built extension stubs use ext-pre- / ext-aft- ids; never treat as transit.
   if (id.startsWith("ext-pre-") || id.startsWith("ext-aft-") || id.includes("extension")) {

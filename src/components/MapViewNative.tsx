@@ -1765,10 +1765,16 @@ export function MapViewNative(props: MapViewProps) {
   // (origin_gps), which can be far from wherever the camera was framed during the
   // pre-alignment preview (that used a provisional/fallback anchor, not the real one) —
   // without this, the newly-aligned plan can render entirely outside the current view.
+  // Defer one frame so React has committed the atomic Fix handoff (transformed lines +
+  // origin_gps + cleared visualAlignmentAnchor) before we measure/fit bounds.
   useEffect(() => {
     const count = alignedRefPoints?.length ?? 0;
     if (visible && count > lastAlignedRefPointsCountRef.current) {
-      fitToPlan();
+      const id = requestAnimationFrame(() => {
+        fitToPlan();
+      });
+      lastAlignedRefPointsCountRef.current = count;
+      return () => cancelAnimationFrame(id);
     }
     lastAlignedRefPointsCountRef.current = count;
   }, [visible, alignedRefPoints, fitToPlan]);

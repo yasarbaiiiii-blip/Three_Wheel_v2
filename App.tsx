@@ -120,6 +120,11 @@ import {
   parsePlanAndStageResponse,
   sanitizePlanLines,
 } from "./src/utils/pathWorkflow";
+import {
+  appendExtensionLegsFromPlanLines,
+  buildExtensionLegCatalogFromEntitiesBody,
+  matchNonSprayToExtensionRole,
+} from "./src/utils/extensionTransitClassify";
 import type {
   AlignmentResultState,
   StagedPlanResultState,
@@ -826,10 +831,11 @@ export default function App() {
   // on every render, so it silently "chases" whatever the bake just moved and cancels the
   // drag out visually (the plan appears to snap back). Keeping this stable anchor alive
   // across bake operations is what makes a locked-in plan position actually stick.
-  // It's cleared only once a REAL alignment exists (a completed Fix Alignment) AND plan
-  // editing isn't actively in progress — so the map hands off to that verified origin
-  // instead of a leftover provisional one, including for a second drag session done after
-  // an alignment already completed.
+  //
+  // Fix Alignment clears the anchor SYNCHRONOUSLY in AlignDxfPanel (same turn as
+  // setAlignedRefPoints + line transform) so the first post-Fix paint uses origin_gps.
+  // This effect is only a safety net for other paths that set alignedRefPoints without
+  // going through Fix (e.g. staged mission hydrate) while the sticker is already gone.
   useEffect(() => {
     if (!visualAlignmentItem && alignedRefPoints.length > 0) {
       setVisualAlignmentAnchor(null);
@@ -1892,6 +1898,7 @@ export default function App() {
                     id: `ext-pre-${ent.entity_id || i}`,
                     label: `Pre-extension ${ent.entity_id || i}`,
                     layer: "extension",
+                    segmentRole: "pre",
                     from: { id: i * 100 + 1, x: pre[0].north, y: pre[0].east },
                     to: { id: i * 100 + 2, x: pre[pre.length - 1].north, y: pre[pre.length - 1].east },
                     width: 0.1,
@@ -1911,6 +1918,7 @@ export default function App() {
                     id: `ext-aft-${ent.entity_id || i}`,
                     label: `Aft-extension ${ent.entity_id || i}`,
                     layer: "extension",
+                    segmentRole: "aft",
                     from: { id: i * 100 + 3, x: aft[0].north, y: aft[0].east },
                     to: { id: i * 100 + 4, x: aft[aft.length - 1].north, y: aft[aft.length - 1].east },
                     width: 0.1,
@@ -1927,6 +1935,14 @@ export default function App() {
               }
             });
 
+            // Catalog of every extension pre/aft leg (top-level extensions[] + previews +
+            // fallbackExtLines). Used to strip extension non-spray from /plan transit so
+            // Path Order Transit dropdown only shows inter-shape legs.
+            let extensionLegCatalog = appendExtensionLegsFromPlanLines(
+              buildExtensionLegCatalogFromEntitiesBody(body),
+              fallbackExtLines
+            );
+
             // Authoritative runtime path overlay.
             //
             // The /entities `transit_preview` connects MARK entities in *saved
@@ -1939,11 +1955,9 @@ export default function App() {
             // Instead, overlay the exact merged waypoints /plan publishes — the
             // single source of truth for what the rover does. MARK waypoints are
             // already shown as editable entity lines above, so we draw only the
-            // non-spray runs here (real inter-shape transits + extension
-            // run-ups). Result: preview == mission for any DXF. Falls back to the
-            // legacy per-entity extensions + straight transit_preview when /plan
-            // is unavailable (offline / older backend), so the operator always
-            // gets a usable picture.
+            // non-spray runs here (real inter-shape transits). Extension run-ups
+            // are matched against extensionLegCatalog (role pre/aft + endpoints)
+            // and skipped here so fallbackExtLines remain the sole extension draw.
             let runtimePathApplied = false;
             try {
               const planRes = await pathApi.planPath(apiBaseUrl, { source: pathName, include_waypoints: true });
@@ -1956,33 +1970,37 @@ export default function App() {
                   for (let i = 0; i < wps.length - 1; i++) {
                     if (!(sprayFlags[i] ?? true)) nonSprayIdxs.push(i);
                   }
-                  // The runtime /plan overlay has no layer tag of its own — it only
-                  // knows spray vs non-spray, so extension run-ups are otherwise
-                  // indistinguishable from ordinary inter-shape transit. Rather than
-                  // try to relabel them by matching coordinates against a different
-                  // API response (fragile: /plan's merged_waypoints and /entities'
-                  // preview_points can carry different rounding/tessellation and
-                  // fail to match exactly), skip drawing the non-spray run here
-                  // whenever it's structurally a run-up — always the very first
-                  // pre-mark and very last post-mark non-spray run when extensions
-                  // are enabled, no matter how many marks/shapes/inter-shape
-                  // transits sit in between — and let the already-correctly-tagged
-                  // fallbackExtLines (pushed unconditionally below) draw it instead.
+                  // Structural fallback when catalog is empty: first/last non-spray of the
+                  // whole path is still a common global PRE/AFT pair when extensions are on.
                   const firstNonSprayIdx = nonSprayIdxs[0];
                   const lastNonSprayIdx = nonSprayIdxs[nonSprayIdxs.length - 1];
                   for (let i = 0; i < wps.length - 1; i++) {
                     const isMark = sprayFlags[i] ?? true;
                     if (isMark) continue; // marks already drawn as editable entity lines
-                    if (isEnabled && (i === firstNonSprayIdx || i === lastNonSprayIdx)) continue; // drawn via fallbackExtLines instead
                     const fromNorth = coerceFiniteNumber(wps[i]?.[0]);
                     const fromEast = coerceFiniteNumber(wps[i]?.[1]);
                     const toNorth = coerceFiniteNumber(wps[i + 1]?.[0]);
                     const toEast = coerceFiniteNumber(wps[i + 1]?.[1]);
                     if (fromNorth == null || fromEast == null || toNorth == null || toEast == null) continue;
+
+                    // Prefer catalog match (covers per_line mid-path pre/aft, not just path ends).
+                    const extRole = matchNonSprayToExtensionRole(
+                      fromNorth,
+                      fromEast,
+                      toNorth,
+                      toEast,
+                      extensionLegCatalog
+                    );
+                    if (extRole) continue; // drawn via fallbackExtLines / Extension list entity
+
+                    // Keep first/last skip when extensions enabled (legacy single-pair case).
+                    if (isEnabled && (i === firstNonSprayIdx || i === lastNonSprayIdx)) continue;
+
                     generatedLines.push({
                       id: `runtime-transit-${i}`,
                       label: "Transit",
                       layer: "transit",
+                      segmentRole: "none",
                       from: { id: 900000 + i * 2 + 1, x: fromNorth, y: fromEast },
                       to: { id: 900000 + i * 2 + 2, x: toNorth, y: toEast },
                       width: 0.1,
@@ -1999,9 +2017,8 @@ export default function App() {
 
             // fallbackExtLines (built directly from each entity's own
             // extension_preview, always correctly tagged layer:"extension") are
-            // pushed unconditionally — the runtime overlay above omits its own
-            // first/last non-spray run precisely so this is the one and only
-            // source of extension geometry, regardless of which overlay path ran.
+            // pushed unconditionally — the runtime overlay above omits matched
+            // extension non-spray so this is the one source of extension geometry.
             generatedLines.push(...fallbackExtLines);
 
             if (!runtimePathApplied) {
@@ -2009,12 +2026,30 @@ export default function App() {
                 body.transit_preview.forEach((transit: any, i: number) => {
                   const pts = transit.points || [];
                   if (pts.length < 2) return;
+                  const fromNorth = coerceFiniteNumber(pts[0]?.north);
+                  const fromEast = coerceFiniteNumber(pts[0]?.east);
+                  const toNorth = coerceFiniteNumber(pts[pts.length - 1]?.north);
+                  const toEast = coerceFiniteNumber(pts[pts.length - 1]?.east);
+                  if (fromNorth == null || fromEast == null || toNorth == null || toEast == null) return;
+                  // Never list extension run-ups under transit when falling back to transit_preview.
+                  if (
+                    matchNonSprayToExtensionRole(
+                      fromNorth,
+                      fromEast,
+                      toNorth,
+                      toEast,
+                      extensionLegCatalog
+                    )
+                  ) {
+                    return;
+                  }
                   generatedLines.push({
                     id: `transit-${i}`,
                     label: `Transit ${transit.from_entity_id || "?"} to ${transit.to_entity_id || "?"}`,
                     layer: "transit",
-                    from: { id: i * 1000 + 1, x: pts[0].north, y: pts[0].east },
-                    to: { id: i * 1000 + 2, x: pts[pts.length - 1].north, y: pts[pts.length - 1].east },
+                    segmentRole: "none",
+                    from: { id: i * 1000 + 1, x: fromNorth, y: fromEast },
+                    to: { id: i * 1000 + 2, x: toNorth, y: toEast },
                     width: 0.1,
                     entity: { entity_id: `transit-${i}`, entity_type: "TRANSIT", layer: "TRANSIT", color: 0, is_mark: false, length_m: transit.length_m || 0, geometry: {}, preview_points: pts }
                   });
@@ -3806,6 +3841,7 @@ export default function App() {
                             isVisualAlignmentMode={isVisualAlignmentMode}
                             visualAlignmentItem={visualAlignmentItem}
                             setVisualAlignmentItem={setVisualAlignmentItem}
+                            setVisualAlignmentAnchor={setVisualAlignmentAnchor}
                             visualAlignmentAnchor={visualAlignmentAnchor}
                             onStartVisualAlignment={startVisualAlignment}
                             onConfirmVisualAlignment={handleConfirmVisualAlignment}
@@ -5448,6 +5484,14 @@ function SectionPages(props: {
   recenterRoverCount?: number;
   recenterPlanCount?: number;
   visualAlignmentAnchor?: { originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null;
+  setVisualAlignmentAnchor?: React.Dispatch<
+    React.SetStateAction<{
+      originLat: number;
+      originLon: number;
+      originDxfNorth: number;
+      originDxfEast: number;
+    } | null>
+  >;
   gpsPointMission?: pathApi.ParsePointGpsCsvResponse | null;
   onGpsPointMissionParsed?: (data: pathApi.ParsePointGpsCsvResponse) => void;
   onStageAndLoadGpsPointMission?: () => Promise<void>;
