@@ -1922,7 +1922,8 @@ export default function ModernHomeUI(props) {
               mode={visualAlignmentItem ? "templates" : "fields"}
               placedItems={visualAlignmentItem ? [visualAlignmentItem] : []}
               selectedItemIds={visualAlignmentItem && visualSelected ? [visualAlignmentItem.id] : []}
-              multiTouchMode={visualAlignmentItem ? (isPlanEditingMode ? "both" : "rotate") : "both"}
+              // Plan sticker modes: rotate+pan only — never pinch-scale to fake a second ref fit.
+              multiTouchMode={visualAlignmentItem ? "rotate" : "both"}
               onSelectionChange={(ids) => {
                 if (isVisualAlignmentMode || isPlanEditingMode) {
                   setVisualSelected(visualAlignmentItem ? ids.includes(visualAlignmentItem.id) : false);

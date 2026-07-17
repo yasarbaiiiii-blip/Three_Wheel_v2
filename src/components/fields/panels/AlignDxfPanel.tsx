@@ -750,10 +750,10 @@ export function AlignDxfPanel({
       {isPlanEditingMode ? (
         <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontStyle: "italic" }}>
           {alignmentMethod === "least_squares"
-            ? "Drag, pinch, or twist the plan on the map, using the reference points as a guide. Tap \"Use This Position\" to capture wherever you place it as the alignment."
+            ? "Drag or twist the plan on the map. Corners/center snap to reference points without scaling — twist around a locked point to fit others when size matches. Tap \"Use This Position\" to capture the placement."
             : refPoints.length > 0
-            ? "Drag, pinch, or twist the plan on the map. Your reference points move with it, so they stay valid — tap-to-pick-point is paused until you lock it in."
-            : "Drag, pinch, or twist the plan into position on the map. Tap-to-pick-point is paused until you lock it in."}
+            ? "Drag or twist the plan on the map. Your reference points move with it, so they stay valid — tap-to-pick-point is paused until you lock it in."
+            : "Drag or twist the plan into position on the map. Tap-to-pick-point is paused until you lock it in."}
         </Text>
       ) : null}
 
