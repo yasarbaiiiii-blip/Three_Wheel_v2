@@ -352,7 +352,7 @@ export function UploadAndPreviewStep({
         >
           <Upload size={18} color={FIELDS_COLORS.stepActive} />
           <Text style={{ color: FIELDS_COLORS.stepActive, fontSize: 14, fontWeight: "700" }}>
-            {isUploading ? "Parsing…" : "Select File"}
+            {isUploading ? "Loading preview…" : "Select File"}
           </Text>
         </TouchableOpacity>
       ) : pickedFile ? (
@@ -372,7 +372,7 @@ export function UploadAndPreviewStep({
             </Text>
             {isUploading ? (
               <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-                Uploading & parsing…
+                Uploading and loading map preview…
               </Text>
             ) : (
               <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, marginTop: 2 }}>
@@ -464,7 +464,7 @@ export function UploadAndPreviewStep({
             }}
           >
             <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "600" }}>
-              {isUploading ? "Parsing…" : "Upload Different File"}
+              {isUploading ? "Loading preview…" : "Upload Different File"}
             </Text>
           </Pressable>
         </View>

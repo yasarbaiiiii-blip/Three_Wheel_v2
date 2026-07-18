@@ -20,7 +20,6 @@ import {
   Check,
   Upload,
   FileText,
-  Play,
   Power,
   Radio,
   Satellite,
@@ -457,8 +456,6 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
   const [dashDistanceOff, setDashDistanceOff] = useState("0.3");
   const [pointExecutionMode, setPointExecutionMode] = useState<"auto" | "manual">("auto");
   const [isSettingSprayMode, setIsSettingSprayMode] = useState(false);
-  const [sprayDuration, setSprayDuration] = useState("2");
-  const [isSprayTestRunning, setIsSprayTestRunning] = useState(false);
   const [manualHoldActive, setManualHoldActive] = useState(false);
   const [sprayLive, setSprayLive] = useState(false);
 
@@ -595,30 +592,6 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
       Alert.alert("Error", err?.message || "Failed to set spray mode.");
     } finally {
       setIsSettingSprayMode(false);
-    }
-  };
-
-  const handleSprayTest = async () => {
-    if (!apiBaseUrl || isSprayTestRunning) return;
-    setIsSprayTestRunning(true);
-    try {
-      const duration = Number(sprayDuration) || 2;
-      const res = await fetch(sprayApiUrl("/api/spray/test"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ on: true, duration_s: duration }),
-      });
-      if (!res.ok) {
-        const errText = await res.text();
-        Alert.alert("Error", errText || "Failed to run spray test.");
-        return;
-      }
-      setSprayLive(true);
-      setTimeout(() => setSprayLive(false), duration * 1000);
-    } catch (err: any) {
-      Alert.alert("Error", err?.message || "Failed to run spray test.");
-    } finally {
-      setIsSprayTestRunning(false);
     }
   };
 
@@ -956,29 +929,6 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
               loading={isSettingSprayMode}
               disabled={!apiBaseUrl || !selectedPathName}
             />
-          </View>
-
-          <View style={styles.block}>
-            <Text style={styles.blockLabel}>Test spray</Text>
-            <View style={styles.testRow}>
-              <View style={{ flex: 1 }}>
-                <SettingsField
-                  label="Seconds"
-                  value={sprayDuration}
-                  onChangeText={setSprayDuration}
-                  keyboardType="numeric"
-                  placeholder="2"
-                />
-              </View>
-              <ActionButton
-                label="Run test"
-                icon={Play}
-                onPress={handleSprayTest}
-                loading={isSprayTestRunning}
-                disabled={!apiBaseUrl}
-                variant="secondary"
-              />
-            </View>
           </View>
 
           <View style={styles.block}>
@@ -1480,11 +1430,6 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     letterSpacing: 0.5,
     textTransform: "uppercase",
-  },
-  testRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 10,
   },
   holdBtn: {
     flexDirection: "row",

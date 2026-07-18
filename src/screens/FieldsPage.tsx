@@ -239,8 +239,15 @@ export function FieldsPage(props: FieldsPageProps) {
   } = props;
 
   const [refPoints, setRefPoints] = useState<RefPoint[]>([]);
+  /**
+   * True after a Multi-Point guide-points CSV is loaded. While active, map tap-to-pick
+   * is disabled (CSV is the sole source of ref markers). Cleared with Clear Points /
+   * method change / empty list.
+   */
+  const [csvGuidePointsActive, setCsvGuidePointsActive] = useState(false);
   const [missionSummary, setMissionSummary] = useState<any | null>(null);
-  const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "single_point" | "visual_alignment">("least_squares");
+  /** Align DXF methods: Multi-Point Fit | Visual (1-Point Fit removed). Auto Origin is a separate toggle peer. */
+  const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "visual_alignment">("least_squares");
 
   const [showTemplates, setShowTemplates] = useState(false);
   const [boundaryMode, setBoundaryMode] = useState(false);
@@ -325,37 +332,66 @@ export function FieldsPage(props: FieldsPageProps) {
     [loadedPathInspection, protectedResident]
   );
 
+  /**
+   * Map tap → yellow guide points. Enabled ONLY for Multi-Point Fit when:
+   * - Align step is active
+   * - not Visual Alignment / Auto Origin
+   * - not mid Move-Plan sticker drag
+   * - no CSV guide file is loaded
+   */
+  const canTapGuidePoints =
+    activeStep === "align" &&
+    alignmentMethod === "least_squares" &&
+    !autoOrigin &&
+    !isVisualAlignmentMode &&
+    !isPlanEditingMode &&
+    !csvGuidePointsActive;
+
   const handleSelectPoint = useCallback(
     (pt: { x: number; y: number }) => {
-      console.log(`[AlignDXF][Tap] Map tapped: pt.x(north)=${pt.x} pt.y(east)=${pt.y} method=${alignmentMethod}`);
+      if (
+        activeStep !== "align" ||
+        alignmentMethod !== "least_squares" ||
+        autoOrigin ||
+        isVisualAlignmentMode ||
+        isPlanEditingMode ||
+        csvGuidePointsActive
+      ) {
+        console.log(
+          `[AlignDXF][Tap] Ignored (gated): step=${activeStep} method=${alignmentMethod} autoOrigin=${!!autoOrigin} visual=${!!isVisualAlignmentMode} editing=${!!isPlanEditingMode} csv=${csvGuidePointsActive}`
+        );
+        return;
+      }
+      console.log(`[AlignDXF][Tap] Map tapped: pt.x(north)=${pt.x} pt.y(east)=${pt.y}`);
       onInvalidateWorkflow("alignment");
       setMissionSummary(null);
       setAlignmentResult(null);
       setVerifiedAlignmentRequest(null);
       setRefPoints((prev) => {
+        // Toggle only the same snapped location (sub-metre). Wider radii would make
+        // the 2nd/3rd multi-point tap remove an earlier marker instead of adding.
         const existingIdx = prev.findIndex(
-          (point) => Math.abs(point.dxf_y - pt.x) < 0.001 && Math.abs(point.dxf_x - pt.y) < 0.001
+          (point) => Math.hypot(point.dxf_y - pt.x, point.dxf_x - pt.y) < 0.35
         );
         if (existingIdx >= 0) {
           console.log(`[AlignDXF][Tap] Deselecting existing point at index ${existingIdx}`);
           return prev.filter((_, index) => index !== existingIdx);
         }
-        if (alignmentMethod === "single_point") {
-          const next =
-            prev.length >= 1
-              ? [{ dxf_x: pt.y, dxf_y: pt.x, lat: prev[0].lat, lon: prev[0].lon }]
-              : [{ dxf_x: pt.y, dxf_y: pt.x, lat: "", lon: "" }];
-          console.log("[AlignDXF][Tap] single_point refPoints ->", JSON.stringify(next));
-          return next;
-        }
-        // least_squares: no cap — any number of reference points can be tapped.
+        // Multi-Point Fit: append — no cap on guide markers.
         const next = [...prev, { dxf_x: pt.y, dxf_y: pt.x, lat: "", lon: "" }];
-        console.log("[AlignDXF][Tap] least_squares refPoints ->", JSON.stringify(next));
+        console.log(
+          `[AlignDXF][Tap] Added guide #${next.length}: north=${pt.x.toFixed(3)} east=${pt.y.toFixed(3)}`
+        );
         return next;
       });
     },
     [
+      activeStep,
       alignmentMethod,
+      autoOrigin,
+      isVisualAlignmentMode,
+      isPlanEditingMode,
+      csvGuidePointsActive,
       onInvalidateWorkflow,
       setAlignmentResult,
       setVerifiedAlignmentRequest,
@@ -529,7 +565,7 @@ export function FieldsPage(props: FieldsPageProps) {
                   };
                 })
               : [],
-          onSelectPoint: activeStep === "align" ? handleSelectPoint : undefined,
+          onSelectPoint: canTapGuidePoints ? handleSelectPoint : undefined,
           alignedRefPoints,
           stagedVerified: stagedWorkflow.staged === "verified",
           mapViewEnabled,
@@ -695,7 +731,7 @@ export function FieldsPage(props: FieldsPageProps) {
       >
         <FieldsClearBar onClear={onClearMission} busy={missionActionBusy} />
         <View style={{ flex: 1, minHeight: 0, padding: 12, gap: 10, paddingBottom: 24 }}>
-          {/* Step 1: Upload (auto-parse + map preview on pick) */}
+          {/* Step 1: Select file → auto upload/parse → map preview (no manual Parse step) */}
           <FieldsStepCard
             stepNumber={1}
             title="Upload"
@@ -834,6 +870,8 @@ export function FieldsPage(props: FieldsPageProps) {
               blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
               refPoints={refPoints}
               setRefPoints={setRefPoints}
+              csvGuidePointsActive={csvGuidePointsActive}
+              setCsvGuidePointsActive={setCsvGuidePointsActive}
               alignmentMethod={alignmentMethod}
               setAlignmentMethod={setAlignmentMethod}
               setMissionSummary={setMissionSummary}

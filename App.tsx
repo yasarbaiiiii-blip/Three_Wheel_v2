@@ -6656,21 +6656,79 @@ function pickNearestPoint(
   const cx = layoutSize.width / 2;
   const cy = layoutSize.height / 2;
 
-  const corners = getCornerPoints(lines);
-
-  for (const pt of corners) {
+  const toScreen = (pt: { x: number; y: number }) => {
     let screenPt = toScreenPoint(pt, viewport);
-
     if (rotation !== 0 && layoutSize.width > 0 && layoutSize.height > 0) {
       screenPt = rotatePoint(screenPt.x, screenPt.y, cx, cy, rotation);
     }
+    return screenPt;
+  };
 
+  // Prefer every plan endpoint / preview sample (not only "corners") so Multi-Point
+  // guide picking feels responsive on the canvas fallback (Map Off).
+  const candidates: { x: number; y: number }[] = [];
+  for (const line of lines) {
+    if (line.from) candidates.push(line.from);
+    if (line.to) candidates.push(line.to);
+    if (line.entity?.preview_points) {
+      for (const pt of line.entity.preview_points) {
+        candidates.push({ x: pt.north, y: pt.east });
+      }
+    }
+  }
+  // Keep corners as a fallback when lines have sparse samples.
+  for (const pt of getCornerPoints(lines)) candidates.push(pt);
+
+  for (const pt of candidates) {
+    const screenPt = toScreen(pt);
     const dist = Math.hypot(tap.x - screenPt.x, tap.y - screenPt.y);
-
     if (dist < nearestDistance) {
       nearestDistance = dist;
       nearestPoint = pt;
     }
+  }
+
+  // Snap to nearest point on any segment if no vertex was close enough.
+  // No free-place outside geometry — empty map / hollow bbox space is ignored.
+  if (!nearestPoint) {
+    let bestSeg: { x: number; y: number; dist: number } | null = null;
+    for (const line of lines) {
+      const segs: { a: { x: number; y: number }; b: { x: number; y: number } }[] = [];
+      if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
+        const pts = line.entity.preview_points;
+        for (let i = 0; i < pts.length - 1; i++) {
+          segs.push({
+            a: { x: pts[i].north, y: pts[i].east },
+            b: { x: pts[i + 1].north, y: pts[i + 1].east },
+          });
+        }
+      } else if (line.from && line.to) {
+        segs.push({ a: line.from, b: line.to });
+      }
+      for (const { a, b } of segs) {
+        const sa = toScreen(a);
+        const sb = toScreen(b);
+        // Project tap onto screen-space segment, then map t back to plan coords.
+        const dx = sb.x - sa.x;
+        const dy = sb.y - sa.y;
+        const l2 = dx * dx + dy * dy;
+        let t = 0;
+        if (l2 > 0) {
+          t = Math.max(0, Math.min(1, ((tap.x - sa.x) * dx + (tap.y - sa.y) * dy) / l2));
+        }
+        const sx = sa.x + t * dx;
+        const sy = sa.y + t * dy;
+        const dist = Math.hypot(tap.x - sx, tap.y - sy);
+        if (dist < radiusPx && (!bestSeg || dist < bestSeg.dist)) {
+          bestSeg = {
+            x: a.x + t * (b.x - a.x),
+            y: a.y + t * (b.y - a.y),
+            dist,
+          };
+        }
+      }
+    }
+    if (bestSeg) nearestPoint = { x: bestSeg.x, y: bestSeg.y };
   }
 
   return nearestPoint;
@@ -7395,7 +7453,15 @@ function PlanPreview({
 
           const tap = { x: tapX, y: tapY };
           if (onSelectPointRef.current) {
-            const ptHit = pickNearestPoint(linesRef.current, viewportRef.current, tap, 28, rotationRef.current, layoutSizeRef.current);
+            // ~44px finger target for Multi-Point guide picking (Map Off canvas).
+            const ptHit = pickNearestPoint(
+              linesRef.current,
+              viewportRef.current,
+              tap,
+              44,
+              rotationRef.current,
+              layoutSizeRef.current
+            );
             if (ptHit) {
               onSelectPointRef.current(ptHit);
               return;

@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Alert, Platform, Pressable, Text, TextInput, View } from "react-native";
-import { Check, Move, Upload, X } from "lucide-react-native";
+import { Check, ChevronDown, Move, Upload, X } from "lucide-react-native";
 import * as DocumentPicker from "expo-document-picker";
 
 import * as pathApi from "../../../api/pathApi";
@@ -123,49 +123,6 @@ function parseGuidePointsCsv(text: string): { points: GuidePoint[]; errors: stri
   return { points, errors };
 }
 
-type DxfBounds = { minNorth: number; maxNorth: number; minEast: number; maxEast: number };
-
-/** Bounding box of the currently-loaded DXF's OWN drawing coordinates (PlanLine.x=north, .y=east). */
-function computeDxfBounds(lines: PlanLine[]): DxfBounds | null {
-  if (lines.length === 0) return null;
-  let minNorth = Infinity;
-  let maxNorth = -Infinity;
-  let minEast = Infinity;
-  let maxEast = -Infinity;
-  for (const line of lines) {
-    for (const pt of [line.from, line.to]) {
-      if (pt.x < minNorth) minNorth = pt.x;
-      if (pt.x > maxNorth) maxNorth = pt.x;
-      if (pt.y < minEast) minEast = pt.y;
-      if (pt.y > maxEast) maxEast = pt.y;
-    }
-  }
-  if (!Number.isFinite(minNorth) || !Number.isFinite(minEast)) return null;
-  return { minNorth, maxNorth, minEast, maxEast };
-}
-
-/**
- * A ref point's dxf_x/dxf_y must be expressed in the SAME coordinate system as the loaded
- * DXF's own lines — least-squares alignment fits a similarity transform between these
- * numbers and lat/lon, then reapplies that exact transform to the drawing's real coordinates.
- * If a point is wildly outside the drawing's own coordinate range (a common real-world
- * case: a raw RTK/GNSS survey export's Easting/Northing are in a project-specific grid CRS
- * with a large false easting/northing, e.g. hundreds of thousands to millions — completely
- * unrelated to a small CAD drawing's local origin), the fit still "succeeds" numerically but
- * reapplying it to the drawing's tiny native coordinates lands the whole plan thousands of
- * kilometres away. Margin is generous (20x the drawing's own span, floor of 200 units) so
- * legitimate large-scale/state-plane-native DXFs and ref points a reasonable distance outside
- * the drawn shape (survey control points, corner markers) aren't falsely flagged.
- */
-function pointMatchesDxfScale(point: { dxf_x: number; dxf_y: number }, bounds: DxfBounds): boolean {
-  const spanNorth = bounds.maxNorth - bounds.minNorth;
-  const spanEast = bounds.maxEast - bounds.minEast;
-  const margin = Math.max(spanNorth, spanEast, 10) * 20 + 200;
-  const centerNorth = (bounds.minNorth + bounds.maxNorth) / 2;
-  const centerEast = (bounds.minEast + bounds.maxEast) / 2;
-  return Math.abs(point.dxf_y - centerNorth) <= margin && Math.abs(point.dxf_x - centerEast) <= margin;
-}
-
 type AlignDxfPanelProps = {
   apiBaseUrl: string;
   selectedPathName: string | null;
@@ -180,8 +137,11 @@ type AlignDxfPanelProps = {
   blockProtectedWorkflowMutation: (action: string) => boolean;
   refPoints: RefPoint[];
   setRefPoints: React.Dispatch<React.SetStateAction<RefPoint[]>>;
-  alignmentMethod: "least_squares" | "single_point" | "visual_alignment";
-  setAlignmentMethod: React.Dispatch<React.SetStateAction<"least_squares" | "single_point" | "visual_alignment">>;
+  /** True while Multi-Point guide points came from CSV — disables map tap-to-pick. */
+  csvGuidePointsActive?: boolean;
+  setCsvGuidePointsActive?: React.Dispatch<React.SetStateAction<boolean>>;
+  alignmentMethod: "least_squares" | "visual_alignment";
+  setAlignmentMethod: React.Dispatch<React.SetStateAction<"least_squares" | "visual_alignment">>;
   setMissionSummary: React.Dispatch<React.SetStateAction<any>>;
   isVisualAlignmentMode?: boolean;
   visualAlignmentItem?: PlacedItem | null;
@@ -235,6 +195,8 @@ export function AlignDxfPanel({
   blockProtectedWorkflowMutation,
   refPoints,
   setRefPoints,
+  csvGuidePointsActive = false,
+  setCsvGuidePointsActive,
   alignmentMethod,
   setAlignmentMethod,
   setMissionSummary,
@@ -256,9 +218,78 @@ export function AlignDxfPanel({
   isPlanEditingMode = false,
   onToggleMovePlan,
 }: AlignDxfPanelProps) {
-  const [rotationDeg, setRotationDeg] = useState("");
   const [isFixing, setIsFixing] = useState(false);
   const [isImportingCsv, setIsImportingCsv] = useState(false);
+  const [methodMenuOpen, setMethodMenuOpen] = useState(false);
+
+  /** UI method picker options (1-Point Fit removed). Auto Origin is a peer choice. */
+  type AlignUiMethod = "least_squares" | "visual_alignment" | "auto_origin";
+
+  const METHOD_OPTIONS: {
+    id: AlignUiMethod;
+    label: string;
+    description: string;
+    accent: string;
+  }[] = useMemo(
+    () => [
+      {
+        id: "least_squares",
+        label: "Multi-Point Fit",
+        description: "Tap or CSV guide points, then drag / scale the plan",
+        accent: FIELDS_COLORS.stepActive,
+      },
+      {
+        id: "visual_alignment",
+        label: "Visual Alignment",
+        description: "Place the plan on the map — no tap-to-pick points",
+        accent: "#8b5cf6",
+      },
+      {
+        id: "auto_origin",
+        label: "Auto Origin",
+        description: "Skip GPS fit — start from the rover's live position",
+        accent: FIELDS_COLORS.success,
+      },
+    ],
+    []
+  );
+
+  const selectedUiMethod: AlignUiMethod = autoOrigin
+    ? "auto_origin"
+    : alignmentMethod === "visual_alignment"
+    ? "visual_alignment"
+    : "least_squares";
+
+  const selectedMethodOption =
+    METHOD_OPTIONS.find((m) => m.id === selectedUiMethod) ?? METHOD_OPTIONS[0];
+
+  const setAutoOriginEnabled = (enabled: boolean) => {
+    if (enabled === autoOrigin) return;
+    onToggleAutoOrigin?.();
+  };
+
+  const selectAlignMethod = (id: AlignUiMethod) => {
+    setMethodMenuOpen(false);
+    if (id === selectedUiMethod) return;
+
+    onInvalidateWorkflow("alignment");
+    setMissionSummary(null);
+    setAlignmentResult(null);
+    setVerifiedAlignmentRequest(null);
+    setRefPoints([]);
+    setCsvGuidePointsActive?.(false);
+    setExtractedCorners?.(null);
+    setVisualAlignmentItem?.(null);
+    setVisualAlignmentAnchor?.(null);
+
+    if (id === "auto_origin") {
+      setAutoOriginEnabled(true);
+      return;
+    }
+
+    setAutoOriginEnabled(false);
+    setAlignmentMethod(id);
+  };
 
   const handleUpdateRefPoint = (idx: number, field: "lat" | "lon", value: string) => {
     onInvalidateWorkflow("alignment");
@@ -272,7 +303,11 @@ export function AlignDxfPanel({
     setMissionSummary(null);
     setAlignmentResult(null);
     setVerifiedAlignmentRequest(null);
-    setRefPoints((prev) => prev.filter((_, i) => i !== idx));
+    setRefPoints((prev) => {
+      const next = prev.filter((_, i) => i !== idx);
+      if (next.length === 0) setCsvGuidePointsActive?.(false);
+      return next;
+    });
   };
 
   // Reference points are a PURE visual guide (any count, 1+) — only Latitude/Longitude are
@@ -324,10 +359,12 @@ export function AlignDxfPanel({
       setMissionSummary(null);
       setAlignmentResult(null);
       setVerifiedAlignmentRequest(null);
-      // dxf_x/dxf_y are unused placeholders — rendering prioritizes lat/lon whenever present
-      // (see MapViewNative's selectedPointsFC), which every one of these points has.
-      setRefPoints((prev) => [...prev, ...points.map((p) => ({ dxf_x: 0, dxf_y: 0, lat: p.latRaw, lon: p.lonRaw }))]);
-      console.log(`[AlignDXF][CSV] Added ${points.length} reference point(s).`);
+      // CSV becomes the sole guide-point source: replace any tapped points and lock out
+      // map tap-to-pick until Clear Points. dxf_x/dxf_y are unused placeholders — rendering
+      // prioritizes lat/lon (see MapViewNative's selectedPointsFC).
+      setRefPoints(points.map((p) => ({ dxf_x: 0, dxf_y: 0, lat: p.latRaw, lon: p.lonRaw })));
+      setCsvGuidePointsActive?.(true);
+      console.log(`[AlignDXF][CSV] Loaded ${points.length} reference point(s); tap-to-pick disabled.`);
 
       if (errors.length > 0) {
         Alert.alert(
@@ -350,20 +387,67 @@ export function AlignDxfPanel({
     }
   };
 
+  /** Parsed Multi-Point control points ready for /align (plan NE + GPS). */
+  const validTypedRefPoints = useMemo(() => {
+    const out: pathApi.RefPoint[] = [];
+    for (const point of refPoints) {
+      const lat = parseFloat(point.lat);
+      const lon = parseFloat(point.lon);
+      const dxf_x = coerceFiniteNumber(point.dxf_x);
+      const dxf_y = coerceFiniteNumber(point.dxf_y);
+      if (
+        !Number.isFinite(lat) ||
+        !Number.isFinite(lon) ||
+        dxf_x == null ||
+        dxf_y == null ||
+        lat < -90 ||
+        lat > 90 ||
+        lon < -180 ||
+        lon > 180
+      ) {
+        continue;
+      }
+      out.push({ dxf_x, dxf_y, lat, lon });
+    }
+    return out;
+  }, [refPoints]);
+
+  const canFixFromTypedRefs =
+    alignmentMethod === "least_squares" &&
+    !csvGuidePointsActive &&
+    validTypedRefPoints.length >= 1;
+
   const handleFixAlignment = async () => {
     console.log(
       `[AlignDXF][Fix] Clicked. method=${alignmentMethod} selectedPathName=${selectedPathName} refPoints=`,
-      JSON.stringify(refPoints)
+      JSON.stringify(refPoints),
+      `extractedCorners=${extractedCorners?.length ?? 0} typedRefs=${validTypedRefPoints.length}`
     );
     if (blockProtectedWorkflowMutation("Changing GPS alignment")) return;
-    const usesManualPlacement = alignmentMethod === "visual_alignment" || alignmentMethod === "least_squares";
-    if (
-      !selectedPathName ||
-      !apiBaseUrl ||
-      (usesManualPlacement && !extractedCorners) ||
-      (alignmentMethod === "single_point" && refPoints.length === 0)
-    ) {
+
+    // Two Multi-Point paths:
+    // 1) Captured plan placement (Move Plan / Visual) → extractedCorners
+    // 2) Tapped plan points + typed lat/lon (no CSV) → validTypedRefPoints
+    let validPoints: pathApi.RefPoint[] | null = null;
+    if (extractedCorners && extractedCorners.length > 0) {
+      validPoints = extractedCorners.map((point) => ({
+        dxf_x: point.dxf_x,
+        dxf_y: point.dxf_y,
+        lat: point.lat,
+        lon: point.lon,
+      }));
+    } else if (canFixFromTypedRefs) {
+      validPoints = validTypedRefPoints;
+    }
+
+    if (!selectedPathName || !apiBaseUrl || !validPoints || validPoints.length === 0) {
       console.log("[AlignDXF][Fix] Aborted: missing path/apiBaseUrl/points guard.");
+      if (alignmentMethod === "least_squares" && !extractedCorners) {
+        Alert.alert(
+          "Need control points",
+          "Tap at least one plan point and enter its Latitude/Longitude, or use Move / Rotate Plan → Use This Position."
+        );
+      }
       onWorkflowStep?.("alignment", "failed");
       setVerifiedAlignmentRequest(null);
       return;
@@ -371,74 +455,9 @@ export function AlignDxfPanel({
 
     setIsFixing(true);
     try {
-      let validPoints: { dxf_x: number; dxf_y: number; lat: number; lon: number }[] = [];
-
-      if (usesManualPlacement) {
-        // Both Visual and Multi-Point Fit now work the same way: the reference points (tapped
-        // or CSV-imported) are just an on-screen guide — the actual alignment comes from
-        // wherever the user manually dragged/scaled/rotated the plan to (captured via "Use
-        // This Position" / "Capture & Confirm" into extractedCorners), not a computed fit.
-        validPoints = extractedCorners!.map((point) => ({
-          dxf_x: point.dxf_x,
-          dxf_y: point.dxf_y,
-          lat: point.lat,
-          lon: point.lon,
-        }));
-      } else {
-        // single_point (1-Point + Angle): still a computed fit from one tapped point + a
-        // given heading, so its dxf_x/dxf_y must genuinely correspond to this drawing.
-        validPoints = refPoints
-          .filter((point) => point.lat.trim() !== "" && point.lon.trim() !== "")
-          .map((point) => ({
-            dxf_x: point.dxf_x,
-            dxf_y: point.dxf_y,
-            lat: parseFloat(point.lat),
-            lon: parseFloat(point.lon),
-          }));
-
-        if (validPoints.length === 0) {
-          onWorkflowStep?.("alignment", "failed");
-          setVerifiedAlignmentRequest(null);
-          Alert.alert("Validation", "Please select a point and enter its coordinates.");
-          setIsFixing(false);
-          return;
-        }
-
-        // Defense-in-depth: never send a fit whose input coordinates don't match this
-        // drawing's own scale — that computes a transform for the wrong coordinate system
-        // and, reapplied to the drawing, can misplace the whole plan by thousands of
-        // kilometres. This is a physical spraying rover; a wrong alignment is a safety issue.
-        const dxfBoundsForFix = computeDxfBounds(lines);
-        if (dxfBoundsForFix && !validPoints.every((p) => pointMatchesDxfScale(p, dxfBoundsForFix))) {
-          console.log(
-            `[AlignDXF][Fix] BLOCKED: ref point coordinates don't match drawing bounds`,
-            JSON.stringify(dxfBoundsForFix)
-          );
-          onWorkflowStep?.("alignment", "failed");
-          setVerifiedAlignmentRequest(null);
-          Alert.alert(
-            "Coordinates Don't Match This Drawing",
-            "This point's drawing coordinates are far outside this DXF's own coordinate range. This usually means a raw survey file's Easting/Northing got used directly instead of a point actually tapped on the drawing — sending this would misalign the plan by a huge distance."
-          );
-          setIsFixing(false);
-          return;
-        }
-      }
-
       console.log("[AlignDXF][Fix] validPoints (dxf_x=east, dxf_y=north):", JSON.stringify(validPoints));
 
       const payload: pathApi.AlignPathRequest = { ref_points: validPoints };
-      if (alignmentMethod === "single_point") {
-        const rot = parseFloat(rotationDeg);
-        if (isNaN(rot)) {
-          onWorkflowStep?.("alignment", "failed");
-          setVerifiedAlignmentRequest(null);
-          Alert.alert("Validation", "Please enter a valid Heading (Degrees).");
-          setIsFixing(false);
-          return;
-        }
-        payload.rotation_deg = rot;
-      }
 
       console.log(`[AlignDXF][Fix] POST /api/path/${selectedPathName}/align payload:`, JSON.stringify(payload));
 
@@ -559,6 +578,7 @@ export function AlignDxfPanel({
         // paints transformed NED lines under visualAlignmentAnchor for one intermediate frame
         // (the shift-then-settle bug). Do not rely on App's useEffect for this first paint.
         setRefPoints([]);
+        setCsvGuidePointsActive?.(false);
         setExtractedCorners?.(null);
         setVisualAlignmentItem?.(null);
         setVisualAlignmentAnchor?.(null);
@@ -586,6 +606,7 @@ export function AlignDxfPanel({
     setAlignmentResult(null);
     setVerifiedAlignmentRequest(null);
     setRefPoints([]);
+    setCsvGuidePointsActive?.(false);
     setExtractedCorners?.(null);
     setVisualAlignmentItem?.(null);
     setVisualAlignmentAnchor?.(null);
@@ -598,118 +619,176 @@ export function AlignDxfPanel({
     <View style={{ gap: 12 }}>
       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
         <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17, flex: 1 }}>
-          Tap points on the map to set alignment references.
+          {selectedUiMethod === "auto_origin"
+            ? "Plan starts at the rover without a formal GPS fit."
+            : selectedUiMethod === "visual_alignment"
+            ? "Place the plan on the map, then capture its position. Map tap-to-pick is off."
+            : csvGuidePointsActive
+            ? "CSV guide points loaded — map tap-to-pick is off. Move the plan into place."
+            : "Tap the plan (or import CSV) for guide points, then move the plan into place."}
         </Text>
-        {refPoints.length > 0 ? (
+        {refPoints.length > 0 && selectedUiMethod !== "auto_origin" ? (
           <Pressable onPress={resetAlignment}>
             <Text style={{ color: FIELDS_COLORS.danger, fontSize: 11, fontWeight: "700" }}>Clear Points</Text>
           </Pressable>
         ) : null}
       </View>
 
-      {!missionRunning ? (
-        <View
+      {/* Method dropdown: Multi-Point | Visual | Auto Origin (1-Point Fit removed) */}
+      <View style={{ zIndex: 20 }}>
+        <Text
           style={{
-            borderRadius: 10,
-            borderWidth: 1,
-            borderColor: autoOrigin ? "#10b981" : FIELDS_COLORS.panelBorder,
-            backgroundColor: autoOrigin ? "rgba(16, 185, 129, 0.08)" : FIELDS_COLORS.surfaceSolid,
-            padding: 10,
-            gap: 8,
+            color: FIELDS_COLORS.textDim,
+            fontSize: 10,
+            fontWeight: "800",
+            letterSpacing: 0.6,
+            marginBottom: 6,
+            textTransform: "uppercase",
           }}
         >
-          <Pressable
-            onPress={onToggleAutoOrigin}
-            accessibilityLabel="Auto Origin Checkbox"
-            style={{ flexDirection: "row", alignItems: "center", gap: 10 }}
-          >
-            <View
-              style={{
-                width: 22,
-                height: 22,
-                borderRadius: 6,
-                borderWidth: 1.5,
-                borderColor: autoOrigin ? "#10b981" : FIELDS_COLORS.panelBorder,
-                backgroundColor: autoOrigin ? "rgba(16, 185, 129, 0.15)" : FIELDS_COLORS.cardSolid,
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              {autoOrigin ? <Check color="#10b981" size={14} strokeWidth={3} /> : null}
-            </View>
-            <Text style={{ flex: 1, color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>
-              Auto Origin — skip GPS alignment, start from rover's current position
+          Alignment method
+        </Text>
+        <Pressable
+          onPress={() => setMethodMenuOpen((open) => !open)}
+          accessibilityLabel="Alignment method dropdown"
+          style={{
+            minHeight: 52,
+            borderRadius: 12,
+            borderWidth: 1.5,
+            borderColor: methodMenuOpen ? selectedMethodOption.accent : FIELDS_COLORS.panelBorder,
+            backgroundColor: FIELDS_COLORS.surfaceSolid,
+            paddingHorizontal: 14,
+            paddingVertical: 10,
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          <View
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: 4,
+              backgroundColor: selectedMethodOption.accent,
+            }}
+          />
+          <View style={{ flex: 1, gap: 2 }}>
+            <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 14, fontWeight: "800" }}>
+              {selectedMethodOption.label}
             </Text>
-          </Pressable>
+            <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, lineHeight: 14 }} numberOfLines={1}>
+              {selectedMethodOption.description}
+            </Text>
+          </View>
+          <View style={{ transform: [{ rotate: methodMenuOpen ? "180deg" : "0deg" }] }}>
+            <ChevronDown size={18} color={FIELDS_COLORS.textMuted} />
+          </View>
+        </Pressable>
 
-          {autoOrigin ? (
-            <Text
-              style={{
-                color: stagedVerified || !autoOriginEnabled
+        {methodMenuOpen ? (
+          <View
+            style={{
+              marginTop: 6,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: FIELDS_COLORS.panelBorder,
+              backgroundColor: FIELDS_COLORS.cardSolid,
+              overflow: "hidden",
+            }}
+          >
+            {METHOD_OPTIONS.map((option, index) => {
+              const selected = option.id === selectedUiMethod;
+              return (
+                <Pressable
+                  key={option.id}
+                  onPress={() => selectAlignMethod(option.id)}
+                  style={{
+                    paddingHorizontal: 14,
+                    paddingVertical: 12,
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 12,
+                    backgroundColor: selected ? "rgba(59, 130, 246, 0.08)" : "transparent",
+                    borderTopWidth: index === 0 ? 0 : 1,
+                    borderTopColor: FIELDS_COLORS.panelBorder,
+                  }}
+                >
+                  <View
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: 4,
+                      backgroundColor: option.accent,
+                      opacity: selected ? 1 : 0.55,
+                    }}
+                  />
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <Text
+                      style={{
+                        color: selected ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted,
+                        fontSize: 13,
+                        fontWeight: selected ? "800" : "600",
+                      }}
+                    >
+                      {option.label}
+                    </Text>
+                    <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, lineHeight: 14 }}>
+                      {option.description}
+                    </Text>
+                  </View>
+                  {selected ? <Check size={16} color={option.accent} strokeWidth={2.5} /> : null}
+                </Pressable>
+              );
+            })}
+          </View>
+        ) : null}
+      </View>
+
+      {/* Auto Origin status (selected via dropdown) */}
+      {selectedUiMethod === "auto_origin" && !missionRunning ? (
+        <View
+          style={{
+            borderRadius: 12,
+            borderWidth: 1,
+            borderColor: autoOriginActive ? FIELDS_COLORS.successBorder : FIELDS_COLORS.panelBorder,
+            backgroundColor: autoOriginActive
+              ? "rgba(16, 185, 129, 0.08)"
+              : FIELDS_COLORS.surfaceSolid,
+            padding: 12,
+            gap: 6,
+          }}
+        >
+          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "800" }}>
+            Auto Origin
+          </Text>
+          <Text
+            style={{
+              color:
+                stagedVerified || !autoOriginEnabled
                   ? FIELDS_COLORS.danger
                   : autoOriginReference
                   ? FIELDS_COLORS.success
                   : FIELDS_COLORS.textMuted,
-                fontSize: 11,
-                lineHeight: 15,
-              }}
-            >
-              {stagedVerified
-                ? "A verified GPS alignment is active — Auto Origin will have no effect until that alignment is cleared."
-                : !autoOriginEnabled
-                ? "Auto Origin is blocked by an existing alignment. Clear the ref points below to use it."
-                : autoOriginReference
-                ? `Captured — plan will start at the rover's current position (N ${autoOriginReference.roverNorth.toFixed(2)}, E ${autoOriginReference.roverEast.toFixed(2)}).`
-                : "Waiting for a valid GPS fix and position from the rover..."}
-            </Text>
-          ) : null}
+              fontSize: 11,
+              lineHeight: 15,
+            }}
+          >
+            {stagedVerified
+              ? "A verified GPS alignment is active — Auto Origin will have no effect until that alignment is cleared."
+              : !autoOriginEnabled
+              ? "Auto Origin is blocked by an existing alignment. Clear alignment / ref points to use it."
+              : autoOriginReference
+              ? `Captured — plan will start at the rover's current position (N ${autoOriginReference.roverNorth.toFixed(2)}, E ${autoOriginReference.roverEast.toFixed(2)}).`
+              : "Waiting for a valid GPS fix and position from the rover..."}
+          </Text>
         </View>
       ) : null}
 
-      <View
-        style={{ gap: 12, opacity: autoOriginActive ? 0.4 : 1 }}
-        pointerEvents={autoOriginActive ? "none" : "auto"}
-      >
-      <View style={{ flexDirection: "row", backgroundColor: FIELDS_COLORS.surfaceSolid, borderRadius: 8, padding: 4 }}>
-        {([
-          { id: "least_squares" as const, label: "Multi-Point Fit" },
-          { id: "single_point" as const, label: "1-Point + Angle" },
-          { id: "visual_alignment" as const, label: "Visual" },
-        ]).map((method) => (
-          <Pressable
-            key={method.id}
-            onPress={() => {
-              onInvalidateWorkflow("alignment");
-              setAlignmentMethod(method.id);
-              setRefPoints([]);
-              setMissionSummary(null);
-              setAlignmentResult(null);
-              setVerifiedAlignmentRequest(null);
-              setExtractedCorners?.(null);
-              setVisualAlignmentItem?.(null);
-            }}
-            style={{
-              flex: 1,
-              paddingVertical: 8,
-              alignItems: "center",
-              borderRadius: 6,
-              backgroundColor: alignmentMethod === method.id ? FIELDS_COLORS.cardSolid : "transparent",
-            }}
-          >
-            <Text
-              style={{
-                color: alignmentMethod === method.id ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted,
-                fontSize: 11,
-                fontWeight: "700",
-              }}
-            >
-              {method.label}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
-
-      {alignmentMethod !== "visual_alignment" && !(alignmentMethod === "least_squares" && extractedCorners) ? (
+      {/* Formal alignment controls — not shown while Auto Origin is selected */}
+      {selectedUiMethod !== "auto_origin" ? (
+      <View style={{ gap: 12 }}>
+      {alignmentMethod !== "visual_alignment" &&
+      !(alignmentMethod === "least_squares" && extractedCorners) ? (
         <Pressable
           onPress={onToggleMovePlan}
           disabled={isFixing || missionRunning}
@@ -776,7 +855,11 @@ export function AlignDxfPanel({
         >
           <Upload color={FIELDS_COLORS.stepActive} size={15} />
           <Text style={{ color: FIELDS_COLORS.stepActive, fontSize: 13, fontWeight: "700" }}>
-            {isImportingCsv ? "Importing CSV..." : "Upload Reference Points CSV"}
+            {isImportingCsv
+              ? "Importing CSV..."
+              : csvGuidePointsActive
+              ? "Replace Reference Points CSV"
+              : "Upload Reference Points CSV"}
           </Text>
         </Pressable>
       ) : null}
@@ -972,180 +1055,158 @@ export function AlignDxfPanel({
             </View>
           ) : null}
         </View>
-      ) : isPlanEditingMode ? null : refPoints.length === 0 ? (
+      ) : isPlanEditingMode ? null : alignmentMethod !== "least_squares" ? null : refPoints.length === 0 ? (
         <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 12, fontStyle: "italic", textAlign: "center" }}>
-          {alignmentMethod === "least_squares"
-            ? "Tap points on the canvas, or upload a CSV, to show reference points on the map — any number, purely a visual guide. Then use \"Move / Rotate Plan\" to position the plan."
-            : "Tap 1 point on the canvas to set anchor."}
+          Tap the plan to place control points (lat/lon fields appear for each), or upload a CSV guide file. CSV disables
+          map tap until Clear Points.
         </Text>
       ) : (
-        <View style={{ gap: 8 }}>
-          {alignmentMethod === "least_squares" ? (
-            <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11 }}>
-              {refPoints.length} reference point{refPoints.length === 1 ? "" : "s"} shown on the map — drag the plan close to
-              one to snap onto it.
-            </Text>
-          ) : null}
+        <View style={{ gap: 10 }}>
+          <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11 }}>
+            {refPoints.length} control point{refPoints.length === 1 ? "" : "s"}
+            {csvGuidePointsActive
+              ? " from CSV (map tap off). Use Move / Rotate Plan to place the drawing, then Use This Position."
+              : " — enter Latitude / Longitude for each, then Fix Alignment (1+ points). Or use Move / Rotate Plan as a visual guide."}
+          </Text>
           <View style={{ gap: 8 }}>
-            {refPoints.map((point, index) => (
-              <View
-                key={index}
-                style={{
-                  backgroundColor: FIELDS_COLORS.surfaceSolid,
-                  padding: 10,
-                  borderRadius: 8,
-                  borderWidth: 1,
-                  borderColor: FIELDS_COLORS.panelBorder,
-                }}
-              >
-                <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 6 }}>
-                  <Text style={{ flex: 1, color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
-                    Point {index + 1}
-                    {alignmentMethod === "single_point" ? (
-                      <Text style={{ fontWeight: "400", color: FIELDS_COLORS.textMuted }}>
-                        {" "}(X: {point.dxf_x.toFixed(2)}, Y: {point.dxf_y.toFixed(2)})
-                      </Text>
-                    ) : null}
-                  </Text>
-                  <Pressable onPress={() => handleRemoveRefPoint(index)} hitSlop={8}>
-                    <X size={14} color={FIELDS_COLORS.danger} />
-                  </Pressable>
+            {refPoints.map((point, index) => {
+              const latOk = Number.isFinite(parseFloat(point.lat));
+              const lonOk = Number.isFinite(parseFloat(point.lon));
+              const filled = latOk && lonOk;
+              return (
+                <View
+                  key={index}
+                  style={{
+                    backgroundColor: FIELDS_COLORS.surfaceSolid,
+                    padding: 10,
+                    borderRadius: 8,
+                    borderWidth: 1,
+                    borderColor: filled ? FIELDS_COLORS.successBorder : FIELDS_COLORS.panelBorder,
+                  }}
+                >
+                  <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 6 }}>
+                    <Text style={{ flex: 1, color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
+                      Point {index + 1}
+                      {!csvGuidePointsActive ? (
+                        <Text style={{ color: FIELDS_COLORS.textDim, fontWeight: "500" }}>
+                          {`  ·  N ${Number(point.dxf_y).toFixed(2)}  E ${Number(point.dxf_x).toFixed(2)}`}
+                        </Text>
+                      ) : null}
+                    </Text>
+                    <Pressable onPress={() => handleRemoveRefPoint(index)} hitSlop={8}>
+                      <X size={14} color={FIELDS_COLORS.danger} />
+                    </Pressable>
+                  </View>
+                  {/* Lat/Lon always shown for tapped points; CSV rows already have coords but stay editable. */}
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <TextInput
+                      style={{
+                        flex: 1,
+                        height: 40,
+                        backgroundColor: FIELDS_COLORS.cardSolid,
+                        borderWidth: 1,
+                        borderColor: latOk ? FIELDS_COLORS.successBorder : FIELDS_COLORS.panelBorder,
+                        borderRadius: 6,
+                        paddingHorizontal: 10,
+                        fontSize: 13,
+                        color: FIELDS_COLORS.textMain,
+                      }}
+                      placeholder="Latitude"
+                      placeholderTextColor={FIELDS_COLORS.textDim}
+                      value={point.lat}
+                      onChangeText={(value) => handleUpdateRefPoint(index, "lat", value)}
+                      keyboardType="numeric"
+                      editable={!isFixing && !missionRunning}
+                    />
+                    <TextInput
+                      style={{
+                        flex: 1,
+                        height: 40,
+                        backgroundColor: FIELDS_COLORS.cardSolid,
+                        borderWidth: 1,
+                        borderColor: lonOk ? FIELDS_COLORS.successBorder : FIELDS_COLORS.panelBorder,
+                        borderRadius: 6,
+                        paddingHorizontal: 10,
+                        fontSize: 13,
+                        color: FIELDS_COLORS.textMain,
+                      }}
+                      placeholder="Longitude"
+                      placeholderTextColor={FIELDS_COLORS.textDim}
+                      value={point.lon}
+                      onChangeText={(value) => handleUpdateRefPoint(index, "lon", value)}
+                      keyboardType="numeric"
+                      editable={!isFixing && !missionRunning}
+                    />
+                  </View>
                 </View>
-                <View style={{ flexDirection: "row", gap: 8 }}>
-                  <TextInput
-                    style={{
-                      flex: 1,
-                      height: 36,
-                      backgroundColor: FIELDS_COLORS.cardSolid,
-                      borderWidth: 1,
-                      borderColor: FIELDS_COLORS.panelBorder,
-                      borderRadius: 6,
-                      paddingHorizontal: 10,
-                      fontSize: 13,
-                      color: FIELDS_COLORS.textMain,
-                    }}
-                    placeholder="Latitude"
-                    placeholderTextColor={FIELDS_COLORS.textDim}
-                    value={point.lat}
-                    onChangeText={(value) => handleUpdateRefPoint(index, "lat", value)}
-                    keyboardType="numeric"
-                  />
-                  <TextInput
-                    style={{
-                      flex: 1,
-                      height: 36,
-                      backgroundColor: FIELDS_COLORS.cardSolid,
-                      borderWidth: 1,
-                      borderColor: FIELDS_COLORS.panelBorder,
-                      borderRadius: 6,
-                      paddingHorizontal: 10,
-                      fontSize: 13,
-                      color: FIELDS_COLORS.textMain,
-                    }}
-                    placeholder="Longitude"
-                    placeholderTextColor={FIELDS_COLORS.textDim}
-                    value={point.lon}
-                    onChangeText={(value) => handleUpdateRefPoint(index, "lon", value)}
-                    keyboardType="numeric"
-                  />
-                </View>
-              </View>
-            ))}
+              );
+            })}
           </View>
 
-          {alignmentMethod === "single_point" && refPoints.length === 1 ? (
-            <View
-              style={{
-                backgroundColor: FIELDS_COLORS.surfaceSolid,
-                padding: 10,
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: FIELDS_COLORS.panelBorder,
-              }}
-            >
-              <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700", marginBottom: 6 }}>
-                Heading Angle
-              </Text>
-              <TextInput
-                style={{
-                  height: 36,
-                  backgroundColor: FIELDS_COLORS.cardSolid,
-                  borderWidth: 1,
-                  borderColor: FIELDS_COLORS.panelBorder,
-                  borderRadius: 6,
-                  paddingHorizontal: 10,
-                  fontSize: 13,
-                  color: FIELDS_COLORS.textMain,
-                }}
-                placeholder="Degrees (e.g. 45)"
-                placeholderTextColor={FIELDS_COLORS.textDim}
-                value={rotationDeg}
-                onChangeText={(value) => {
-                  onInvalidateWorkflow("alignment");
-                  setRotationDeg(value);
-                }}
-                keyboardType="numeric"
-              />
-            </View>
-          ) : null}
-
-          {alignmentMethod === "least_squares" ? (
-            <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontStyle: "italic", textAlign: "center" }}>
-              Now tap "Move / Rotate Plan" above to position the plan using these points as a guide.
-            </Text>
-          ) : (
-            <>
+          {/* Fix Alignment for tapped + typed control points (not CSV-only visual guide). */}
+          {!csvGuidePointsActive ? (
+            <View style={{ gap: 6 }}>
               <Pressable
                 onPress={handleFixAlignment}
-                disabled={isFixing || !selectedPathName}
+                disabled={isFixing || !selectedPathName || !canFixFromTypedRefs || missionRunning}
                 style={{
-                  height: 44,
+                  height: 46,
                   borderRadius: 10,
                   alignItems: "center",
                   justifyContent: "center",
-                  backgroundColor: isFixing || !selectedPathName ? FIELDS_COLORS.textDim : FIELDS_COLORS.warning,
+                  backgroundColor:
+                    isFixing || !selectedPathName || !canFixFromTypedRefs || missionRunning
+                      ? FIELDS_COLORS.textDim
+                      : FIELDS_COLORS.warning,
                 }}
               >
                 <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>
-                  {isFixing ? "Fixing..." : "Fix Alignment"}
+                  {isFixing
+                    ? "Fixing..."
+                    : canFixFromTypedRefs
+                    ? `Fix Alignment (${validTypedRefPoints.length} point${validTypedRefPoints.length === 1 ? "" : "s"})`
+                    : `Fix Alignment (need lat/lon · ${validTypedRefPoints.length}/${refPoints.length})`}
                 </Text>
               </Pressable>
-
-              {alignmentResult ? (
-                <View
-                  style={{
-                    marginTop: 4,
-                    padding: 12,
-                    backgroundColor: FIELDS_COLORS.successMuted,
-                    borderRadius: 8,
-                    borderWidth: 1,
-                    borderColor: FIELDS_COLORS.successBorder,
-                    gap: 4,
-                  }}
-                >
-                  <Text style={{ color: FIELDS_COLORS.success, fontWeight: "800", fontSize: 13 }}>Alignment Verified</Text>
-                  <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
-                    Method: {alignmentResult.method != null ? String(alignmentResult.method) : "n/a"}
-                  </Text>
-                  <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
-                    Scale: {formatFinite(alignmentResult.scale, 6)}
-                  </Text>
-                  <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
-                    Rotation: {formatFinite(alignmentResult.rotation_deg, 3)} deg
-                  </Text>
-                  <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
-                    Offset: N {formatFinite(alignmentResult.offset_n, 3)} / E {formatFinite(alignmentResult.offset_e, 3)}
-                  </Text>
-                  <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
-                    RMSE: {formatFinite(alignmentResult.rmse_m, 3)}
-                  </Text>
-                </View>
-              ) : null}
-            </>
+              <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, textAlign: "center" }}>
+                {canFixFromTypedRefs
+                  ? "Sends plan point(s) + your GPS coordinates to the rover for the fit."
+                  : "Fill Latitude and Longitude on at least 1 tapped point to enable Fix Alignment."}
+              </Text>
+            </View>
+          ) : (
+            <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontStyle: "italic", textAlign: "center" }}>
+              CSV guides are visual only — use Move / Rotate Plan, then Use This Position, then Fix Alignment.
+            </Text>
           )}
+
+          {alignmentResult && !extractedCorners ? (
+            <View
+              style={{
+                padding: 12,
+                backgroundColor: FIELDS_COLORS.successMuted,
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: FIELDS_COLORS.successBorder,
+                gap: 4,
+              }}
+            >
+              <Text style={{ color: FIELDS_COLORS.success, fontWeight: "800", fontSize: 13 }}>Alignment Verified</Text>
+              <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
+                Scale: {formatFinite(alignmentResult.scale, 6)}
+              </Text>
+              <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
+                Rotation: {formatFinite(alignmentResult.rotation_deg, 3)} deg
+              </Text>
+              <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
+                RMSE: {formatFinite(alignmentResult.rmse_m, 3)}
+              </Text>
+            </View>
+          ) : null}
         </View>
       )}
       </View>
+      ) : null}
     </View>
   );
 }

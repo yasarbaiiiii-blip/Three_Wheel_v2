@@ -128,11 +128,32 @@ function distToSegment(
   x2: number,
   y2: number
 ): number {
-  const l2 = (x1 - x2) ** 2 + (y1 - y2) ** 2;
-  if (l2 === 0) return Math.hypot(px - x1, py - y1);
-  let t = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / l2;
+  return nearestOnSegment(px, py, x1, y1, x2, y2).dist;
+}
+
+/**
+ * Closest point on segment (x1,y1)-(x2,y2) to (px,py). All coords in the same
+ * planar frame (typically plan north/east metres).
+ */
+function nearestOnSegment(
+  px: number,
+  py: number,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number
+): { dist: number; x: number; y: number } {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const l2 = dx * dx + dy * dy;
+  if (l2 === 0) {
+    return { dist: Math.hypot(px - x1, py - y1), x: x1, y: y1 };
+  }
+  let t = ((px - x1) * dx + (py - y1) * dy) / l2;
   t = Math.max(0, Math.min(1, t));
-  return Math.hypot(px - (x1 + t * (x2 - x1)), py - (y1 + t * (y2 - y1)));
+  const x = x1 + t * dx;
+  const y = y1 + t * dy;
+  return { dist: Math.hypot(px - x, py - y), x, y };
 }
 
 type Coord = [number, number]; // [lon, lat]
@@ -2026,57 +2047,162 @@ export function MapViewNative(props: MapViewProps) {
       if (!projectionOrigin) return;
 
       const local = projectGpsToLocalMeters(pLat, pLon, projectionOrigin.originLat, projectionOrigin.originLon);
-      const clickedDxfX = local.east + projectionOrigin.originDxfEast;
-      const clickedDxfY = local.north + projectionOrigin.originDxfNorth;
+      // Plan frame: north = x, east = y (same as PlanLine.from.x/y).
+      const clickN = local.north + projectionOrigin.originDxfNorth;
+      const clickE = local.east + projectionOrigin.originDxfEast;
 
-      // 1) Nearest vertex/point (4.5 m tolerance)
-      let bestPt: { x: number; y: number } | null = null;
-      let bestPtDist = Infinity;
-      for (const line of lines) {
-        if (line.from) {
-          const d = Math.hypot(line.from.x - clickedDxfY, line.from.y - clickedDxfX);
-          if (d < bestPtDist) { bestPtDist = d; bestPt = { x: line.from.x, y: line.from.y }; }
-        }
-        if (line.to) {
-          const d = Math.hypot(line.to.x - clickedDxfY, line.to.y - clickedDxfX);
-          if (d < bestPtDist) { bestPtDist = d; bestPt = { x: line.to.x, y: line.to.y }; }
-        }
-        if (line.entity?.preview_points) {
-          for (const pt of line.entity.preview_points) {
-            const d = Math.hypot(pt.north - clickedDxfY, pt.east - clickedDxfX);
-            if (d < bestPtDist) { bestPtDist = d; bestPt = { x: pt.north, y: pt.east }; }
+      // Geometry pick radius (~40px finger target). Cap so one marker cannot
+      // "own" the whole plan and block multi-point selection.
+      const mpp = metersPerPixelSV.value > 0 ? metersPerPixelSV.value : 0.05;
+      const hitRadiusM = Math.max(6, Math.min(22, mpp * 40));
+      // Deselect only when the user deliberately taps the yellow marker itself
+      // (~22px). Using hitRadiusM here was the multi-point bug: after point #1,
+      // any second tap within 12–55 m toggled #1 off instead of adding #2.
+      const deselectRadiusM = Math.max(1.0, Math.min(3.0, mpp * 22));
+
+      // ── Multi-Point guide pick (only when parent wired onSelectPoint) ──
+      // ADD is the default. Deselect only when the tap is on an existing marker.
+      // Empty map / far from plan geometry is ignored.
+      if (onSelectPoint) {
+        let bestPt: { x: number; y: number } | null = null;
+        let bestPtDist = hitRadiusM;
+
+        for (const line of lines) {
+          if (line.from) {
+            const d = Math.hypot(line.from.x - clickN, line.from.y - clickE);
+            if (d < bestPtDist) {
+              bestPtDist = d;
+              bestPt = { x: line.from.x, y: line.from.y };
+            }
+          }
+          if (line.to) {
+            const d = Math.hypot(line.to.x - clickN, line.to.y - clickE);
+            if (d < bestPtDist) {
+              bestPtDist = d;
+              bestPt = { x: line.to.x, y: line.to.y };
+            }
+          }
+          if (line.entity?.preview_points) {
+            for (const pt of line.entity.preview_points) {
+              const d = Math.hypot(pt.north - clickN, pt.east - clickE);
+              if (d < bestPtDist) {
+                bestPtDist = d;
+                bestPt = { x: pt.north, y: pt.east };
+              }
+            }
           }
         }
-      }
-      if (bestPt && bestPtDist < 4.5 && onSelectPoint) {
-        onSelectPoint({ x: bestPt.x, y: bestPt.y });
+
+        let bestSeg: { x: number; y: number; dist: number } | null = null;
+        for (const line of lines) {
+          if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
+            const pts = line.entity.preview_points;
+            for (let i = 0; i < pts.length - 1; i++) {
+              const hit = nearestOnSegment(
+                clickN,
+                clickE,
+                pts[i].north,
+                pts[i].east,
+                pts[i + 1].north,
+                pts[i + 1].east
+              );
+              if (!bestSeg || hit.dist < bestSeg.dist) {
+                bestSeg = { x: hit.x, y: hit.y, dist: hit.dist };
+              }
+            }
+          } else if (line.from && line.to) {
+            const hit = nearestOnSegment(
+              clickN,
+              clickE,
+              line.from.x,
+              line.from.y,
+              line.to.x,
+              line.to.y
+            );
+            if (!bestSeg || hit.dist < bestSeg.dist) {
+              bestSeg = { x: hit.x, y: hit.y, dist: hit.dist };
+            }
+          }
+        }
+
+        const geometryPick: { x: number; y: number; dist: number } | null = bestPt
+          ? { x: bestPt.x, y: bestPt.y, dist: bestPtDist }
+          : bestSeg && bestSeg.dist <= hitRadiusM
+          ? { x: bestSeg.x, y: bestSeg.y, dist: bestSeg.dist }
+          : null;
+
+        // Tight deselect: only when the finger is on a yellow marker.
+        let bestSel: { x: number; y: number; dist: number } | null = null;
+        if (selectedPoints && selectedPoints.length > 0) {
+          for (const sp of selectedPoints) {
+            if (!Number.isFinite(sp.x) || !Number.isFinite(sp.y)) continue;
+            const d = Math.hypot(sp.x - clickN, sp.y - clickE);
+            if (d <= deselectRadiusM && (!bestSel || d < bestSel.dist)) {
+              bestSel = { x: sp.x, y: sp.y, dist: d };
+            }
+          }
+        }
+
+        // Prefer deselect only when the tap is clearly on the marker (closer than
+        // a different geometry target, or no new geometry at all).
+        if (bestSel) {
+          const aimingAtSameMarker =
+            !geometryPick ||
+            Math.hypot(geometryPick.x - bestSel.x, geometryPick.y - bestSel.y) < 0.35 ||
+            bestSel.dist <= geometryPick.dist;
+          if (aimingAtSameMarker) {
+            onSelectPoint({ x: bestSel.x, y: bestSel.y });
+            return;
+          }
+        }
+
+        if (geometryPick) {
+          onSelectPoint({ x: geometryPick.x, y: geometryPick.y });
+          return;
+        }
+        // No geometry nearby — ignore completely (no free-place, no line select).
         return;
       }
 
-      // 2) Nearest line (3.5 m tolerance)
+      // ── Default: line selection (no guide-point mode) ──
+      // Plan frame north/east consistently (previous path mixed east/north axes).
       let bestLineId: string | null = null;
       let bestLineDist = Infinity;
+      const lineHitR = Math.max(8, Math.min(40, mpp * 32));
       for (const line of lines) {
         let dist = Infinity;
         if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
           for (let i = 0; i < line.entity.preview_points.length - 1; i++) {
             const p1 = line.entity.preview_points[i];
             const p2 = line.entity.preview_points[i + 1];
-            const d = distToSegment(clickedDxfX, clickedDxfY, p1.north, p1.east, p2.north, p2.east);
+            const d = distToSegment(clickN, clickE, p1.north, p1.east, p2.north, p2.east);
             if (d < dist) dist = d;
           }
         } else if (line.from && line.to) {
-          dist = distToSegment(clickedDxfX, clickedDxfY, line.from.x, line.from.y, line.to.x, line.to.y);
+          dist = distToSegment(clickN, clickE, line.from.x, line.from.y, line.to.x, line.to.y);
         }
-        if (dist < bestLineDist) { bestLineDist = dist; bestLineId = line.id; }
+        if (dist < bestLineDist) {
+          bestLineDist = dist;
+          bestLineId = line.id;
+        }
       }
-      if (bestLineId && bestLineDist < 3.5 && onSelectLine) {
+      if (bestLineId && bestLineDist < lineHitR && onSelectLine) {
         onSelectLine(bestLineId);
       } else if (onSelectLine) {
         onSelectLine(null);
       }
     },
-    [mode, originSig, lines, onSelectPoint, onSelectLine, onSelectionChange, onMapClickToMark]
+    [
+      mode,
+      originSig,
+      lines,
+      onSelectPoint,
+      onSelectLine,
+      onSelectionChange,
+      onMapClickToMark,
+      selectedPoints,
+      metersPerPixelSV,
+    ]
   );
 
   const handleItemsPress = useCallback(
@@ -2294,10 +2420,11 @@ export function MapViewNative(props: MapViewProps) {
           <CircleLayer
             id="selected-points-layer"
             style={{
-              circleRadius: ["case", ["get", "isSnapActive"], 11, 6.5],
+              // Larger default radius so Multi-Point taps read clearly on phone screens.
+              circleRadius: ["case", ["get", "isSnapActive"], 12, 9],
               circleColor: ["case", ["get", "isSnapActive"], "#ff2d78", "#eab308"],
               circleStrokeColor: "#ffffff",
-              circleStrokeWidth: ["case", ["get", "isSnapActive"], 3, 2],
+              circleStrokeWidth: ["case", ["get", "isSnapActive"], 3, 2.5],
               circleOpacity: 1,
             }}
           />
