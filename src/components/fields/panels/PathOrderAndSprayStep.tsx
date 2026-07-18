@@ -33,6 +33,9 @@ type PathOrderAndSprayStepProps = {
   blockProtectedWorkflowMutation: (action: string) => boolean;
   protectedResident: boolean;
   verifiedAlignmentRequest: pathApi.AlignPathRequest | null;
+  /** Georeferenced DXF: backend auto-places at its own WGS84 origin, so loading is
+   * allowed without a manual alignment request. */
+  isGeographicDxf?: boolean;
   onWorkflowStep?: (step: StagedWorkflowStep, status: StagedWorkflowStatus) => void;
   setSegmentVerification: React.Dispatch<React.SetStateAction<pathApi.PathSegmentsResponse | null>>;
   setStagedPlanResult: React.Dispatch<React.SetStateAction<StagedPlanResultState | null>>;
@@ -106,6 +109,7 @@ export function PathOrderAndSprayStep({
   onSelectLine,
   onInvalidateWorkflow,
   verifiedAlignmentRequest,
+  isGeographicDxf = false,
   onWorkflowStep,
   setSegmentVerification,
   setStagedPlanResult,
@@ -193,7 +197,7 @@ export function PathOrderAndSprayStep({
       return;
     }
     const isDxfPath = targetPath?.toLowerCase().endsWith(".dxf");
-    if (!verifiedAlignmentRequest && isDxfPath) {
+    if (!verifiedAlignmentRequest && !isGeographicDxf && isDxfPath) {
       Alert.alert("Missing Alignment", "Please complete the alignment step before loading.");
       return;
     }
@@ -308,7 +312,7 @@ export function PathOrderAndSprayStep({
 
       <TouchableOpacity
         onPress={handleLoadToController}
-        disabled={isLoading || missionActionBusy || !verifiedAlignmentRequest}
+        disabled={isLoading || missionActionBusy || (!verifiedAlignmentRequest && !isGeographicDxf)}
         activeOpacity={0.8}
         style={{
           height: 52,
@@ -317,7 +321,7 @@ export function PathOrderAndSprayStep({
           alignItems: "center",
           justifyContent: "center",
           backgroundColor:
-            isLoading || missionActionBusy || !verifiedAlignmentRequest
+            isLoading || missionActionBusy || (!verifiedAlignmentRequest && !isGeographicDxf)
               ? FIELDS_COLORS.textDim
               : "#7c3aed",
           elevation: 4,
@@ -341,7 +345,12 @@ export function PathOrderAndSprayStep({
         )}
       </TouchableOpacity>
 
-      {!verifiedAlignmentRequest && (
+      {!verifiedAlignmentRequest && isGeographicDxf && (
+        <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, textAlign: "center" }}>
+          Georeferenced DXF — no alignment needed.
+        </Text>
+      )}
+      {!verifiedAlignmentRequest && !isGeographicDxf && (
         <Text style={{ color: FIELDS_COLORS.warning, fontSize: 10, textAlign: "center" }}>
           Complete alignment before loading to controller.
         </Text>

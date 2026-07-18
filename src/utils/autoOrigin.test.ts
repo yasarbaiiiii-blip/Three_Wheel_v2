@@ -305,6 +305,39 @@ describe("Auto Origin MapView projection", () => {
       })
     ).toBeNull();
   });
+
+  it("georeferenced DXF resolves to GEOGRAPHIC frame at geo_origin with zero DXF offset", () => {
+    const geoInput = {
+      mode: "fields" as const,
+      alignedRefPoints: [],
+      stagedVerified: false,
+      autoOriginReference: null,
+      autoOriginEnabled: false,
+      geoOrigin: [12.9716, 77.5946] as [number, number],
+    };
+    const frame = resolveMapGeometryFrame(geoInput);
+    expect(frame).toBe("GEOGRAPHIC");
+    const origin = resolveMapProjectionOrigin(frame, geoInput)!;
+    expect(origin.originLat).toBe(12.9716);
+    expect(origin.originLon).toBe(77.5946);
+    expect(origin.originDxfNorth).toBe(0);
+    expect(origin.originDxfEast).toBe(0);
+    // Backend centers local ENU on geo_origin, so local (0,0) maps to geo_origin.
+    const gps = projectPlanNorthEastToGps(0, 0, origin);
+    expect(gps.lat).toBeCloseTo(12.9716, 8);
+    expect(gps.lon).toBeCloseTo(77.5946, 8);
+  });
+
+  it("aligned reference still wins over a georeferenced DXF geo_origin", () => {
+    const input = {
+      ...frameInput,
+      autoOriginReference: null,
+      autoOriginEnabled: false,
+      alignedRefPoints: [{ dxf_x: 5, dxf_y: 10, lat: 12.97, lon: 77.59 }],
+      geoOrigin: [12.9716, 77.5946] as [number, number],
+    };
+    expect(resolveMapGeometryFrame(input)).toBe("ALIGNED_DESIGN");
+  });
 });
 
 describe("Auto Origin axis convention", () => {

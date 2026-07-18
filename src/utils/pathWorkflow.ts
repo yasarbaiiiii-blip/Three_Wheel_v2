@@ -12,7 +12,11 @@ export function formatFinite(value: unknown, digits = 2, fallback = "n/a") {
   return next == null ? fallback : next.toFixed(digits);
 }
 
-const PRIMARY_ENTITY_TYPES = new Set(["line", "arc", "circle"]);
+// LWPOLYLINE/POLYLINE included: a shape drawn as a single (closed) polyline —
+// e.g. a georeferenced square — is a primary drivable path, not a stray. Without
+// it, such a DXF produced an empty path order (Load failed "Missing entity IDs")
+// and its extensions/connectors never rendered.
+const PRIMARY_ENTITY_TYPES = new Set(["line", "arc", "circle", "lwpolyline", "polyline"]);
 
 export function normalizeEntityType(entityType: unknown) {
   return String(entityType ?? "").trim().toLowerCase();

@@ -324,6 +324,7 @@ export function MapViewNative(props: MapViewProps) {
     mapGeometryFrame,
     stagedVerified = false,
     autoOriginEnabled = false,
+    geoOrigin = null,
     visualAlignmentAnchor,
     previewFallbackGps = null,
     lockPanDrag,
@@ -545,6 +546,7 @@ export function MapViewNative(props: MapViewProps) {
       stagedVerified,
       autoOriginReference: autoOriginReference ?? null,
       autoOriginEnabled,
+      geoOrigin,
       // Parent fields-frame wins so switching MapView mode to "templates" for stickers
       // does not re-pick a different projection family mid-session.
       forcedFrame: mapGeometryFrame ?? null,
@@ -561,6 +563,7 @@ export function MapViewNative(props: MapViewProps) {
     stagedVerified,
     autoOriginReference,
     autoOriginEnabled,
+    geoOrigin,
     mapGeometryFrame,
     templatesFloatingOrigin,
     stableFallbackOrigin,

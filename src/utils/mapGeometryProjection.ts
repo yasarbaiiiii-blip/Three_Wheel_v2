@@ -28,6 +28,7 @@ export type ResolveMapGeometryFrameInput = {
   stagedVerified: boolean;
   autoOriginReference: AutoOriginReference | null;
   autoOriginEnabled: boolean;
+  geoOrigin?: [number, number] | null; // [lat, lon] from a georeferenced DXF
 };
 
 function isValidGps(lat: unknown, lon: unknown): lat is number {
@@ -63,6 +64,10 @@ export function resolveMapGeometryFrame(input: ResolveMapGeometryFrameInput): Ma
     return "AUTO_ORIGIN_RAW";
   }
 
+  if (input.geoOrigin && isValidGps(input.geoOrigin[0], input.geoOrigin[1])) {
+    return "GEOGRAPHIC";
+  }
+
   return "NONE";
 }
 
@@ -92,6 +97,10 @@ export function resolveMapProjectionOrigin(
       originDxfNorth: ref.dxf_y,
       originDxfEast: ref.dxf_x,
     };
+  }
+
+  if (frame === "GEOGRAPHIC" && input.geoOrigin && isValidGps(input.geoOrigin[0], input.geoOrigin[1])) {
+    return { frame, originLat: input.geoOrigin[0], originLon: input.geoOrigin[1], originDxfNorth: 0, originDxfEast: 0 };
   }
 
   if (frame === "AUTO_ORIGIN_RAW" && input.autoOriginReference) {

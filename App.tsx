@@ -671,6 +671,7 @@ export default function App() {
       stagedVerified: stagedWorkflow.staged === "verified",
       autoOriginReference,
       autoOriginEnabled: originEligible,
+      geoOrigin: geoOriginDxf,
       existingAnchor: visualAlignmentAnchor,
       stableFallbackOrigin:
         latchedPreviewGps ??
@@ -907,6 +908,11 @@ export default function App() {
   const alignmentResultRef = useRef<AlignmentResultState | null>(null);
   alignmentResultRef.current = alignmentResult;
   const [verifiedAlignmentRequest, setVerifiedAlignmentRequest] = useState<pathApi.AlignPathRequest | null>(null);
+  // Georeferenced DXF: backend auto-places at its own WGS84 origin, so no manual
+  // ref-point alignment is required. Threaded to the Fields workflow to relax the
+  // alignment gate for these files only (metric DXFs still require alignment).
+  const [isGeographicDxf, setIsGeographicDxf] = useState<boolean>(false);
+  const [geoOriginDxf, setGeoOriginDxf] = useState<[number, number] | null>(null);
   const [segmentVerification, setSegmentVerification] = useState<pathApi.PathSegmentsResponse | null>(null);
   const [stagedPlanResult, setStagedPlanResult] = useState<StagedPlanResultState | null>(null);
   const [stagedMissionInspection, setStagedMissionInspection] = useState<pathApi.StagedMissionResponse | null>(null);
@@ -1017,8 +1023,9 @@ export default function App() {
         stagedVerified: stagedWorkflow.staged === "verified",
         autoOriginReference,
         autoOriginEnabled: autoOriginEligible,
+        geoOrigin: geoOriginDxf,
       }),
-    [alignedRefPoints, stagedWorkflow.staged, autoOriginReference, autoOriginEligible]
+    [alignedRefPoints, stagedWorkflow.staged, autoOriginReference, autoOriginEligible, geoOriginDxf]
   );
 
   // [CANVAS] frame-alignment debug. Logs the auto-origin transform whenever the
@@ -1326,6 +1333,8 @@ export default function App() {
     }));
     setAlignmentResult(null);
     setVerifiedAlignmentRequest(null);
+    setIsGeographicDxf(false);
+    setGeoOriginDxf(null);
     setSegmentVerification(null);
     setStagedPlanResult(null);
     setStagedMissionInspection(null);
@@ -1958,6 +1967,8 @@ export default function App() {
               setExtAft(String(body.extension_config.aft_extension_m ?? "0.5"));
             }
             console.log(`[API GET] /api/path/${pathName}/entities - Success, loaded ${body.num_entities} entities`);
+            setIsGeographicDxf(!!body.is_geographic);
+            setGeoOriginDxf(body.geo_origin ?? null);
             setWorkflowStep("entities", "verified");
             const entities = body.entities || [];
             // Per-entity extension run-ups are only drawn in the fallback path.
@@ -3303,6 +3314,8 @@ export default function App() {
       setAlignedRefPoints([]);
       setAlignmentResult(null);
       setVerifiedAlignmentRequest(null);
+      setIsGeographicDxf(false);
+      setGeoOriginDxf(null);
       setVisualAlignmentItem(null);
       setIsVisualAlignmentMode(false);
       setSegmentVerification(null);
@@ -3835,6 +3848,7 @@ export default function App() {
                   autoOriginReference={autoOriginReference}
                   mapGeometryFrame={mapGeometryFrame}
                   autoOriginEnabled={autoOriginEligible}
+                  geoOrigin={geoOriginDxf}
                   extensionsEnabled={extensionsEnabled}
                   setLines={setLines}
                   selectedLineId={selectedLineId}
@@ -3930,6 +3944,7 @@ export default function App() {
                             autoOriginReference={autoOriginReference}
                             mapGeometryFrame={mapGeometryFrame}
                             autoOriginEnabled={autoOriginEligible}
+                            geoOrigin={geoOriginDxf}
                             autoOrigin={autoOrigin}
                             onToggleAutoOrigin={toggleAutoOrigin}
                             setLines={setLines}
@@ -4014,6 +4029,7 @@ export default function App() {
                             setAlignmentResult={setAlignmentResult}
                             verifiedAlignmentRequest={verifiedAlignmentRequest}
                             setVerifiedAlignmentRequest={setVerifiedAlignmentRequest}
+                            isGeographicDxf={isGeographicDxf}
                             segmentVerification={segmentVerification}
                             setSegmentVerification={setSegmentVerification}
                             stagedPlanResult={stagedPlanResult}
@@ -4232,6 +4248,7 @@ type HomeViewProps = {
   autoOriginReference: AutoOriginReference | null;
   mapGeometryFrame: MapGeometryFrame;
   autoOriginEnabled: boolean;
+  geoOrigin?: [number, number] | null;
   importedPlan: ImportedPlan | null;
   setImportedPlan?: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
   onSelectPath?: (name: string) => void;
@@ -4327,6 +4344,7 @@ function HomeView(props: HomeViewProps) {
     autoOriginReference,
     mapGeometryFrame,
     autoOriginEnabled,
+    geoOrigin = null,
     importedPlan,
     lines,
     setLines,
@@ -4709,6 +4727,7 @@ function HomeView(props: HomeViewProps) {
           autoOriginReference={autoOriginReference}
           mapGeometryFrame={mapGeometryFrame}
           autoOriginEnabled={autoOriginEnabled}
+          geoOrigin={geoOrigin}
           stagedVerified={stagedWorkflow.staged === "verified"}
           visibility={layerVisibility}
           selectedLineId={selectedLineId}
@@ -5500,6 +5519,7 @@ function SectionPages(props: {
   autoOriginReference?: AutoOriginReference | null;
   mapGeometryFrame?: MapGeometryFrame;
   autoOriginEnabled?: boolean;
+  geoOrigin?: [number, number] | null;
   autoOrigin?: boolean;
   onToggleAutoOrigin?: () => void;
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
@@ -5540,6 +5560,7 @@ function SectionPages(props: {
   setAlignmentResult: React.Dispatch<React.SetStateAction<AlignmentResultState | null>>;
   verifiedAlignmentRequest: pathApi.AlignPathRequest | null;
   setVerifiedAlignmentRequest: React.Dispatch<React.SetStateAction<pathApi.AlignPathRequest | null>>;
+  isGeographicDxf?: boolean;
   segmentVerification: pathApi.PathSegmentsResponse | null;
   setSegmentVerification: React.Dispatch<React.SetStateAction<pathApi.PathSegmentsResponse | null>>;
   stagedPlanResult: StagedPlanResultState | null;
@@ -6691,6 +6712,7 @@ function PlanPreview({
   autoOriginReference = null,
   mapGeometryFrame = "NONE",
   autoOriginEnabled = false,
+  geoOrigin = null,
   stagedVerified = false,
   visibility,
   selectedLineId,
@@ -6742,6 +6764,7 @@ function PlanPreview({
   autoOriginReference?: AutoOriginReference | null;
   mapGeometryFrame?: MapGeometryFrame;
   autoOriginEnabled?: boolean;
+  geoOrigin?: [number, number] | null;
   stagedVerified?: boolean;
   visibility: LayerVisibility;
   selectedLineId: string | null;
@@ -7580,6 +7603,7 @@ function PlanPreview({
             autoOriginReference={autoOriginReference}
             mapGeometryFrame={mapGeometryFrame}
             autoOriginEnabled={autoOriginEnabled}
+            geoOrigin={geoOrigin}
             stagedVerified={stagedVerified}
             visualAlignmentAnchor={visualAlignmentAnchor}
             previewFallbackGps={previewFallbackGps}

@@ -72,6 +72,8 @@ export interface MapViewProps {
   mapGeometryFrame?: MapGeometryFrame;
   stagedVerified?: boolean;
   autoOriginEnabled?: boolean;
+  /** [lat, lon] origin of a georeferenced DXF; drives the GEOGRAPHIC projection frame. */
+  geoOrigin?: [number, number] | null;
   visualAlignmentAnchor?: {
     originLat: number;
     originLon: number;

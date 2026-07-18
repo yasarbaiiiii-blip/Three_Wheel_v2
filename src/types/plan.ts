@@ -72,6 +72,8 @@ export interface DxfEntitiesResponse {
     length_m: number;
     points: DxfPoint[];
   }[];
+  is_geographic?: boolean;
+  geo_origin?: [number, number] | null;
   entities: DxfEntity[];
 }
 

@@ -1,7 +1,9 @@
 import type { PlanLine } from "../types/plan";
 export { computePlanBoundingBox, computePlanBoundingBoxLegacy } from "./curveGeometry";
 
-const PRIMARY_ENTITY_TYPES = new Set(["line", "arc", "circle"]);
+// Keep in sync with pathWorkflow.ts PRIMARY_ENTITY_TYPES. LWPOLYLINE/POLYLINE
+// count as primary drivable shapes (a square drawn as one closed polyline).
+const PRIMARY_ENTITY_TYPES = new Set(["line", "arc", "circle", "lwpolyline", "polyline"]);
 
 function coerceFiniteNumber(value: unknown): number | null {
   const next = typeof value === "number" ? value : Number(value);

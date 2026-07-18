@@ -39,6 +39,7 @@ export type FieldsPageProps = {
   autoOriginReference?: AutoOriginReference | null;
   mapGeometryFrame?: MapGeometryFrame;
   autoOriginEnabled?: boolean;
+  geoOrigin?: [number, number] | null;
   autoOrigin?: boolean;
   onToggleAutoOrigin?: () => void;
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
@@ -72,6 +73,9 @@ export type FieldsPageProps = {
   setAlignmentResult: React.Dispatch<React.SetStateAction<AlignmentResultState | null>>;
   verifiedAlignmentRequest: pathApi.AlignPathRequest | null;
   setVerifiedAlignmentRequest: React.Dispatch<React.SetStateAction<pathApi.AlignPathRequest | null>>;
+  /** True when the selected DXF is georeferenced (carries WGS84 coords); the backend
+   * auto-places it, so manual ref-point alignment is not required. */
+  isGeographicDxf?: boolean;
   segmentVerification: pathApi.PathSegmentsResponse | null;
   setSegmentVerification: React.Dispatch<React.SetStateAction<pathApi.PathSegmentsResponse | null>>;
   stagedPlanResult: StagedPlanResultState | null;
@@ -118,6 +122,7 @@ export type FieldsPageProps = {
     autoOriginReference?: AutoOriginReference | null;
     mapGeometryFrame?: MapGeometryFrame;
     autoOriginEnabled?: boolean;
+    geoOrigin?: [number, number] | null;
     visibility: LayerVisibility;
     selectedLineId: string | null;
     onSelectLine?: (id: string | null, options?: { highlightLineIds?: string[] | null }) => void;
@@ -166,6 +171,7 @@ export function FieldsPage(props: FieldsPageProps) {
     autoOriginReference = null,
     mapGeometryFrame = "NONE",
     autoOriginEnabled = false,
+    geoOrigin = null,
     autoOrigin = false,
     onToggleAutoOrigin,
     setLines,
@@ -192,6 +198,7 @@ export function FieldsPage(props: FieldsPageProps) {
     setAlignmentResult,
     verifiedAlignmentRequest,
     setVerifiedAlignmentRequest,
+    isGeographicDxf = false,
     segmentVerification,
     setSegmentVerification,
     stagedPlanResult,
@@ -359,7 +366,7 @@ export function FieldsPage(props: FieldsPageProps) {
   const hasPath = !!selectedPathName || !!importedPlan;
   const uploadDone = hasPath;
   const isDxfPath = importedPlan?.fileType === "dxf" || selectedPathName?.toLowerCase().endsWith(".dxf");
-  const alignDone = !isDxfPath || stagedWorkflow.alignment === "verified" || !!verifiedAlignmentRequest || autoOrigin;
+  const alignDone = !isDxfPath || stagedWorkflow.alignment === "verified" || !!verifiedAlignmentRequest || autoOrigin || isGeographicDxf;
   const isGpsPointFlow = gpsPointMission != null;
 
   const stepStatus = (id: FieldsStepId): "pending" | "active" | "done" => {
@@ -502,6 +509,7 @@ export function FieldsPage(props: FieldsPageProps) {
           autoOriginReference,
           mapGeometryFrame,
           autoOriginEnabled,
+          geoOrigin,
           visibility: effectiveLayerVisibility,
           selectedLineId,
           onSelectLine,
@@ -878,6 +886,7 @@ export function FieldsPage(props: FieldsPageProps) {
               blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
               protectedResident={protectedResident}
               verifiedAlignmentRequest={verifiedAlignmentRequest}
+              isGeographicDxf={isGeographicDxf}
               onWorkflowStep={onWorkflowStep}
               setSegmentVerification={setSegmentVerification}
               setStagedPlanResult={setStagedPlanResult}
