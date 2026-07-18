@@ -79,6 +79,12 @@ export interface MapViewProps {
     originDxfEast: number;
   } | null;
 
+  /**
+   * Latched first GPS from App — shared with startPlanEditing so the fields fallback
+   * origin matches Move/Rotate enter (avoids jump when MapView and App latch independently).
+   */
+  previewFallbackGps?: { lat: number; lon: number } | null;
+
   /** Click-to-Mark: callback when user taps the map while drawing waypoints */
   onMapClickToMark?: (coord: { lat: number; lon: number }) => void;
   /** Click-to-Mark & Manual Drawing: array of user-drawn waypoints to render on the map */

@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { PlanLine } from "../types/plan";
-import { projectPlanLineToGpsSegments } from "./mapGeometryProjection";
+import type { AutoOriginReference } from "../types/autoOrigin";
+import {
+  buildPlanManipulationAnchor,
+  projectPlanLineToGpsSegments,
+  projectPlanNorthEastToGps,
+  resolvePreviewProjectionOrigin,
+} from "./mapGeometryProjection";
 
 function makeOrigin() {
   return {
@@ -189,6 +195,127 @@ describe("mapGeometryProjection", () => {
     const expectedStart = projectLatLonForOffset(origin, 0, 2);
     expect(first[0]).toBeCloseTo(expectedStart[0], 7);
     expect(first[1]).toBeCloseTo(expectedStart[1], 7);
+  });
+});
+
+describe("buildPlanManipulationAnchor / no-jump Move-Rotate enter", () => {
+  const baseLines: PlanLine[] = [
+    {
+      id: "line-1",
+      label: "L1",
+      layer: "marking",
+      from: { id: 1, x: 10, y: 5 },
+      to: { id: 2, x: 20, y: 5 },
+      width: 0.1,
+    },
+  ];
+
+  const autoOriginRef: AutoOriginReference = {
+    planStartNorth: 10,
+    planStartEast: 5,
+    roverNorth: 100,
+    roverEast: 200,
+    latitude: 12.97,
+    longitude: 77.59,
+    capturedAtMs: 1,
+  };
+
+  it("uses auto-origin capture GPS + planStart (not live telemetry / firstLine-2)", () => {
+    const anchor = buildPlanManipulationAnchor({
+      alignedRefPoints: [],
+      stagedVerified: false,
+      autoOriginReference: autoOriginRef,
+      autoOriginEnabled: true,
+      stableFallbackOrigin: { lat: 1, lon: 2 },
+      lines: baseLines,
+    });
+    expect(anchor.originLat).toBeCloseTo(12.97, 8);
+    expect(anchor.originLon).toBeCloseTo(77.59, 8);
+    expect(anchor.originDxfNorth).toBe(10);
+    expect(anchor.originDxfEast).toBe(5);
+  });
+
+  it("identity sticker keeps plan GPS identical to fields preview under auto-origin", () => {
+    const fieldsOrigin = resolvePreviewProjectionOrigin({
+      mode: "fields",
+      alignedRefPoints: [],
+      stagedVerified: false,
+      autoOriginReference: autoOriginRef,
+      autoOriginEnabled: true,
+      lines: baseLines,
+    })!;
+    const anchor = buildPlanManipulationAnchor({
+      alignedRefPoints: [],
+      stagedVerified: false,
+      autoOriginReference: autoOriginRef,
+      autoOriginEnabled: true,
+      lines: baseLines,
+    });
+    // Enter Move/Rotate: sticky anchor + identity transform
+    const stickerOrigin = resolvePreviewProjectionOrigin({
+      mode: "templates",
+      alignedRefPoints: [],
+      stagedVerified: false,
+      autoOriginReference: autoOriginRef,
+      autoOriginEnabled: true,
+      visualAlignmentAnchor: anchor,
+      lines: [],
+      placedItemLines: baseLines,
+    })!;
+
+    const pt = { north: 15, east: 8 };
+    const before = projectPlanNorthEastToGps(pt.north, pt.east, fieldsOrigin);
+    // identity item: transformVisualDxfPoint is a no-op
+    const after = projectPlanNorthEastToGps(pt.north, pt.east, stickerOrigin);
+    expect(after.lat).toBeCloseTo(before.lat, 10);
+    expect(after.lon).toBeCloseTo(before.lon, 10);
+  });
+
+  it("prefers aligned ref over auto-origin (same as map frame priority)", () => {
+    const anchor = buildPlanManipulationAnchor({
+      alignedRefPoints: [{ dxf_x: 30, dxf_y: 40, lat: 13.1, lon: 77.7 }],
+      stagedVerified: false,
+      autoOriginReference: autoOriginRef,
+      autoOriginEnabled: true,
+      lines: baseLines,
+    });
+    expect(anchor.originLat).toBeCloseTo(13.1, 8);
+    expect(anchor.originLon).toBeCloseTo(77.7, 8);
+    expect(anchor.originDxfNorth).toBe(40);
+    expect(anchor.originDxfEast).toBe(30);
+  });
+
+  it("fallback uses firstLine-2 and latched GPS (not a different constant)", () => {
+    const anchor = buildPlanManipulationAnchor({
+      alignedRefPoints: [],
+      stagedVerified: false,
+      autoOriginReference: null,
+      autoOriginEnabled: false,
+      stableFallbackOrigin: { lat: 28.6, lon: 77.2 },
+      lines: baseLines,
+    });
+    expect(anchor.originLat).toBeCloseTo(28.6, 8);
+    expect(anchor.originLon).toBeCloseTo(77.2, 8);
+    expect(anchor.originDxfNorth).toBe(10 - 2);
+    expect(anchor.originDxfEast).toBe(5 - 2);
+  });
+
+  it("keeps existing sticky anchor on re-entry (post-bake)", () => {
+    const existing = {
+      originLat: 11.1,
+      originLon: 76.6,
+      originDxfNorth: 3,
+      originDxfEast: 4,
+    };
+    const anchor = buildPlanManipulationAnchor({
+      alignedRefPoints: [],
+      stagedVerified: false,
+      autoOriginReference: autoOriginRef,
+      autoOriginEnabled: true,
+      existingAnchor: existing,
+      lines: baseLines,
+    });
+    expect(anchor).toEqual(existing);
   });
 });
 

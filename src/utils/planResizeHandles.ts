@@ -12,8 +12,17 @@ export type PlanStickerPose = {
   y: number; // north
   rotation: number; // deg
   scale: number;
+  /** East extent of design-space OBB (metres). */
   width: number;
+  /** North extent of design-space OBB (metres). */
   height: number;
+  /**
+   * Design-space centre of the OBB (PlanPoint: north/east). Defaults to 0,0 for
+   * templates whose geometry is already centred. Absolute DXF plans use the
+   * real bbox mid so handles/box sit on the plan, not at design origin.
+   */
+  designCenterNorth?: number;
+  designCenterEast?: number;
 };
 
 export type HandleId =
@@ -68,19 +77,21 @@ export function designOffsetToWorld(
   };
 }
 
-/** Eight OBB handles in design offsets (half-height = N, half-width = E). */
+/** Eight OBB handles in absolute design coords (centre ± half extents). */
 export function getObbResizeHandles(pose: PlanStickerPose): ResizeHandle[] {
   const halfN = (Number.isFinite(pose.height) ? pose.height : 0) / 2;
   const halfE = (Number.isFinite(pose.width) ? pose.width : 0) / 2;
+  const cN = Number.isFinite(pose.designCenterNorth) ? (pose.designCenterNorth as number) : 0;
+  const cE = Number.isFinite(pose.designCenterEast) ? (pose.designCenterEast as number) : 0;
   const defs: Array<{ id: HandleId; dn: number; de: number }> = [
-    { id: "nw", dn: halfN, de: -halfE },
-    { id: "n", dn: halfN, de: 0 },
-    { id: "ne", dn: halfN, de: halfE },
-    { id: "e", dn: 0, de: halfE },
-    { id: "se", dn: -halfN, de: halfE },
-    { id: "s", dn: -halfN, de: 0 },
-    { id: "sw", dn: -halfN, de: -halfE },
-    { id: "w", dn: 0, de: -halfE },
+    { id: "nw", dn: cN + halfN, de: cE - halfE },
+    { id: "n", dn: cN + halfN, de: cE },
+    { id: "ne", dn: cN + halfN, de: cE + halfE },
+    { id: "e", dn: cN, de: cE + halfE },
+    { id: "se", dn: cN - halfN, de: cE + halfE },
+    { id: "s", dn: cN - halfN, de: cE },
+    { id: "sw", dn: cN - halfN, de: cE - halfE },
+    { id: "w", dn: cN, de: cE - halfE },
   ];
   return defs.map((d) => ({
     id: d.id,
@@ -88,6 +99,43 @@ export function getObbResizeHandles(pose: PlanStickerPose): ResizeHandle[] {
     designEast: d.de,
     oppositeId: OPPOSITE[d.id],
   }));
+}
+
+/** Design-space OBB centre + extents from plan lines (legacy minX=north, minY=east). */
+export function designObbFromLines(lines: { from?: { x?: number; y?: number }; to?: { x?: number; y?: number } }[]): {
+  designCenterNorth: number;
+  designCenterEast: number;
+  width: number;
+  height: number;
+} {
+  let minN = Infinity;
+  let maxN = -Infinity;
+  let minE = Infinity;
+  let maxE = -Infinity;
+  for (const l of lines) {
+    for (const p of [l.from, l.to]) {
+      if (!p) continue;
+      const n = p.x;
+      const e = p.y;
+      if (typeof n === "number" && Number.isFinite(n)) {
+        if (n < minN) minN = n;
+        if (n > maxN) maxN = n;
+      }
+      if (typeof e === "number" && Number.isFinite(e)) {
+        if (e < minE) minE = e;
+        if (e > maxE) maxE = e;
+      }
+    }
+  }
+  if (!Number.isFinite(minN) || !Number.isFinite(minE)) {
+    return { designCenterNorth: 0, designCenterEast: 0, width: 0, height: 0 };
+  }
+  return {
+    designCenterNorth: (minN + maxN) / 2,
+    designCenterEast: (minE + maxE) / 2,
+    width: Math.max(0, maxE - minE),
+    height: Math.max(0, maxN - minN),
+  };
 }
 
 export function getHandleWorldPoints(

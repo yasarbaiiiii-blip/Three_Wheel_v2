@@ -170,7 +170,10 @@ import {
   buildAutoOriginReference,
   planStartMatchesReference,
 } from "./src/utils/autoOrigin";
-import { resolveMapGeometryFrame } from "./src/utils/mapGeometryProjection";
+import {
+  buildPlanManipulationAnchor,
+  resolveMapGeometryFrame,
+} from "./src/utils/mapGeometryProjection";
 
 LogBox.ignoreLogs(["Maximum update depth exceeded"]);
 
@@ -625,6 +628,46 @@ export default function App() {
   // 2. The temporary "Sticker" holding all DXF lines
   const [visualAlignmentItem, setVisualAlignmentItem] = useState<PlacedItem | null>(null);
 
+  // Latched first GPS for fields fallback origin — same role as MapViewNative.stableFallbackOrigin
+  // so startPlanEditing does not jump to live telemetry if the rover has moved since first paint.
+  const [latchedPreviewGps, setLatchedPreviewGps] = useState<{ lat: number; lon: number } | null>(null);
+  useEffect(() => {
+    if (latchedPreviewGps) return;
+    const lat = telemetrySnapshot?.lat;
+    const lon = telemetrySnapshot?.lon;
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      setLatchedPreviewGps({ lat: lat as number, lon: lon as number });
+    }
+  }, [telemetrySnapshot?.lat, telemetrySnapshot?.lon, latchedPreviewGps]);
+
+  /**
+   * Sticky anchor matching the live fields preview (auto-origin / refs / fallback).
+   * Function declaration (not useCallback): may close over state declared later in this
+   * component body; only reads those bindings when invoked on user action.
+   */
+  function buildManipulationAnchorFromPreview() {
+    // Mirror autoOriginEligible (declared later) so Move/Rotate uses the same frame as the map.
+    const originEligible =
+      autoOrigin &&
+      stagedWorkflow.staged !== "verified" &&
+      alignedRefPoints.length === 0;
+    return buildPlanManipulationAnchor({
+      previewAnchor: null,
+      alignedRefPoints,
+      stagedVerified: stagedWorkflow.staged === "verified",
+      autoOriginReference,
+      autoOriginEnabled: originEligible,
+      existingAnchor: visualAlignmentAnchor,
+      stableFallbackOrigin:
+        latchedPreviewGps ??
+        (Number.isFinite(telemetrySnapshot?.lat) && Number.isFinite(telemetrySnapshot?.lon)
+          ? { lat: telemetrySnapshot!.lat as number, lon: telemetrySnapshot!.lon as number }
+          : null),
+      // Raw design lines — same coords the map projects under AUTO_ORIGIN_RAW / fallback.
+      lines: sanitizePlanLines(lines),
+    });
+  }
+
   // 3. Trigger Function: Bundles lines into one item
   function startVisualAlignment() {
     console.log("[Align DXF] startVisualAlignment: Initiating visual alignment mode.");
@@ -634,16 +677,13 @@ export default function App() {
     }
 
     const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(lines);
+    // width = east span (maxY−minY), height = north span (maxX−minX) — see planResizeHandles.
+    const stickerW = maxY - minY;
+    const stickerH = maxX - minX;
 
-    // Fallback MUST match MapViewNative's stableFallbackOrigin ultimate fallback (Null
-    // Island, 0/0) — not some other constant — or the plan visibly jumps between this
-    // anchor (used while dragging) and the map's own fallback anchor (used once plan
-    // editing ends and the map falls back to its normal, non-manipulation projection).
-    const startLat = alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 0;
-    const startLon = alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 0;
-    const startNorth = alignedRefPoints[0] ? alignedRefPoints[0].dxf_y : ((lines[0]?.from?.x ?? 0) - 2);
-    const startEast = alignedRefPoints[0] ? alignedRefPoints[0].dxf_x : ((lines[0]?.from?.y ?? 0) - 2);
-    setVisualAlignmentAnchor({ originLat: startLat, originLon: startLon, originDxfNorth: startNorth, originDxfEast: startEast });
+    // Must match MapViewNative's live projection origin or the plan jumps on enter.
+    const anchor = buildManipulationAnchorFromPreview();
+    setVisualAlignmentAnchor(anchor);
 
     setVisualAlignmentItem({
       id: "visual-alignment-group",
@@ -652,11 +692,11 @@ export default function App() {
       y: 0,
       rotation: 0,
       scale: 1,
-      width: maxX - minX,
-      height: maxY - minY,
+      width: stickerW,
+      height: stickerH,
     });
 
-    console.log(`[Align DXF] startVisualAlignment: Created visual sticker. Width: ${maxX - minX}, Height: ${maxY - minY}`);
+    console.log(`[Align DXF] startVisualAlignment: Created visual sticker. Width: ${stickerW}, Height: ${stickerH}`);
     setIsVisualAlignmentMode(true);
   }
 
@@ -664,15 +704,12 @@ export default function App() {
   function startPlanEditing() {
     if (lines.length === 0) return;
     const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(lines);
-    // Fallback MUST match MapViewNative's stableFallbackOrigin ultimate fallback (Null
-    // Island, 0/0) — not some other constant — or the plan visibly jumps between this
-    // anchor (used while dragging) and the map's own fallback anchor (used once plan
-    // editing ends and the map falls back to its normal, non-manipulation projection).
-    const startLat = alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 0;
-    const startLon = alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 0;
-    const startNorth = alignedRefPoints[0] ? alignedRefPoints[0].dxf_y : ((lines[0]?.from?.x ?? 0) - 2);
-    const startEast = alignedRefPoints[0] ? alignedRefPoints[0].dxf_x : ((lines[0]?.from?.y ?? 0) - 2);
-    setVisualAlignmentAnchor({ originLat: startLat, originLon: startLon, originDxfNorth: startNorth, originDxfEast: startEast });
+    // width = east span, height = north span (matches OBB halfE/halfN).
+    const stickerW = maxY - minY;
+    const stickerH = maxX - minX;
+    // Identity sticker + anchor identical to current fields preview → zero on-screen jump.
+    const anchor = buildManipulationAnchorFromPreview();
+    setVisualAlignmentAnchor(anchor);
 
     setVisualAlignmentItem({
       id: "plan-editing-group",
@@ -681,8 +718,8 @@ export default function App() {
       y: 0,
       rotation: 0,
       scale: 1,
-      width: maxX - minX,
-      height: maxY - minY,
+      width: stickerW,
+      height: stickerH,
     });
     setIsVisualAlignmentMode(false);
     setMapViewEnabled(true);
@@ -5578,6 +5615,7 @@ function SectionPages(props: {
               visualAlignmentItem={props.visualAlignmentItem}
               setVisualAlignmentItem={props.setVisualAlignmentItem}
               visualAlignmentAnchor={props.visualAlignmentAnchor}
+              previewFallbackGps={props.previewFallbackGps}
               isPlanEditingMode={props.isPlanEditingMode}
               multiPointPlacementPhase={props.multiPointPlacementPhase}
               onPlanAttached={props.onPlanAttached}
@@ -5610,6 +5648,7 @@ function SectionPages(props: {
               visualAlignmentItem={props.visualAlignmentItem}
               setVisualAlignmentItem={props.setVisualAlignmentItem}
               visualAlignmentAnchor={props.visualAlignmentAnchor}
+              previewFallbackGps={props.previewFallbackGps}
               resetNorthTrigger={props.resetNorthCount}
               recenterRoverTrigger={props.recenterRoverCount}
               recenterPlanTrigger={props.recenterPlanCount}
@@ -6654,6 +6693,7 @@ function PlanPreview({
   visualAlignmentItem,
   setVisualAlignmentItem,
   visualAlignmentAnchor,
+  previewFallbackGps = null,
   boundaryMode = false,
   boundaryWidth,
   boundaryHeight,
@@ -6708,6 +6748,8 @@ function PlanPreview({
   visualAlignmentItem?: PlacedItem | null;
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
   visualAlignmentAnchor?: { originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null;
+  /** Shared latched GPS for fields fallback origin (matches startPlanEditing). */
+  previewFallbackGps?: { lat: number; lon: number } | null;
   boundaryMode?: boolean;
   boundaryWidth?: number;
   boundaryHeight?: number;
@@ -7513,6 +7555,7 @@ function PlanPreview({
             autoOriginEnabled={autoOriginEnabled}
             stagedVerified={stagedVerified}
             visualAlignmentAnchor={visualAlignmentAnchor}
+            previewFallbackGps={previewFallbackGps}
             visible
             recenterRoverTrigger={recenterRoverTrigger || recenterRoverCount}
             recenterPlanTrigger={recenterPlanTrigger || recenterPlanCount}

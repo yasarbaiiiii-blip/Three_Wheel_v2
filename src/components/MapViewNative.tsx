@@ -50,8 +50,7 @@ import type { PlacedItem } from "./BoundaryEditor";
 import {
   projectPlanLineToGpsSegments,
   projectPlanNorthEastToGps,
-  resolveMapGeometryFrame,
-  resolveMapProjectionOrigin,
+  resolvePreviewProjectionOrigin,
   type MapProjectionOrigin,
 } from "../utils/mapGeometryProjection";
 import {
@@ -76,6 +75,7 @@ import {
 } from "../utils/similarityRefPointSnap";
 import {
   applyHandleResize,
+  designObbFromLines,
   findNearestHandle,
   getHandleWorldPoints,
   getObbResizeHandles,
@@ -325,6 +325,7 @@ export function MapViewNative(props: MapViewProps) {
     stagedVerified = false,
     autoOriginEnabled = false,
     visualAlignmentAnchor,
+    previewFallbackGps = null,
     lockPanDrag,
     lockZoom,
     sketchMode,
@@ -453,7 +454,8 @@ export function MapViewNative(props: MapViewProps) {
   // rAF coalescing for preview updates — avoids full rebuilds on every native touch sample.
   const previewRafRef = useRef<number | null>(null);
 
-  // Stable fallback origin so the plan doesn't jitter with every telemetry tick during preview
+  // Stable fallback origin so the plan doesn't jitter with every telemetry tick during preview.
+  // Prefer App's latched GPS when provided so Move/Rotate enter uses the same fallback frame.
   const [stableFallbackOrigin, setStableFallbackOrigin] = useState<{lat: number, lon: number} | null>(null);
 
   // ── Templates floating origin (parity with legacy) ──
@@ -463,12 +465,37 @@ export function MapViewNative(props: MapViewProps) {
   } | null>(null);
 
   useEffect(() => {
+    if (
+      previewFallbackGps &&
+      Number.isFinite(previewFallbackGps.lat) &&
+      Number.isFinite(previewFallbackGps.lon)
+    ) {
+      // Keep local latch aligned with App — single source of truth for fallback GPS.
+      if (
+        !stableFallbackOrigin ||
+        stableFallbackOrigin.lat !== previewFallbackGps.lat ||
+        stableFallbackOrigin.lon !== previewFallbackGps.lon
+      ) {
+        setStableFallbackOrigin({
+          lat: previewFallbackGps.lat,
+          lon: previewFallbackGps.lon,
+        });
+      }
+      return;
+    }
     if (!stableFallbackOrigin && telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null) {
       setStableFallbackOrigin({ lat: telemetrySnapshot.lat, lon: telemetrySnapshot.lon });
     } else if (!stableFallbackOrigin && templatesFloatingOrigin) {
       setStableFallbackOrigin(templatesFloatingOrigin);
     }
-  }, [telemetrySnapshot?.lat, telemetrySnapshot?.lon, templatesFloatingOrigin, stableFallbackOrigin]);
+  }, [
+    previewFallbackGps?.lat,
+    previewFallbackGps?.lon,
+    telemetrySnapshot?.lat,
+    telemetrySnapshot?.lon,
+    templatesFloatingOrigin,
+    stableFallbackOrigin,
+  ]);
 
   useEffect(() => {
     if (!visible || mode !== "templates") {
@@ -497,96 +524,49 @@ export function MapViewNative(props: MapViewProps) {
     stableFallbackOrigin,
   ]);
 
-  // ── Projection frame + origin (reuse existing utilities verbatim) ──
-  // Honor an explicit `mapGeometryFrame` prop when provided (contract parity
-  // with the legacy MapView), else resolve from inputs.
-  const geometryFrame = useMemo(
-    () =>
-      mapGeometryFrame ??
-      resolveMapGeometryFrame({
-        mode,
-        previewAnchor,
-        alignedRefPoints: alignedRefPoints ?? [],
-        stagedVerified,
-        autoOriginReference: autoOriginReference ?? null,
-        autoOriginEnabled,
-      }),
-    [mapGeometryFrame, mode, previewAnchor, alignedRefPoints, stagedVerified, autoOriginReference, autoOriginEnabled]
-  );
-
+  // ── Projection frame + origin (shared with App startPlanEditing — no jump) ──
   const projectionOrigin = useMemo((): MapProjectionOrigin | null => {
-    const isPlanManipulation = placedItems?.some(
+    // Shared resolver with App.tsx startPlanEditing / startVisualAlignment — identity enter
+    // of Move/Rotate must not rebuild a different frame than the live fields preview.
+    // visualAlignmentAnchor stays sticky after bake so the origin does not "chase" geometry.
+    const manipulationItem = placedItems?.find(
       (it) => it.id === "visual-alignment-group" || it.id === "plan-editing-group"
     );
-
-    // Not gated on isPlanManipulation: this anchor must keep being used for a while AFTER
-    // plan editing ends too (App.tsx keeps it alive post-bake for exactly this reason) —
-    // otherwise the map falls through to the generic fallback below, which re-derives its
-    // origin from `lines[0]`'s CURRENT position on every render and so cancels out
-    // whatever the just-baked drag/rotate/scale moved, making the plan appear to snap back.
-    if (visualAlignmentAnchor) {
-      return {
-        frame: "RAW_DESIGN",
-        originLat: visualAlignmentAnchor.originLat,
-        originLon: visualAlignmentAnchor.originLon,
-        originDxfNorth: visualAlignmentAnchor.originDxfNorth,
-        originDxfEast: visualAlignmentAnchor.originDxfEast,
-      };
-    }
-
-    const resolved = resolveMapProjectionOrigin(geometryFrame, {
+    const fallbackGps =
+      previewFallbackGps &&
+      Number.isFinite(previewFallbackGps.lat) &&
+      Number.isFinite(previewFallbackGps.lon)
+        ? previewFallbackGps
+        : stableFallbackOrigin;
+    return resolvePreviewProjectionOrigin({
       mode,
       previewAnchor,
-      alignedRefPoints,
+      alignedRefPoints: alignedRefPoints ?? [],
       stagedVerified,
       autoOriginReference: autoOriginReference ?? null,
       autoOriginEnabled,
+      // Parent fields-frame wins so switching MapView mode to "templates" for stickers
+      // does not re-pick a different projection family mid-session.
+      forcedFrame: mapGeometryFrame ?? null,
+      visualAlignmentAnchor,
+      stableFallbackOrigin: fallbackGps,
+      templatesFloatingOrigin,
+      lines,
+      placedItemLines: manipulationItem?.lines ?? null,
     });
-    if (resolved) return resolved;
-
-    if (mode === "templates" && !isPlanManipulation && templatesFloatingOrigin) {
-      return {
-        frame: "RAW_DESIGN",
-        originLat: templatesFloatingOrigin.lat,
-        originLon: templatesFloatingOrigin.lon,
-        originDxfNorth: 0,
-        originDxfEast: 0,
-      };
-    }
-
-    // Fallback: If no origin is available (e.g. previewing unaligned plans in fields mode or visual alignment),
-    // place the plan at the first seen floating origin (rover's position) so it renders on map.
-    // If there is no rover telemetry, fallback to 0,0 (Null Island) so we can at least see the plan.
-    if ((mode === "fields" || isPlanManipulation) && (lines.length > 0 || isPlanManipulation)) {
-      const fallback = stableFallbackOrigin || templatesFloatingOrigin || { lat: 0, lon: 0 };
-      const planLines = lines.length > 0 ? lines : (placedItems?.[0]?.lines ?? []);
-      const firstLine = planLines[0];
-      const startN = firstLine?.from?.x ?? 0;
-      const startE = firstLine?.from?.y ?? 0;
-
-      // Offset the local origin by 2 meters so the plan is rendered
-      // 2 meters North and 2 meters East of the rover icon, rather than exactly on top of it.
-      return {
-        frame: "RAW_DESIGN",
-        originLat: fallback.lat,
-        originLon: fallback.lon,
-        originDxfNorth: startN - 2,
-        originDxfEast: startE - 2,
-      };
-    }
-
-    return null;
   }, [
-    geometryFrame,
     mode,
     previewAnchor,
     alignedRefPoints,
     stagedVerified,
     autoOriginReference,
     autoOriginEnabled,
+    mapGeometryFrame,
     templatesFloatingOrigin,
     stableFallbackOrigin,
-    lines, // We use lines to find the center/start
+    previewFallbackGps?.lat,
+    previewFallbackGps?.lon,
+    lines,
     placedItems,
     visualAlignmentAnchor,
   ]);
@@ -1007,21 +987,23 @@ export function MapViewNative(props: MapViewProps) {
           );
         }
       }
-      // Bounding box (centered at item.y North / item.x East), rotated + scaled.
-      const cos = Math.cos(((item.rotation || 0) * Math.PI) / 180);
-      const sin = Math.sin(((item.rotation || 0) * Math.PI) / 180);
-      const halfN = item.height / 2;
-      const halfE = item.width / 2;
-      const cornersLocal = [
-        { n: -halfN, e: -halfE },
-        { n: -halfN, e: halfE },
-        { n: halfN, e: halfE },
-        { n: halfN, e: -halfE },
+      // OBB from design-space line bbox (absolute DXF coords), then sticker transform.
+      // Do not assume geometry is centred at design origin — that shifted the cyan
+      // frame away from the plan on Move/Rotate enter for real DXF uploads.
+      const obb = designObbFromLines(item.lines);
+      const halfN = (obb.height > 0 ? obb.height : item.height) / 2;
+      const halfE = (obb.width > 0 ? obb.width : item.width) / 2;
+      const cN = obb.height > 0 || obb.width > 0 ? obb.designCenterNorth : 0;
+      const cE = obb.height > 0 || obb.width > 0 ? obb.designCenterEast : 0;
+      const cornersDesign = [
+        { n: cN - halfN, e: cE - halfE },
+        { n: cN - halfN, e: cE + halfE },
+        { n: cN + halfN, e: cE + halfE },
+        { n: cN + halfN, e: cE - halfE },
       ];
-      const ring: Coord[] = cornersLocal.map((c) => {
-        const n = (c.n * cos - c.e * sin) * item.scale + item.y;
-        const e = (c.n * sin + c.e * cos) * item.scale + item.x;
-        const gps = projectPlanNorthEastToGps(n, e, projectionOrigin);
+      const ring: Coord[] = cornersDesign.map((c) => {
+        const tp = transformVisualDxfPoint(c.n, c.e, item);
+        const gps = projectPlanNorthEastToGps(tp.north, tp.east, projectionOrigin);
         return toMapboxCoord(gps.lat, gps.lon);
       });
       ring.push(ring[0]); // close the polygon ring
@@ -1263,17 +1245,19 @@ export function MapViewNative(props: MapViewProps) {
             );
           }
         }
-        const cos = Math.cos(((item.rotation || 0) * Math.PI) / 180);
-        const sin = Math.sin(((item.rotation || 0) * Math.PI) / 180);
-        const halfN = item.height / 2;
-        const halfE = item.width / 2;
+        const obb = designObbFromLines(item.lines);
+        const halfN = (obb.height > 0 ? obb.height : item.height) / 2;
+        const halfE = (obb.width > 0 ? obb.width : item.width) / 2;
+        const cN = obb.height > 0 || obb.width > 0 ? obb.designCenterNorth : 0;
+        const cE = obb.height > 0 || obb.width > 0 ? obb.designCenterEast : 0;
         const ring: Coord[] = [
-          { n: -halfN, e: -halfE }, { n: -halfN, e: halfE },
-          { n: halfN,  e: halfE  }, { n: halfN,  e: -halfE },
+          { n: cN - halfN, e: cE - halfE },
+          { n: cN - halfN, e: cE + halfE },
+          { n: cN + halfN, e: cE + halfE },
+          { n: cN + halfN, e: cE - halfE },
         ].map((c) => {
-          const n = (c.n * cos - c.e * sin) * item.scale + item.y;
-          const e = (c.n * sin + c.e * cos) * item.scale + item.x;
-          const g = projectPlanNorthEastToGps(n, e, projectionOrigin);
+          const tp = transformVisualDxfPoint(c.n, c.e, item);
+          const g = projectPlanNorthEastToGps(tp.north, tp.east, projectionOrigin);
           return toMapboxCoord(g.lat, g.lon);
         });
         ring.push(ring[0]);
@@ -1352,13 +1336,16 @@ export function MapViewNative(props: MapViewProps) {
       const features: GeoJSON.Feature[] = [];
       for (const item of items) {
         if (item.id !== "plan-editing-group") continue;
+        const obb = designObbFromLines(item.lines);
         const pose: PlanStickerPose = {
           x: item.x,
           y: item.y,
           rotation: item.rotation || 0,
           scale: item.scale || 1,
-          width: item.width,
-          height: item.height,
+          width: obb.width > 0 ? obb.width : item.width,
+          height: obb.height > 0 ? obb.height : item.height,
+          designCenterNorth: obb.designCenterNorth,
+          designCenterEast: obb.designCenterEast,
         };
         for (const h of getHandleWorldPoints(pose)) {
           const gps = projectPlanNorthEastToGps(h.north, h.east, projectionOrigin);
@@ -1744,13 +1731,16 @@ export function MapViewNative(props: MapViewProps) {
               north: local.north + origin.originDxfNorth,
               east: local.east + origin.originDxfEast,
             };
+            const obb = designObbFromLines(planItem.lines);
             const pose: PlanStickerPose = {
               x: planItem.x,
               y: planItem.y,
               rotation: planItem.rotation || 0,
               scale: planItem.scale || 1,
-              width: planItem.width,
-              height: planItem.height,
+              width: obb.width > 0 ? obb.width : planItem.width,
+              height: obb.height > 0 ? obb.height : planItem.height,
+              designCenterNorth: obb.designCenterNorth,
+              designCenterEast: obb.designCenterEast,
             };
             const worlds = getHandleWorldPoints(pose);
             const hit = findNearestHandle(cursorWorld, worlds, HANDLE_HIT_RADIUS_M);

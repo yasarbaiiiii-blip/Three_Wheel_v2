@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   applyHandleResize,
+  designObbFromLines,
   designOffsetToWorld,
   getObbResizeHandles,
   scaleAboutDesignAnchor,
@@ -69,5 +70,32 @@ describe("planResizeHandles", () => {
     const worlds = getHandleWorldPoints(pose);
     const hit = findNearestHandle({ north: -5, east: 5 }, worlds, 1);
     expect(hit?.id).toBe("se");
+  });
+
+  it("designObbFromLines uses absolute DXF mid + correct width/height axes", () => {
+    const obb = designObbFromLines([
+      { from: { x: 10, y: 20 }, to: { x: 30, y: 40 } },
+    ]);
+    // x=north, y=east
+    expect(obb.designCenterNorth).toBeCloseTo(20, 6);
+    expect(obb.designCenterEast).toBeCloseTo(30, 6);
+    expect(obb.height).toBeCloseTo(20, 6); // north span
+    expect(obb.width).toBeCloseTo(20, 6); // east span
+  });
+
+  it("handles sit on absolute DXF bbox when designCenter is set", () => {
+    const offsetPose = {
+      ...pose,
+      designCenterNorth: 100,
+      designCenterEast: 50,
+      width: 20,
+      height: 10,
+    };
+    const handles = getObbResizeHandles(offsetPose);
+    const se = handles.find((h) => h.id === "se")!;
+    const w = designOffsetToWorld(se.designNorth, se.designEast, offsetPose);
+    // SE = center + (-halfN, +halfE) = (100-5, 50+10) = (95, 60)
+    expect(w.north).toBeCloseTo(95, 6);
+    expect(w.east).toBeCloseTo(60, 6);
   });
 });
