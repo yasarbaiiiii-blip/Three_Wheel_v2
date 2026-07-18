@@ -12,9 +12,29 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 // Lazy-loaded: none of these are needed for the initial "connection" screen
 // (see the `page` state default below), so deferring them shrinks the JS
 // that must be parsed before first paint.
-const MapboxHelloMap = lazy(() => import("./src/components/MapboxHelloMap"));
-const ModernHomeUI = lazy(() => import("./src/components/ModernHomeUI"));
-const ModernSettingsPage = lazy(() => import("./src/components/ModernSettingsPage"));
+/** Metro HMR can resolve a chunk with a missing default; fail loudly instead of undefined. */
+function lazyDefault<T extends React.ComponentType<any>>(
+  loader: () => Promise<{ default?: T } & Record<string, unknown>>,
+  name: string
+) {
+  return lazy(async () => {
+    const mod = await loader();
+    const Comp = (mod.default ?? mod[name]) as T | undefined;
+    if (typeof Comp !== "function") {
+      throw new Error(
+        `[lazy] ${name} failed to load (got ${typeof Comp}). Restart Metro with --reset-cache.`
+      );
+    }
+    return { default: Comp };
+  });
+}
+
+const MapboxHelloMap = lazyDefault(() => import("./src/components/MapboxHelloMap"), "MapboxHelloMap");
+const ModernHomeUI = lazyDefault(() => import("./src/components/ModernHomeUI"), "ModernHomeUI");
+const ModernSettingsPage = lazyDefault(
+  () => import("./src/components/ModernSettingsPage"),
+  "ModernSettingsPage"
+);
 import {
   ActivityIndicator,
   Alert,
@@ -102,11 +122,13 @@ import { generateRoadSignLines, RoadSignType, ROAD_SIGN_LABELS } from "./src/uti
 import { canAcquireJoystick as canAcquireJoystickForState } from "./src/utils/joystickFrontendSafety";
 
 import type { Page, TelemetrySnapshot, LayerVisibility } from "./src/types/plan";
-const TemplatesPage = lazy(() =>
-  import("./src/screens/TemplatesPage").then((m) => ({ default: m.TemplatesPage }))
+const TemplatesPage = lazyDefault(
+  () => import("./src/screens/TemplatesPage").then((m) => ({ default: m.TemplatesPage })),
+  "TemplatesPage"
 );
-const FieldsPage = lazy(() =>
-  import("./src/screens/FieldsPage").then((m) => ({ default: m.FieldsPage }))
+const FieldsPage = lazyDefault(
+  () => import("./src/screens/FieldsPage").then((m) => ({ default: m.FieldsPage })),
+  "FieldsPage"
 );
 import {
   coerceFiniteNumber,
