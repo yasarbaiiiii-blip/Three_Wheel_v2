@@ -1,15 +1,22 @@
 /**
- * designAlignmentPolicy.ts — Phase 1 alignment scale policy.
+ * designAlignmentPolicy.ts — alignment scale policy.
  *
- * Defaults to scale = 1.0 unless explicit opt-in is configured.
+ * Multi-Point Fit scale-to-ref and manual sticker scale must survive Fix Alignment
+ * and rehydrate. Scale is clamped to a physical range so a bad fit cannot send
+ * the plan to absurd sizes.
  */
 
-export const allowAlignmentScale = false;
+export const allowAlignmentScale = true;
+
+export const MIN_ALIGNMENT_SCALE = 0.01;
+export const MAX_ALIGNMENT_SCALE = 100;
 
 /**
  * Enforces the scale policy on a given alignment scale factor.
- * If allowAlignmentScale is false, returns 1.0. Otherwise, returns the scale.
+ * When allowAlignmentScale is false, returns 1.0. Otherwise clamps to a safe range.
  */
 export function enforceAlignmentScale(scale: number): number {
-  return allowAlignmentScale ? scale : 1.0;
+  if (!allowAlignmentScale) return 1.0;
+  if (!Number.isFinite(scale) || scale <= 0) return 1.0;
+  return Math.min(MAX_ALIGNMENT_SCALE, Math.max(MIN_ALIGNMENT_SCALE, scale));
 }

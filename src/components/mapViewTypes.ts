@@ -7,6 +7,7 @@
  */
 import type { TelemetrySnapshot, PlanLine } from "../types/plan";
 import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
+import type { MultiPointPlacementPhase } from "../types/fieldsWorkflow";
 import type { PlacedItem } from "./BoundaryEditor";
 import type { DesignPreviewAnchor } from "../types/designDocument";
 
@@ -96,4 +97,18 @@ export interface MapViewProps {
    * while it's close. Purely a manual-placement guide — never affects any computed fit.
    */
   snapRefPoints?: { lat: number; lon: number }[];
+
+  /**
+   * Multi-Point Fit lifecycle (placing → attached → resizing). Controls snap mode,
+   * whether free drag is enabled, Figma resize handles, and path-length labels.
+   */
+  planPlacementPhase?: MultiPointPlacementPhase;
+
+  /** Fired once when dual-ref similarity attach is acquired during placing. */
+  onPlanAttached?: (info: {
+    x: number;
+    y: number;
+    rotation: number;
+    scale: number;
+  }) => void;
 }

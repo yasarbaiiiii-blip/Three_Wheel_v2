@@ -68,16 +68,29 @@ import {
 import { type LocalMeters } from "../utils/refPointSnap";
 import { computeShapeSnapPoints } from "../utils/planShapeSnapPoints";
 import {
-  applyRigidPlanSnap,
-  type RigidSnapLock,
   type SnapRefPoint,
 } from "../utils/rigidRefPointSnap";
+import {
+  applySimilarityPlanSnap,
+  type SimilaritySnapLock,
+} from "../utils/similarityRefPointSnap";
+import {
+  applyHandleResize,
+  findNearestHandle,
+  getHandleWorldPoints,
+  getObbResizeHandles,
+  HANDLE_HIT_RADIUS_M,
+  type PlanStickerPose,
+  type ResizeHandle,
+} from "../utils/planResizeHandles";
+import { buildPlanLengthLabels } from "../utils/planLengthLabels";
 import { toMapboxCoord, fromMapboxCoord } from "../utils/mapboxCoords";
 import { getLineLengthM, formatFinite } from "../utils/pathWorkflow";
 import { MAPBOX_STYLE_URL } from "../config/mapbox";
 import type { MapViewProps } from "./mapViewTypes";
 import { pixelDeltaToMetres, clampToIndent, type BoundingRect } from "../utils/mapGestureUtils";
 import { deriveMetersPerPixel, screenToGeo } from "../utils/mapScreenGeo";
+import type { MultiPointPlacementPhase } from "../types/fieldsWorkflow";
 
 /** Max vertices per line while live-dragging plan-editing-group (LOD). Full quality on commit. */
 const DRAG_PREVIEW_MAX_VERTICES = 12;
@@ -323,7 +336,19 @@ export function MapViewNative(props: MapViewProps) {
     manualDrawingEnabled,
     screenToGeoRef,
     snapRefPoints,
+    planPlacementPhase = "idle",
+    onPlanAttached,
   } = props;
+
+  const planPlacementPhaseRef = useRef<MultiPointPlacementPhase>(planPlacementPhase);
+  useEffect(() => {
+    planPlacementPhaseRef.current = planPlacementPhase;
+  }, [planPlacementPhase]);
+
+  const onPlanAttachedRef = useRef(onPlanAttached);
+  useEffect(() => {
+    onPlanAttachedRef.current = onPlanAttached;
+  }, [onPlanAttached]);
 
   useEffect(() => {
     if (screenToGeoRef) {
@@ -383,10 +408,21 @@ export function MapViewNative(props: MapViewProps) {
   // position from accumulated delta (avoids floating-point drift from incremental additions).
   const dragStartPositionsRef = useRef<Record<string, { x: number; y: number; rotation: number; scale: number }>>({});
 
-  // Multi-Point Fit rigid primary lock (whole gesture). Pivot-pin: always re-translate so the
-  // locked feature stays on the ref while the user rotates. Cleared at drag begin/end only —
-  // never released mid-gesture by rotation-induced free-candidate motion (that was the old bug).
-  const snapLockRef = useRef<RigidSnapLock | null>(null);
+  // Multi-Point Fit similarity lock (whole gesture). Dual-ref attach freezes scale+rot;
+  // single-ref re-pins translation while rotating. Cleared at drag begin/end only.
+  const snapLockRef = useRef<SimilaritySnapLock | null>(null);
+
+  // Figma resize session (phase === "resizing"): active handle + start pose.
+  const resizeSessionRef = useRef<{
+    handle: ResizeHandle;
+    opposite: ResizeHandle;
+    startPose: PlanStickerPose;
+    /** Local-metre cursor at gesture begin (relative to projection origin). */
+    startCursor: { north: number; east: number };
+  } | null>(null);
+
+  /** Fire onPlanAttached at most once per gesture. */
+  const notifiedAttachRef = useRef(false);
 
   // Preview FeatureCollection for live drag feedback (set via RAF-coalesced JS callback).
   // Null = use the normal committed sources (no active drag preview).
@@ -399,10 +435,14 @@ export function MapViewNative(props: MapViewProps) {
     };
     guideFC: GeoJSON.FeatureCollection;
     activeRefKey: string | null;
+    lengthLabelsFC: GeoJSON.FeatureCollection;
+    handlesFC: GeoJSON.FeatureCollection;
   } | null>(null);
   const previewItemsGeo = dragPreview?.itemsGeo ?? null;
   const snapGuideFC = dragPreview?.guideFC ?? featureCollection([]);
   const activeSnapRefPointKey = dragPreview?.activeRefKey ?? null;
+  const previewLengthLabelsFC = dragPreview?.lengthLabelsFC ?? null;
+  const previewHandlesFC = dragPreview?.handlesFC ?? null;
 
   const [previewBoundary, setPreviewBoundary] = useState<{
     x: number;
@@ -1272,8 +1312,94 @@ export function MapViewNative(props: MapViewProps) {
     [projectionOrigin?.originLat, projectionOrigin?.originLon]
   );
 
-  // Multi-Point Fit rigid snap (see rigidRefPointSnap.ts): primary pivot lock + frozen scale,
-  // size-gated secondary angle magnet. Pure math; MapView only applies the result.
+  const buildLengthLabelsFC = useCallback(
+    (items: PlacedItem[]): GeoJSON.FeatureCollection => {
+      if (!projectionOrigin) return featureCollection([]);
+      const phase = planPlacementPhaseRef.current;
+      if (phase !== "placing" && phase !== "attached" && phase !== "resizing") {
+        return featureCollection([]);
+      }
+      const features: GeoJSON.Feature[] = [];
+      for (const item of items) {
+        if (item.id !== "plan-editing-group") continue;
+        const labels = buildPlanLengthLabels(item.lines, {
+          x: item.x,
+          y: item.y,
+          rotation: item.rotation || 0,
+          scale: item.scale || 1,
+        });
+        for (const lbl of labels) {
+          // Labels use the same originDxf subtraction as placeCandidate / local NE frame.
+          const gps = projectPlanNorthEastToGps(lbl.north, lbl.east, projectionOrigin);
+          features.push(
+            pointFeature(toMapboxCoord(gps.lat, gps.lon), {
+              id: lbl.id,
+              label: lbl.label,
+            })
+          );
+        }
+      }
+      return featureCollection(features);
+    },
+    [projectionOrigin]
+  );
+
+  const buildHandlesFC = useCallback(
+    (items: PlacedItem[]): GeoJSON.FeatureCollection => {
+      if (!projectionOrigin || planPlacementPhaseRef.current !== "resizing") {
+        return featureCollection([]);
+      }
+      const features: GeoJSON.Feature[] = [];
+      for (const item of items) {
+        if (item.id !== "plan-editing-group") continue;
+        const pose: PlanStickerPose = {
+          x: item.x,
+          y: item.y,
+          rotation: item.rotation || 0,
+          scale: item.scale || 1,
+          width: item.width,
+          height: item.height,
+        };
+        for (const h of getHandleWorldPoints(pose)) {
+          const gps = projectPlanNorthEastToGps(h.north, h.east, projectionOrigin);
+          features.push(
+            pointFeature(toMapboxCoord(gps.lat, gps.lon), {
+              id: h.id,
+              handleId: h.id,
+            })
+          );
+        }
+      }
+      return featureCollection(features);
+    },
+    [projectionOrigin]
+  );
+
+  // Steady-state path lengths + resize handles (drag preview overrides when active).
+  const steadyLengthLabelsFC = useMemo(() => {
+    if (!placedItems || placedItems.length === 0 || !projectionOrigin) {
+      return featureCollection([]);
+    }
+    if (
+      planPlacementPhase !== "placing" &&
+      planPlacementPhase !== "attached" &&
+      planPlacementPhase !== "resizing"
+    ) {
+      return featureCollection([]);
+    }
+    return buildLengthLabelsFC(placedItems);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [placedItemsSig, projectionOrigin, planPlacementPhase, buildLengthLabelsFC]);
+
+  const steadyHandlesFC = useMemo(() => {
+    if (!placedItems || planPlacementPhase !== "resizing" || !projectionOrigin) {
+      return featureCollection([]);
+    }
+    return buildHandlesFC(placedItems);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [placedItemsSig, planPlacementPhase, projectionOrigin, buildHandlesFC]);
+
+  // Multi-Point Fit similarity snap (scale-to-fit dual-ref). Pure math; MapView applies result.
   const applyPointSnap = useCallback(
     (
       itemId: string,
@@ -1281,16 +1407,28 @@ export function MapViewNative(props: MapViewProps) {
       newY: number,
       newRotation: number,
       newScale: number
-    ): { x: number; y: number; rotation: number; scale: number; guide: { point: SnapRefPoint; anchor: LocalMeters } | null } => {
+    ): {
+      x: number;
+      y: number;
+      rotation: number;
+      scale: number;
+      guide: { point: SnapRefPoint; anchor: LocalMeters } | null;
+      attached: boolean;
+    } => {
       if (!projectionOrigin) {
         snapLockRef.current = null;
-        return { x: newX, y: newY, rotation: newRotation, scale: newScale, guide: null };
+        return { x: newX, y: newY, rotation: newRotation, scale: newScale, guide: null, attached: false };
+      }
+      const phase = planPlacementPhaseRef.current;
+      // Magnet during placing and attached (reposition). Resizing uses handles only.
+      if (phase !== "placing" && phase !== "attached" && phase !== "idle") {
+        return { x: newX, y: newY, rotation: newRotation, scale: newScale, guide: null, attached: false };
       }
       const gestureStartScale =
         dragStartPositionsRef.current[itemId]?.scale ??
         (Number.isFinite(newScale) && newScale > 0 ? newScale : 1);
 
-      const result = applyRigidPlanSnap({
+      const result = applySimilarityPlanSnap({
         itemId,
         newX,
         newY,
@@ -1302,6 +1440,7 @@ export function MapViewNative(props: MapViewProps) {
         originDxfEast: projectionOrigin.originDxfEast,
         lock: snapLockRef.current,
         gestureStartScale,
+        holdLock: snapLockRef.current != null,
       });
       snapLockRef.current = result.lock;
       return {
@@ -1310,6 +1449,7 @@ export function MapViewNative(props: MapViewProps) {
         rotation: result.rotation,
         scale: result.scale,
         guide: result.guide,
+        attached: result.attached,
       };
     },
     [planEditingSnapCandidates, projectionOrigin, snapRefLocalPoints]
@@ -1319,6 +1459,7 @@ export function MapViewNative(props: MapViewProps) {
     (dN: number, dE: number, rotDeg: number, scaleF: number) => {
       const starts = dragStartPositionsRef.current;
       const ids = selectedItemIds ?? [];
+      const phase = planPlacementPhaseRef.current;
 
       if (ids.includes("boundary") && starts["boundary"]) {
         const start = starts["boundary"];
@@ -1333,35 +1474,80 @@ export function MapViewNative(props: MapViewProps) {
 
       if (!placedItems) return;
 
-      // A plain for-of (not .map()) so TS can actually track activeGuide's reassignment below —
-      // it can't follow mutations made from inside a separate callback function.
+      // Attached still allows free drag (light magnet + break-away). Only resizing
+      // switches to handle mode. Never freeze the plan mid-gesture.
       let activeGuide: { point: SnapRefPoint; anchor: LocalMeters } | null = null;
       const shifted: PlacedItem[] = [];
+
       for (const item of placedItems) {
         const start = starts[item.id];
         if (!start || !ids.includes(item.id)) {
           shifted.push(item);
           continue;
         }
+
+        // Resize phase: Figma handle drag (uniform scale about opposite corner).
+        if (phase === "resizing" && item.id === "plan-editing-group") {
+          const session = resizeSessionRef.current;
+          if (!session) {
+            shifted.push(item);
+            continue;
+          }
+          // startCursor + deltas are in sticker/world frame (same as designOffsetToWorld).
+          const cursor = {
+            north: session.startCursor.north + dN,
+            east: session.startCursor.east + dE,
+          };
+          const next = applyHandleResize({
+            pose: session.startPose,
+            activeHandle: session.handle,
+            oppositeHandle: session.opposite,
+            cursor,
+          });
+          shifted.push({
+            ...item,
+            x: next.x,
+            y: next.y,
+            scale: next.scale,
+            rotation: next.rotation,
+          });
+          continue;
+        }
+
+        // placing + attached: free drag with light similarity magnet (attach only on commit)
         const newX = start.x + dE;
         const newY = start.y + dN;
         const newRotation = start.rotation + rotDeg;
-        // Plan-editing freezes scale inside applyRigidPlanSnap; still pass start.scale * scaleF
-        // for non-plan stickers / visual alignment.
         const newScale = start.scale * scaleF;
         const snapped = applyPointSnap(item.id, newX, newY, newRotation, newScale);
         if (snapped.guide) activeGuide = snapped.guide;
-        shifted.push({ ...item, x: snapped.x, y: snapped.y, rotation: snapped.rotation, scale: snapped.scale });
+        shifted.push({
+          ...item,
+          x: snapped.x,
+          y: snapped.y,
+          rotation: snapped.rotation,
+          scale: snapped.scale,
+        });
       }
 
-      // Single React state update per frame (items + guide + highlight) with drag LOD.
       setDragPreview({
         itemsGeo: buildItemsGeoForItems(shifted, "drag"),
         guideFC: buildSnapGuideFC(activeGuide),
         activeRefKey: activeGuide ? refPointKey(activeGuide.point) : null,
+        lengthLabelsFC: buildLengthLabelsFC(shifted),
+        handlesFC: buildHandlesFC(shifted),
       });
     },
-    [placedItems, selectedItemIds, buildItemsGeoForItems, applyPointSnap, buildSnapGuideFC]
+    [
+      placedItems,
+      selectedItemIds,
+      buildItemsGeoForItems,
+      applyPointSnap,
+      buildSnapGuideFC,
+      buildLengthLabelsFC,
+      buildHandlesFC,
+      projectionOrigin,
+    ]
   );
 
   // Raw pan/pinch/rotation callbacks fire on every native touch-move sample (often 60-120Hz,
@@ -1403,6 +1589,7 @@ export function MapViewNative(props: MapViewProps) {
 
       const starts = dragStartPositionsRef.current;
       const ids = selectedItemIds ?? [];
+      const phase = planPlacementPhaseRef.current;
 
       if (ids.includes("boundary") && starts["boundary"]) {
         const start = starts["boundary"];
@@ -1421,17 +1608,57 @@ export function MapViewNative(props: MapViewProps) {
 
       if (!placedItems) {
         setDragPreview(null);
+        resizeSessionRef.current = null;
         return;
       }
+
+      let becameAttached: {
+        x: number;
+        y: number;
+        rotation: number;
+        scale: number;
+      } | null = null;
 
       const updated = placedItems.map((item) => {
         const start = starts[item.id];
         if (!start || !ids.includes(item.id)) return item;
+
+        if (phase === "resizing" && item.id === "plan-editing-group") {
+          const session = resizeSessionRef.current;
+          if (!session) return item;
+          const cursor = {
+            north: session.startCursor.north + finalDN,
+            east: session.startCursor.east + finalDE,
+          };
+          const next = applyHandleResize({
+            pose: session.startPose,
+            activeHandle: session.handle,
+            oppositeHandle: session.opposite,
+            cursor,
+          });
+          return {
+            ...item,
+            x: next.x,
+            y: next.y,
+            scale: next.scale,
+            rotation: next.rotation,
+          };
+        }
+
         const newX = start.x + finalDE;
         const newY = start.y + finalDN;
         const newRotation = start.rotation + finalRotDeg;
         const newScale = start.scale * finalScaleF;
         const snapped = applyPointSnap(item.id, newX, newY, newRotation, newScale);
+        // Attach UI only on finger-up when dual-fit residual is tight — never mid-drag freeze.
+        if (snapped.attached && item.id === "plan-editing-group") {
+          becameAttached = {
+            x: snapped.x,
+            y: snapped.y,
+            rotation: snapped.rotation,
+            scale: snapped.scale,
+          };
+        }
         return { ...item, x: snapped.x, y: snapped.y, rotation: snapped.rotation, scale: snapped.scale };
       });
 
@@ -1447,10 +1674,16 @@ export function MapViewNative(props: MapViewProps) {
         });
       }
 
+      if (becameAttached && onPlanAttachedRef.current) {
+        onPlanAttachedRef.current(becameAttached);
+      }
+
       // Clear atomic drag preview — parent state + placedItemsGeo are full quality now.
       setDragPreview(null);
       dragStartPositionsRef.current = {};
-      snapLockRef.current = null; // the gesture is over — nothing left to hold.
+      snapLockRef.current = null;
+      resizeSessionRef.current = null;
+      // Keep notifiedAttachRef if parent phase is already attached; reset only on begin.
     },
     [
       placedItems,
@@ -1465,6 +1698,7 @@ export function MapViewNative(props: MapViewProps) {
 
   /**
    * Called via runOnJS from onBegin. Snapshots start positions and calibrates mpp.
+   * In resizing phase, also resolves which OBB handle is under the finger (async geo).
    */
   const onDragBegin = useCallback(
     (touchX: number, touchY: number) => {
@@ -1485,7 +1719,54 @@ export function MapViewNative(props: MapViewProps) {
       }
       dragStartPositionsRef.current = snapshot;
       snapLockRef.current = null; // each gesture starts with no held snap.
+      resizeSessionRef.current = null;
+      if (planPlacementPhaseRef.current === "placing") {
+        notifiedAttachRef.current = false;
+      }
       calibrateMetersPerPixel(touchX, touchY);
+
+      const phase = planPlacementPhaseRef.current;
+      if (phase === "resizing" && projectionOrigin && mapViewRef.current) {
+        const planItem = (placedItems ?? []).find((it) => it.id === "plan-editing-group");
+        if (planItem) {
+          const origin = projectionOrigin;
+          void (async () => {
+            const geo = await screenToGeo(mapViewRef.current!, { x: touchX, y: touchY });
+            if (!geo) return;
+            const local = projectGpsToLocalMeters(
+              geo.lat,
+              geo.lon,
+              origin.originLat,
+              origin.originLon
+            );
+            // Sticker/world frame = local NE + originDxf (matches designOffsetToWorld / transformVisualDxfPoint).
+            const cursorWorld = {
+              north: local.north + origin.originDxfNorth,
+              east: local.east + origin.originDxfEast,
+            };
+            const pose: PlanStickerPose = {
+              x: planItem.x,
+              y: planItem.y,
+              rotation: planItem.rotation || 0,
+              scale: planItem.scale || 1,
+              width: planItem.width,
+              height: planItem.height,
+            };
+            const worlds = getHandleWorldPoints(pose);
+            const hit = findNearestHandle(cursorWorld, worlds, HANDLE_HIT_RADIUS_M);
+            if (!hit) return;
+            const all = getObbResizeHandles(pose);
+            const opposite = all.find((h) => h.id === hit.oppositeId);
+            if (!opposite) return;
+            resizeSessionRef.current = {
+              handle: hit,
+              opposite,
+              startPose: pose,
+              startCursor: cursorWorld,
+            };
+          })();
+        }
+      }
     },
     [placedItems, selectedItemIds, boundaryPosition, boundaryRotation, calibrateMetersPerPixel]
   );
@@ -1819,6 +2100,8 @@ export function MapViewNative(props: MapViewProps) {
   const refLabelsVisible = !!showRefPointLabels;
   // Active preview overrides the committed sources during a live gesture.
   const activeItemsGeo = previewItemsGeo ?? placedItemsGeo;
+  const activeLengthLabelsFC = previewLengthLabelsFC ?? steadyLengthLabelsFC;
+  const activeHandlesFC = previewHandlesFC ?? steadyHandlesFC;
   // The inner map content (shared between editing and non-editing render).
   const mapContent = (
     <View style={styles.container}>
@@ -1978,6 +2261,37 @@ export function MapViewNative(props: MapViewProps) {
               circleColor: "#ff2d78",
               circleStrokeWidth: 1.5,
               circleStrokeColor: "#ffffff",
+            }}
+          />
+        </ShapeSource>
+
+        {/* ── Live path lengths on Multi-Point Fit sticker (design × scale) ── */}
+        <ShapeSource id="plan-length-labels" shape={activeLengthLabelsFC}>
+          <SymbolLayer
+            id="plan-length-labels-layer"
+            style={{
+              textField: ["get", "label"],
+              textColor: "#0f172a",
+              textHaloColor: "#ffffff",
+              textHaloWidth: 1.5,
+              textSize: 11,
+              textOffset: [0, -0.8],
+              textAllowOverlap: false,
+              textIgnorePlacement: false,
+            }}
+          />
+        </ShapeSource>
+
+        {/* ── Figma-style resize handles (resizing phase only) ── */}
+        <ShapeSource id="plan-resize-handles" shape={activeHandlesFC}>
+          <CircleLayer
+            id="plan-resize-handles-layer"
+            style={{
+              circleRadius: 7,
+              circleColor: "#38bdf8",
+              circleStrokeColor: "#ffffff",
+              circleStrokeWidth: 2,
+              circleOpacity: 0.95,
             }}
           />
         </ShapeSource>

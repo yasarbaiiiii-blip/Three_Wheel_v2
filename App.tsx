@@ -127,6 +127,7 @@ import {
 } from "./src/utils/extensionTransitClassify";
 import type {
   AlignmentResultState,
+  MultiPointPlacementPhase,
   StagedPlanResultState,
   StagedWorkflowState,
   StagedWorkflowStatus,
@@ -617,6 +618,9 @@ export default function App() {
   // 1. Mode Toggle State
   const [isVisualAlignmentMode, setIsVisualAlignmentMode] = useState(false);
   const [isPlanEditingMode, setIsPlanEditingMode] = useState(false);
+  /** Multi-Point Fit: placing → attached (Edit) → resizing (Done) → captured */
+  const [multiPointPlacementPhase, setMultiPointPlacementPhase] =
+    useState<MultiPointPlacementPhase>("idle");
 
   // 2. The temporary "Sticker" holding all DXF lines
   const [visualAlignmentItem, setVisualAlignmentItem] = useState<PlacedItem | null>(null);
@@ -683,6 +687,7 @@ export default function App() {
     setIsVisualAlignmentMode(false);
     setMapViewEnabled(true);
     setIsPlanEditingMode(true);
+    setMultiPointPlacementPhase("placing");
   }
 
   function stopPlanEditing() {
@@ -700,6 +705,32 @@ export default function App() {
     }
     setIsPlanEditingMode(false);
     setVisualAlignmentItem(null);
+    setMultiPointPlacementPhase("idle");
+  }
+
+  function handlePlanAttached(info: { x: number; y: number; rotation: number; scale: number }) {
+    setVisualAlignmentItem((prev) => {
+      if (!prev || prev.id !== "plan-editing-group") return prev;
+      return {
+        ...prev,
+        x: info.x,
+        y: info.y,
+        rotation: info.rotation,
+        scale: info.scale,
+      };
+    });
+    setMultiPointPlacementPhase((phase) =>
+      phase === "placing" || phase === "idle" ? "attached" : phase
+    );
+  }
+
+  function handlePlanEditResize() {
+    if (!isPlanEditingMode || !visualAlignmentItem) return;
+    setMultiPointPlacementPhase("resizing");
+  }
+
+  function handlePlanResizeDone() {
+    setMultiPointPlacementPhase((phase) => (phase === "resizing" ? "attached" : phase));
   }
 
   function handleConfirmVisualAlignment() {
@@ -751,6 +782,7 @@ export default function App() {
     // drives the SAME sticker via isPlanEditingMode rather than isVisualAlignmentMode — clear
     // it here too so that tab's UI exits drag mode once a position is confirmed.
     setIsPlanEditingMode(false);
+    setMultiPointPlacementPhase("captured");
   }
   const [extractedCorners, setExtractedCorners] = useState<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>(null);
   const [visualAlignmentAnchor, setVisualAlignmentAnchor] = useState<{ originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null>(null);
@@ -3865,6 +3897,10 @@ export default function App() {
                             isPlanEditingMode={isPlanEditingMode}
                             onStartPlanEditing={startPlanEditing}
                             onStopPlanEditing={stopPlanEditing}
+                            multiPointPlacementPhase={multiPointPlacementPhase}
+                            onPlanAttached={handlePlanAttached}
+                            onPlanEditResize={handlePlanEditResize}
+                            onPlanResizeDone={handlePlanResizeDone}
                             extractedCorners={extractedCorners}
                             setExtractedCorners={setExtractedCorners}
                             onNav={(p) => setPage(p)}
@@ -5474,6 +5510,10 @@ function SectionPages(props: {
   isPlanEditingMode?: boolean;
   onStartPlanEditing?: () => void;
   onStopPlanEditing?: () => void;
+  multiPointPlacementPhase?: MultiPointPlacementPhase;
+  onPlanAttached?: (info: { x: number; y: number; rotation: number; scale: number }) => void;
+  onPlanEditResize?: () => void;
+  onPlanResizeDone?: () => void;
   extractedCorners?: { dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>>;
   isFloatingEStopEnabled: boolean;
@@ -5539,6 +5579,8 @@ function SectionPages(props: {
               setVisualAlignmentItem={props.setVisualAlignmentItem}
               visualAlignmentAnchor={props.visualAlignmentAnchor}
               isPlanEditingMode={props.isPlanEditingMode}
+              multiPointPlacementPhase={props.multiPointPlacementPhase}
+              onPlanAttached={props.onPlanAttached}
               resetNorthTrigger={props.resetNorthCount}
               recenterRoverTrigger={props.recenterRoverCount}
               recenterPlanTrigger={props.recenterPlanCount}
@@ -6607,6 +6649,8 @@ function PlanPreview({
   onToggleRefPointLabel,
   isVisualAlignmentMode,
   isPlanEditingMode = false,
+  multiPointPlacementPhase = "idle",
+  onPlanAttached,
   visualAlignmentItem,
   setVisualAlignmentItem,
   visualAlignmentAnchor,
@@ -6659,6 +6703,8 @@ function PlanPreview({
   onToggleRefPointLabel?: (index: number | null) => void;
   isVisualAlignmentMode?: boolean;
   isPlanEditingMode?: boolean;
+  multiPointPlacementPhase?: MultiPointPlacementPhase;
+  onPlanAttached?: (info: { x: number; y: number; rotation: number; scale: number }) => void;
   visualAlignmentItem?: PlacedItem | null;
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
   visualAlignmentAnchor?: { originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null;
@@ -7411,15 +7457,26 @@ function PlanPreview({
             sketchMode={sketchMode}
             showBoundaryPoints={showBoundaryPoints}
             snapRefPoints={snapRefPoints}
+            planPlacementPhase={
+              isPlanEditingMode ? multiPointPlacementPhase : "idle"
+            }
+            onPlanAttached={onPlanAttached}
             placedItems={isPlacedItemActive && visualAlignmentItem ? [visualAlignmentItem] : []}
             selectedItemIds={
+              // Keep selection during attached/resizing so sticker stays active; freeze via phase.
               isEditablePlacedItemMode && visualSelected && placedItemId
                 ? [placedItemId]
                 : boundaryMode && boundarySelected
                 ? ["boundary"]
                 : []
             }
-            multiTouchMode={isEditablePlacedItemMode ? "rotate" : "both"}
+            multiTouchMode={
+              multiPointPlacementPhase === "resizing"
+                ? "scale"
+                : isEditablePlacedItemMode
+                ? "rotate"
+                : "both"
+            }
             onSelectionChange={(ids) => {
               if (boundaryMode) {
                 setBoundarySelected(ids.includes("boundary"));

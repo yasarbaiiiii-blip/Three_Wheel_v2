@@ -2,7 +2,22 @@
 export type FieldsStepId = "boundingBox" | "upload" | "align" | "orderAndSpray";
 
 /** Map-centric plan manipulation modes */
-export type PlanManipulationMode = "idle" | "scale" | "drag" | "rotate";
+export type PlanManipulationMode = "idle" | "scale" | "drag" | "rotate" | "resize";
+
+/**
+ * Multi-Point Fit placement lifecycle after Move/Rotate Plan:
+ * - idle: not editing
+ * - placing: drag/rotate; magnetic similarity scale-to-fit toward refs
+ * - attached: dual-ref attach acquired; Edit button available
+ * - resizing: Figma handles active; Done button available
+ * - captured: Use This Position completed
+ */
+export type MultiPointPlacementPhase =
+  | "idle"
+  | "placing"
+  | "attached"
+  | "resizing"
+  | "captured";
 
 /** Real-time transform HUD data shown above the plan on the map */
 export type TransformHUDData = {

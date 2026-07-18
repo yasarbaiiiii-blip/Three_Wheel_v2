@@ -23,6 +23,7 @@ import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin"
 import type {
   AlignmentResultState,
   FieldsStepId,
+  MultiPointPlacementPhase,
   StagedPlanResultState,
   StagedWorkflowState,
   StagedWorkflowStatus,
@@ -103,6 +104,10 @@ export type FieldsPageProps = {
   isPlanEditingMode?: boolean;
   onStartPlanEditing?: () => void;
   onStopPlanEditing?: () => void;
+  multiPointPlacementPhase?: MultiPointPlacementPhase;
+  onPlanAttached?: (info: { x: number; y: number; rotation: number; scale: number }) => void;
+  onPlanEditResize?: () => void;
+  onPlanResizeDone?: () => void;
   extractedCorners?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null>>;
   onClearMission: () => Promise<void>;
@@ -130,6 +135,8 @@ export type FieldsPageProps = {
     onToggleRefPointLabel?: React.Dispatch<React.SetStateAction<number | null>>;
     isVisualAlignmentMode?: boolean;
     isPlanEditingMode?: boolean;
+    multiPointPlacementPhase?: MultiPointPlacementPhase;
+    onPlanAttached?: (info: { x: number; y: number; rotation: number; scale: number }) => void;
     visualAlignmentItem?: PlacedItem | null;
     setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
     boundaryMode?: boolean;
@@ -210,6 +217,10 @@ export function FieldsPage(props: FieldsPageProps) {
     isPlanEditingMode,
     onStartPlanEditing,
     onStopPlanEditing,
+    multiPointPlacementPhase = "idle",
+    onPlanAttached,
+    onPlanEditResize,
+    onPlanResizeDone,
     extractedCorners,
     setExtractedCorners,
     onClearMission,
@@ -422,6 +433,11 @@ export function FieldsPage(props: FieldsPageProps) {
   // same confirm path used right after upload.
   const handleToggleMovePlan = useCallback(() => {
     if (isPlanEditingMode) {
+      // Don't capture while mid-resize — Done first.
+      if (multiPointPlacementPhase === "resizing") {
+        onPlanResizeDone?.();
+        return;
+      }
       if (alignmentMethod === "least_squares") {
         // Multi-Point Fit: the reference points are just a visual guide — the manual
         // drag/scale/rotate IS the alignment. Capture wherever the user placed it as the
@@ -440,6 +456,8 @@ export function FieldsPage(props: FieldsPageProps) {
     setManipulationMode("drag");
   }, [
     isPlanEditingMode,
+    multiPointPlacementPhase,
+    onPlanResizeDone,
     alignmentMethod,
     onConfirmVisualAlignment,
     handleConfirmTransform,
@@ -512,6 +530,8 @@ export function FieldsPage(props: FieldsPageProps) {
           onToggleRefPointLabel: setActiveRefPointLabelIndex,
           isVisualAlignmentMode,
           isPlanEditingMode,
+          multiPointPlacementPhase,
+          onPlanAttached,
           visualAlignmentItem,
           setVisualAlignmentItem,
           boundaryMode: false,
@@ -532,9 +552,100 @@ export function FieldsPage(props: FieldsPageProps) {
         })}
       </View>
 
+      {/* Post-attach Edit / Done chrome above the map preview */}
+      {isPlanEditingMode &&
+      (multiPointPlacementPhase === "attached" || multiPointPlacementPhase === "resizing") ? (
+        <View
+          pointerEvents="box-none"
+          style={{
+            position: "absolute",
+            top: 24,
+            left: 0,
+            right: 0,
+            alignItems: "center",
+            zIndex: 60,
+          }}
+        >
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 12,
+              backgroundColor: "rgba(15,23,42,0.92)",
+              borderRadius: 14,
+              paddingHorizontal: 16,
+              paddingVertical: 10,
+              borderWidth: 1,
+              borderColor:
+                multiPointPlacementPhase === "resizing"
+                  ? FIELDS_COLORS.stepActive
+                  : FIELDS_COLORS.success,
+              elevation: 12,
+              shadowColor: "#000",
+              shadowOffset: { width: 0, height: 4 },
+              shadowOpacity: 0.4,
+              shadowRadius: 10,
+            }}
+          >
+            <View style={{ alignItems: "flex-start" }}>
+              <Text
+                style={{
+                  color: FIELDS_COLORS.textMuted,
+                  fontSize: 10,
+                  fontWeight: "700",
+                  letterSpacing: 0.6,
+                }}
+              >
+                {multiPointPlacementPhase === "resizing" ? "RESIZING" : "ATTACHED"}
+              </Text>
+              <Text
+                style={{
+                  color: FIELDS_COLORS.textMain,
+                  fontSize: 16,
+                  fontWeight: "800",
+                  fontFamily: "monospace",
+                }}
+              >
+                {(visualAlignmentItem?.scale ?? 1).toFixed(2)}×
+              </Text>
+            </View>
+            {multiPointPlacementPhase === "attached" ? (
+              <Pressable
+                onPress={() => onPlanEditResize?.()}
+                style={({ pressed }) => ({
+                  paddingHorizontal: 18,
+                  paddingVertical: 10,
+                  borderRadius: 10,
+                  backgroundColor: pressed ? FIELDS_COLORS.stepActive : "#0ea5e9",
+                })}
+              >
+                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 14 }}>Edit</Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                onPress={() => onPlanResizeDone?.()}
+                style={({ pressed }) => ({
+                  paddingHorizontal: 18,
+                  paddingVertical: 10,
+                  borderRadius: 10,
+                  backgroundColor: pressed ? FIELDS_COLORS.success : "#10b981",
+                })}
+              >
+                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 14 }}>Done</Text>
+              </Pressable>
+            )}
+          </View>
+        </View>
+      ) : null}
+
       {/* Map interaction overlay (floating icons on plan) */}
       <MapPlanInteractionOverlay
-        visible={showMapInteraction && hasPath}
+        visible={
+          showMapInteraction &&
+          hasPath &&
+          multiPointPlacementPhase !== "attached" &&
+          multiPointPlacementPhase !== "resizing"
+        }
         manipulationMode={manipulationMode}
         onSetMode={setManipulationMode}
         transformData={{
