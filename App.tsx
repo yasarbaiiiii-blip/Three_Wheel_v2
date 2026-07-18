@@ -628,17 +628,9 @@ export default function App() {
   // 2. The temporary "Sticker" holding all DXF lines
   const [visualAlignmentItem, setVisualAlignmentItem] = useState<PlacedItem | null>(null);
 
-  // Latched first GPS for fields fallback origin — same role as MapViewNative.stableFallbackOrigin
-  // so startPlanEditing does not jump to live telemetry if the rover has moved since first paint.
+  // Latched first GPS for fields fallback origin — same role as MapViewNative.stableFallbackOrigin.
+  // The effect that fills this must sit after telemetrySnapshot is declared (see below).
   const [latchedPreviewGps, setLatchedPreviewGps] = useState<{ lat: number; lon: number } | null>(null);
-  useEffect(() => {
-    if (latchedPreviewGps) return;
-    const lat = telemetrySnapshot?.lat;
-    const lon = telemetrySnapshot?.lon;
-    if (Number.isFinite(lat) && Number.isFinite(lon)) {
-      setLatchedPreviewGps({ lat: lat as number, lon: lon as number });
-    }
-  }, [telemetrySnapshot?.lat, telemetrySnapshot?.lon, latchedPreviewGps]);
 
   /**
    * Sticky anchor matching the live fields preview (auto-origin / refs / fallback).
@@ -843,6 +835,17 @@ export default function App() {
   }, [showRefPointLabels]);
   const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
   const [telemetrySnapshot, setTelemetrySnapshot] = useState<TelemetrySnapshot | null>(null);
+
+  // Latch first finite GPS after telemetry exists — must not run above this declaration.
+  useEffect(() => {
+    if (latchedPreviewGps) return;
+    const lat = telemetrySnapshot?.lat;
+    const lon = telemetrySnapshot?.lon;
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      setLatchedPreviewGps({ lat: lat as number, lon: lon as number });
+    }
+  }, [telemetrySnapshot?.lat, telemetrySnapshot?.lon, latchedPreviewGps]);
+
   const [activityFeed, setActivityFeed] = useState<ActivityEntry[]>([]);
   const [discoveryFeed, setDiscoveryFeed] = useState<DiscoveredRover[]>([]);
   const [telemetryError, setTelemetryError] = useState<string>("");
@@ -3929,6 +3932,7 @@ export default function App() {
                             setVisualAlignmentItem={setVisualAlignmentItem}
                             setVisualAlignmentAnchor={setVisualAlignmentAnchor}
                             visualAlignmentAnchor={visualAlignmentAnchor}
+                            previewFallbackGps={latchedPreviewGps}
                             onStartVisualAlignment={startVisualAlignment}
                             onConfirmVisualAlignment={handleConfirmVisualAlignment}
                             isPlanEditingMode={isPlanEditingMode}
@@ -5586,6 +5590,7 @@ function SectionPages(props: {
       originDxfEast: number;
     } | null>
   >;
+  previewFallbackGps?: { lat: number; lon: number } | null;
   gpsPointMission?: pathApi.ParsePointGpsCsvResponse | null;
   onGpsPointMissionParsed?: (data: pathApi.ParsePointGpsCsvResponse) => void;
   onStageAndLoadGpsPointMission?: () => Promise<void>;
