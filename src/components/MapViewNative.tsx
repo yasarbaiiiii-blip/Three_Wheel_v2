@@ -2051,50 +2051,38 @@ export function MapViewNative(props: MapViewProps) {
       const clickN = local.north + projectionOrigin.originDxfNorth;
       const clickE = local.east + projectionOrigin.originDxfEast;
 
-      // Geometry pick radius (~40px finger target). Cap so one marker cannot
-      // "own" the whole plan and block multi-point selection.
+      // Multi-Point hit: ~24–28px finger target in metres. Keep the max small so
+      // taps outside the plan or in hollow interior never jump to a far corner.
       const mpp = metersPerPixelSV.value > 0 ? metersPerPixelSV.value : 0.05;
-      const hitRadiusM = Math.max(6, Math.min(22, mpp * 40));
-      // Deselect only when the user deliberately taps the yellow marker itself
-      // (~22px). Using hitRadiusM here was the multi-point bug: after point #1,
-      // any second tap within 12–55 m toggled #1 off instead of adding #2.
-      const deselectRadiusM = Math.max(1.0, Math.min(3.0, mpp * 22));
+      const hitRadiusM = Math.max(0.75, Math.min(3.0, mpp * 28));
+      // Deselect only when the finger is on the yellow marker itself.
+      const deselectRadiusM = Math.max(0.75, Math.min(2.5, mpp * 22));
 
       // ── Multi-Point guide pick (only when parent wired onSelectPoint) ──
-      // ADD is the default. Deselect only when the tap is on an existing marker.
-      // Empty map / far from plan geometry is ignored.
+      // Pick the closest point *on plan strokes* (vertex OR mid-segment). Never
+      // prefer corners over a nearer mid-line hit. Outside / hollow = ignore.
       if (onSelectPoint) {
-        let bestPt: { x: number; y: number } | null = null;
-        let bestPtDist = hitRadiusM;
+        let geometryPick: { x: number; y: number; dist: number } | null = null;
+
+        const consider = (x: number, y: number, dist: number) => {
+          if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(dist)) return;
+          if (dist > hitRadiusM) return;
+          if (!geometryPick || dist < geometryPick.dist) {
+            geometryPick = { x, y, dist };
+          }
+        };
 
         for (const line of lines) {
-          if (line.from) {
-            const d = Math.hypot(line.from.x - clickN, line.from.y - clickE);
-            if (d < bestPtDist) {
-              bestPtDist = d;
-              bestPt = { x: line.from.x, y: line.from.y };
-            }
+          // Skip synthetic overlay layers — alignment refs should land on real plan geometry.
+          if (
+            line.layer === "virtual_boundary" ||
+            line.layer === "transit" ||
+            line.layer === "extension"
+          ) {
+            continue;
           }
-          if (line.to) {
-            const d = Math.hypot(line.to.x - clickN, line.to.y - clickE);
-            if (d < bestPtDist) {
-              bestPtDist = d;
-              bestPt = { x: line.to.x, y: line.to.y };
-            }
-          }
-          if (line.entity?.preview_points) {
-            for (const pt of line.entity.preview_points) {
-              const d = Math.hypot(pt.north - clickN, pt.east - clickE);
-              if (d < bestPtDist) {
-                bestPtDist = d;
-                bestPt = { x: pt.north, y: pt.east };
-              }
-            }
-          }
-        }
 
-        let bestSeg: { x: number; y: number; dist: number } | null = null;
-        for (const line of lines) {
+          // Closest point on each stroke (includes endpoints and anywhere along the line).
           if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
             const pts = line.entity.preview_points;
             for (let i = 0; i < pts.length - 1; i++) {
@@ -2106,9 +2094,7 @@ export function MapViewNative(props: MapViewProps) {
                 pts[i + 1].north,
                 pts[i + 1].east
               );
-              if (!bestSeg || hit.dist < bestSeg.dist) {
-                bestSeg = { x: hit.x, y: hit.y, dist: hit.dist };
-              }
+              consider(hit.x, hit.y, hit.dist);
             }
           } else if (line.from && line.to) {
             const hit = nearestOnSegment(
@@ -2119,17 +2105,24 @@ export function MapViewNative(props: MapViewProps) {
               line.to.x,
               line.to.y
             );
-            if (!bestSeg || hit.dist < bestSeg.dist) {
-              bestSeg = { x: hit.x, y: hit.y, dist: hit.dist };
+            consider(hit.x, hit.y, hit.dist);
+          } else {
+            if (line.from) {
+              consider(
+                line.from.x,
+                line.from.y,
+                Math.hypot(line.from.x - clickN, line.from.y - clickE)
+              );
+            }
+            if (line.to) {
+              consider(
+                line.to.x,
+                line.to.y,
+                Math.hypot(line.to.x - clickN, line.to.y - clickE)
+              );
             }
           }
         }
-
-        const geometryPick: { x: number; y: number; dist: number } | null = bestPt
-          ? { x: bestPt.x, y: bestPt.y, dist: bestPtDist }
-          : bestSeg && bestSeg.dist <= hitRadiusM
-          ? { x: bestSeg.x, y: bestSeg.y, dist: bestSeg.dist }
-          : null;
 
         // Tight deselect: only when the finger is on a yellow marker.
         let bestSel: { x: number; y: number; dist: number } | null = null;

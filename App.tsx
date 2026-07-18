@@ -6650,6 +6650,8 @@ function pickNearestPoint(
   rotation: number = 0,
   layoutSize: { width: number; height: number } = { width: 0, height: 0 }
 ) {
+  // Closest point on any plan stroke (mid-line or endpoint). Do NOT prefer
+  // corners over a nearer mid-segment hit. Outside / hollow interior = null.
   let nearestPoint: { x: number; y: number } | null = null;
   let nearestDistance = radiusPx;
 
@@ -6664,71 +6666,63 @@ function pickNearestPoint(
     return screenPt;
   };
 
-  // Prefer every plan endpoint / preview sample (not only "corners") so Multi-Point
-  // guide picking feels responsive on the canvas fallback (Map Off).
-  const candidates: { x: number; y: number }[] = [];
   for (const line of lines) {
-    if (line.from) candidates.push(line.from);
-    if (line.to) candidates.push(line.to);
-    if (line.entity?.preview_points) {
-      for (const pt of line.entity.preview_points) {
-        candidates.push({ x: pt.north, y: pt.east });
-      }
+    if (
+      line.layer === "virtual_boundary" ||
+      line.layer === "transit" ||
+      line.layer === "extension"
+    ) {
+      continue;
     }
-  }
-  // Keep corners as a fallback when lines have sparse samples.
-  for (const pt of getCornerPoints(lines)) candidates.push(pt);
 
-  for (const pt of candidates) {
-    const screenPt = toScreen(pt);
-    const dist = Math.hypot(tap.x - screenPt.x, tap.y - screenPt.y);
-    if (dist < nearestDistance) {
-      nearestDistance = dist;
-      nearestPoint = pt;
+    const segs: { a: { x: number; y: number }; b: { x: number; y: number } }[] = [];
+    if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
+      const pts = line.entity.preview_points;
+      for (let i = 0; i < pts.length - 1; i++) {
+        segs.push({
+          a: { x: pts[i].north, y: pts[i].east },
+          b: { x: pts[i + 1].north, y: pts[i + 1].east },
+        });
+      }
+    } else if (line.from && line.to) {
+      segs.push({ a: line.from, b: line.to });
     }
-  }
 
-  // Snap to nearest point on any segment if no vertex was close enough.
-  // No free-place outside geometry — empty map / hollow bbox space is ignored.
-  if (!nearestPoint) {
-    let bestSeg: { x: number; y: number; dist: number } | null = null;
-    for (const line of lines) {
-      const segs: { a: { x: number; y: number }; b: { x: number; y: number } }[] = [];
-      if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
-        const pts = line.entity.preview_points;
-        for (let i = 0; i < pts.length - 1; i++) {
-          segs.push({
-            a: { x: pts[i].north, y: pts[i].east },
-            b: { x: pts[i + 1].north, y: pts[i + 1].east },
-          });
+    if (segs.length === 0) {
+      for (const pt of [line.from, line.to]) {
+        if (!pt) continue;
+        const screenPt = toScreen(pt);
+        const dist = Math.hypot(tap.x - screenPt.x, tap.y - screenPt.y);
+        if (dist < nearestDistance) {
+          nearestDistance = dist;
+          nearestPoint = pt;
         }
-      } else if (line.from && line.to) {
-        segs.push({ a: line.from, b: line.to });
       }
-      for (const { a, b } of segs) {
-        const sa = toScreen(a);
-        const sb = toScreen(b);
-        // Project tap onto screen-space segment, then map t back to plan coords.
-        const dx = sb.x - sa.x;
-        const dy = sb.y - sa.y;
-        const l2 = dx * dx + dy * dy;
-        let t = 0;
-        if (l2 > 0) {
-          t = Math.max(0, Math.min(1, ((tap.x - sa.x) * dx + (tap.y - sa.y) * dy) / l2));
-        }
-        const sx = sa.x + t * dx;
-        const sy = sa.y + t * dy;
-        const dist = Math.hypot(tap.x - sx, tap.y - sy);
-        if (dist < radiusPx && (!bestSeg || dist < bestSeg.dist)) {
-          bestSeg = {
-            x: a.x + t * (b.x - a.x),
-            y: a.y + t * (b.y - a.y),
-            dist,
-          };
-        }
+      continue;
+    }
+
+    for (const { a, b } of segs) {
+      const sa = toScreen(a);
+      const sb = toScreen(b);
+      // Project tap onto screen-space segment, then map t back to plan coords.
+      const dx = sb.x - sa.x;
+      const dy = sb.y - sa.y;
+      const l2 = dx * dx + dy * dy;
+      let t = 0;
+      if (l2 > 0) {
+        t = Math.max(0, Math.min(1, ((tap.x - sa.x) * dx + (tap.y - sa.y) * dy) / l2));
+      }
+      const sx = sa.x + t * dx;
+      const sy = sa.y + t * dy;
+      const dist = Math.hypot(tap.x - sx, tap.y - sy);
+      if (dist < nearestDistance) {
+        nearestDistance = dist;
+        nearestPoint = {
+          x: a.x + t * (b.x - a.x),
+          y: a.y + t * (b.y - a.y),
+        };
       }
     }
-    if (bestSeg) nearestPoint = { x: bestSeg.x, y: bestSeg.y };
   }
 
   return nearestPoint;
