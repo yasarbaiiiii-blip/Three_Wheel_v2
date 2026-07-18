@@ -149,3 +149,100 @@ export function toPlanSegmentRole(role: ExtensionSegmentRole | null | undefined)
   if (role === "pre" || role === "aft") return role;
   return "none";
 }
+
+export type RuntimeTransitOverlayResult = {
+  /** Inter-shape transit PlanLines (layer transit, segmentRole none). */
+  transitLines: PlanLine[];
+  /**
+   * True only when at least one inter-shape transit was produced.
+   * Callers must NOT treat empty overlays as authoritative — fall back to
+   * /entities transit_preview so connecting legs are not silently dropped.
+   */
+  applied: boolean;
+};
+
+/**
+ * Build inter-shape transit lines from /plan merged waypoints + spray flags.
+ *
+ * Classification order per non-spray segment:
+ * 1. Catalog match (pre/aft) → skip (drawn via fallback extension lines)
+ * 2. Structural first/last non-spray skip — ONLY when extensions are enabled AND
+ *    the catalog is empty (legacy global PRE/AFT pair). When the catalog is
+ *    non-empty (typical LLA + extension_preview), first/last are real connecting
+ *    transits and must not be dropped.
+ * 3. Otherwise → runtime transit line
+ */
+export function buildRuntimeTransitOverlayFromPlan(args: {
+  waypoints: unknown[];
+  sprayFlags: unknown[];
+  extensionLegCatalog: ExtensionLegSample[];
+  extensionsEnabled: boolean;
+  epsM?: number;
+}): RuntimeTransitOverlayResult {
+  const wps = Array.isArray(args.waypoints) ? args.waypoints : [];
+  const sprayFlags = Array.isArray(args.sprayFlags) ? args.sprayFlags : [];
+  const catalog = args.extensionLegCatalog ?? [];
+  const epsM = args.epsM ?? EXTENSION_ENDPOINT_MATCH_EPS_M;
+
+  if (wps.length < 2) {
+    return { transitLines: [], applied: false };
+  }
+
+  const nonSprayIdxs: number[] = [];
+  for (let i = 0; i < wps.length - 1; i++) {
+    if (!(sprayFlags[i] ?? true)) nonSprayIdxs.push(i);
+  }
+
+  // Structural PRE/AFT ends only when we have no catalog samples to match against.
+  // When catalog is non-empty (entity extension_preview / extensions[]), first/last
+  // non-spray are often the only inter-shape connecting transits (backend puts PRE/AFT
+  // only on entities, not as /plan non-spray). Blind skip would hide them — LLA bug.
+  const useStructuralExtEnds = args.extensionsEnabled && catalog.length === 0;
+  const firstNonSprayIdx = nonSprayIdxs[0];
+  const lastNonSprayIdx = nonSprayIdxs[nonSprayIdxs.length - 1];
+
+  const transitLines: PlanLine[] = [];
+
+  for (let i = 0; i < wps.length - 1; i++) {
+    const isMark = sprayFlags[i] ?? true;
+    if (isMark) continue;
+
+    const fromNorth = coerceFiniteNumber((wps[i] as unknown[])?.[0]);
+    const fromEast = coerceFiniteNumber((wps[i] as unknown[])?.[1]);
+    const toNorth = coerceFiniteNumber((wps[i + 1] as unknown[])?.[0]);
+    const toEast = coerceFiniteNumber((wps[i + 1] as unknown[])?.[1]);
+    if (fromNorth == null || fromEast == null || toNorth == null || toEast == null) continue;
+
+    const extRole = matchNonSprayToExtensionRole(
+      fromNorth,
+      fromEast,
+      toNorth,
+      toEast,
+      catalog,
+      epsM
+    );
+    if (extRole) continue;
+
+    if (
+      useStructuralExtEnds &&
+      (i === firstNonSprayIdx || i === lastNonSprayIdx)
+    ) {
+      continue;
+    }
+
+    transitLines.push({
+      id: `runtime-transit-${i}`,
+      label: "Transit",
+      layer: "transit",
+      segmentRole: "none",
+      from: { id: 900000 + i * 2 + 1, x: fromNorth, y: fromEast },
+      to: { id: 900000 + i * 2 + 2, x: toNorth, y: toEast },
+      width: 0.1,
+    });
+  }
+
+  return {
+    transitLines,
+    applied: transitLines.length > 0,
+  };
+}

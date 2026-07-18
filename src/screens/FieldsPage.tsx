@@ -695,10 +695,10 @@ export function FieldsPage(props: FieldsPageProps) {
       >
         <FieldsClearBar onClear={onClearMission} busy={missionActionBusy} />
         <View style={{ flex: 1, minHeight: 0, padding: 12, gap: 10, paddingBottom: 24 }}>
-          {/* Step 1: Upload & Parse */}
+          {/* Step 1: Upload (auto-parse + map preview on pick) */}
           <FieldsStepCard
             stepNumber={1}
-            title="Upload & Parse"
+            title="Upload"
             status={stepStatus("upload")}
             expanded={activeStep === "upload"}
             onToggle={() => toggleStep("upload")}
@@ -717,7 +717,7 @@ export function FieldsPage(props: FieldsPageProps) {
                 // uninvited and the live `lines` update gets masked by the frozen
                 // plan-editing sticker (see PlanPreview's isPlacedItemActive in App.tsx).
                 if (refreshOnly) return;
-                // Stay on Upload & Parse after import/parse. Operator opens Align DXF
+                // Stay on Upload after import. Operator opens Align DXF
                 // (or Bounding Box) when ready — do not auto-jump the accordion.
                 setShowMapInteraction(true);
               }}

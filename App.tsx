@@ -145,6 +145,7 @@ import {
 import {
   appendExtensionLegsFromPlanLines,
   buildExtensionLegCatalogFromEntitiesBody,
+  buildRuntimeTransitOverlayFromPlan,
   matchNonSprayToExtensionRole,
 } from "./src/utils/extensionTransitClassify";
 import type {
@@ -2069,6 +2070,8 @@ export default function App() {
             // non-spray runs here (real inter-shape transits). Extension run-ups
             // are matched against extensionLegCatalog (role pre/aft + endpoints)
             // and skipped here so fallbackExtLines remain the sole extension draw.
+            // applied=true only when ≥1 inter-shape transit was produced. Empty overlays
+            // must fall through to transit_preview (do not treat waypoint-only /plan as done).
             let runtimePathApplied = false;
             try {
               const planRes = await pathApi.planPath(apiBaseUrl, { source: pathName, include_waypoints: true });
@@ -2076,47 +2079,14 @@ export default function App() {
                 const planData = await planRes.json();
                 const wps = Array.isArray(planData.merged_waypoints) ? planData.merged_waypoints : [];
                 const sprayFlags = Array.isArray(planData.spray_flags) ? planData.spray_flags : [];
-                if (wps.length >= 2) {
-                  const nonSprayIdxs: number[] = [];
-                  for (let i = 0; i < wps.length - 1; i++) {
-                    if (!(sprayFlags[i] ?? true)) nonSprayIdxs.push(i);
-                  }
-                  // Structural fallback when catalog is empty: first/last non-spray of the
-                  // whole path is still a common global PRE/AFT pair when extensions are on.
-                  const firstNonSprayIdx = nonSprayIdxs[0];
-                  const lastNonSprayIdx = nonSprayIdxs[nonSprayIdxs.length - 1];
-                  for (let i = 0; i < wps.length - 1; i++) {
-                    const isMark = sprayFlags[i] ?? true;
-                    if (isMark) continue; // marks already drawn as editable entity lines
-                    const fromNorth = coerceFiniteNumber(wps[i]?.[0]);
-                    const fromEast = coerceFiniteNumber(wps[i]?.[1]);
-                    const toNorth = coerceFiniteNumber(wps[i + 1]?.[0]);
-                    const toEast = coerceFiniteNumber(wps[i + 1]?.[1]);
-                    if (fromNorth == null || fromEast == null || toNorth == null || toEast == null) continue;
-
-                    // Prefer catalog match (covers per_line mid-path pre/aft, not just path ends).
-                    const extRole = matchNonSprayToExtensionRole(
-                      fromNorth,
-                      fromEast,
-                      toNorth,
-                      toEast,
-                      extensionLegCatalog
-                    );
-                    if (extRole) continue; // drawn via fallbackExtLines / Extension list entity
-
-                    // Keep first/last skip when extensions enabled (legacy single-pair case).
-                    if (isEnabled && (i === firstNonSprayIdx || i === lastNonSprayIdx)) continue;
-
-                    generatedLines.push({
-                      id: `runtime-transit-${i}`,
-                      label: "Transit",
-                      layer: "transit",
-                      segmentRole: "none",
-                      from: { id: 900000 + i * 2 + 1, x: fromNorth, y: fromEast },
-                      to: { id: 900000 + i * 2 + 2, x: toNorth, y: toEast },
-                      width: 0.1,
-                    });
-                  }
+                const overlay = buildRuntimeTransitOverlayFromPlan({
+                  waypoints: wps,
+                  sprayFlags,
+                  extensionLegCatalog,
+                  extensionsEnabled: isEnabled,
+                });
+                if (overlay.applied) {
+                  generatedLines.push(...overlay.transitLines);
                   runtimePathApplied = true;
                 }
               } else {

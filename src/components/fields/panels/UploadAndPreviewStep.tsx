@@ -96,46 +96,36 @@ export function UploadAndPreviewStep({
       });
   }, [targetPathName, apiBaseUrl]);
 
-  const handlePickFile = async () => {
-    if (blockProtectedWorkflowMutation("Uploading a new path")) return;
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: ["*/*"],
-        copyToCacheDirectory: true,
-      });
-      if (!result.canceled && result.assets && result.assets.length > 0) {
-        const asset = result.assets[0];
-        const ext = asset.name.split(".").pop()?.toLowerCase();
-        if (ext === "dxf" || ext === "csv" || ext === "waypoints") {
-          setPickedFile(asset);
-        } else {
-          Alert.alert("Invalid File", "Please select a .dxf, .csv, or .waypoints file.");
-        }
-      }
-    } catch (err) {
-      console.log("Error picking file:", err);
-    }
-  };
-
-  const handleParseFile = async () => {
+  /**
+   * Upload + parse + map preview in one shot.
+   * Accepts the asset directly (do not rely on React state for the pick→parse race).
+   * On success: clears pickedFile, sets importedPlan, calls onSelectPath (map lines).
+   * On failure: keeps pickedFile so the operator can Retry without re-picking.
+   */
+  const importAndPreviewFile = async (file: DocumentPicker.DocumentPickerAsset) => {
     if (blockProtectedWorkflowMutation("Parsing a new path")) return;
-    if (!pickedFile || !apiBaseUrl) return;
+    if (!apiBaseUrl) {
+      Alert.alert("Not connected", "Connect to the rover before importing a file.");
+      return;
+    }
+
+    setPickedFile(file);
     setIsUploading(true);
     try {
-      const ext = pickedFile.name.split(".").pop()?.toLowerCase();
+      const ext = file.name.split(".").pop()?.toLowerCase();
       const formData = new FormData();
       if (Platform.OS === "web") {
-        const webFile = (pickedFile as any).file ?? (await (await fetch(pickedFile.uri)).blob());
-        formData.append("file", webFile, pickedFile.name);
+        const webFile = (file as any).file ?? (await (await fetch(file.uri)).blob());
+        formData.append("file", webFile, file.name);
       } else {
         formData.append("file", {
-          uri: pickedFile.uri,
-          name: pickedFile.name,
-          type: pickedFile.mimeType || "application/octet-stream",
+          uri: file.uri,
+          name: file.name,
+          type: file.mimeType || "application/octet-stream",
         } as any);
       }
 
-      let res;
+      let res: Response;
       if (ext === "dxf") {
         res = await pathApi.parseDxf(apiBaseUrl, formData);
       } else if (ext === "csv") {
@@ -143,28 +133,29 @@ export function UploadAndPreviewStep({
           // Read the file and strip BOM if present
           let text = "";
           if (Platform.OS === "web") {
-            const webFile = (pickedFile as any).file ?? (await (await fetch(pickedFile.uri)).blob());
+            const webFile = (file as any).file ?? (await (await fetch(file.uri)).blob());
             text = await webFile.text();
           } else {
-            text = await (await fetch(pickedFile.uri)).text();
+            text = await (await fetch(file.uri)).text();
           }
-          
-          if (text.charCodeAt(0) === 0xFEFF) {
+
+          if (text.charCodeAt(0) === 0xfeff) {
             text = text.slice(1);
           }
 
-          // In React Native, sending strings directly in FormData can be tricky.
-          // Since we are fixing the BOM and sending it to the backend, let's create a new FormData.
+          // BOM-clean FormData for the backend CSV parsers.
           const cleanFormData = new FormData();
           if (Platform.OS === "web") {
             const cleanBlob = new Blob([text], { type: "text/csv" });
-            cleanFormData.append("file", cleanBlob as any, pickedFile.name);
+            cleanFormData.append("file", cleanBlob as any, file.name);
           } else {
-            const tempUri = FileSystem.cacheDirectory + "clean_" + pickedFile.name;
-            await FileSystem.writeAsStringAsync(tempUri, text, { encoding: FileSystem.EncodingType.UTF8 });
+            const tempUri = FileSystem.cacheDirectory + "clean_" + file.name;
+            await FileSystem.writeAsStringAsync(tempUri, text, {
+              encoding: FileSystem.EncodingType.UTF8,
+            });
             cleanFormData.append("file", {
               uri: tempUri,
-              name: pickedFile.name,
+              name: file.name,
               type: "text/csv",
             } as any);
           }
@@ -182,7 +173,7 @@ export function UploadAndPreviewStep({
               const parsed = (await parseRes.clone().json()) as pathApi.ParsePointGpsCsvResponse;
               onGpsPointMissionParsed?.(parsed);
             }
-            // If validation succeeded, call uploadPath to actually save the file on the backend
+            // Validation succeeded — persist the file on the backend.
             res = await pathApi.uploadPath(apiBaseUrl, cleanFormData);
           }
         } catch (e) {
@@ -196,36 +187,41 @@ export function UploadAndPreviewStep({
       if (res.ok) {
         onInvalidateWorkflow("alignment");
         if (ext === "dxf") {
-          setImportedPlan({ fileName: pickedFile.name, uri: pickedFile.uri, fileType: "dxf", source: "builtin" });
+          setImportedPlan({
+            fileName: file.name,
+            uri: file.uri,
+            fileType: "dxf",
+            source: "builtin",
+          });
         } else {
           setImportedPlan({
-            fileName: pickedFile.name,
-            uri: pickedFile.uri,
-            fileType: ext as "csv" | "waypoints",
+            fileName: file.name,
+            uri: file.uri,
+            fileType: (ext as "csv" | "waypoints") || "csv",
             source: "imported",
           });
         }
         setPickedFile(null);
         onRefreshPaths();
 
-        // Auto-select the just-parsed path
-        onSelectPath(pickedFile.name);
+        // Map geometry preview (entities + /plan overlay) — same path as selecting a backend path.
+        onSelectPath(file.name);
 
-        // Auto-fetch preview
+        // Lightweight path-preview summary for the LOADED chip (optional).
         try {
-          const previewRes = await pathApi.getPathPreview(apiBaseUrl, pickedFile.name);
+          const previewRes = await pathApi.getPathPreview(apiBaseUrl, file.name);
           if (previewRes.ok) {
             const data = await previewRes.json();
             setPreviewData(data);
           }
         } catch {
-          // Preview is optional, plan still loads
+          // Preview summary is optional; map lines still load via onSelectPath.
         }
 
         // Auto-fetch extension config if DXF
         if (ext === "dxf") {
           try {
-            const cfg = await pathApi.getExtensions(apiBaseUrl, pickedFile.name);
+            const cfg = await pathApi.getExtensions(apiBaseUrl, file.name);
             setExtEnabled(cfg.enabled);
             setExtPre(String(cfg.pre_extension_m ?? 0.5));
             setExtAft(String(cfg.aft_extension_m ?? 0.5));
@@ -244,6 +240,34 @@ export function UploadAndPreviewStep({
     } finally {
       setIsUploading(false);
     }
+  };
+
+  const handlePickFile = async () => {
+    if (blockProtectedWorkflowMutation("Uploading a new path")) return;
+    if (isUploading) return;
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ["*/*"],
+        copyToCacheDirectory: true,
+      });
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const asset = result.assets[0];
+        const ext = asset.name.split(".").pop()?.toLowerCase();
+        if (ext === "dxf" || ext === "csv" || ext === "waypoints") {
+          // Parse + map preview immediately — no separate Parse step.
+          await importAndPreviewFile(asset);
+        } else {
+          Alert.alert("Invalid File", "Please select a .dxf, .csv, or .waypoints file.");
+        }
+      }
+    } catch (err) {
+      console.log("Error picking file:", err);
+    }
+  };
+
+  const handleRetryImport = async () => {
+    if (!pickedFile || isUploading) return;
+    await importAndPreviewFile(pickedFile);
   };
 
   const handleToggleExtension = async (enabled: boolean) => {
@@ -304,13 +328,13 @@ export function UploadAndPreviewStep({
     <View style={{ gap: 14 }}>
       {/* File Upload Section */}
       <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
-        Import a .dxf, .csv, or .waypoints file. Preview appears automatically after parsing.
+        Import a .dxf, .csv, or .waypoints file. Parsing and map preview start automatically.
       </Text>
 
       {!pickedFile && !targetPathName ? (
         <TouchableOpacity
           onPress={handlePickFile}
-          disabled={protectedResident}
+          disabled={protectedResident || isUploading}
           activeOpacity={0.8}
           style={{
             height: 52,
@@ -323,11 +347,12 @@ export function UploadAndPreviewStep({
             borderWidth: 1.5,
             borderColor: FIELDS_COLORS.stepActive,
             borderStyle: "dashed",
+            opacity: protectedResident || isUploading ? 0.6 : 1,
           }}
         >
           <Upload size={18} color={FIELDS_COLORS.stepActive} />
           <Text style={{ color: FIELDS_COLORS.stepActive, fontSize: 14, fontWeight: "700" }}>
-            Select File
+            {isUploading ? "Parsing…" : "Select File"}
           </Text>
         </TouchableOpacity>
       ) : pickedFile ? (
@@ -345,25 +370,41 @@ export function UploadAndPreviewStep({
             <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "600" }} numberOfLines={1}>
               {pickedFile.name}
             </Text>
+            {isUploading ? (
+              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
+                Uploading & parsing…
+              </Text>
+            ) : (
+              <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, marginTop: 2 }}>
+                Import failed — retry or clear
+              </Text>
+            )}
           </View>
-          <TouchableOpacity
-            onPress={handleParseFile}
-            disabled={isUploading || protectedResident}
-            activeOpacity={0.85}
-            style={{
-              height: 40,
-              paddingHorizontal: 16,
-              borderRadius: 8,
-              alignItems: "center",
-              justifyContent: "center",
-              backgroundColor: isUploading || protectedResident ? FIELDS_COLORS.textDim : FIELDS_COLORS.teal,
+          {!isUploading ? (
+            <TouchableOpacity
+              onPress={handleRetryImport}
+              disabled={protectedResident}
+              activeOpacity={0.85}
+              style={{
+                height: 40,
+                paddingHorizontal: 14,
+                borderRadius: 8,
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: protectedResident ? FIELDS_COLORS.textDim : FIELDS_COLORS.teal,
+              }}
+            >
+              <Text style={{ color: "#fff", fontSize: 13, fontWeight: "800" }}>Retry</Text>
+            </TouchableOpacity>
+          ) : null}
+          <Pressable
+            onPress={() => {
+              if (isUploading) return;
+              setPickedFile(null);
             }}
+            disabled={isUploading}
+            style={{ padding: 4, opacity: isUploading ? 0.4 : 1 }}
           >
-            <Text style={{ color: "#fff", fontSize: 13, fontWeight: "800" }}>
-              {isUploading ? "..." : "Parse"}
-            </Text>
-          </TouchableOpacity>
-          <Pressable onPress={() => setPickedFile(null)} style={{ padding: 4 }}>
             <X size={20} color={FIELDS_COLORS.textMuted} />
           </Pressable>
         </View>
@@ -407,10 +448,10 @@ export function UploadAndPreviewStep({
             </Pressable>
           </View>
 
-          {/* Upload another */}
+          {/* Upload another — also auto-parses on pick */}
           <Pressable
             onPress={handlePickFile}
-            disabled={protectedResident}
+            disabled={protectedResident || isUploading}
             style={{
               height: 36,
               borderRadius: 8,
@@ -419,10 +460,11 @@ export function UploadAndPreviewStep({
               backgroundColor: "transparent",
               borderWidth: 1,
               borderColor: FIELDS_COLORS.panelBorder,
+              opacity: protectedResident || isUploading ? 0.5 : 1,
             }}
           >
             <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "600" }}>
-              Upload Different File
+              {isUploading ? "Parsing…" : "Upload Different File"}
             </Text>
           </Pressable>
         </View>

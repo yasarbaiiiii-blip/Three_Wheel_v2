@@ -4,6 +4,7 @@ import type { PlanLine } from "../types/plan";
 import {
   appendExtensionLegsFromPlanLines,
   buildExtensionLegCatalogFromEntitiesBody,
+  buildRuntimeTransitOverlayFromPlan,
   matchNonSprayToExtensionRole,
   normalizeExtensionSegmentRole,
 } from "./extensionTransitClassify";
@@ -146,5 +147,169 @@ describe("appendExtensionLegsFromPlanLines + list filter", () => {
     expect(getInterShapeTransitLines([misTaggedAsTransit, pureTransit, extLine]).map((l) => l.id)).toEqual([
       "runtime-transit-5",
     ]);
+  });
+});
+
+describe("buildRuntimeTransitOverlayFromPlan", () => {
+  const catalog = buildExtensionLegCatalogFromEntitiesBody({
+    extensions: [
+      {
+        role: "pre",
+        points: [
+          { north: 0, east: -0.5 },
+          { north: 0, east: 0 },
+        ],
+      },
+      {
+        role: "aft",
+        points: [
+          { north: 0, east: 2 },
+          { north: 0, east: 2.5 },
+        ],
+      },
+    ],
+  });
+
+  it("LLA-style: catalog non-empty, only connecting transit is non-spray → transit kept", () => {
+    // Extensions live only in catalog/extension_preview; /plan non-spray is solely
+    // the inter-shape connector. Old first/last skip dropped this when isEnabled.
+    const waypoints = [
+      [0, 0],
+      [0, 2], // mark
+      [5, 2], // transit end
+      [5, 4], // mark
+    ];
+    // segment 0 mark, 1 transit, 2 mark
+    const sprayFlags = [true, false, true];
+    const overlay = buildRuntimeTransitOverlayFromPlan({
+      waypoints,
+      sprayFlags,
+      extensionLegCatalog: catalog,
+      extensionsEnabled: true,
+    });
+    expect(overlay.applied).toBe(true);
+    expect(overlay.transitLines).toHaveLength(1);
+    expect(overlay.transitLines[0].id).toBe("runtime-transit-1");
+    expect(overlay.transitLines[0].from).toMatchObject({ x: 0, y: 2 });
+    expect(overlay.transitLines[0].to).toMatchObject({ x: 5, y: 2 });
+  });
+
+  it("LLA-style: two connecting transits — first and last kept when catalog non-empty", () => {
+    // 3 shapes: transit A-B and B-C are first/last non-spray only.
+    const waypoints = [
+      [0, 0],
+      [0, 1], // mark A
+      [2, 1], // transit A→B
+      [2, 2], // mark B
+      [4, 2], // transit B→C
+      [4, 3], // mark C
+    ];
+    const sprayFlags = [true, false, true, false, true];
+    const overlay = buildRuntimeTransitOverlayFromPlan({
+      waypoints,
+      sprayFlags,
+      extensionLegCatalog: catalog,
+      extensionsEnabled: true,
+    });
+    expect(overlay.applied).toBe(true);
+    expect(overlay.transitLines.map((l) => l.id)).toEqual([
+      "runtime-transit-1",
+      "runtime-transit-3",
+    ]);
+  });
+
+  it("strips catalog-matched PRE/AFT and keeps true mid transit", () => {
+    // PRE → mark → AFT → TRANSIT → mark
+    const waypoints = [
+      [0, -0.5],
+      [0, 0],
+      [0, 2],
+      [0, 2.5],
+      [5, 2.5],
+      [5, 4],
+    ];
+    // non-spray: 0=pre, 2=aft, 3=transit; spray marks: 1, 4
+    const sprayFlags = [false, true, false, false, true];
+    const overlay = buildRuntimeTransitOverlayFromPlan({
+      waypoints,
+      sprayFlags,
+      extensionLegCatalog: catalog,
+      extensionsEnabled: true,
+    });
+    expect(overlay.applied).toBe(true);
+    expect(overlay.transitLines).toHaveLength(1);
+    expect(overlay.transitLines[0].id).toBe("runtime-transit-3");
+    expect(overlay.transitLines[0].from).toMatchObject({ x: 0, y: 2.5 });
+    expect(overlay.transitLines[0].to).toMatchObject({ x: 5, y: 2.5 });
+  });
+
+  it("empty catalog + extensions on: structural first/last non-spray skipped as PRE/AFT", () => {
+    const waypoints = [
+      [0, -0.5],
+      [0, 0],
+      [0, 2],
+      [0, 2.5],
+      [5, 2.5],
+      [5, 4],
+    ];
+    // non-spray first + mid transit + last
+    const sprayFlags = [false, true, false, false, true];
+    const overlay = buildRuntimeTransitOverlayFromPlan({
+      waypoints,
+      sprayFlags,
+      extensionLegCatalog: [],
+      extensionsEnabled: true,
+    });
+    // first non-spray (0) and last non-spray (3) skipped; segment 2 kept
+    expect(overlay.applied).toBe(true);
+    expect(overlay.transitLines.map((l) => l.id)).toEqual(["runtime-transit-2"]);
+  });
+
+  it("extensions off: all non-spray become transit (no structural skip)", () => {
+    const waypoints = [
+      [0, 0],
+      [0, 1],
+      [2, 1],
+      [2, 2],
+    ];
+    const sprayFlags = [false, false, true];
+    const overlay = buildRuntimeTransitOverlayFromPlan({
+      waypoints,
+      sprayFlags,
+      extensionLegCatalog: catalog,
+      extensionsEnabled: false,
+    });
+    expect(overlay.applied).toBe(true);
+    expect(overlay.transitLines).toHaveLength(2);
+  });
+
+  it("applied=false when no inter-shape transit remains (blocks false runtimePathApplied)", () => {
+    // Only PRE + AFT non-spray, both catalog-matched → empty overlay
+    const waypoints = [
+      [0, -0.5],
+      [0, 0],
+      [0, 2],
+      [0, 2.5],
+    ];
+    const sprayFlags = [false, true, false];
+    const overlay = buildRuntimeTransitOverlayFromPlan({
+      waypoints,
+      sprayFlags,
+      extensionLegCatalog: catalog,
+      extensionsEnabled: true,
+    });
+    expect(overlay.transitLines).toHaveLength(0);
+    expect(overlay.applied).toBe(false);
+  });
+
+  it("applied=false for too-short waypoint list", () => {
+    const overlay = buildRuntimeTransitOverlayFromPlan({
+      waypoints: [[0, 0]],
+      sprayFlags: [],
+      extensionLegCatalog: catalog,
+      extensionsEnabled: true,
+    });
+    expect(overlay.applied).toBe(false);
+    expect(overlay.transitLines).toHaveLength(0);
   });
 });
