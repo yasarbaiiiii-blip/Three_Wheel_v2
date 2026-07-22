@@ -1,12 +1,21 @@
 import { describe, it, expect } from "vitest";
 import {
+  applyAxisResize,
   applyHandleResize,
   designObbFromLines,
   designOffsetToWorld,
+  edgeHandleArrowBearingDeg,
+  getEdgeHandleWorldPoints,
+  getEdgeResizeHandles,
   getObbResizeHandles,
+  getRotateAffordanceWorldPoints,
+  handleHitRadiusM,
+  rotateAboutDesignCenter,
   scaleAboutDesignAnchor,
   findNearestHandle,
   getHandleWorldPoints,
+  worldToDesignPoint,
+  HANDLE_HIT_RADIUS_M,
 } from "./planResizeHandles";
 
 const pose = {
@@ -97,5 +106,96 @@ describe("planResizeHandles", () => {
     // SE = center + (-halfN, +halfE) = (100-5, 50+10) = (95, 60)
     expect(w.north).toBeCloseTo(95, 6);
     expect(w.east).toBeCloseTo(60, 6);
+  });
+
+  it("worldToDesignPoint inverts designOffsetToWorld", () => {
+    const rotated = { ...pose, rotation: 35, scale: 1.4, x: 3, y: -2 };
+    const world = designOffsetToWorld(4, -1.5, rotated);
+    const back = worldToDesignPoint(world, rotated);
+    expect(back.designNorth).toBeCloseTo(4, 9);
+    expect(back.designEast).toBeCloseTo(-1.5, 9);
+  });
+
+  it("applyAxisResize on east edge changes only east scale and pins west", () => {
+    const handles = getObbResizeHandles(pose);
+    const e = handles.find((h) => h.id === "e")!;
+    const w = handles.find((h) => h.id === "w")!;
+    const wStart = designOffsetToWorld(w.designNorth, w.designEast, pose);
+    // Full span west→east is 10 m; double it → curSpan 20, east edge at +15 when west pinned at -5.
+    const cursor = { north: 0, east: 15 };
+    const next = applyAxisResize({
+      pose,
+      activeHandle: e,
+      oppositeHandle: w,
+      cursor,
+    });
+    expect(next.scaleEast ?? next.scale).toBeCloseTo(2, 5);
+    expect(next.scaleNorth ?? next.scale).toBeCloseTo(1, 5);
+    const wAfter = designOffsetToWorld(w.designNorth, w.designEast, next);
+    expect(wAfter.north).toBeCloseTo(wStart.north, 5);
+    expect(wAfter.east).toBeCloseTo(wStart.east, 5);
+  });
+
+  it("applyAxisResize on north edge changes only north scale", () => {
+    const handles = getObbResizeHandles(pose);
+    const n = handles.find((h) => h.id === "n")!;
+    const s = handles.find((h) => h.id === "s")!;
+    // Double north span (10 → 20): north edge at +15 with south pinned at -5.
+    const cursor = { north: 15, east: 0 };
+    const next = applyAxisResize({
+      pose,
+      activeHandle: n,
+      oppositeHandle: s,
+      cursor,
+    });
+    expect(next.scaleNorth ?? next.scale).toBeCloseTo(2, 5);
+    expect(next.scaleEast ?? next.scale).toBeCloseTo(1, 5);
+  });
+
+  it("rotateAboutDesignCenter keeps design centre fixed in world", () => {
+    const p = {
+      ...pose,
+      designCenterNorth: 2,
+      designCenterEast: -1,
+      x: 5,
+      y: 3,
+      rotation: 10,
+    };
+    const c0 = designOffsetToWorld(2, -1, p);
+    const next = rotateAboutDesignCenter(p, 55);
+    const c1 = designOffsetToWorld(2, -1, next);
+    expect(c1.north).toBeCloseTo(c0.north, 6);
+    expect(c1.east).toBeCloseTo(c0.east, 6);
+    expect(next.rotation).toBe(55);
+  });
+
+  it("getRotateAffordanceWorldPoints sits outside corners", () => {
+    const pts = getRotateAffordanceWorldPoints(pose, 0.2);
+    expect(pts).toHaveLength(4);
+    const se = pts.find((p) => p.id === "se")!;
+    // SE corner is (-5, 5); 20% outside → further from origin
+    expect(Math.hypot(se.north, se.east)).toBeGreaterThan(Math.hypot(-5, 5));
+  });
+
+  it("handleHitRadiusM grows with meters-per-pixel and never below baseline", () => {
+    expect(handleHitRadiusM(0.05, pose, 40)).toBeGreaterThanOrEqual(HANDLE_HIT_RADIUS_M);
+    // Zoomed out (large mpp) must expand hit target for fingers.
+    expect(handleHitRadiusM(0.5, pose, 40)).toBeGreaterThan(handleHitRadiusM(0.05, pose, 40));
+  });
+
+  it("getEdgeResizeHandles returns only n/e/s/w midpoints", () => {
+    const edges = getEdgeResizeHandles(pose);
+    expect(edges.map((h) => h.id).sort()).toEqual(["e", "n", "s", "w"]);
+    const worlds = getEdgeHandleWorldPoints(pose);
+    const n = worlds.find((h) => h.id === "n")!;
+    expect(n.north).toBeCloseTo(5, 6);
+    expect(n.east).toBeCloseTo(0, 6);
+  });
+
+  it("edgeHandleArrowBearingDeg points outward with pose rotation", () => {
+    expect(edgeHandleArrowBearingDeg("n", 0)).toBe(0);
+    expect(edgeHandleArrowBearingDeg("e", 0)).toBe(90);
+    expect(edgeHandleArrowBearingDeg("n", 45)).toBe(45);
+    expect(edgeHandleArrowBearingDeg("w", 90)).toBe(0); // 90+270 = 360 → 0
   });
 });

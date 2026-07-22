@@ -17,6 +17,10 @@ export type VisualAlignmentTransform = {
   y: number;
   rotation: number;
   scale?: number;
+  /** Independent north-axis scale (falls back to `scale`). */
+  scaleNorth?: number;
+  /** Independent east-axis scale (falls back to `scale`). */
+  scaleEast?: number;
 };
 
 const EARTH_RADIUS = 6378137.0;
@@ -27,13 +31,16 @@ export function transformVisualDxfPoint(
   east: number,
   item: VisualAlignmentTransform
 ): { north: number; east: number } {
-  const scale = item.scale ?? 1;
+  const sN = item.scaleNorth ?? item.scale ?? 1;
+  const sE = item.scaleEast ?? item.scale ?? 1;
+  const sn = north * sN;
+  const se = east * sE;
   const theta = (item.rotation * Math.PI) / 180;
   const cos = Math.cos(theta);
   const sin = Math.sin(theta);
   return {
-    north: (north * cos - east * sin) * scale + item.y,
-    east: (north * sin + east * cos) * scale + item.x,
+    north: sn * cos - se * sin + item.y,
+    east: sn * sin + se * cos + item.x,
   };
 }
 

@@ -1,6 +1,7 @@
-import React, { useCallback, useState } from "react";
-import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useMemo, useState } from "react";
+import { Alert, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { ChevronDown, ChevronRight } from "lucide-react-native";
+import * as DocumentPicker from "expo-document-picker";
 
 import * as missionApi from "../api/missionApi";
 import * as pathApi from "../api/pathApi";
@@ -19,6 +20,8 @@ import { PathOrderAndSprayStep } from "../components/fields/panels/PathOrderAndS
 import { TemplatePanel } from "../components/fields/panels/TemplatePanel";
 import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPreviewStep";
 import { useFieldsWorkflow } from "../hooks/useFieldsWorkflow";
+import { parseGuidePointsCsv } from "../utils/refPointsCsv";
+import { designObbFromLines } from "../utils/planResizeHandles";
 import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
 import type {
   AlignmentResultState,
@@ -112,6 +115,7 @@ export type FieldsPageProps = {
   onPlanAttached?: (info: { x: number; y: number; rotation: number; scale: number }) => void;
   onPlanEditResize?: () => void;
   onPlanResizeDone?: () => void;
+  onFitToReferencePoints?: (refs: Array<{ lat: number; lon: number }>) => void;
   extractedCorners?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null>>;
   onClearMission: () => Promise<void>;
@@ -228,6 +232,7 @@ export function FieldsPage(props: FieldsPageProps) {
     onPlanAttached,
     onPlanEditResize,
     onPlanResizeDone,
+    onFitToReferencePoints,
     extractedCorners,
     setExtractedCorners,
     onClearMission,
@@ -245,6 +250,9 @@ export function FieldsPage(props: FieldsPageProps) {
    * method change / empty list.
    */
   const [csvGuidePointsActive, setCsvGuidePointsActive] = useState(false);
+  /** Original guide CSV file name for Upload/Align button labels (not “Reference Points”). */
+  const [guideCsvFileName, setGuideCsvFileName] = useState<string | null>(null);
+  const [isImportingRefPointsCsv, setIsImportingRefPointsCsv] = useState(false);
   const [missionSummary, setMissionSummary] = useState<any | null>(null);
   /** Align DXF methods: Multi-Point Fit | Visual (1-Point Fit removed). Auto Origin is a separate toggle peer. */
   const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "visual_alignment">("least_squares");
@@ -331,6 +339,85 @@ export function FieldsPage(props: FieldsPageProps) {
     },
     [loadedPathInspection, protectedResident]
   );
+
+  /**
+   * Lets the operator add reference points right after uploading the plan, instead of only
+   * discovering the CSV guide-point uploader once they open the Align step. Reuses the same
+   * shared CSV parser as AlignDxfPanel's own "Upload CSV" button; jumps the stepper to Align
+   * once points are loaded so the newly-visible map dots are the very next thing shown.
+   */
+  const handleImportRefPointsCsvFromUpload = useCallback(async () => {
+    if (blockProtectedWorkflowMutation("Importing reference points")) return;
+
+    let asset: DocumentPicker.DocumentPickerAsset | null = null;
+    try {
+      const result = await DocumentPicker.getDocumentAsync({ type: ["*/*"], copyToCacheDirectory: true });
+      if (result.canceled || !result.assets || result.assets.length === 0) return;
+      asset = result.assets[0];
+    } catch (err) {
+      console.log("[Upload][RefPointsCSV] Error picking CSV:", err);
+      Alert.alert("Error", "Could not open the file picker.");
+      return;
+    }
+
+    const ext = asset.name.split(".").pop()?.toLowerCase();
+    if (ext !== "csv") {
+      Alert.alert("Invalid File", "Please select a .csv file.");
+      return;
+    }
+
+    setIsImportingRefPointsCsv(true);
+    try {
+      let text: string;
+      if (Platform.OS === "web") {
+        const webFile = (asset as any).file ?? (await (await fetch(asset.uri)).blob());
+        text = await webFile.text();
+      } else {
+        text = await (await fetch(asset.uri)).text();
+      }
+      if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+
+      const { points, errors } = parseGuidePointsCsv(text);
+      if (points.length === 0) {
+        Alert.alert("Import Failed", errors[0] ?? "No valid Latitude/Longitude rows were found in the file.");
+        return;
+      }
+
+      onInvalidateWorkflow("alignment");
+      setMissionSummary(null);
+      setAlignmentResult(null);
+      setVerifiedAlignmentRequest(null);
+      setRefPoints(points.map((p) => ({ dxf_x: 0, dxf_y: 0, lat: p.latRaw, lon: p.lonRaw })));
+      setCsvGuidePointsActive(true);
+      setGuideCsvFileName(asset.name || "guide.csv");
+      setActiveStep("align");
+
+      if (errors.length > 0) {
+        Alert.alert(
+          "Imported With Warnings",
+          `${points.length} point(s) imported. ${errors.length} row(s) skipped:\n${errors.slice(0, 5).join("\n")}${
+            errors.length > 5 ? `\n…and ${errors.length - 5} more` : ""
+          }`
+        );
+      } else {
+        Alert.alert(
+          "Guide CSV Loaded",
+          `${points.length} point(s) from ${asset.name}. Open Align → Move / Rotate Plan, then Resize if needed.`
+        );
+      }
+    } catch (err) {
+      console.log("[Upload][RefPointsCSV] Error importing CSV:", err);
+      Alert.alert("Error", "Could not read or parse the selected CSV file.");
+    } finally {
+      setIsImportingRefPointsCsv(false);
+    }
+  }, [
+    blockProtectedWorkflowMutation,
+    onInvalidateWorkflow,
+    setAlignmentResult,
+    setVerifiedAlignmentRequest,
+    setActiveStep,
+  ]);
 
   /**
    * Map tap → yellow guide points. Enabled ONLY for Multi-Point Fit when:
@@ -535,6 +622,22 @@ export function FieldsPage(props: FieldsPageProps) {
       Math.abs((visualAlignmentItem.scale ?? 1) - 1) > 0.001)
   );
 
+  // Live bounding-box size in meters (design-space OBB × current scale) for the transform
+  // HUD — was hardcoded to 0 before since nothing computed it from the plan's own bounds.
+  const liveBoundingSizeM = useMemo(() => {
+    if (!visualAlignmentItem?.lines?.length) return { widthM: 0, heightM: 0 };
+    const obb = designObbFromLines(visualAlignmentItem.lines);
+    const scale = visualAlignmentItem.scale ?? 1;
+    const sE = visualAlignmentItem.scaleEast ?? scale;
+    const sN = visualAlignmentItem.scaleNorth ?? scale;
+    return { widthM: obb.width * sE, heightM: obb.height * sN };
+  }, [
+    visualAlignmentItem?.lines,
+    visualAlignmentItem?.scale,
+    visualAlignmentItem?.scaleEast,
+    visualAlignmentItem?.scaleNorth,
+  ]);
+
   return (
     <View style={{ flex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
       {/* Map preview — full screen background */}
@@ -596,9 +699,11 @@ export function FieldsPage(props: FieldsPageProps) {
         })}
       </View>
 
-      {/* Post-attach Edit / Done chrome above the map preview */}
+      {/* Move / Resize chrome — visible as soon as Move/Rotate Plan is active */}
       {isPlanEditingMode &&
-      (multiPointPlacementPhase === "attached" || multiPointPlacementPhase === "resizing") ? (
+      (multiPointPlacementPhase === "placing" ||
+        multiPointPlacementPhase === "attached" ||
+        multiPointPlacementPhase === "resizing") ? (
         <View
           pointerEvents="box-none"
           style={{
@@ -640,7 +745,7 @@ export function FieldsPage(props: FieldsPageProps) {
                   letterSpacing: 0.6,
                 }}
               >
-                {multiPointPlacementPhase === "resizing" ? "RESIZING" : "ATTACHED"}
+                {multiPointPlacementPhase === "resizing" ? "RESIZE" : "MOVE"}
               </Text>
               <Text
                 style={{
@@ -653,19 +758,7 @@ export function FieldsPage(props: FieldsPageProps) {
                 {(visualAlignmentItem?.scale ?? 1).toFixed(2)}×
               </Text>
             </View>
-            {multiPointPlacementPhase === "attached" ? (
-              <Pressable
-                onPress={() => onPlanEditResize?.()}
-                style={({ pressed }) => ({
-                  paddingHorizontal: 18,
-                  paddingVertical: 10,
-                  borderRadius: 10,
-                  backgroundColor: pressed ? FIELDS_COLORS.stepActive : "#0ea5e9",
-                })}
-              >
-                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 14 }}>Edit</Text>
-              </Pressable>
-            ) : (
+            {multiPointPlacementPhase === "resizing" ? (
               <Pressable
                 onPress={() => onPlanResizeDone?.()}
                 style={({ pressed }) => ({
@@ -677,6 +770,18 @@ export function FieldsPage(props: FieldsPageProps) {
               >
                 <Text style={{ color: "#fff", fontWeight: "800", fontSize: 14 }}>Done</Text>
               </Pressable>
+            ) : (
+              <Pressable
+                onPress={() => onPlanEditResize?.()}
+                style={({ pressed }) => ({
+                  paddingHorizontal: 18,
+                  paddingVertical: 10,
+                  borderRadius: 10,
+                  backgroundColor: pressed ? FIELDS_COLORS.stepActive : "#0ea5e9",
+                })}
+              >
+                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 14 }}>Resize</Text>
+              </Pressable>
             )}
           </View>
         </View>
@@ -687,22 +792,20 @@ export function FieldsPage(props: FieldsPageProps) {
         visible={
           showMapInteraction &&
           hasPath &&
+          multiPointPlacementPhase !== "placing" &&
           multiPointPlacementPhase !== "attached" &&
           multiPointPlacementPhase !== "resizing"
         }
-        manipulationMode={manipulationMode}
-        onSetMode={setManipulationMode}
         transformData={{
           scaleMultiplier: visualAlignmentItem?.scale ?? 1,
-          boundingWidthM: 0, // TODO: compute from plan bounds
-          boundingHeightM: 0,
+          boundingWidthM: liveBoundingSizeM.widthM,
+          boundingHeightM: liveBoundingSizeM.heightM,
           rotationDeg: visualAlignmentItem?.rotation ?? 0,
           offsetMeters: {
             x: visualAlignmentItem?.x ?? 0,
             y: visualAlignmentItem?.y ?? 0,
           },
         }}
-        onTransformChange={() => {}}
         onConfirm={handleConfirmTransform}
         hasTransform={hasTransform}
       />
@@ -761,6 +864,9 @@ export function FieldsPage(props: FieldsPageProps) {
               blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
               protectedResident={protectedResident}
               onGpsPointMissionParsed={onGpsPointMissionParsed}
+              onImportRefPointsCsv={handleImportRefPointsCsvFromUpload}
+              isImportingRefPointsCsv={isImportingRefPointsCsv}
+              guideCsvFileName={guideCsvFileName}
             />
           </FieldsStepCard>
 
@@ -872,6 +978,8 @@ export function FieldsPage(props: FieldsPageProps) {
               setRefPoints={setRefPoints}
               csvGuidePointsActive={csvGuidePointsActive}
               setCsvGuidePointsActive={setCsvGuidePointsActive}
+              guideCsvFileName={guideCsvFileName}
+              setGuideCsvFileName={setGuideCsvFileName}
               alignmentMethod={alignmentMethod}
               setAlignmentMethod={setAlignmentMethod}
               setMissionSummary={setMissionSummary}
@@ -892,6 +1000,7 @@ export function FieldsPage(props: FieldsPageProps) {
               missionRunning={missionRunning}
               isPlanEditingMode={isPlanEditingMode}
               onToggleMovePlan={handleToggleMovePlan}
+              onFitToReferencePoints={onFitToReferencePoints}
             />
           </FieldsStepCard>
           )}

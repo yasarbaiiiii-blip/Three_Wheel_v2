@@ -24,6 +24,14 @@ type UploadAndPreviewStepProps = {
   protectedResident: boolean;
   /** Called when a GPS lat/lon point CSV is successfully parsed */
   onGpsPointMissionParsed?: (data: pathApi.ParsePointGpsCsvResponse) => void;
+  /**
+   * Lets the operator import a guide-points CSV once the plan preview is up
+   * (same parser as Align step).
+   */
+  onImportRefPointsCsv?: () => void;
+  isImportingRefPointsCsv?: boolean;
+  /** When set, the guide-CSV button shows this file name instead of a generic label. */
+  guideCsvFileName?: string | null;
 };
 
 /** Peek at CSV header to decide GPS vs NED parse route */
@@ -49,6 +57,9 @@ export function UploadAndPreviewStep({
   blockProtectedWorkflowMutation,
   protectedResident,
   onGpsPointMissionParsed,
+  onImportRefPointsCsv,
+  isImportingRefPointsCsv = false,
+  guideCsvFileName = null,
 }: UploadAndPreviewStepProps) {
   const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -467,6 +478,40 @@ export function UploadAndPreviewStep({
               {isUploading ? "Loading preview…" : "Upload Different File"}
             </Text>
           </Pressable>
+
+          {/* Guide-points CSV — label becomes the uploaded file name after import */}
+          {onImportRefPointsCsv ? (
+            <Pressable
+              onPress={onImportRefPointsCsv}
+              disabled={protectedResident || isImportingRefPointsCsv}
+              style={{
+                height: 36,
+                borderRadius: 8,
+                alignItems: "center",
+                justifyContent: "center",
+                paddingHorizontal: 12,
+                backgroundColor: guideCsvFileName ? FIELDS_COLORS.surfaceSolid : FIELDS_COLORS.teal,
+                borderWidth: guideCsvFileName ? 1 : 0,
+                borderColor: FIELDS_COLORS.teal,
+                opacity: protectedResident || isImportingRefPointsCsv ? 0.5 : 1,
+              }}
+            >
+              <Text
+                numberOfLines={1}
+                style={{
+                  color: guideCsvFileName ? FIELDS_COLORS.teal : "#fff",
+                  fontSize: 12,
+                  fontWeight: "800",
+                }}
+              >
+                {isImportingRefPointsCsv
+                  ? "Importing…"
+                  : guideCsvFileName
+                    ? guideCsvFileName
+                    : "Import guide CSV"}
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
 

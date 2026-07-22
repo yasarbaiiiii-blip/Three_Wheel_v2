@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   applySimilarityPlanSnap,
+  computeBestSimilarityFit,
   solveTwoPointSimilarity,
   bestSecondarySimilarity,
   poseAboutPrimaryPin,
@@ -111,6 +112,32 @@ describe("blendTowardDualAboutPrimary", () => {
     expect(p.east).toBeCloseTo(primaryRef.east, 6);
     expect(soft.scale).toBeGreaterThan(1);
     expect(soft.scale).toBeLessThan(dual.scale);
+  });
+});
+
+describe("computeBestSimilarityFit", () => {
+  it("fits a square design onto scaled refs in one shot", () => {
+    const candidates = [
+      { north: 0, east: 0 },
+      { north: 0, east: 10 },
+      { north: 10, east: 0 },
+      { north: 10, east: 10 },
+    ];
+    const refs = [
+      ref(0, 0),
+      ref(0, 20), // 2× scale
+      ref(20, 0),
+      ref(20, 20),
+    ];
+    const fit = computeBestSimilarityFit({
+      candidates,
+      refs,
+      preferScale: 1,
+      currentRotationDeg: 0,
+    });
+    expect(fit).not.toBeNull();
+    expect(fit!.scale).toBeCloseTo(2, 5);
+    expect(fit!.residual).toBeLessThan(0.05);
   });
 });
 

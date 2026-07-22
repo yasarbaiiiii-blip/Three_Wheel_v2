@@ -74,12 +74,16 @@ import {
   type SimilaritySnapLock,
 } from "../utils/similarityRefPointSnap";
 import {
-  applyHandleResize,
+  applyAxisResize,
   designObbFromLines,
+  edgeHandleArrowBearingDeg,
+  effectiveScaleEast,
+  effectiveScaleNorth,
   findNearestHandle,
-  getHandleWorldPoints,
+  getEdgeHandleWorldPoints,
   getObbResizeHandles,
-  HANDLE_HIT_RADIUS_M,
+  handleHitRadiusM,
+  isEdgeHandleId,
   type PlanStickerPose,
   type ResizeHandle,
 } from "../utils/planResizeHandles";
@@ -435,14 +439,22 @@ export function MapViewNative(props: MapViewProps) {
   // single-ref re-pins translation while rotating. Cleared at drag begin/end only.
   const snapLockRef = useRef<SimilaritySnapLock | null>(null);
 
-  // Figma resize session (phase === "resizing"): active handle + start pose.
+  // Resize-mode session: edge-midpoint axis resize only (n/e/s/w).
   const resizeSessionRef = useRef<{
     handle: ResizeHandle;
     opposite: ResizeHandle;
     startPose: PlanStickerPose;
-    /** Local-metre cursor at gesture begin (relative to projection origin). */
     startCursor: { north: number; east: number };
   } | null>(null);
+
+  /** Bumps on every drag-begin so stale screenToGeo results cannot win. */
+  const resizeGestureGenRef = useRef(0);
+  /**
+   * Resolves when the current resize hit-test finishes (hit or miss).
+   * Commit awaits this so a fast finger-up still applies after async geo resolves.
+   */
+  const resizeSessionReadyRef = useRef<Promise<void>>(Promise.resolve());
+  const resolveResizeSessionReadyRef = useRef<(() => void) | null>(null);
 
   /** Fire onPlanAttached at most once per gesture. */
   const notifiedAttachRef = useRef(false);
@@ -1025,6 +1037,7 @@ export function MapViewNative(props: MapViewProps) {
         { n: cN + halfN, e: cE + halfE },
         { n: cN + halfN, e: cE - halfE },
       ];
+      // transformVisualDxfPoint already applies item.scaleNorth/scaleEast when set.
       const ring: Coord[] = cornersDesign.map((c) => {
         const tp = transformVisualDxfPoint(c.n, c.e, item);
         const gps = projectPlanNorthEastToGps(tp.north, tp.east, projectionOrigin);
@@ -1178,11 +1191,15 @@ export function MapViewNative(props: MapViewProps) {
   // Whether we have anything selected that can be edited.
   // Gesture engagement is gated on this: if nothing is selected, the
   // GestureDetector is not even mounted so map touch events pass through freely.
+  // Multi-Point Fit phases always enable gestures so a deselect race cannot freeze Edit.
   const hasEditableSelection =
     mode === "templates" &&
     (
       (selectedItemIds && selectedItemIds.length > 0) ||
-      (selectedItemIds && selectedItemIds.includes("boundary"))
+      (selectedItemIds && selectedItemIds.includes("boundary")) ||
+      planPlacementPhase === "placing" ||
+      planPlacementPhase === "attached" ||
+      planPlacementPhase === "resizing"
     );
 
   // ── Drag helpers (JS thread — called from worklet via runOnJS) ──
@@ -1320,6 +1337,22 @@ export function MapViewNative(props: MapViewProps) {
     [projectionOrigin?.originLat, projectionOrigin?.originLon]
   );
 
+  const poseFromPlanItem = useCallback((item: PlacedItem): PlanStickerPose => {
+    const obb = designObbFromLines(item.lines);
+    return {
+      x: item.x,
+      y: item.y,
+      rotation: item.rotation || 0,
+      scale: item.scale || 1,
+      scaleNorth: item.scaleNorth,
+      scaleEast: item.scaleEast,
+      width: obb.width > 0 ? obb.width : item.width,
+      height: obb.height > 0 ? obb.height : item.height,
+      designCenterNorth: obb.designCenterNorth,
+      designCenterEast: obb.designCenterEast,
+    };
+  }, []);
+
   const buildLengthLabelsFC = useCallback(
     (items: PlacedItem[]): GeoJSON.FeatureCollection => {
       if (!projectionOrigin) return featureCollection([]);
@@ -1330,6 +1363,30 @@ export function MapViewNative(props: MapViewProps) {
       const features: GeoJSON.Feature[] = [];
       for (const item of items) {
         if (item.id !== "plan-editing-group") continue;
+
+        // Resize phase: one live "W × H m" pill below the OBB (video parity).
+        if (phase === "resizing") {
+          const pose = poseFromPlanItem(item);
+          const sE = effectiveScaleEast(pose);
+          const sN = effectiveScaleNorth(pose);
+          const widthM = pose.width * sE;
+          const heightM = pose.height * sN;
+          const cN = pose.designCenterNorth ?? 0;
+          const cE = pose.designCenterEast ?? 0;
+          // Just south of the box centre in design space → below after transform.
+          const pillDesignN = cN - pose.height / 2 - Math.max(1.2, pose.height * 0.08);
+          const pillWorld = transformVisualDxfPoint(pillDesignN, cE, item);
+          const gps = projectPlanNorthEastToGps(pillWorld.north, pillWorld.east, projectionOrigin);
+          features.push(
+            pointFeature(toMapboxCoord(gps.lat, gps.lon), {
+              id: "resize-wh-pill",
+              label: `${widthM.toFixed(1)}  ${heightM.toFixed(1)}`,
+              isWhPill: true,
+            })
+          );
+          continue;
+        }
+
         const labels = buildPlanLengthLabels(item.lines, {
           x: item.x,
           y: item.y,
@@ -1349,9 +1406,13 @@ export function MapViewNative(props: MapViewProps) {
       }
       return featureCollection(features);
     },
-    [projectionOrigin]
+    [projectionOrigin, poseFromPlanItem]
   );
 
+  /**
+   * Resize-mode affordances: four edge-midpoint arrows only (n/e/s/w).
+   * No corners, no outer rotate rings — shape-based box editor UX.
+   */
   const buildHandlesFC = useCallback(
     (items: PlacedItem[]): GeoJSON.FeatureCollection => {
       if (!projectionOrigin || planPlacementPhaseRef.current !== "resizing") {
@@ -1360,30 +1421,32 @@ export function MapViewNative(props: MapViewProps) {
       const features: GeoJSON.Feature[] = [];
       for (const item of items) {
         if (item.id !== "plan-editing-group") continue;
-        const obb = designObbFromLines(item.lines);
-        const pose: PlanStickerPose = {
-          x: item.x,
-          y: item.y,
-          rotation: item.rotation || 0,
-          scale: item.scale || 1,
-          width: obb.width > 0 ? obb.width : item.width,
-          height: obb.height > 0 ? obb.height : item.height,
-          designCenterNorth: obb.designCenterNorth,
-          designCenterEast: obb.designCenterEast,
-        };
-        for (const h of getHandleWorldPoints(pose)) {
+        const pose = poseFromPlanItem(item);
+        for (const h of getEdgeHandleWorldPoints(pose)) {
           const gps = projectPlanNorthEastToGps(h.north, h.east, projectionOrigin);
+          const bearing = edgeHandleArrowBearingDeg(h.id, pose.rotation);
           features.push(
             pointFeature(toMapboxCoord(gps.lat, gps.lon), {
               id: h.id,
               handleId: h.id,
+              isEdge: 1,
+              // Single upright glyph; SymbolLayer rotates by outward bearing.
+              arrow: "▲",
+              bearing,
             })
           );
         }
       }
       return featureCollection(features);
     },
-    [projectionOrigin]
+    [projectionOrigin, poseFromPlanItem]
+  );
+
+  /** Rotate rings intentionally disabled — resize mode is edge-axis only. */
+  const buildRotateHandlesFC = useCallback(
+    (_items: PlacedItem[], _hideWhileDragging: boolean): GeoJSON.FeatureCollection =>
+      featureCollection([]),
+    []
   );
 
   // Steady-state path lengths + resize handles (drag preview overrides when active).
@@ -1409,6 +1472,15 @@ export function MapViewNative(props: MapViewProps) {
     return buildHandlesFC(placedItems);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [placedItemsSig, planPlacementPhase, projectionOrigin, buildHandlesFC]);
+
+  // Rotate affordances only while idle-selected (hidden during any active handle drag).
+  const steadyRotateHandlesFC = useMemo(() => {
+    if (!placedItems || planPlacementPhase !== "resizing" || !projectionOrigin || dragPreview) {
+      return featureCollection([]);
+    }
+    return buildRotateHandlesFC(placedItems, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [placedItemsSig, planPlacementPhase, projectionOrigin, buildRotateHandlesFC, dragPreview]);
 
   // Multi-Point Fit similarity snap (scale-to-fit dual-ref). Pure math; MapView applies result.
   const applyPointSnap = useCallback(
@@ -1469,8 +1541,14 @@ export function MapViewNative(props: MapViewProps) {
   const applyDragMove = useCallback(
     (dN: number, dE: number, rotDeg: number, scaleF: number) => {
       const starts = dragStartPositionsRef.current;
-      const ids = selectedItemIds ?? [];
       const phase = planPlacementPhaseRef.current;
+      // Force plan-editing-group into the active id set during Multi-Point Fit so a
+      // transient deselect cannot turn resize/drag into a silent no-op.
+      const idsRaw = selectedItemIds ?? [];
+      const ids =
+        phase === "placing" || phase === "attached" || phase === "resizing"
+          ? Array.from(new Set([...idsRaw, "plan-editing-group"]))
+          : idsRaw;
 
       if (ids.includes("boundary") && starts["boundary"]) {
         const start = starts["boundary"];
@@ -1497,19 +1575,19 @@ export function MapViewNative(props: MapViewProps) {
           continue;
         }
 
-        // Resize phase: Figma handle drag (uniform scale about opposite corner).
+        // Resize phase: edge-midpoint axis resize only (drag/rotate/pinch disabled).
         if (phase === "resizing" && item.id === "plan-editing-group") {
           const session = resizeSessionRef.current;
-          if (!session) {
+          if (!session || !isEdgeHandleId(session.handle.id)) {
+            // Hit-test in flight or miss — body frozen (no free drag in resize).
             shifted.push(item);
             continue;
           }
-          // startCursor + deltas are in sticker/world frame (same as designOffsetToWorld).
           const cursor = {
             north: session.startCursor.north + dN,
             east: session.startCursor.east + dE,
           };
-          const next = applyHandleResize({
+          const next = applyAxisResize({
             pose: session.startPose,
             activeHandle: session.handle,
             oppositeHandle: session.opposite,
@@ -1520,6 +1598,8 @@ export function MapViewNative(props: MapViewProps) {
             x: next.x,
             y: next.y,
             scale: next.scale,
+            scaleNorth: next.scaleNorth,
+            scaleEast: next.scaleEast,
             rotation: next.rotation,
           });
           continue;
@@ -1587,6 +1667,7 @@ export function MapViewNative(props: MapViewProps) {
   /**
    * Called via runOnJS from the worklet on gesture finalize.
    * Reads final deltas, applies clamp, commits to parent once, clears preview.
+   * Async: waits briefly for resize hit-test so a quick drag still commits after geo resolves.
    */
   const onDragCommit = useCallback(
     (finalDN: number, finalDE: number, finalRotDeg: number, finalScaleF: number) => {
@@ -1599,102 +1680,144 @@ export function MapViewNative(props: MapViewProps) {
       pendingDragDeltaRef.current = null;
 
       const starts = dragStartPositionsRef.current;
-      const ids = selectedItemIds ?? [];
       const phase = planPlacementPhaseRef.current;
+      const idsRaw = selectedItemIds ?? [];
+      const ids =
+        phase === "placing" || phase === "attached" || phase === "resizing"
+          ? Array.from(new Set([...idsRaw, "plan-editing-group"]))
+          : idsRaw;
+      const gestureGen = resizeGestureGenRef.current;
 
-      if (ids.includes("boundary") && starts["boundary"]) {
-        const start = starts["boundary"];
-        const finalX = start.x + finalDE;
-        const finalY = start.y + finalDN;
-        let finalRot = (start.rotation + finalRotDeg) % 360;
-        if (finalRot < 0) finalRot += 360;
-        if (onMoveBoundary) {
-          onMoveBoundary(finalX, finalY);
+      const finishCommit = () => {
+        // Ignore stale commits if a newer gesture already began.
+        if (gestureGen !== resizeGestureGenRef.current) return;
+
+        if (ids.includes("boundary") && starts["boundary"]) {
+          const start = starts["boundary"];
+          const finalX = start.x + finalDE;
+          const finalY = start.y + finalDN;
+          let finalRot = (start.rotation + finalRotDeg) % 360;
+          if (finalRot < 0) finalRot += 360;
+          if (onMoveBoundary) {
+            onMoveBoundary(finalX, finalY);
+          }
+          if (onRotateBoundary) {
+            onRotateBoundary(finalRot);
+          }
+          setPreviewBoundary(null);
         }
-        if (onRotateBoundary) {
-          onRotateBoundary(finalRot);
+
+        if (!placedItems) {
+          setDragPreview(null);
+          resizeSessionRef.current = null;
+          return;
         }
-        setPreviewBoundary(null);
-      }
 
-      if (!placedItems) {
-        setDragPreview(null);
-        resizeSessionRef.current = null;
-        return;
-      }
+        let becameAttached: {
+          x: number;
+          y: number;
+          rotation: number;
+          scale: number;
+        } | null = null;
 
-      let becameAttached: {
-        x: number;
-        y: number;
-        rotation: number;
-        scale: number;
-      } | null = null;
+        const updated = placedItems.map((item) => {
+          const start = starts[item.id];
+          if (!start || !ids.includes(item.id)) return item;
 
-      const updated = placedItems.map((item) => {
-        const start = starts[item.id];
-        if (!start || !ids.includes(item.id)) return item;
+          if (phase === "resizing" && item.id === "plan-editing-group") {
+            const session = resizeSessionRef.current;
+            if (!session || !isEdgeHandleId(session.handle.id)) return item;
+            const cursor = {
+              north: session.startCursor.north + finalDN,
+              east: session.startCursor.east + finalDE,
+            };
+            const next = applyAxisResize({
+              pose: session.startPose,
+              activeHandle: session.handle,
+              oppositeHandle: session.opposite,
+              cursor,
+            });
+            return {
+              ...item,
+              x: next.x,
+              y: next.y,
+              scale: next.scale,
+              scaleNorth: next.scaleNorth,
+              scaleEast: next.scaleEast,
+              rotation: next.rotation,
+            };
+          }
 
-        if (phase === "resizing" && item.id === "plan-editing-group") {
-          const session = resizeSessionRef.current;
-          if (!session) return item;
-          const cursor = {
-            north: session.startCursor.north + finalDN,
-            east: session.startCursor.east + finalDE,
-          };
-          const next = applyHandleResize({
-            pose: session.startPose,
-            activeHandle: session.handle,
-            oppositeHandle: session.opposite,
-            cursor,
-          });
+          const newX = start.x + finalDE;
+          const newY = start.y + finalDN;
+          const newRotation = start.rotation + finalRotDeg;
+          const newScale = start.scale * finalScaleF;
+          const snapped = applyPointSnap(item.id, newX, newY, newRotation, newScale);
+          // Attach UI only on finger-up when dual-fit residual is tight — never mid-drag freeze.
+          if (snapped.attached && item.id === "plan-editing-group") {
+            becameAttached = {
+              x: snapped.x,
+              y: snapped.y,
+              rotation: snapped.rotation,
+              scale: snapped.scale,
+            };
+          }
           return {
             ...item,
-            x: next.x,
-            y: next.y,
-            scale: next.scale,
-            rotation: next.rotation,
-          };
-        }
-
-        const newX = start.x + finalDE;
-        const newY = start.y + finalDN;
-        const newRotation = start.rotation + finalRotDeg;
-        const newScale = start.scale * finalScaleF;
-        const snapped = applyPointSnap(item.id, newX, newY, newRotation, newScale);
-        // Attach UI only on finger-up when dual-fit residual is tight — never mid-drag freeze.
-        if (snapped.attached && item.id === "plan-editing-group") {
-          becameAttached = {
             x: snapped.x,
             y: snapped.y,
             rotation: snapped.rotation,
             scale: snapped.scale,
           };
-        }
-        return { ...item, x: snapped.x, y: snapped.y, rotation: snapped.rotation, scale: snapped.scale };
-      });
-
-      // Single commit to parent — parity with legacy itemsMoved handler.
-      if (onUpdatePlacedItems) {
-        onUpdatePlacedItems(updated);
-      } else if (onUpdatePlacedItem) {
-        updated.forEach((item) => {
-          const orig = placedItems.find((it) => it.id === item.id);
-          if (orig && (item.x !== orig.x || item.y !== orig.y || item.rotation !== orig.rotation || item.scale !== orig.scale)) {
-            onUpdatePlacedItem(item.id, { x: item.x, y: item.y, rotation: item.rotation, scale: item.scale });
-          }
         });
-      }
 
-      if (becameAttached && onPlanAttachedRef.current) {
-        onPlanAttachedRef.current(becameAttached);
-      }
+        // Single commit to parent — parity with legacy itemsMoved handler.
+        if (onUpdatePlacedItems) {
+          onUpdatePlacedItems(updated);
+        } else if (onUpdatePlacedItem) {
+          updated.forEach((item) => {
+            const orig = placedItems.find((it) => it.id === item.id);
+            if (
+              orig &&
+              (item.x !== orig.x ||
+                item.y !== orig.y ||
+                item.rotation !== orig.rotation ||
+                item.scale !== orig.scale ||
+                item.scaleNorth !== orig.scaleNorth ||
+                item.scaleEast !== orig.scaleEast)
+            ) {
+              onUpdatePlacedItem(item.id, {
+                x: item.x,
+                y: item.y,
+                rotation: item.rotation,
+                scale: item.scale,
+                scaleNorth: item.scaleNorth,
+                scaleEast: item.scaleEast,
+              });
+            }
+          });
+        }
 
-      // Clear atomic drag preview — parent state + placedItemsGeo are full quality now.
-      setDragPreview(null);
-      dragStartPositionsRef.current = {};
-      snapLockRef.current = null;
-      resizeSessionRef.current = null;
-      // Keep notifiedAttachRef if parent phase is already attached; reset only on begin.
+        if (becameAttached && onPlanAttachedRef.current) {
+          onPlanAttachedRef.current(becameAttached);
+        }
+
+        // Clear atomic drag preview — parent state + placedItemsGeo are full quality now.
+        setDragPreview(null);
+        dragStartPositionsRef.current = {};
+        snapLockRef.current = null;
+        resizeSessionRef.current = null;
+        // Keep notifiedAttachRef if parent phase is already attached; reset only on begin.
+      };
+
+      // Wait for resize hit-test (with timeout) so fast gestures still commit.
+      if (phase === "resizing") {
+        const ready = resizeSessionReadyRef.current;
+        const timeout = new Promise<void>((resolve) => setTimeout(resolve, 200));
+        void Promise.race([ready, timeout]).then(finishCommit);
+        return;
+      }
+      finishCommit();
     },
     [
       placedItems,
@@ -1709,18 +1832,32 @@ export function MapViewNative(props: MapViewProps) {
 
   /**
    * Called via runOnJS from onBegin. Snapshots start positions and calibrates mpp.
-   * In resizing phase, also resolves which OBB handle is under the finger (async geo).
+   * In resizing phase, resolves which OBB handle is under the finger (async geo) with a
+   * generation token + ready promise so fast gestures still commit correctly.
    */
   const onDragBegin = useCallback(
     (touchX: number, touchY: number) => {
       const ids = selectedItemIds ?? [];
+      // During Multi-Point Fit lifecycle always snapshot the plan sticker even if selection
+      // was briefly cleared — resize/drag must never become a no-op mid-edit.
+      const phase0 = planPlacementPhaseRef.current;
+      const forcePlanIds =
+        phase0 === "placing" || phase0 === "attached" || phase0 === "resizing"
+          ? Array.from(new Set([...ids, "plan-editing-group"]))
+          : ids;
+
       const snapshot: Record<string, { x: number; y: number; rotation: number; scale: number }> = {};
       for (const item of placedItems ?? []) {
-        if (ids.includes(item.id)) {
-          snapshot[item.id] = { x: item.x, y: item.y, rotation: item.rotation || 0, scale: item.scale || 1 };
+        if (forcePlanIds.includes(item.id)) {
+          snapshot[item.id] = {
+            x: item.x,
+            y: item.y,
+            rotation: item.rotation || 0,
+            scale: item.scale || 1,
+          };
         }
       }
-      if (ids.includes("boundary")) {
+      if (forcePlanIds.includes("boundary") || ids.includes("boundary")) {
         snapshot["boundary"] = {
           x: boundaryPosition?.x ?? 0,
           y: boundaryPosition?.y ?? 0,
@@ -1731,58 +1868,118 @@ export function MapViewNative(props: MapViewProps) {
       dragStartPositionsRef.current = snapshot;
       snapLockRef.current = null; // each gesture starts with no held snap.
       resizeSessionRef.current = null;
+
+      // Invalidate any in-flight hit-test from a previous gesture.
+      const gestureGen = ++resizeGestureGenRef.current;
+      if (resolveResizeSessionReadyRef.current) {
+        resolveResizeSessionReadyRef.current();
+        resolveResizeSessionReadyRef.current = null;
+      }
+      resizeSessionReadyRef.current = new Promise<void>((resolve) => {
+        resolveResizeSessionReadyRef.current = resolve;
+      });
+      const markResizeReady = () => {
+        if (gestureGen !== resizeGestureGenRef.current) return;
+        resolveResizeSessionReadyRef.current?.();
+        resolveResizeSessionReadyRef.current = null;
+      };
+
       if (planPlacementPhaseRef.current === "placing") {
         notifiedAttachRef.current = false;
       }
-      calibrateMetersPerPixel(touchX, touchY);
+      void calibrateMetersPerPixel(touchX, touchY);
 
       const phase = planPlacementPhaseRef.current;
       if (phase === "resizing" && projectionOrigin && mapViewRef.current) {
         const planItem = (placedItems ?? []).find((it) => it.id === "plan-editing-group");
         if (planItem) {
           const origin = projectionOrigin;
+          const poseAtBegin = poseFromPlanItem(planItem);
           void (async () => {
-            const geo = await screenToGeo(mapViewRef.current!, { x: touchX, y: touchY });
-            if (!geo) return;
-            const local = projectGpsToLocalMeters(
-              geo.lat,
-              geo.lon,
-              origin.originLat,
-              origin.originLon
-            );
-            // Sticker/world frame = local NE + originDxf (matches designOffsetToWorld / transformVisualDxfPoint).
-            const cursorWorld = {
-              north: local.north + origin.originDxfNorth,
-              east: local.east + origin.originDxfEast,
-            };
-            const obb = designObbFromLines(planItem.lines);
-            const pose: PlanStickerPose = {
-              x: planItem.x,
-              y: planItem.y,
-              rotation: planItem.rotation || 0,
-              scale: planItem.scale || 1,
-              width: obb.width > 0 ? obb.width : planItem.width,
-              height: obb.height > 0 ? obb.height : planItem.height,
-              designCenterNorth: obb.designCenterNorth,
-              designCenterEast: obb.designCenterEast,
-            };
-            const worlds = getHandleWorldPoints(pose);
-            const hit = findNearestHandle(cursorWorld, worlds, HANDLE_HIT_RADIUS_M);
-            if (!hit) return;
-            const all = getObbResizeHandles(pose);
-            const opposite = all.find((h) => h.id === hit.oppositeId);
-            if (!opposite) return;
-            resizeSessionRef.current = {
-              handle: hit,
-              opposite,
-              startPose: pose,
-              startCursor: cursorWorld,
-            };
+            try {
+              const map = mapViewRef.current;
+              if (!map || gestureGen !== resizeGestureGenRef.current) return;
+
+              // Calibrate mpp first so hit radius matches current zoom (best-effort).
+              await calibrateMetersPerPixel(touchX, touchY);
+              if (gestureGen !== resizeGestureGenRef.current) return;
+
+              const geo = await screenToGeo(map, { x: touchX, y: touchY });
+              if (!geo || gestureGen !== resizeGestureGenRef.current) return;
+
+              const local = projectGpsToLocalMeters(
+                geo.lat,
+                geo.lon,
+                origin.originLat,
+                origin.originLon
+              );
+              // Sticker/world frame = local NE + originDxf (matches designOffsetToWorld).
+              const cursorWorld = {
+                north: local.north + origin.originDxfNorth,
+                east: local.east + origin.originDxfEast,
+              };
+              const pose = poseAtBegin;
+              const mpp = metersPerPixelSV.value > 0 ? metersPerPixelSV.value : 0.05;
+              const hitR = handleHitRadiusM(mpp, pose, 44);
+
+              // Edge mids only (n/e/s/w) — no corners, no rotate rings.
+              const edgeWorlds = getEdgeHandleWorldPoints(pose);
+              let hit = findNearestHandle(cursorWorld, edgeWorlds, hitR);
+              if (!hit) {
+                const halfN =
+                  ((Number.isFinite(pose.height) ? pose.height : 0) / 2) *
+                  effectiveScaleNorth(pose);
+                const halfE =
+                  ((Number.isFinite(pose.width) ? pose.width : 0) / 2) *
+                  effectiveScaleEast(pose);
+                // Modest widen only — do NOT grab nearest edge across the whole map
+                // (that made body-drag feel like accidental resize).
+                const captureR = Math.max(
+                  hitR * 1.6,
+                  Math.min(Math.hypot(halfN, halfE) * 0.28, 18)
+                );
+                hit = findNearestHandle(cursorWorld, edgeWorlds, captureR);
+              }
+              if (hit && isEdgeHandleId(hit.id)) {
+                const all = getObbResizeHandles(pose);
+                const opposite = all.find((h) => h.id === hit!.oppositeId);
+                if (opposite) {
+                  resizeSessionRef.current = {
+                    handle: hit,
+                    opposite,
+                    startPose: pose,
+                    startCursor: cursorWorld,
+                  };
+                }
+              }
+              // Miss → session stays null → body frozen until user grabs an edge arrow.
+
+              // If the finger already moved while geo was resolving, paint a live preview now.
+              const pending = pendingDragDeltaRef.current;
+              if (pending && gestureGen === resizeGestureGenRef.current) {
+                applyDragMove(pending.dN, pending.dE, pending.rotDeg, pending.scaleF);
+              }
+            } finally {
+              markResizeReady();
+            }
           })();
+          return;
         }
       }
+      // Non-resize (or missing plan item): ready immediately.
+      markResizeReady();
     },
-    [placedItems, selectedItemIds, boundaryPosition, boundaryRotation, calibrateMetersPerPixel]
+    [
+      placedItems,
+      selectedItemIds,
+      boundaryPosition,
+      boundaryRotation,
+      calibrateMetersPerPixel,
+      poseFromPlanItem,
+      metersPerPixelSV,
+      projectionOrigin,
+      applyDragMove,
+    ]
   );
 
   // ── Gesture surface: Pan + Pinch + Rotation (Simultaneous) ──
@@ -1875,7 +2072,8 @@ export function MapViewNative(props: MapViewProps) {
     [rotationDelta, panDeltaN, panDeltaE, pinchScale, onDragMove]
   );
 
-  // Gate gestures based on multiTouchMode:
+  // Gate gestures based on multiTouchMode + plan phase:
+  // - resizing: pan only (edge-handle axis resize; no pinch/rotate)
   // - "both": pan + pinch + rotation
   // - "scale": pan + pinch only (no rotation)
   // - "rotate": pan + rotation only (no pinch/scale)
@@ -1884,16 +2082,25 @@ export function MapViewNative(props: MapViewProps) {
       if (manualDrawingEnabled) {
         return Gesture.Pan().enabled(false);
       }
+      const resizing = planPlacementPhase === "resizing";
       const gestures: any[] = [panGesture.enabled(!!hasEditableSelection)];
-      if (multiTouchMode === "both" || multiTouchMode === "scale") {
+      if (!resizing && (multiTouchMode === "both" || multiTouchMode === "scale")) {
         gestures.push(pinchGesture.enabled(!!hasEditableSelection));
       }
-      if (multiTouchMode === "both" || multiTouchMode === "rotate") {
+      if (!resizing && (multiTouchMode === "both" || multiTouchMode === "rotate")) {
         gestures.push(rotationGesture.enabled(!!hasEditableSelection));
       }
       return Gesture.Simultaneous(...gestures);
     },
-    [panGesture, pinchGesture, rotationGesture, multiTouchMode, hasEditableSelection, manualDrawingEnabled]
+    [
+      panGesture,
+      pinchGesture,
+      rotationGesture,
+      multiTouchMode,
+      hasEditableSelection,
+      manualDrawingEnabled,
+      planPlacementPhase,
+    ]
   );
 
   // ── Camera helpers ──
@@ -2041,6 +2248,14 @@ export function MapViewNative(props: MapViewProps) {
       }
 
       if (mode === "templates") {
+        // Multi-Point Fit / plan-edit lifecycle: never clear selection on map press.
+        // Clearing selectedItemIds disables pan/resize gestures while RESIZING chrome
+        // still looks active — the main "Edit works but resize doesn't" bug.
+        const phase = planPlacementPhaseRef.current;
+        if (phase === "placing" || phase === "attached" || phase === "resizing") {
+          onSelectionChange?.(["plan-editing-group"]);
+          return;
+        }
         onSelectionChange?.([]);
         return;
       }
@@ -2383,33 +2598,61 @@ export function MapViewNative(props: MapViewProps) {
           />
         </ShapeSource>
 
-        {/* ── Live path lengths on Multi-Point Fit sticker (design × scale) ── */}
+        {/* ── Live path lengths / resize W×H pill ── */}
         <ShapeSource id="plan-length-labels" shape={activeLengthLabelsFC}>
           <SymbolLayer
             id="plan-length-labels-layer"
             style={{
               textField: ["get", "label"],
-              textColor: "#0f172a",
-              textHaloColor: "#ffffff",
-              textHaloWidth: 1.5,
-              textSize: 11,
+              textColor: ["case", ["get", "isWhPill"], "#ffffff", "#0f172a"],
+              textHaloColor: ["case", ["get", "isWhPill"], "#2563eb", "#ffffff"],
+              textHaloWidth: ["case", ["get", "isWhPill"], 8, 1.5],
+              textSize: ["case", ["get", "isWhPill"], 13, 11],
               textOffset: [0, -0.8],
-              textAllowOverlap: false,
-              textIgnorePlacement: false,
+              textAllowOverlap: true,
+              textIgnorePlacement: true,
             }}
           />
         </ShapeSource>
 
-        {/* ── Figma-style resize handles (resizing phase only) ── */}
+        {/* ── Resize: four edge-midpoint arrows only (n/e/s/w) ── */}
         <ShapeSource id="plan-resize-handles" shape={activeHandlesFC}>
           <CircleLayer
-            id="plan-resize-handles-layer"
+            id="plan-resize-handles-hit"
             style={{
-              circleRadius: 7,
-              circleColor: "#38bdf8",
+              // Large invisible-ish hit disc; arrow symbol sits on top.
+              circleRadius: 14,
+              circleColor: "#0ea5e9",
+              circleOpacity: 0.22,
               circleStrokeColor: "#ffffff",
-              circleStrokeWidth: 2,
-              circleOpacity: 0.95,
+              circleStrokeWidth: 1.5,
+              circleStrokeOpacity: 0.85,
+            }}
+          />
+          <SymbolLayer
+            id="plan-resize-handles-arrows"
+            style={{
+              textField: ["get", "arrow"],
+              textSize: 16,
+              textColor: "#ffffff",
+              textHaloColor: "#0369a1",
+              textHaloWidth: 1.25,
+              textAllowOverlap: true,
+              textIgnorePlacement: true,
+              textRotate: ["get", "bearing"],
+              // Unicode triangles already point; keep bearing for future icon assets.
+              textRotationAlignment: "map",
+            }}
+          />
+        </ShapeSource>
+
+        {/* Rotate rings intentionally unmounted in Resize (edge-axis only). */}
+        <ShapeSource id="plan-rotate-handles" shape={featureCollection([])}>
+          <CircleLayer
+            id="plan-rotate-handles-layer"
+            style={{
+              circleRadius: 0,
+              circleOpacity: 0,
             }}
           />
         </ShapeSource>

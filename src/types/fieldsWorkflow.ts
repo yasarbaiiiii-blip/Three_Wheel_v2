@@ -7,9 +7,9 @@ export type PlanManipulationMode = "idle" | "scale" | "drag" | "rotate" | "resiz
 /**
  * Multi-Point Fit placement lifecycle after Move/Rotate Plan:
  * - idle: not editing
- * - placing: drag/rotate; magnetic similarity scale-to-fit toward refs
- * - attached: dual-ref attach acquired; Edit button available
- * - resizing: Figma handles active; Done button available
+ * - placing: drag/rotate; magnetic similarity scale-to-fit toward refs; Resize available
+ * - attached: dual-ref attach acquired (same move UX as placing; Resize available)
+ * - resizing: edge-midpoint arrows only; drag/rotate off; Done returns to placing
  * - captured: Use This Position completed
  */
 export type MultiPointPlacementPhase =

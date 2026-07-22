@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { Alert, Platform, Pressable, Text, TextInput, View } from "react-native";
-import { Check, ChevronDown, Move, Upload, X } from "lucide-react-native";
+import { Check, ChevronDown, Maximize2, Move, Upload, X } from "lucide-react-native";
 import * as DocumentPicker from "expo-document-picker";
 
 import * as pathApi from "../../../api/pathApi";
@@ -19,109 +19,9 @@ import type { PlanLine } from "../../../types/plan";
 import type { AutoOriginReference } from "../../../types/autoOrigin";
 import type { PlacedItem } from "../../BoundaryEditor";
 import { FIELDS_COLORS } from "../fieldsTheme";
+import { parseGuidePointsCsv } from "../../../utils/refPointsCsv";
 
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
-
-/** Splits one CSV line into trimmed cells, honoring double-quoted values. */
-function splitCsvCells(line: string): string[] {
-  const cells: string[] = [];
-  let current = "";
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (line[i + 1] === '"') {
-          current += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        current += ch;
-      }
-    } else if (ch === '"') {
-      inQuotes = true;
-    } else if (ch === ",") {
-      cells.push(current);
-      current = "";
-    } else {
-      current += ch;
-    }
-  }
-  cells.push(current);
-  return cells.map((cell) => cell.trim());
-}
-
-type GuidePoint = { latRaw: string; lonRaw: string };
-
-/**
- * Parses a PURE visual reference-point CSV: only Latitude/Longitude are read (any other
- * columns, e.g. a survey device's own Easting/Northing in some arbitrary project grid, are
- * ignored — they don't need to correspond to this drawing's coordinate system at all, since
- * these points are just a visual marker on the map, not an input to a computed fit).
- * Accepts a header row (lat/latitude, lon/lng/long/longitude, any order) or, with no
- * recognizable header, 2 bare numeric columns in that order (lat, lon).
- */
-function parseGuidePointsCsv(text: string): { points: GuidePoint[]; errors: string[] } {
-  const errors: string[] = [];
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line !== "" && !line.startsWith("#"));
-
-  if (lines.length === 0) return { points: [], errors: ["The file is empty."] };
-
-  const headerCells = splitCsvCells(lines[0]).map((cell) => cell.toLowerCase());
-  const latAliases = ["lat", "latitude"];
-  const lonAliases = ["lon", "lng", "long", "longitude"];
-  let latIdx = headerCells.findIndex((cell) => latAliases.includes(cell));
-  let lonIdx = headerCells.findIndex((cell) => lonAliases.includes(cell));
-
-  let dataLines: string[];
-  if (latIdx >= 0 && lonIdx >= 0) {
-    dataLines = lines.slice(1);
-  } else {
-    latIdx = 0;
-    lonIdx = 1;
-    const firstRowIsNumeric =
-      headerCells.length >= 2 && headerCells.slice(0, 2).every((cell) => cell !== "" && Number.isFinite(Number(cell)));
-    if (!firstRowIsNumeric && lines.length < 2) {
-      return {
-        points: [],
-        errors: ["Could not find Latitude/Longitude columns. Expected a header row like: lat,lon"],
-      };
-    }
-    dataLines = firstRowIsNumeric ? lines : lines.slice(1);
-  }
-
-  const points: GuidePoint[] = [];
-  dataLines.forEach((line, i) => {
-    const cells = splitCsvCells(line);
-    if (cells.every((cell) => cell === "")) return;
-    const rowNum = i + (dataLines.length === lines.length ? 1 : 2);
-
-    const rawLat = cells[latIdx] ?? "";
-    const rawLon = cells[lonIdx] ?? "";
-    if (rawLat === "" || rawLon === "") {
-      errors.push(`Row ${rowNum}: missing latitude/longitude.`);
-      return;
-    }
-    const lat = Number(rawLat);
-    const lon = Number(rawLon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-      errors.push(`Row ${rowNum}: could not parse latitude/longitude.`);
-      return;
-    }
-    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
-      errors.push(`Row ${rowNum}: latitude/longitude out of range.`);
-      return;
-    }
-    points.push({ latRaw: rawLat, lonRaw: rawLon });
-  });
-
-  return { points, errors };
-}
 
 type AlignDxfPanelProps = {
   apiBaseUrl: string;
@@ -140,6 +40,9 @@ type AlignDxfPanelProps = {
   /** True while Multi-Point guide points came from CSV — disables map tap-to-pick. */
   csvGuidePointsActive?: boolean;
   setCsvGuidePointsActive?: React.Dispatch<React.SetStateAction<boolean>>;
+  /** Uploaded guide CSV file name for the import button label. */
+  guideCsvFileName?: string | null;
+  setGuideCsvFileName?: React.Dispatch<React.SetStateAction<string | null>>;
   alignmentMethod: "least_squares" | "visual_alignment";
   setAlignmentMethod: React.Dispatch<React.SetStateAction<"least_squares" | "visual_alignment">>;
   setMissionSummary: React.Dispatch<React.SetStateAction<any>>;
@@ -179,6 +82,8 @@ type AlignDxfPanelProps = {
   isPlanEditingMode?: boolean;
   /** Enters plan editing (drag/rotate) when off, or bakes the transform back into `lines` and returns to point-picking when on. */
   onToggleMovePlan?: () => void;
+  /** One-tap similarity fit (translate+rotate+scale) onto ≥2 lat/lon reference points. */
+  onFitToReferencePoints?: (refs: Array<{ lat: number; lon: number }>) => void;
 };
 
 export function AlignDxfPanel({
@@ -197,6 +102,8 @@ export function AlignDxfPanel({
   setRefPoints,
   csvGuidePointsActive = false,
   setCsvGuidePointsActive,
+  guideCsvFileName = null,
+  setGuideCsvFileName,
   alignmentMethod,
   setAlignmentMethod,
   setMissionSummary,
@@ -217,6 +124,7 @@ export function AlignDxfPanel({
   missionRunning = false,
   isPlanEditingMode = false,
   onToggleMovePlan,
+  onFitToReferencePoints,
 }: AlignDxfPanelProps) {
   const [isFixing, setIsFixing] = useState(false);
   const [isImportingCsv, setIsImportingCsv] = useState(false);
@@ -278,6 +186,7 @@ export function AlignDxfPanel({
     setVerifiedAlignmentRequest(null);
     setRefPoints([]);
     setCsvGuidePointsActive?.(false);
+    setGuideCsvFileName?.(null);
     setExtractedCorners?.(null);
     setVisualAlignmentItem?.(null);
     setVisualAlignmentAnchor?.(null);
@@ -305,7 +214,10 @@ export function AlignDxfPanel({
     setVerifiedAlignmentRequest(null);
     setRefPoints((prev) => {
       const next = prev.filter((_, i) => i !== idx);
-      if (next.length === 0) setCsvGuidePointsActive?.(false);
+      if (next.length === 0) {
+        setCsvGuidePointsActive?.(false);
+        setGuideCsvFileName?.(null);
+      }
       return next;
     });
   };
@@ -364,7 +276,8 @@ export function AlignDxfPanel({
       // prioritizes lat/lon (see MapViewNative's selectedPointsFC).
       setRefPoints(points.map((p) => ({ dxf_x: 0, dxf_y: 0, lat: p.latRaw, lon: p.lonRaw })));
       setCsvGuidePointsActive?.(true);
-      console.log(`[AlignDXF][CSV] Loaded ${points.length} reference point(s); tap-to-pick disabled.`);
+      setGuideCsvFileName?.(asset.name || "guide.csv");
+      console.log(`[AlignDXF][CSV] Loaded ${points.length} point(s) from ${asset.name}; tap-to-pick disabled.`);
 
       if (errors.length > 0) {
         Alert.alert(
@@ -375,8 +288,8 @@ export function AlignDxfPanel({
         );
       } else {
         Alert.alert(
-          "Reference Points Loaded",
-          `${points.length} point(s) shown on the map. Drag, scale, or rotate the plan to position it — these points are just a visual guide.`
+          "Guide CSV Loaded",
+          `${points.length} point(s) from ${asset.name}. Use Move / Rotate Plan, then Resize for edge handles.`
         );
       }
     } catch (err) {
@@ -579,6 +492,7 @@ export function AlignDxfPanel({
         // (the shift-then-settle bug). Do not rely on App's useEffect for this first paint.
         setRefPoints([]);
         setCsvGuidePointsActive?.(false);
+        setGuideCsvFileName?.(null);
         setExtractedCorners?.(null);
         setVisualAlignmentItem?.(null);
         setVisualAlignmentAnchor?.(null);
@@ -607,6 +521,7 @@ export function AlignDxfPanel({
     setVerifiedAlignmentRequest(null);
     setRefPoints([]);
     setCsvGuidePointsActive?.(false);
+    setGuideCsvFileName?.(null);
     setExtractedCorners?.(null);
     setVisualAlignmentItem?.(null);
     setVisualAlignmentAnchor?.(null);
@@ -789,49 +704,100 @@ export function AlignDxfPanel({
       <View style={{ gap: 12 }}>
       {alignmentMethod !== "visual_alignment" &&
       !(alignmentMethod === "least_squares" && extractedCorners) ? (
-        <Pressable
-          onPress={onToggleMovePlan}
-          disabled={isFixing || missionRunning}
-          style={{
-            height: 40,
-            borderRadius: 8,
-            borderWidth: 1,
-            borderColor: isPlanEditingMode ? FIELDS_COLORS.success : FIELDS_COLORS.panelBorder,
-            backgroundColor: isPlanEditingMode ? FIELDS_COLORS.successMuted : FIELDS_COLORS.surfaceSolid,
-            flexDirection: "row",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-            opacity: isFixing || missionRunning ? 0.5 : 1,
-          }}
-        >
-          {isPlanEditingMode ? (
-            <Check color={FIELDS_COLORS.success} size={15} />
-          ) : (
-            <Move color={FIELDS_COLORS.textMain} size={15} />
-          )}
-          <Text
+        <View style={{ gap: 8 }}>
+          <Pressable
+            onPress={onToggleMovePlan}
+            disabled={isFixing || missionRunning}
             style={{
-              color: isPlanEditingMode ? FIELDS_COLORS.success : FIELDS_COLORS.textMain,
-              fontSize: 13,
-              fontWeight: "700",
+              height: 40,
+              borderRadius: 8,
+              borderWidth: 1,
+              borderColor: isPlanEditingMode ? FIELDS_COLORS.success : FIELDS_COLORS.panelBorder,
+              backgroundColor: isPlanEditingMode ? FIELDS_COLORS.successMuted : FIELDS_COLORS.surfaceSolid,
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+              opacity: isFixing || missionRunning ? 0.5 : 1,
             }}
           >
-            {isPlanEditingMode
-              ? alignmentMethod === "least_squares"
-                ? "Use This Position"
-                : "Done — Lock Plan Position"
-              : "Move / Rotate Plan"}
-          </Text>
-        </Pressable>
+            {isPlanEditingMode ? (
+              <Check color={FIELDS_COLORS.success} size={15} />
+            ) : (
+              <Move color={FIELDS_COLORS.textMain} size={15} />
+            )}
+            <Text
+              style={{
+                color: isPlanEditingMode ? FIELDS_COLORS.success : FIELDS_COLORS.textMain,
+                fontSize: 13,
+                fontWeight: "700",
+              }}
+            >
+              {isPlanEditingMode
+                ? alignmentMethod === "least_squares"
+                  ? "Use This Position"
+                  : "Done — Lock Plan Position"
+                : "Move / Rotate Plan"}
+            </Text>
+          </Pressable>
+
+          {alignmentMethod === "least_squares" && onFitToReferencePoints ? (
+            <Pressable
+              onPress={() => {
+                const parsed = refPoints
+                  .map((p) => ({
+                    lat: parseFloat(String(p.lat).trim()),
+                    lon: parseFloat(String(p.lon).trim()),
+                  }))
+                  .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon));
+                onFitToReferencePoints(parsed);
+              }}
+              disabled={
+                isFixing ||
+                missionRunning ||
+                refPoints.filter(
+                  (p) =>
+                    Number.isFinite(parseFloat(String(p.lat).trim())) &&
+                    Number.isFinite(parseFloat(String(p.lon).trim()))
+                ).length < 2
+              }
+              style={{
+                height: 40,
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: FIELDS_COLORS.stepActive,
+                backgroundColor: FIELDS_COLORS.surfaceSolid,
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 6,
+                opacity:
+                  isFixing ||
+                  missionRunning ||
+                  refPoints.filter(
+                    (p) =>
+                      Number.isFinite(parseFloat(String(p.lat).trim())) &&
+                      Number.isFinite(parseFloat(String(p.lon).trim()))
+                  ).length < 2
+                    ? 0.45
+                    : 1,
+              }}
+            >
+              <Maximize2 color={FIELDS_COLORS.stepActive} size={15} />
+              <Text style={{ color: FIELDS_COLORS.stepActive, fontSize: 13, fontWeight: "700" }}>
+                Fit to Reference Points
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
       ) : null}
 
       {isPlanEditingMode ? (
         <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontStyle: "italic" }}>
           {alignmentMethod === "least_squares"
-            ? "Drag toward the yellow refs — a light magnet scales the plan to match; keep dragging to break free. Release while snug to show Edit for resize, then Done, then Use This Position."
+            ? "Drag or two-finger rotate the plan. Tap Resize for edge-midpoint handles (width/height). Done returns to move, then Use This Position."
             : refPoints.length > 0
-            ? "Drag or twist the plan on the map. Your reference points move with it, so they stay valid — tap-to-pick-point is paused until you lock it in."
+            ? "Drag or twist the plan on the map. Guide points stay fixed in GPS; tap-to-pick is paused until you lock it in."
             : "Drag or twist the plan into position on the map. Tap-to-pick-point is paused until you lock it in."}
         </Text>
       ) : null}
@@ -850,16 +816,20 @@ export function AlignDxfPanel({
             alignItems: "center",
             justifyContent: "center",
             gap: 6,
+            paddingHorizontal: 12,
             opacity: isImportingCsv || isFixing || missionRunning ? 0.5 : 1,
           }}
         >
           <Upload color={FIELDS_COLORS.stepActive} size={15} />
-          <Text style={{ color: FIELDS_COLORS.stepActive, fontSize: 13, fontWeight: "700" }}>
+          <Text
+            numberOfLines={1}
+            style={{ color: FIELDS_COLORS.stepActive, fontSize: 13, fontWeight: "700", flexShrink: 1 }}
+          >
             {isImportingCsv
               ? "Importing CSV..."
-              : csvGuidePointsActive
-              ? "Replace Reference Points CSV"
-              : "Upload Reference Points CSV"}
+              : guideCsvFileName
+                ? guideCsvFileName
+                : "Import guide CSV"}
           </Text>
         </Pressable>
       ) : null}

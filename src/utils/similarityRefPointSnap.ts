@@ -391,6 +391,146 @@ export function bestSecondarySimilarity(args: {
   };
 }
 
+/**
+ * One-tap global similarity fit: search all primary candidate↔ref pairs and pick the
+ * dual-fit with lowest residual (no proximity gate — works from any starting pose).
+ */
+export function computeBestSimilarityFit(args: {
+  candidates: LocalMeters[];
+  refs: SnapRefPoint[];
+  originDxfNorth?: number;
+  originDxfEast?: number;
+  preferScale?: number;
+  currentRotationDeg?: number;
+}): {
+  x: number;
+  y: number;
+  rotation: number;
+  scale: number;
+  residual: number;
+  primaryIndex: number;
+  secondaryIndex: number;
+} | null {
+  const {
+    candidates,
+    refs,
+    originDxfNorth = 0,
+    originDxfEast = 0,
+    preferScale = 1,
+    currentRotationDeg = 0,
+  } = args;
+  if (candidates.length < 2 || refs.length < 2) return null;
+
+  let best: {
+    x: number;
+    y: number;
+    rotation: number;
+    scale: number;
+    residual: number;
+    primaryIndex: number;
+    secondaryIndex: number;
+    score: number;
+  } | null = null;
+
+  for (let i = 0; i < candidates.length; i++) {
+    for (const primaryRef of refs) {
+      // Global search: do not reject by residual proximity — exact 2-pt solve is ~0 residual.
+      let localBest: {
+        secondaryIndex: number;
+        scale: number;
+        rotation: number;
+        x: number;
+        y: number;
+        residual: number;
+        score: number;
+      } | null = null;
+
+      for (let j = 0; j < candidates.length; j++) {
+        if (j === i) continue;
+        for (const secondaryRef of refs) {
+          if (sameRef(secondaryRef, primaryRef)) continue;
+          const solved = solveTwoPointSimilarity({
+            primaryCand: candidates[i],
+            secondaryCand: candidates[j],
+            primaryRef,
+            secondaryRef,
+            originDxfNorth,
+            originDxfEast,
+          });
+          if (!solved) continue;
+
+          // Score remaining refs by how well they land (mean residual over all refs
+          // matched to nearest placed candidate) — primary/secondary exact.
+          let sumRes = 0;
+          let count = 0;
+          for (const r of refs) {
+            let nearest = Infinity;
+            for (let k = 0; k < candidates.length; k++) {
+              const res = residualAfter(
+                candidates,
+                solved.x,
+                solved.y,
+                solved.rotationDeg,
+                solved.scale,
+                originDxfNorth,
+                originDxfEast,
+                k,
+                r
+              );
+              if (res < nearest) nearest = res;
+            }
+            if (Number.isFinite(nearest)) {
+              sumRes += nearest;
+              count += 1;
+            }
+          }
+          const residual = count > 0 ? sumRes / count : Infinity;
+          const angleDelta = Math.abs(
+            normalizeAngleDeltaDeg(solved.rotationDeg - currentRotationDeg)
+          );
+          const scaleDelta = Math.abs(Math.log(solved.scale / Math.max(preferScale, 1e-6)));
+          const score = residual + angleDelta * 0.01 + scaleDelta * 0.05;
+          if (!localBest || score < localBest.score) {
+            localBest = {
+              secondaryIndex: j,
+              scale: solved.scale,
+              rotation: solved.rotationDeg,
+              x: solved.x,
+              y: solved.y,
+              residual,
+              score,
+            };
+          }
+        }
+      }
+
+      if (localBest && (!best || localBest.score < best.score)) {
+        best = {
+          x: localBest.x,
+          y: localBest.y,
+          rotation: localBest.rotation,
+          scale: localBest.scale,
+          residual: localBest.residual,
+          primaryIndex: i,
+          secondaryIndex: localBest.secondaryIndex,
+          score: localBest.score,
+        };
+      }
+    }
+  }
+
+  if (!best) return null;
+  return {
+    x: best.x,
+    y: best.y,
+    rotation: best.rotation,
+    scale: best.scale,
+    residual: best.residual,
+    primaryIndex: best.primaryIndex,
+    secondaryIndex: best.secondaryIndex,
+  };
+}
+
 function freePrimaryDistToRef(args: {
   candidates: LocalMeters[];
   primaryIndex: number;

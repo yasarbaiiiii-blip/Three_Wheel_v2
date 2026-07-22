@@ -174,11 +174,13 @@ import {
 import {
   buildVisualAlignmentRefPoints,
   computeLineBoundingBox,
+  transformVisualDxfPoint,
 } from "./src/utils/visualAlignment";
 import {
-  similarityTransform,
   transformPlanLinesGeometry,
 } from "./src/utils/planLineTransform";
+import { computeShapeSnapPoints } from "./src/utils/planShapeSnapPoints";
+import { computeBestSimilarityFit } from "./src/utils/similarityRefPointSnap";
 import {
   anchorToAlignedRefPoints,
   pointMissionPointsToPlanLines,
@@ -745,15 +747,13 @@ export default function App() {
 
   function stopPlanEditing() {
     if (visualAlignmentItem && isPlanEditingMode) {
-      const { x, y, rotation = 0, scale = 1 } = visualAlignmentItem;
+      const item = visualAlignmentItem;
       // Shared bake: from/to + preview_points + entity.geometry (circles/arcs stay frame-consistent).
-      // PlacedItem.x = east, PlacedItem.y = north (see docs/coordinate-conventions.md).
-      const transformPt = similarityTransform({
-        rotationDeg: rotation,
-        scale,
-        offsetN: y,
-        offsetE: x,
-      });
+      // Supports non-uniform edge resize via scaleNorth/scaleEast on the sticker.
+      const transformPt = (north: number, east: number) => {
+        const t = transformVisualDxfPoint(north, east, item);
+        return { north: t.north, east: t.east };
+      };
       setLines((prev) => transformPlanLinesGeometry(prev, transformPt));
     }
     setIsPlanEditingMode(false);
@@ -782,8 +782,103 @@ export default function App() {
     setMultiPointPlacementPhase("resizing");
   }
 
+  /**
+   * One-tap similarity fit onto CSV/manual reference points (translate + rotate + scale).
+   * Uses the same pure solver as the magnet drag; enters Move Plan if needed.
+   */
+  function handleFitToReferencePoints(
+    refList: Array<{ lat: number; lon: number }>
+  ) {
+    if (lines.length === 0) {
+      Alert.alert("No plan", "Upload a DXF plan before fitting to reference points.");
+      return;
+    }
+    const validRefs = refList.filter(
+      (p) => Number.isFinite(p.lat) && Number.isFinite(p.lon)
+    );
+    if (validRefs.length < 2) {
+      Alert.alert(
+        "Need 2+ points",
+        "Import or enter at least two Latitude/Longitude reference points first."
+      );
+      return;
+    }
+
+    // Ensure sticker + projection anchor (same as Move / Rotate Plan).
+    let item = visualAlignmentItem?.id === "plan-editing-group" ? visualAlignmentItem : null;
+    let anchor = visualAlignmentAnchor;
+    if (!item || !isPlanEditingMode) {
+      const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(lines);
+      const stickerW = maxY - minY;
+      const stickerH = maxX - minX;
+      anchor = buildManipulationAnchorFromPreview();
+      setVisualAlignmentAnchor(anchor);
+      item = {
+        id: "plan-editing-group",
+        lines: sanitizePlanLines(lines),
+        x: 0,
+        y: 0,
+        rotation: 0,
+        scale: 1,
+        width: stickerW,
+        height: stickerH,
+      };
+      setVisualAlignmentItem(item);
+      setIsVisualAlignmentMode(false);
+      setMapViewEnabled(true);
+      setIsPlanEditingMode(true);
+    }
+    if (!anchor) {
+      anchor = buildManipulationAnchorFromPreview();
+      setVisualAlignmentAnchor(anchor);
+    }
+
+    const candidates = computeShapeSnapPoints(item.lines);
+    if (candidates.length < 2) {
+      Alert.alert("Fit failed", "Could not derive plan snap features from the geometry.");
+      return;
+    }
+
+    const snapRefs = validRefs.map((p) => ({
+      ...projectGpsToLocalMeters(p.lat, p.lon, anchor!.originLat, anchor!.originLon),
+      lat: p.lat,
+      lon: p.lon,
+    }));
+
+    const fit = computeBestSimilarityFit({
+      candidates,
+      refs: snapRefs,
+      originDxfNorth: anchor.originDxfNorth,
+      originDxfEast: anchor.originDxfEast,
+      preferScale: item.scale || 1,
+      currentRotationDeg: item.rotation || 0,
+    });
+    if (!fit) {
+      Alert.alert(
+        "Fit failed",
+        "Could not solve a scale/rotate/translate match for these points. Check that at least two refs correspond to plan corners or edge midpoints."
+      );
+      return;
+    }
+
+    setVisualAlignmentItem({
+      ...item,
+      x: fit.x,
+      y: fit.y,
+      rotation: fit.rotation,
+      scale: fit.scale,
+      scaleNorth: fit.scale,
+      scaleEast: fit.scale,
+    });
+    setMultiPointPlacementPhase("attached");
+    console.log(
+      `[AlignDXF][Fit] residual=${fit.residual.toFixed(3)}m scale=${fit.scale.toFixed(4)} rot=${fit.rotation.toFixed(2)}`
+    );
+  }
+
   function handlePlanResizeDone() {
-    setMultiPointPlacementPhase((phase) => (phase === "resizing" ? "attached" : phase));
+    // Leave Resize → Move mode (drag/rotate), not attach-gated chrome.
+    setMultiPointPlacementPhase((phase) => (phase === "resizing" ? "placing" : phase));
   }
 
   function handleConfirmVisualAlignment() {
@@ -3949,6 +4044,7 @@ export default function App() {
                             onPlanAttached={handlePlanAttached}
                             onPlanEditResize={handlePlanEditResize}
                             onPlanResizeDone={handlePlanResizeDone}
+                            onFitToReferencePoints={handleFitToReferencePoints}
                             extractedCorners={extractedCorners}
                             setExtractedCorners={setExtractedCorners}
                             onNav={(p) => setPage(p)}
@@ -5568,6 +5664,7 @@ function SectionPages(props: {
   onPlanAttached?: (info: { x: number; y: number; rotation: number; scale: number }) => void;
   onPlanEditResize?: () => void;
   onPlanResizeDone?: () => void;
+  onFitToReferencePoints?: (refs: Array<{ lat: number; lon: number }>) => void;
   extractedCorners?: { dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>>;
   isFloatingEStopEnabled: boolean;
@@ -7585,17 +7682,20 @@ function PlanPreview({
             onPlanAttached={onPlanAttached}
             placedItems={isPlacedItemActive && visualAlignmentItem ? [visualAlignmentItem] : []}
             selectedItemIds={
-              // Keep selection during attached/resizing so sticker stays active; freeze via phase.
-              isEditablePlacedItemMode && visualSelected && placedItemId
+              // Plan edit / Multi-Point Fit: ALWAYS keep the sticker selected.
+              // Map presses previously cleared selection and disabled pan/resize gestures
+              // while the RESIZING chrome still looked active.
+              isEditablePlacedItemMode && placedItemId
                 ? [placedItemId]
                 : boundaryMode && boundarySelected
                 ? ["boundary"]
                 : []
             }
             multiTouchMode={
+              // Resize: pan only (edge-handle scale). Move: pan + two-finger rotate.
               multiPointPlacementPhase === "resizing"
                 ? "scale"
-                : isEditablePlacedItemMode
+                : isEditablePlacedItemMode || isPlanEditingMode
                 ? "rotate"
                 : "both"
             }
@@ -7605,6 +7705,12 @@ function PlanPreview({
                 return;
               }
               if (!isEditablePlacedItemMode || !placedItemId) return;
+              // Never allow accidental deselect while Move/Edit Plan is active —
+              // resize + drag gestures require selectedItemIds to be non-empty.
+              if (isPlanEditingMode) {
+                setVisualSelected(true);
+                return;
+              }
               setVisualSelected(ids.includes(placedItemId));
             }}
             onUpdatePlacedItem={(id, updates) => {

@@ -30,6 +30,9 @@ export interface PlacedItem {
   y: number;
   rotation: number;
   scale: number;
+  /** Optional axis scales for non-uniform edge resize (fallback: `scale`). */
+  scaleNorth?: number;
+  scaleEast?: number;
   groupId?: string;
   width: number;
   height: number;
