@@ -2062,14 +2062,9 @@ export function MapViewNative(props: MapViewProps) {
       // Pick the closest point *on plan strokes* (vertex OR mid-segment). Never
       // prefer corners over a nearer mid-line hit. Outside / hollow = ignore.
       if (onSelectPoint) {
-        let geometryPick: { x: number; y: number; dist: number } | null = null;
-
-        const consider = (x: number, y: number, dist: number) => {
-          if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(dist)) return;
-          if (dist > hitRadiusM) return;
-          if (!geometryPick || dist < geometryPick.dist) {
-            geometryPick = { x, y, dist };
-          }
+        // Object wrapper so closest-hit updates are visible to TS (not narrowed via a closure).
+        const geometryPick: { current: { x: number; y: number; dist: number } | null } = {
+          current: null,
         };
 
         for (const line of lines) {
@@ -2081,6 +2076,15 @@ export function MapViewNative(props: MapViewProps) {
           ) {
             continue;
           }
+
+          const tryHit = (x: number, y: number, dist: number) => {
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(dist)) return;
+            if (dist > hitRadiusM) return;
+            const prev = geometryPick.current;
+            if (!prev || dist < prev.dist) {
+              geometryPick.current = { x, y, dist };
+            }
+          };
 
           // Closest point on each stroke (includes endpoints and anywhere along the line).
           if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
@@ -2094,7 +2098,7 @@ export function MapViewNative(props: MapViewProps) {
                 pts[i + 1].north,
                 pts[i + 1].east
               );
-              consider(hit.x, hit.y, hit.dist);
+              tryHit(hit.x, hit.y, hit.dist);
             }
           } else if (line.from && line.to) {
             const hit = nearestOnSegment(
@@ -2105,17 +2109,17 @@ export function MapViewNative(props: MapViewProps) {
               line.to.x,
               line.to.y
             );
-            consider(hit.x, hit.y, hit.dist);
+            tryHit(hit.x, hit.y, hit.dist);
           } else {
             if (line.from) {
-              consider(
+              tryHit(
                 line.from.x,
                 line.from.y,
                 Math.hypot(line.from.x - clickN, line.from.y - clickE)
               );
             }
             if (line.to) {
-              consider(
+              tryHit(
                 line.to.x,
                 line.to.y,
                 Math.hypot(line.to.x - clickN, line.to.y - clickE)
@@ -2123,6 +2127,8 @@ export function MapViewNative(props: MapViewProps) {
             }
           }
         }
+
+        const picked = geometryPick.current;
 
         // Tight deselect: only when the finger is on a yellow marker.
         let bestSel: { x: number; y: number; dist: number } | null = null;
@@ -2140,17 +2146,17 @@ export function MapViewNative(props: MapViewProps) {
         // a different geometry target, or no new geometry at all).
         if (bestSel) {
           const aimingAtSameMarker =
-            !geometryPick ||
-            Math.hypot(geometryPick.x - bestSel.x, geometryPick.y - bestSel.y) < 0.35 ||
-            bestSel.dist <= geometryPick.dist;
+            !picked ||
+            Math.hypot(picked.x - bestSel.x, picked.y - bestSel.y) < 0.35 ||
+            bestSel.dist <= picked.dist;
           if (aimingAtSameMarker) {
             onSelectPoint({ x: bestSel.x, y: bestSel.y });
             return;
           }
         }
 
-        if (geometryPick) {
-          onSelectPoint({ x: geometryPick.x, y: geometryPick.y });
+        if (picked) {
+          onSelectPoint({ x: picked.x, y: picked.y });
           return;
         }
         // No geometry nearby — ignore completely (no free-place, no line select).
