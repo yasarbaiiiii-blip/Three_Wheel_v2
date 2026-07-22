@@ -88,6 +88,35 @@ export function getEdgeHandleWorldPoints(
   });
 }
 
+/**
+ * True if `world` lies inside the plan OBB (optionally expanded by `padM` metres
+ * in design space after inverse-transform). Used for tap-to-select / tap-outside-deselect.
+ */
+export function isWorldPointInPlanObb(
+  world: WorldPoint,
+  pose: PlanStickerPose,
+  padM = 0
+): boolean {
+  const halfN = (Number.isFinite(pose.height) ? pose.height : 0) / 2;
+  const halfE = (Number.isFinite(pose.width) ? pose.width : 0) / 2;
+  if (!(halfN > 0) || !(halfE > 0)) return false;
+  const cN = Number.isFinite(pose.designCenterNorth) ? (pose.designCenterNorth as number) : 0;
+  const cE = Number.isFinite(pose.designCenterEast) ? (pose.designCenterEast as number) : 0;
+  const { designNorth, designEast } = worldToDesignPoint(world, pose);
+  const pad = Number.isFinite(padM) && padM > 0 ? padM : 0;
+  // pad is in world metres ≈ design metres near scale≈1; scale by inverse axis scale for fairness.
+  const sN = effectiveScaleNorth(pose);
+  const sE = effectiveScaleEast(pose);
+  const padN = sN > 1e-12 ? pad / sN : pad;
+  const padE = sE > 1e-12 ? pad / sE : pad;
+  return (
+    designNorth >= cN - halfN - padN &&
+    designNorth <= cN + halfN + padN &&
+    designEast >= cE - halfE - padE &&
+    designEast <= cE + halfE + padE
+  );
+}
+
 export type HandleId =
   | "nw"
   | "n"
@@ -123,17 +152,17 @@ const OPPOSITE: Record<HandleId, HandleId> = {
 export const MIN_RESIZE_SCALE = 0.01;
 export const MAX_RESIZE_SCALE = 100;
 /** Baseline hit radius in local metres (map space). Prefer {@link handleHitRadiusM} at runtime. */
-export const HANDLE_HIT_RADIUS_M = 2.5;
+export const HANDLE_HIT_RADIUS_M = 3.5;
 
 /**
  * Finger-friendly handle hit radius in world metres.
- * Combines a screen-pixel target (mpp × px) with a fraction of the OBB so large
- * plans / zoomed-out cameras still register, without swallowing the whole map.
+ * Combines a large screen-pixel target (mpp × px) with a fraction of the OBB so
+ * touch resize stays easy at field zoom without swallowing the whole map.
  */
 export function handleHitRadiusM(
   metersPerPixel: number,
   pose: Pick<PlanStickerPose, "width" | "height" | "scale" | "scaleNorth" | "scaleEast">,
-  pixelTarget = 40
+  pixelTarget = 56
 ): number {
   const mpp =
     Number.isFinite(metersPerPixel) && metersPerPixel > 0 ? metersPerPixel : 0.05;
@@ -145,8 +174,22 @@ export function handleHitRadiusM(
     Number.isFinite(halfN) && halfN > 0 ? halfN : Infinity,
     Number.isFinite(halfE) && halfE > 0 ? halfE : Infinity
   );
-  const fromSpan = Number.isFinite(span) ? Math.min(span * 0.35, 30) : 0;
+  // Generous but bounded: ~half of the smaller half-span helps large fields.
+  const fromSpan = Number.isFinite(span) ? Math.min(span * 0.45, 22) : 0;
   return Math.max(HANDLE_HIT_RADIUS_M, mpp * pixelTarget, fromSpan);
+}
+
+/**
+ * Slightly larger capture radius for initial grab only (still not whole-map).
+ * Callers must anchor resize deltas at the handle world point so a near-miss
+ * grab does not jump scale toward the finger.
+ */
+export function handleGrabRadiusM(
+  metersPerPixel: number,
+  pose: Pick<PlanStickerPose, "width" | "height" | "scale" | "scaleNorth" | "scaleEast">
+): number {
+  const hit = handleHitRadiusM(metersPerPixel, pose, 56);
+  return Math.max(hit * 1.35, hit + 1.25);
 }
 
 export function designOffsetToWorld(
@@ -212,30 +255,76 @@ export function getObbResizeHandles(pose: PlanStickerPose): ResizeHandle[] {
   }));
 }
 
+/**
+ * True for primary design/marking geometry used for OBB / resize handles.
+ * Extension run-ups, transit, and virtual boundary expand the visual footprint
+ * but must not move the resize box or edge handles (they transform with the sticker).
+ */
+export function isPrimaryObbLine(line: {
+  layer?: string;
+  id?: string | number;
+}): boolean {
+  const layer = line.layer;
+  if (layer === "extension" || layer === "transit" || layer === "virtual_boundary") {
+    return false;
+  }
+  const id = String(line.id ?? "");
+  if (
+    id.startsWith("ext-pre-") ||
+    id.startsWith("ext-aft-") ||
+    id.startsWith("runtime-transit-") ||
+    id.startsWith("transit-")
+  ) {
+    return false;
+  }
+  return true;
+}
+
 /** Design-space OBB centre + extents from plan lines (legacy minX=north, minY=east). */
-export function designObbFromLines(lines: { from?: { x?: number; y?: number }; to?: { x?: number; y?: number } }[]): {
+export function designObbFromLines(
+  lines: {
+    from?: { x?: number; y?: number };
+    to?: { x?: number; y?: number };
+    layer?: string;
+    id?: string | number;
+    entity?: { preview_points?: Array<{ north: number; east: number }> };
+  }[]
+): {
   designCenterNorth: number;
   designCenterEast: number;
   width: number;
   height: number;
 } {
+  // Prefer primary geometry so enabling extensions does not inflate the resize box.
+  const primary = lines.filter(isPrimaryObbLine);
+  const use = primary.length > 0 ? primary : lines;
+
   let minN = Infinity;
   let maxN = -Infinity;
   let minE = Infinity;
   let maxE = -Infinity;
-  for (const l of lines) {
+
+  const include = (n: number, e: number) => {
+    if (Number.isFinite(n)) {
+      if (n < minN) minN = n;
+      if (n > maxN) maxN = n;
+    }
+    if (Number.isFinite(e)) {
+      if (e < minE) minE = e;
+      if (e > maxE) maxE = e;
+    }
+  };
+
+  for (const l of use) {
+    const preview = l.entity?.preview_points;
+    if (preview && preview.length > 0) {
+      for (const pt of preview) {
+        include(pt.north, pt.east);
+      }
+    }
     for (const p of [l.from, l.to]) {
       if (!p) continue;
-      const n = p.x;
-      const e = p.y;
-      if (typeof n === "number" && Number.isFinite(n)) {
-        if (n < minN) minN = n;
-        if (n > maxN) maxN = n;
-      }
-      if (typeof e === "number" && Number.isFinite(e)) {
-        if (e < minE) minE = e;
-        if (e > maxE) maxE = e;
-      }
+      include(p.x as number, p.y as number);
     }
   }
   if (!Number.isFinite(minN) || !Number.isFinite(minE)) {

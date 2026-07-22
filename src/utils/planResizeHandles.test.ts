@@ -8,6 +8,7 @@ import {
   getEdgeHandleWorldPoints,
   getEdgeResizeHandles,
   getObbResizeHandles,
+  isWorldPointInPlanObb,
   getRotateAffordanceWorldPoints,
   handleHitRadiusM,
   rotateAboutDesignCenter,
@@ -90,6 +91,22 @@ describe("planResizeHandles", () => {
     expect(obb.designCenterEast).toBeCloseTo(30, 6);
     expect(obb.height).toBeCloseTo(20, 6); // north span
     expect(obb.width).toBeCloseTo(20, 6); // east span
+  });
+
+  it("designObbFromLines ignores extension legs so handles stay on primary plan", () => {
+    const obb = designObbFromLines([
+      { id: "mark-1", layer: "marking", from: { x: 0, y: 0 }, to: { x: 10, y: 10 } },
+      {
+        id: "ext-pre-1",
+        layer: "extension",
+        from: { x: -50, y: -50 },
+        to: { x: 0, y: 0 },
+      },
+    ]);
+    expect(obb.designCenterNorth).toBeCloseTo(5, 6);
+    expect(obb.designCenterEast).toBeCloseTo(5, 6);
+    expect(obb.height).toBeCloseTo(10, 6);
+    expect(obb.width).toBeCloseTo(10, 6);
   });
 
   it("handles sit on absolute DXF bbox when designCenter is set", () => {
@@ -197,5 +214,13 @@ describe("planResizeHandles", () => {
     expect(edgeHandleArrowBearingDeg("e", 0)).toBe(90);
     expect(edgeHandleArrowBearingDeg("n", 45)).toBe(45);
     expect(edgeHandleArrowBearingDeg("w", 90)).toBe(0); // 90+270 = 360 → 0
+  });
+
+  it("isWorldPointInPlanObb selects inside and rejects outside", () => {
+    // pose: 10×10 OBB centred at 0 → half extents 5
+    expect(isWorldPointInPlanObb({ north: 0, east: 0 }, pose)).toBe(true);
+    expect(isWorldPointInPlanObb({ north: 4.9, east: 4.9 }, pose)).toBe(true);
+    expect(isWorldPointInPlanObb({ north: 6, east: 0 }, pose)).toBe(false);
+    expect(isWorldPointInPlanObb({ north: 6, east: 0 }, pose, 1.5)).toBe(true);
   });
 });

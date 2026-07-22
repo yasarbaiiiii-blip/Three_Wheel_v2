@@ -721,7 +721,19 @@ export default function App() {
   // Plan Editing: lets user drag/scale/rotate the plan from the 4th dropdown
   function startPlanEditing() {
     if (lines.length === 0) return;
-    const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(lines);
+    // Sticker still carries ALL lines (extensions transform with the plan), but OBB
+    // width/height use primary geometry only so resize handles stay on the field —
+    // not inflated by PRE/AFT run-ups when extensions are enabled.
+    const primary = lines.filter(
+      (l) =>
+        l.layer !== "extension" &&
+        l.layer !== "transit" &&
+        l.layer !== "virtual_boundary" &&
+        !String(l.id ?? "").startsWith("ext-pre-") &&
+        !String(l.id ?? "").startsWith("ext-aft-")
+    );
+    const bboxSource = primary.length > 0 ? primary : lines;
+    const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(bboxSource);
     // width = east span, height = north span (matches OBB halfE/halfN).
     const stickerW = maxY - minY;
     const stickerH = maxX - minX;
@@ -779,6 +791,7 @@ export default function App() {
 
   function handlePlanEditResize() {
     if (!isPlanEditingMode || !visualAlignmentItem) return;
+    // Resize is free axis scale — no magnet lock (lock is for drag/rotate only).
     setMultiPointPlacementPhase("resizing");
   }
 
@@ -808,14 +821,24 @@ export default function App() {
     let item = visualAlignmentItem?.id === "plan-editing-group" ? visualAlignmentItem : null;
     let anchor = visualAlignmentAnchor;
     if (!item || !isPlanEditingMode) {
-      const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(lines);
+      const all = sanitizePlanLines(lines);
+      const primary = all.filter(
+        (l) =>
+          l.layer !== "extension" &&
+          l.layer !== "transit" &&
+          l.layer !== "virtual_boundary" &&
+          !String(l.id ?? "").startsWith("ext-pre-") &&
+          !String(l.id ?? "").startsWith("ext-aft-")
+      );
+      const bboxSource = primary.length > 0 ? primary : all;
+      const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(bboxSource);
       const stickerW = maxY - minY;
       const stickerH = maxX - minX;
       anchor = buildManipulationAnchorFromPreview();
       setVisualAlignmentAnchor(anchor);
       item = {
         id: "plan-editing-group",
-        lines: sanitizePlanLines(lines),
+        lines: all,
         x: 0,
         y: 0,
         rotation: 0,
@@ -6946,11 +6969,20 @@ function PlanPreview({
   const isPlacedItemActive = isEditablePlacedItemMode || isVisualAlignmentPreview;
   const placedItemId = visualAlignmentItem?.id ?? null;
 
+  // Entering move/edit or creating a sticker selects the plan once.
+  // User can still tap outside to deselect and tap the plan to reselect.
   useEffect(() => {
     if (visualAlignmentItem && (isVisualAlignmentMode || isPlanEditingMode)) {
       setVisualSelected(true);
     }
   }, [visualAlignmentItem, isVisualAlignmentMode, isPlanEditingMode]);
+
+  // Entering Resize re-selects so edge handles are immediately interactive.
+  useEffect(() => {
+    if (isPlanEditingMode && multiPointPlacementPhase === "resizing") {
+      setVisualSelected(true);
+    }
+  }, [isPlanEditingMode, multiPointPlacementPhase]);
 
   useEffect(() => {
     if (boundaryMode) {
@@ -7682,10 +7714,8 @@ function PlanPreview({
             onPlanAttached={onPlanAttached}
             placedItems={isPlacedItemActive && visualAlignmentItem ? [visualAlignmentItem] : []}
             selectedItemIds={
-              // Plan edit / Multi-Point Fit: ALWAYS keep the sticker selected.
-              // Map presses previously cleared selection and disabled pan/resize gestures
-              // while the RESIZING chrome still looked active.
-              isEditablePlacedItemMode && placedItemId
+              // Tap plan → select; tap outside → deselect (gestures only when selected).
+              isEditablePlacedItemMode && visualSelected && placedItemId
                 ? [placedItemId]
                 : boundaryMode && boundarySelected
                 ? ["boundary"]
@@ -7705,12 +7735,6 @@ function PlanPreview({
                 return;
               }
               if (!isEditablePlacedItemMode || !placedItemId) return;
-              // Never allow accidental deselect while Move/Edit Plan is active —
-              // resize + drag gestures require selectedItemIds to be non-empty.
-              if (isPlanEditingMode) {
-                setVisualSelected(true);
-                return;
-              }
               setVisualSelected(ids.includes(placedItemId));
             }}
             onUpdatePlacedItem={(id, updates) => {
