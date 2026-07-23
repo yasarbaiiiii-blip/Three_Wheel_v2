@@ -710,55 +710,114 @@ export function MapViewNative(props: MapViewProps) {
     return featureCollection(features);
   }, [lines, originSig, mode]);
 
-  // ── Rover start (Fields): pin + "FROM" + direction arrow below the path.
-  // Arrow rotates with first-segment bearing so it shows where the rover will go.
+  // ── Rover start pin: exact first vertex of the start travel segment.
+  // Uses the same GPS projection as the drawn plan stroke so the red pin sits on
+  // the real path start (not a different line and not a screen-space offset).
   const startDirectionFC = useMemo((): GeoJSON.FeatureCollection => {
-    if (mode === "templates" || !projectionOrigin || lines.length === 0) {
-      return featureCollection([]);
+    if (!projectionOrigin) return featureCollection([]);
+
+    // ── Move / Multi-Point sticker: start line in sticker design, transformed to world ──
+    if (mode === "templates") {
+      const sticker = placedItems?.find(
+        (it) => it.id === "plan-editing-group" || it.id === "visual-alignment-group"
+      );
+      if (!sticker?.lines?.length) return featureCollection([]);
+
+      const startLine = getPlanStartTravelLine(sticker.lines);
+      if (!startLine) return featureCollection([]);
+
+      const renderPts = getPlanLineRenderPoints(startLine, true);
+      if (renderPts.length < 2 && !(startLine.from && startLine.to)) {
+        return featureCollection([]);
+      }
+      const n0 = renderPts[0]?.north ?? startLine.from!.x;
+      const e0 = renderPts[0]?.east ?? startLine.from!.y;
+      const n1 = renderPts[1]?.north ?? startLine.to!.x;
+      const e1 = renderPts[1]?.east ?? startLine.to!.y;
+
+      // During drag, stick to the live preview polyline that matches this start line
+      // index so the pin tracks the finger-moved plan.
+      const startLineIdx = sticker.lines.findIndex((l) => l.id === startLine.id);
+      const liveLines = (previewItemsGeo ?? placedItemsGeo)?.lines?.features ?? [];
+      const liveFeat =
+        startLineIdx >= 0 &&
+        liveLines[startLineIdx]?.geometry?.type === "LineString" &&
+        (liveLines[startLineIdx].geometry as GeoJSON.LineString).coordinates.length >= 2
+          ? (liveLines[startLineIdx].geometry as GeoJSON.LineString)
+          : null;
+
+      let startCoord: Coord;
+      let bearing: number;
+      let planNorth: number;
+      let planEast: number;
+
+      if (liveFeat) {
+        const coords = liveFeat.coordinates as Coord[];
+        startCoord = coords[0];
+        const [lon1, lat1] = coords[0];
+        const [lon2, lat2] = coords[1];
+        const dLat = lat2 - lat1;
+        const dLon = (lon2 - lon1) * Math.cos((lat1 * Math.PI) / 180);
+        bearing = (Math.atan2(dLon, dLat) * 180) / Math.PI;
+        // World metres under current sticker pose (committed or last bake mid-drag).
+        const w0 = transformVisualDxfPoint(n0, e0, sticker);
+        planNorth = w0.north;
+        planEast = w0.east;
+      } else {
+        const w0 = transformVisualDxfPoint(n0, e0, sticker);
+        const w1 = transformVisualDxfPoint(n1, e1, sticker);
+        planNorth = w0.north;
+        planEast = w0.east;
+        const startGps = projectPlanNorthEastToGps(w0.north, w0.east, projectionOrigin);
+        const tipGps = projectPlanNorthEastToGps(w1.north, w1.east, projectionOrigin);
+        startCoord = toMapboxCoord(startGps.lat, startGps.lon);
+        const dLat = tipGps.lat - startGps.lat;
+        const dLon =
+          (tipGps.lon - startGps.lon) * Math.cos((startGps.lat * Math.PI) / 180);
+        bearing = (Math.atan2(dLon, dLat) * 180) / Math.PI;
+      }
+
+      return featureCollection([
+        pointFeature(startCoord, {
+          kind: "start-origin",
+          bearing,
+          label: "FROM",
+          planNorth,
+          planEast,
+        }),
+      ]);
     }
 
+    // ── Fields: identical first vertex as planLinesFC stroke ──
+    if (lines.length === 0) return featureCollection([]);
     const startLine = getPlanStartTravelLine(lines);
-    const startPt = getPlanStartPoint(lines);
-    if (!startLine || !startPt) return featureCollection([]);
+    if (!startLine) return featureCollection([]);
 
-    let originNorth = startPt.north;
-    let originEast = startPt.east;
-    let bearing = 0;
+    const segs = projectPlanLineToGpsSegments(startLine, projectionOrigin);
+    if (segs.length < 2) return featureCollection([]);
+
+    const [lat1, lon1] = segs[0];
+    const [lat2, lon2] = segs[1];
+    const startCoord = toMapboxCoord(lat1, lon1);
+
+    const dLat = lat2 - lat1;
+    const dLon = (lon2 - lon1) * Math.cos((lat1 * Math.PI) / 180);
+    const bearing = (Math.atan2(dLon, dLat) * 180) / Math.PI;
+
     const renderPts = getPlanLineRenderPoints(startLine, true);
-    if (renderPts.length >= 2) {
-      const a = renderPts[0];
-      const b = renderPts[1];
-      originNorth = a.north;
-      originEast = a.east;
-      const dn = b.north - a.north;
-      const de = b.east - a.east;
-      if (Math.hypot(dn, de) > 1e-6) {
-        // Bearing CW from North in plan N/E frame (n=north, e=east).
-        bearing = (Math.atan2(de, dn) * 180) / Math.PI;
-      }
-    } else if (startLine.from && startLine.to) {
-      originNorth = startLine.from.x;
-      originEast = startLine.from.y;
-      const dn = startLine.to.x - startLine.from.x;
-      const de = startLine.to.y - startLine.from.y;
-      if (Math.hypot(dn, de) > 1e-6) {
-        bearing = (Math.atan2(de, dn) * 180) / Math.PI;
-      }
-    }
-
-    const startGps = projectPlanNorthEastToGps(originNorth, originEast, projectionOrigin);
-    const startCoord = toMapboxCoord(startGps.lat, startGps.lon);
+    const planNorth = renderPts[0]?.north ?? startLine.from?.x ?? 0;
+    const planEast = renderPts[0]?.east ?? startLine.from?.y ?? 0;
 
     return featureCollection([
       pointFeature(startCoord, {
         kind: "start-origin",
         bearing,
         label: "FROM",
-        planNorth: originNorth,
-        planEast: originEast,
+        planNorth,
+        planEast,
       }),
     ]);
-  }, [lines, originSig, mode, projectionOrigin]);
+  }, [lines, originSig, mode, projectionOrigin, placedItems, placedItemsGeo, previewItemsGeo]);
 
   // ── Multi-Point pickable vertex anchors (shown only while guide-point mode is on) ──
   // Clickable dots on path endpoints / corners so operators do not need a perfect path hit.
@@ -887,13 +946,9 @@ export function MapViewNative(props: MapViewProps) {
     };
   }, [mode, originSig, linesToHighlight]);
 
-  // ── Reference points ──
+  // ── Reference points (labels only — no green map dots; multi-point uses gold pins) ──
   const refPointsFC = useMemo(() => {
     if (!alignedRefPoints || alignedRefPoints.length === 0) return featureCollection([]);
-    console.log(
-      `[AlignDXF][Map] Verified ref-point marker(s) (blue "Ref #" dots) at:`,
-      JSON.stringify(alignedRefPoints.map((p) => ({ lat: p.lat, lon: p.lon })))
-    );
     const features = alignedRefPoints.map((p, i) =>
       pointFeature(toMapboxCoord(p.lat, p.lon), {
         label: `Ref #${i + 1}`,
@@ -2830,49 +2885,44 @@ export function MapViewNative(props: MapViewProps) {
           />
         </ShapeSource>
 
-        {/* ── Rover start: pin + FROM text + travel arrow below (4px under the path) ── */}
+        {/* ── Rover start: red pin ON the true start vertex; FROM + ▲ label slightly below ── */}
         <ShapeSource
           id="plan-start-direction"
           shape={startDirectionFC}
           onPress={onSelectPoint ? handleMultiPointAnchorPress : undefined}
           hitbox={{ width: 72, height: 72 }}
         >
+          {/* Hit + pin sit at the exact start coordinate (no translate offset) */}
           <CircleLayer
             id="plan-start-hit"
             filter={["==", ["get", "kind"], "start-origin"]}
             style={{
-              circleRadius: 26,
+              circleRadius: 22,
               circleColor: "#f97316",
               circleOpacity: 0.001,
-              circleTranslate: [0, 4],
-              circleTranslateAnchor: "viewport",
             }}
           />
           <CircleLayer
             id="plan-start-origin-halo"
             filter={["==", ["get", "kind"], "start-origin"]}
             style={{
-              circleRadius: 12,
+              circleRadius: 11,
               circleColor: "#f97316",
-              circleOpacity: 0.2,
-              circleTranslate: [0, 4],
-              circleTranslateAnchor: "viewport",
+              circleOpacity: 0.22,
             }}
           />
           <CircleLayer
             id="plan-start-origin-core"
             filter={["==", ["get", "kind"], "start-origin"]}
             style={{
-              circleRadius: 6,
+              circleRadius: 5.5,
               circleColor: "#ea580c",
               circleStrokeColor: "#ffffff",
               circleStrokeWidth: 2.5,
               circleOpacity: 1,
-              circleTranslate: [0, 4],
-              circleTranslateAnchor: "viewport",
             }}
           />
-          {/* FROM under the pin; arrow sits next to the M (same line) */}
+          {/* Labels offset below the pin so the red dot stays on the path start */}
           <SymbolLayer
             id="plan-start-origin-label"
             filter={["==", ["get", "kind"], "start-origin"]}
@@ -2883,16 +2933,12 @@ export function MapViewNative(props: MapViewProps) {
               textHaloColor: "#ffffff",
               textHaloWidth: 1.75,
               textFont: ["DIN Pro Bold"],
-              // Shift left slightly so "FROM  ▲" reads centered under the pin
-              textOffset: [-0.55, 1.4],
+              textOffset: [-0.55, 1.35],
               textAnchor: "top",
               textAllowOverlap: true,
               textIgnorePlacement: true,
-              textTranslate: [0, 4],
-              textTranslateAnchor: "viewport",
             }}
           />
-          {/* Larger ▲ just after the M — same height band as FROM, points travel direction */}
           <SymbolLayer
             id="plan-start-arrow"
             filter={["==", ["get", "kind"], "start-origin"]}
@@ -2902,15 +2948,12 @@ export function MapViewNative(props: MapViewProps) {
               textColor: "#ea580c",
               textHaloColor: "#ffffff",
               textHaloWidth: 1.5,
-              // Next to M with a little space; y matches FROM so they share a line
-              textOffset: [1.55, 1.4],
+              textOffset: [1.55, 1.35],
               textAnchor: "top",
               textAllowOverlap: true,
               textIgnorePlacement: true,
               textRotate: ["get", "bearing"],
               textRotationAlignment: "map",
-              textTranslate: [0, 4],
-              textTranslateAnchor: "viewport",
             }}
           />
         </ShapeSource>
@@ -2960,19 +3003,16 @@ export function MapViewNative(props: MapViewProps) {
           />
         </ShapeSource>
 
-        {/* ── Reference points (+ optional labels) ── */}
+        {/* ── Reference point labels only (green dots removed — cluttered Fields map) ── */}
         <ShapeSource id="ref-points" shape={refPointsFC}>
+          {/* Invisible zero-radius layer keeps source valid without painting dots */}
           <CircleLayer
             id="ref-points-layer"
             style={{
-              circleRadius: 3.5,
-              circleColor: "#10b981",
-              circleStrokeColor: "#ffffff",
-              circleStrokeWidth: 1.5,
+              circleRadius: 0,
+              circleOpacity: 0,
             }}
           />
-          {/* Labels always mounted; visibility toggled via opacity to keep
-              ShapeSource children strongly typed and avoid remounts. */}
           <SymbolLayer
             id="ref-points-labels"
             style={{
@@ -3131,16 +3171,13 @@ export function MapViewNative(props: MapViewProps) {
           />
         </ShapeSource>
 
-        {/* ── Virtual bounding box corners and dimension labels ── */}
+        {/* ── Virtual bounding box: labels only (corner dots removed) ── */}
         <ShapeSource id="virtual-box-corners" shape={virtualBoxCornersFC}>
           <CircleLayer
             id="virtual-box-corners-layer"
             style={{
-              circleRadius: 5,
-              circleColor: "#06b6d4",
-              circleStrokeColor: "#ffffff",
-              circleStrokeWidth: 1.5,
-              circleOpacity: 0.95,
+              circleRadius: 0,
+              circleOpacity: 0,
             }}
           />
         </ShapeSource>

@@ -8060,55 +8060,44 @@ function PlanPreview({
               return null;
             })()}
 
-            {/* ── Aligned Reference Points with GPS labels ── */}
-            {alignedRefPoints?.map((pt, i) => {
-              const rawSX = pt.dxf_y * viewport.zoom + viewport.panX;
-              const rawSY = -pt.dxf_x * viewport.zoom + viewport.panY;
-              let sx = rawSX;
-              let sy = rawSY;
-              if (rotation !== 0 && layoutSize.width > 0 && layoutSize.height > 0) {
-                const rotated = rotatePoint(rawSX, rawSY, layoutSize.width / 2, layoutSize.height / 2, rotation);
-                sx = rotated.x;
-                sy = rotated.y;
-              }
-              return (
-                <G key={`arp-${i}`}>
-                  <Circle
-                    cx={sx}
-                    cy={sy}
-                    r={8}
-                    fill="none"
-                    stroke="#10b981"
-                    strokeWidth={2}
-                    strokeDasharray="3 2"
-                  />
-                  {showRefPointLabels && activeRefPointLabelIndex === i && (
-                    <>
-                      <SvgText
-                        x={sx + 12}
-                        y={sy - 10}
-                        fontSize={10}
-                        fill="#ffffff"
-                        stroke="#ffffff"
-                        strokeWidth={3}
-                        fontWeight="700"
-                      >
-                        {`${pt.lat.toFixed(6)}, ${pt.lon.toFixed(6)}`}
-                      </SvgText>
-                      <SvgText
-                        x={sx + 12}
-                        y={sy - 10}
-                        fontSize={10}
-                        fill="#10b981"
-                        fontWeight="700"
-                      >
-                        {`${pt.lat.toFixed(6)}, ${pt.lon.toFixed(6)}`}
-                      </SvgText>
-                    </>
-                  )}
-                </G>
-              );
-            })}
+            {/* ── Aligned ref labels only (green map dots removed) ── */}
+            {showRefPointLabels &&
+              alignedRefPoints?.map((pt, i) => {
+                if (activeRefPointLabelIndex !== i) return null;
+                const rawSX = pt.dxf_y * viewport.zoom + viewport.panX;
+                const rawSY = -pt.dxf_x * viewport.zoom + viewport.panY;
+                let sx = rawSX;
+                let sy = rawSY;
+                if (rotation !== 0 && layoutSize.width > 0 && layoutSize.height > 0) {
+                  const rotated = rotatePoint(rawSX, rawSY, layoutSize.width / 2, layoutSize.height / 2, rotation);
+                  sx = rotated.x;
+                  sy = rotated.y;
+                }
+                return (
+                  <G key={`arp-${i}`}>
+                    <SvgText
+                      x={sx + 12}
+                      y={sy - 10}
+                      fontSize={10}
+                      fill="#ffffff"
+                      stroke="#ffffff"
+                      strokeWidth={3}
+                      fontWeight="700"
+                    >
+                      {`${pt.lat.toFixed(6)}, ${pt.lon.toFixed(6)}`}
+                    </SvgText>
+                    <SvgText
+                      x={sx + 12}
+                      y={sy - 10}
+                      fontSize={10}
+                      fill="#0f172a"
+                      fontWeight="700"
+                    >
+                      {`${pt.lat.toFixed(6)}, ${pt.lon.toFixed(6)}`}
+                    </SvgText>
+                  </G>
+                );
+              })}
 
             {/* ── Virtual Bounding Box Dimension Labels ── */}
             {virtualBoxLabels.map((lbl) => {
