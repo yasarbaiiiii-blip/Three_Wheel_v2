@@ -6867,6 +6867,7 @@ function PlanPreview({
   missionRunning = false,
   selectedPoints,
   onSelectPoint,
+  onGuidePointFocus,
   alignedRefPoints = [],
   telemetryPosN = null,
   telemetryPosE = null,
@@ -6923,6 +6924,7 @@ function PlanPreview({
   missionRunning?: boolean;
   selectedPoints?: { x: number; y: number }[];
   onSelectPoint?: (pt: { x: number; y: number }) => void;
+  onGuidePointFocus?: (index: number) => void;
   alignedRefPoints?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
   telemetryPosN?: number | null;
   telemetryPosE?: number | null;
@@ -7772,6 +7774,7 @@ function PlanPreview({
             recenterPlanTrigger={recenterPlanTrigger || recenterPlanCount}
             resetNorthTrigger={resetNorthTrigger}
             onSelectPoint={onSelectPoint}
+            onGuidePointFocus={onGuidePointFocus}
             onSelectLine={onSelectLine}
             selectedLineId={selectedLineId}
             highlightedLines={selectedLines}

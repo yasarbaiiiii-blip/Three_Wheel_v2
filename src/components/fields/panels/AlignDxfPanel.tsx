@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Platform, Pressable, Text, TextInput, View } from "react-native";
 import { Check, ChevronDown, Maximize2, Move, Upload, X } from "lucide-react-native";
 import * as DocumentPicker from "expo-document-picker";
@@ -84,6 +84,9 @@ type AlignDxfPanelProps = {
   onToggleMovePlan?: () => void;
   /** One-tap similarity fit (translate+rotate+scale) onto ≥2 lat/lon reference points. */
   onFitToReferencePoints?: (refs: Array<{ lat: number; lon: number }>) => void;
+  /** Map pin tap focuses this guide row for Lat/Lon entry (0-based). */
+  focusedGuidePointIndex?: number | null;
+  onFocusedGuidePointIndexChange?: (index: number | null) => void;
 };
 
 export function AlignDxfPanel({
@@ -125,10 +128,23 @@ export function AlignDxfPanel({
   isPlanEditingMode = false,
   onToggleMovePlan,
   onFitToReferencePoints,
+  focusedGuidePointIndex = null,
+  onFocusedGuidePointIndexChange,
 }: AlignDxfPanelProps) {
   const [isFixing, setIsFixing] = useState(false);
   const [isImportingCsv, setIsImportingCsv] = useState(false);
   const [methodMenuOpen, setMethodMenuOpen] = useState(false);
+  const latInputRefs = useRef<Array<TextInput | null>>([]);
+
+  // Map pin focus → highlight row and open the Latitude field for typing.
+  useEffect(() => {
+    if (focusedGuidePointIndex == null) return;
+    if (focusedGuidePointIndex < 0 || focusedGuidePointIndex >= refPoints.length) return;
+    const t = setTimeout(() => {
+      latInputRefs.current[focusedGuidePointIndex]?.focus?.();
+    }, 80);
+    return () => clearTimeout(t);
+  }, [focusedGuidePointIndex, refPoints.length]);
 
   /** UI method picker options (1-Point Fit removed). Auto Origin is a peer choice. */
   type AlignUiMethod = "least_squares" | "visual_alignment" | "auto_origin";
@@ -185,6 +201,7 @@ export function AlignDxfPanel({
     setAlignmentResult(null);
     setVerifiedAlignmentRequest(null);
     setRefPoints([]);
+    onFocusedGuidePointIndexChange?.(null);
     setCsvGuidePointsActive?.(false);
     setGuideCsvFileName?.(null);
     setExtractedCorners?.(null);
@@ -211,6 +228,11 @@ export function AlignDxfPanel({
     onInvalidateWorkflow("alignment");
     setMissionSummary(null);
     setAlignmentResult(null);
+    if (focusedGuidePointIndex === idx) {
+      onFocusedGuidePointIndexChange?.(null);
+    } else if (focusedGuidePointIndex != null && focusedGuidePointIndex > idx) {
+      onFocusedGuidePointIndexChange?.(focusedGuidePointIndex - 1);
+    }
     setVerifiedAlignmentRequest(null);
     setRefPoints((prev) => {
       const next = prev.filter((_, i) => i !== idx);
@@ -491,6 +513,7 @@ export function AlignDxfPanel({
         // paints transformed NED lines under visualAlignmentAnchor for one intermediate frame
         // (the shift-then-settle bug). Do not rely on App's useEffect for this first paint.
         setRefPoints([]);
+        onFocusedGuidePointIndexChange?.(null);
         setCsvGuidePointsActive?.(false);
         setGuideCsvFileName?.(null);
         setExtractedCorners?.(null);
@@ -520,6 +543,7 @@ export function AlignDxfPanel({
     setAlignmentResult(null);
     setVerifiedAlignmentRequest(null);
     setRefPoints([]);
+    onFocusedGuidePointIndexChange?.(null);
     setCsvGuidePointsActive?.(false);
     setGuideCsvFileName?.(null);
     setExtractedCorners?.(null);
@@ -1043,39 +1067,60 @@ export function AlignDxfPanel({
               const latOk = Number.isFinite(parseFloat(point.lat));
               const lonOk = Number.isFinite(parseFloat(point.lon));
               const filled = latOk && lonOk;
+              const isFocused = focusedGuidePointIndex === index;
               return (
-                <View
+                <Pressable
                   key={index}
+                  onPress={() => onFocusedGuidePointIndexChange?.(index)}
                   style={{
-                    backgroundColor: FIELDS_COLORS.surfaceSolid,
+                    backgroundColor: isFocused ? "rgba(249, 115, 22, 0.08)" : FIELDS_COLORS.surfaceSolid,
                     padding: 10,
                     borderRadius: 8,
-                    borderWidth: 1,
-                    borderColor: filled ? FIELDS_COLORS.successBorder : FIELDS_COLORS.panelBorder,
+                    borderWidth: isFocused ? 2 : 1,
+                    borderColor: isFocused
+                      ? "#f97316"
+                      : filled
+                        ? FIELDS_COLORS.successBorder
+                        : FIELDS_COLORS.panelBorder,
                   }}
                 >
                   <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 6 }}>
                     <Text style={{ flex: 1, color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
                       Point {index + 1}
-                      {!csvGuidePointsActive ? (
+                      {isFocused ? (
+                        <Text style={{ color: "#ea580c", fontWeight: "700" }}>  ·  enter Lat / Lon</Text>
+                      ) : !csvGuidePointsActive ? (
                         <Text style={{ color: FIELDS_COLORS.textDim, fontWeight: "500" }}>
                           {`  ·  N ${Number(point.dxf_y).toFixed(2)}  E ${Number(point.dxf_x).toFixed(2)}`}
                         </Text>
                       ) : null}
                     </Text>
-                    <Pressable onPress={() => handleRemoveRefPoint(index)} hitSlop={8}>
+                    <Pressable
+                      onPress={() => {
+                        if (focusedGuidePointIndex === index) onFocusedGuidePointIndexChange?.(null);
+                        handleRemoveRefPoint(index);
+                      }}
+                      hitSlop={8}
+                    >
                       <X size={14} color={FIELDS_COLORS.danger} />
                     </Pressable>
                   </View>
                   {/* Lat/Lon always shown for tapped points; CSV rows already have coords but stay editable. */}
                   <View style={{ flexDirection: "row", gap: 8 }}>
                     <TextInput
+                      ref={(el) => {
+                        latInputRefs.current[index] = el;
+                      }}
                       style={{
                         flex: 1,
                         height: 40,
                         backgroundColor: FIELDS_COLORS.cardSolid,
                         borderWidth: 1,
-                        borderColor: latOk ? FIELDS_COLORS.successBorder : FIELDS_COLORS.panelBorder,
+                        borderColor: isFocused
+                          ? "#f97316"
+                          : latOk
+                            ? FIELDS_COLORS.successBorder
+                            : FIELDS_COLORS.panelBorder,
                         borderRadius: 6,
                         paddingHorizontal: 10,
                         fontSize: 13,
@@ -1085,6 +1130,7 @@ export function AlignDxfPanel({
                       placeholderTextColor={FIELDS_COLORS.textDim}
                       value={point.lat}
                       onChangeText={(value) => handleUpdateRefPoint(index, "lat", value)}
+                      onFocus={() => onFocusedGuidePointIndexChange?.(index)}
                       keyboardType="numeric"
                       editable={!isFixing && !missionRunning}
                     />
@@ -1094,7 +1140,11 @@ export function AlignDxfPanel({
                         height: 40,
                         backgroundColor: FIELDS_COLORS.cardSolid,
                         borderWidth: 1,
-                        borderColor: lonOk ? FIELDS_COLORS.successBorder : FIELDS_COLORS.panelBorder,
+                        borderColor: isFocused
+                          ? "#f97316"
+                          : lonOk
+                            ? FIELDS_COLORS.successBorder
+                            : FIELDS_COLORS.panelBorder,
                         borderRadius: 6,
                         paddingHorizontal: 10,
                         fontSize: 13,
@@ -1104,11 +1154,12 @@ export function AlignDxfPanel({
                       placeholderTextColor={FIELDS_COLORS.textDim}
                       value={point.lon}
                       onChangeText={(value) => handleUpdateRefPoint(index, "lon", value)}
+                      onFocus={() => onFocusedGuidePointIndexChange?.(index)}
                       keyboardType="numeric"
                       editable={!isFixing && !missionRunning}
                     />
                   </View>
-                </View>
+                </Pressable>
               );
             })}
           </View>

@@ -119,6 +119,7 @@ export function measurePathLengthAndCenter(
 
 /**
  * Offset label off the stroke so it stays readable (perpendicular to path tangent).
+ * Keep the offset small so the number reads as belonging to that path.
  * Distance grows slightly with path length, clamped for dense small segments.
  */
 export function offsetLabelFromPathCenter(
@@ -127,9 +128,10 @@ export function offsetLabelFromPathCenter(
   lengthM: number,
   opts?: { minOffsetM?: number; maxOffsetM?: number; lengthFactor?: number }
 ): WorldPt {
-  const minOff = opts?.minOffsetM ?? 1.25;
-  const maxOff = opts?.maxOffsetM ?? 3.5;
-  const factor = opts?.lengthFactor ?? 0.035;
+  // Tight defaults: ~0.35–0.9 m off the stroke (was 1.25–3.5 m — too far on phone).
+  const minOff = opts?.minOffsetM ?? 0.35;
+  const maxOff = opts?.maxOffsetM ?? 0.9;
+  const factor = opts?.lengthFactor ?? 0.012;
   const offsetM = Math.min(maxOff, Math.max(minOff, lengthM * factor));
 
   // Left-hand perpendicular in N/E plane: (-e, n)

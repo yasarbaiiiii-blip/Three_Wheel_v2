@@ -23,6 +23,12 @@ export interface MapViewProps {
   recenterPlanTrigger?: number;
   resetNorthTrigger?: number;
   onSelectPoint?: (pt: { x: number; y: number }) => void;
+  /**
+   * Multi-Point: operator tapped an existing guide pin (gold numbered marker).
+   * Parent should focus that point's Latitude/Longitude fields — not deselect.
+   * `index` is 0-based into `selectedPoints` / refPoints.
+   */
+  onGuidePointFocus?: (index: number) => void;
   onSelectLine?: (id: string | null) => void;
   selectedLineId?: string | null;
   /**

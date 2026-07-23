@@ -5,8 +5,8 @@
  * accepts the exact same `MapViewProps` so `App.tsx` / `TemplatesPage.tsx` need
  * zero changes. This file focuses on RENDERING PARITY (Phase 1, first milestone):
  * basemap, plan lines, rover + heading + range circle, next-target, reference
- * points, start arrow, boundary + control points, placed items, selection
- * highlight, camera recenter/fit, and tap selection. Gesture editing
+ * points, rover FROM→GO start direction, boundary + control points, placed items,
+ * selection highlight, camera recenter/fit, and tap selection. Gesture editing
  * (drag/scale/rotate, boundary drag, snap) is deliberately NOT implemented here
  * yet (Phase 2).
  *
@@ -92,11 +92,21 @@ import {
 import { buildPlanLengthLabels } from "../utils/planLengthLabels";
 import { toMapboxCoord, fromMapboxCoord } from "../utils/mapboxCoords";
 import { getLineLengthM, formatFinite } from "../utils/pathWorkflow";
+import { getPlanStartPoint, isPrimaryEditableLine } from "../utils/planGeometry";
 import { MAPBOX_STYLE_URL } from "../config/mapbox";
 import type { MapViewProps } from "./mapViewTypes";
 import { pixelDeltaToMetres, clampToIndent, type BoundingRect } from "../utils/mapGestureUtils";
 import { deriveMetersPerPixel, screenToGeo } from "../utils/mapScreenGeo";
 import type { MultiPointPlacementPhase } from "../types/fieldsWorkflow";
+
+/** Same precedence as getPlanStartPoint — first segment the rover will drive. */
+function getPlanStartTravelLine(lines: PlanLine[]): PlanLine | null {
+  const runtimeStart = lines.find((line) => line.id === "runtime-transit-0");
+  const preExt = lines.find(
+    (line) => line.layer === "extension" && String(line.id).startsWith("ext-pre-")
+  );
+  return runtimeStart ?? preExt ?? lines.find(isPrimaryEditableLine) ?? lines[0] ?? null;
+}
 
 /** Max vertices per line while live-dragging plan-editing-group (LOD). Full quality on commit. */
 const DRAG_PREVIEW_MAX_VERTICES = 12;
@@ -295,28 +305,6 @@ function RoverVehicle({ heading, mapBearing }: { heading: number | null | undefi
   );
 }
 
-/** Start-direction arrow — rotated red triangle pointing along the plan's
- *  initial travel direction (parity with the legacy rotated CSS triangle).
- *  At bearing 0 the arrow points up (North); rotation is clockwise from North.
- *  Counter-rotated against live camera bearing for the same reason as
- *  RoverVehicle — MarkerView content never rotates with the map on its own. */
-function StartArrow({ bearing, mapBearing }: { bearing: number; mapBearing?: number }) {
-  const rotationDeg = bearing - (mapBearing ?? 0);
-  return (
-    <View style={{ transform: [{ rotate: `${rotationDeg}deg` }] }}>
-      <Svg width={14} height={16} viewBox="0 0 14 16">
-        <SvgPolygon
-          points="7,0 13,15 1,15"
-          fill="#ef4444"
-          stroke="#ffffff"
-          strokeWidth={1}
-          strokeLinejoin="round"
-        />
-      </Svg>
-    </View>
-  );
-}
-
 export function MapViewNative(props: MapViewProps) {
   const {
     telemetrySnapshot,
@@ -328,6 +316,7 @@ export function MapViewNative(props: MapViewProps) {
     recenterPlanTrigger,
     resetNorthTrigger,
     onSelectPoint,
+    onGuidePointFocus,
     onSelectLine,
     selectedLineId,
     highlightedLines,
@@ -721,20 +710,126 @@ export function MapViewNative(props: MapViewProps) {
     return featureCollection(features);
   }, [lines, originSig, mode]);
 
-  // ── Start-direction arrow (Fields): start coord + bearing (deg CW from N) ──
-  const startArrow = useMemo((): { coord: Coord; bearing: number } | null => {
-    if (mode === "templates" || !projectionOrigin || lines.length === 0) return null;
-    const first = planLinesFC.features[0];
-    if (!first || first.geometry.type !== "LineString" || first.geometry.coordinates.length < 2) {
-      return null;
+  // ── Rover start (Fields): pin + "FROM" + direction arrow below the path.
+  // Arrow rotates with first-segment bearing so it shows where the rover will go.
+  const startDirectionFC = useMemo((): GeoJSON.FeatureCollection => {
+    if (mode === "templates" || !projectionOrigin || lines.length === 0) {
+      return featureCollection([]);
     }
-    const [lon1, lat1] = first.geometry.coordinates[0] as Coord;
-    const [lon2, lat2] = first.geometry.coordinates[1] as Coord;
-    const dy = lat2 - lat1;
-    const dx = (lon2 - lon1) * Math.cos((lat1 * Math.PI) / 180);
-    const bearing = (Math.atan2(dx, dy) * 180) / Math.PI; // deg clockwise from North
-    return { coord: [lon1, lat1], bearing };
-  }, [planLinesFC, originSig, lines.length, mode]);
+
+    const startLine = getPlanStartTravelLine(lines);
+    const startPt = getPlanStartPoint(lines);
+    if (!startLine || !startPt) return featureCollection([]);
+
+    let originNorth = startPt.north;
+    let originEast = startPt.east;
+    let bearing = 0;
+    const renderPts = getPlanLineRenderPoints(startLine, true);
+    if (renderPts.length >= 2) {
+      const a = renderPts[0];
+      const b = renderPts[1];
+      originNorth = a.north;
+      originEast = a.east;
+      const dn = b.north - a.north;
+      const de = b.east - a.east;
+      if (Math.hypot(dn, de) > 1e-6) {
+        // Bearing CW from North in plan N/E frame (n=north, e=east).
+        bearing = (Math.atan2(de, dn) * 180) / Math.PI;
+      }
+    } else if (startLine.from && startLine.to) {
+      originNorth = startLine.from.x;
+      originEast = startLine.from.y;
+      const dn = startLine.to.x - startLine.from.x;
+      const de = startLine.to.y - startLine.from.y;
+      if (Math.hypot(dn, de) > 1e-6) {
+        bearing = (Math.atan2(de, dn) * 180) / Math.PI;
+      }
+    }
+
+    const startGps = projectPlanNorthEastToGps(originNorth, originEast, projectionOrigin);
+    const startCoord = toMapboxCoord(startGps.lat, startGps.lon);
+
+    return featureCollection([
+      pointFeature(startCoord, {
+        kind: "start-origin",
+        bearing,
+        label: "FROM",
+        planNorth: originNorth,
+        planEast: originEast,
+      }),
+    ]);
+  }, [lines, originSig, mode, projectionOrigin]);
+
+  // ── Multi-Point pickable vertex anchors (shown only while guide-point mode is on) ──
+  // Clickable dots on path endpoints / corners so operators do not need a perfect path hit.
+  const multiPointPickAnchorsFC = useMemo((): GeoJSON.FeatureCollection => {
+    if (!onSelectPoint || mode === "templates" || !projectionOrigin || lines.length === 0) {
+      return featureCollection([]);
+    }
+
+    const keyOf = (n: number, e: number) => `${n.toFixed(3)},${e.toFixed(3)}`;
+    const seen = new Set<string>();
+    const features: GeoJSON.Feature[] = [];
+
+    const pushVertex = (north: number, east: number, isStart = false) => {
+      if (!Number.isFinite(north) || !Number.isFinite(east)) return;
+      const key = keyOf(north, east);
+      if (seen.has(key)) return;
+      seen.add(key);
+      const gps = projectPlanNorthEastToGps(north, east, projectionOrigin);
+      features.push(
+        pointFeature(toMapboxCoord(gps.lat, gps.lon), {
+          kind: isStart ? "pick-start" : "pick-vertex",
+          planNorth: north,
+          planEast: east,
+        })
+      );
+    };
+
+    // Plan start first so it stays in the set even if filtered layers skip its line.
+    const startPt = getPlanStartPoint(lines);
+    if (startPt) pushVertex(startPt.north, startPt.east, true);
+
+    for (const line of lines) {
+      if (
+        line.layer === "virtual_boundary" ||
+        line.layer === "transit" ||
+        line.layer === "extension"
+      ) {
+        continue;
+      }
+
+      if (isCurveEntity(line) || isCircleLikeLine(line)) {
+        for (const pt of getCurveSelectionAnchors(line)) {
+          pushVertex(pt.north, pt.east);
+        }
+        continue;
+      }
+
+      const pts = getPlanLineRenderPoints(line, true);
+      if (pts.length >= 2) {
+        // Endpoints + a few mid vertices (skip dense curve samples)
+        pushVertex(pts[0].north, pts[0].east);
+        pushVertex(pts[pts.length - 1].north, pts[pts.length - 1].east);
+        if (pts.length <= 8) {
+          for (let i = 1; i < pts.length - 1; i++) {
+            pushVertex(pts[i].north, pts[i].east);
+          }
+        } else {
+          // Sparse intermediate samples for long polylines
+          const step = Math.max(1, Math.floor(pts.length / 6));
+          for (let i = step; i < pts.length - 1; i += step) {
+            pushVertex(pts[i].north, pts[i].east);
+          }
+        }
+      } else {
+        if (line.from) pushVertex(line.from.x, line.from.y);
+        if (line.to) pushVertex(line.to.x, line.to.y);
+      }
+    }
+
+    return featureCollection(features);
+  }, [onSelectPoint, mode, projectionOrigin, originSig, lines]);
 
   // ── Fields selection: highlighted line(s) + corner points ──
   // `highlightedLines`, when provided, is an explicit, already-resolved set (e.g. every
@@ -819,13 +914,29 @@ export function MapViewNative(props: MapViewProps) {
       // THERE — never re-projected through the provisional plan-preview origin, which
       // may be a stale/unrelated anchor (rover position, a prior alignment, etc.) and
       // has nothing to do with this point's actual location.
+      // planNorth/East always stored so ShapeSource onPress can toggle selection.
+      const planProps = {
+        id: `sp-${i}`,
+        index: i + 1,
+        planNorth: p.x,
+        planEast: p.y,
+      };
+
       if (Number.isFinite(p.lat) && Number.isFinite(p.lon)) {
         // Matched by VALUE (not index) against activeSnapRefPointKey — `selectedPoints` (every
         // ref point) and the filtered, snap-eligible `snapRefPoints` can diverge in index when a
         // tapped point hasn't had its lat/lon filled in yet, so index correspondence isn't safe.
-        const isSnapActive = activeSnapRefPointKey === refPointKey({ lat: p.lat as number, lon: p.lon as number });
+        const isSnapActive =
+          activeSnapRefPointKey ===
+          refPointKey({ lat: p.lat as number, lon: p.lon as number });
+        // While the yellow dashed snap-guide is locked to this pin, omit the pin entirely
+        // so the dashed line does not terminate in a yellow endpoint blob.
+        if (isSnapActive) return;
         features.push(
-          pointFeature(toMapboxCoord(p.lat as number, p.lon as number), { id: `sp-${i}`, isSnapActive })
+          pointFeature(toMapboxCoord(p.lat as number, p.lon as number), {
+            ...planProps,
+            isSnapActive: 0,
+          })
         );
         return;
       }
@@ -834,7 +945,12 @@ export function MapViewNative(props: MapViewProps) {
       if (!projectionOrigin) return;
       // In FieldsPage/App.tsx, p.x is Northing (dxf_y) and p.y is Easting (dxf_x)
       const gps = projectPlanNorthEastToGps(p.x, p.y, projectionOrigin);
-      features.push(pointFeature(toMapboxCoord(gps.lat, gps.lon), { id: `sp-${i}`, isSnapActive: false }));
+      features.push(
+        pointFeature(toMapboxCoord(gps.lat, gps.lon), {
+          ...planProps,
+          isSnapActive: false,
+        })
+      );
     });
     return featureCollection(features);
   }, [selectedPoints, originSig, activeSnapRefPointKey]);
@@ -2390,19 +2506,30 @@ export function MapViewNative(props: MapViewProps) {
       const clickN = local.north + projectionOrigin.originDxfNorth;
       const clickE = local.east + projectionOrigin.originDxfEast;
 
-      // Multi-Point hit: ~24–28px finger target in metres. Keep the max small so
-      // taps outside the plan or in hollow interior never jump to a far corner.
+      // Multi-Point hit: ~36px finger target in metres. Slightly generous so the
+      // plan start vertex is easy to grab; still capped so hollow interior taps
+      // never jump to a far corner.
       const mpp = metersPerPixelSV.value > 0 ? metersPerPixelSV.value : 0.05;
-      const hitRadiusM = Math.max(0.75, Math.min(3.0, mpp * 28));
+      const hitRadiusM = Math.max(1.0, Math.min(4.0, mpp * 36));
+      // Snap onto true vertices (esp. plan start) when the finger is nearby.
+      const vertexSnapM = Math.max(1.25, Math.min(4.5, mpp * 40));
       // Deselect only when the finger is on the yellow marker itself.
       const deselectRadiusM = Math.max(0.75, Math.min(2.5, mpp * 22));
 
       // ── Multi-Point guide pick (only when parent wired onSelectPoint) ──
-      // Pick the closest point *on plan strokes* (vertex OR mid-segment). Never
-      // prefer corners over a nearer mid-line hit. Outside / hollow = ignore.
+      // Pick the closest point *on plan strokes* (vertex OR mid-segment). When a
+      // true vertex is within vertexSnapM of the tap, snap onto that vertex so
+      // the plan start / corners are easy to select with a finger.
       if (onSelectPoint) {
+        // ShapeSource marker press already handled this tap — do not double-select.
+        if (Date.now() - multiPointAnchorPressAtMsRef.current < 350) {
+          return;
+        }
         // Object wrapper so closest-hit updates are visible to TS (not narrowed via a closure).
         const geometryPick: { current: { x: number; y: number; dist: number } | null } = {
+          current: null,
+        };
+        const vertexPick: { current: { x: number; y: number; dist: number } | null } = {
           current: null,
         };
 
@@ -2425,9 +2552,22 @@ export function MapViewNative(props: MapViewProps) {
             }
           };
 
+          const tryVertex = (x: number, y: number) => {
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+            const dist = Math.hypot(x - clickN, y - clickE);
+            if (dist > vertexSnapM) return;
+            const prev = vertexPick.current;
+            if (!prev || dist < prev.dist) {
+              vertexPick.current = { x, y, dist };
+            }
+          };
+
           // Closest point on each stroke (includes endpoints and anywhere along the line).
           if (line.entity?.preview_points && line.entity.preview_points.length >= 2) {
             const pts = line.entity.preview_points;
+            for (let i = 0; i < pts.length; i++) {
+              tryVertex(pts[i].north, pts[i].east);
+            }
             for (let i = 0; i < pts.length - 1; i++) {
               const hit = nearestOnSegment(
                 clickN,
@@ -2440,6 +2580,8 @@ export function MapViewNative(props: MapViewProps) {
               tryHit(hit.x, hit.y, hit.dist);
             }
           } else if (line.from && line.to) {
+            tryVertex(line.from.x, line.from.y);
+            tryVertex(line.to.x, line.to.y);
             const hit = nearestOnSegment(
               clickN,
               clickE,
@@ -2451,6 +2593,7 @@ export function MapViewNative(props: MapViewProps) {
             tryHit(hit.x, hit.y, hit.dist);
           } else {
             if (line.from) {
+              tryVertex(line.from.x, line.from.y);
               tryHit(
                 line.from.x,
                 line.from.y,
@@ -2458,6 +2601,7 @@ export function MapViewNative(props: MapViewProps) {
               );
             }
             if (line.to) {
+              tryVertex(line.to.x, line.to.y);
               tryHit(
                 line.to.x,
                 line.to.y,
@@ -2467,7 +2611,15 @@ export function MapViewNative(props: MapViewProps) {
           }
         }
 
-        const picked = geometryPick.current;
+        // Prefer a nearby true vertex (start / corners) when the finger is closer
+        // to it than to a pure mid-stroke hit (small slack for fat fingers).
+        const strokeHit = geometryPick.current;
+        const vertexHit = vertexPick.current;
+        const fingerSlackM = Math.max(0.4, mpp * 10);
+        const picked =
+          vertexHit && (!strokeHit || vertexHit.dist <= strokeHit.dist + fingerSlackM)
+            ? vertexHit
+            : strokeHit;
 
         // Tight deselect: only when the finger is on a yellow marker.
         let bestSel: { x: number; y: number; dist: number } | null = null;
@@ -2555,6 +2707,39 @@ export function MapViewNative(props: MapViewProps) {
     [onSelectionChange]
   );
 
+  // When a ShapeSource multi-point marker is pressed, MapView onPress often also fires
+  // for the same finger-up. Ignore the map-press path briefly so we do not add twice.
+  const multiPointAnchorPressAtMsRef = useRef(0);
+
+  /**
+   * Multi-Point: ShapeSource feature press.
+   * - Gold numbered pins → focus that point's Lat/Lon fields (do not deselect).
+   * - FROM start / invisible vertex hits → select that plan point for a new guide.
+   */
+  const handleMultiPointAnchorPress = useCallback(
+    (event: ShapeSourcePressEvent) => {
+      const features = event.features ?? [];
+      for (const f of features) {
+        const props = (f?.properties ?? {}) as Record<string, unknown>;
+        // Existing guide pin (selectedPointsFC stores 1-based `index`)
+        const index1 = Number(props.index);
+        if (Number.isFinite(index1) && index1 >= 1) {
+          multiPointAnchorPressAtMsRef.current = Date.now();
+          onGuidePointFocus?.(index1 - 1);
+          return;
+        }
+        const planNorth = Number(props.planNorth);
+        const planEast = Number(props.planEast);
+        if (Number.isFinite(planNorth) && Number.isFinite(planEast) && onSelectPoint) {
+          multiPointAnchorPressAtMsRef.current = Date.now();
+          onSelectPoint({ x: planNorth, y: planEast });
+          return;
+        }
+      }
+    },
+    [onSelectPoint, onGuidePointFocus]
+  );
+
   if (!visible) return null;
 
   const refLabelsVisible = !!showRefPointLabels;
@@ -2627,7 +2812,108 @@ export function MapViewNative(props: MapViewProps) {
           />
         </ShapeSource>
 
-        {/* ── Start-direction arrow rendered below as a rotated MarkerView ── */}
+        {/* ── Multi-Point pickable vertices: invisible hit targets only (no clutter dots) ── */}
+        <ShapeSource
+          id="multi-point-pick-anchors"
+          shape={multiPointPickAnchorsFC}
+          onPress={handleMultiPointAnchorPress}
+          hitbox={{ width: 48, height: 48 }}
+        >
+          {/* Fully transparent but present so Mapbox still hit-tests the feature */}
+          <CircleLayer
+            id="multi-point-pick-hit"
+            style={{
+              circleRadius: 16,
+              circleColor: "#0ea5e9",
+              circleOpacity: 0.001,
+            }}
+          />
+        </ShapeSource>
+
+        {/* ── Rover start: pin + FROM text + travel arrow below (4px under the path) ── */}
+        <ShapeSource
+          id="plan-start-direction"
+          shape={startDirectionFC}
+          onPress={onSelectPoint ? handleMultiPointAnchorPress : undefined}
+          hitbox={{ width: 72, height: 72 }}
+        >
+          <CircleLayer
+            id="plan-start-hit"
+            filter={["==", ["get", "kind"], "start-origin"]}
+            style={{
+              circleRadius: 26,
+              circleColor: "#f97316",
+              circleOpacity: 0.001,
+              circleTranslate: [0, 4],
+              circleTranslateAnchor: "viewport",
+            }}
+          />
+          <CircleLayer
+            id="plan-start-origin-halo"
+            filter={["==", ["get", "kind"], "start-origin"]}
+            style={{
+              circleRadius: 12,
+              circleColor: "#f97316",
+              circleOpacity: 0.2,
+              circleTranslate: [0, 4],
+              circleTranslateAnchor: "viewport",
+            }}
+          />
+          <CircleLayer
+            id="plan-start-origin-core"
+            filter={["==", ["get", "kind"], "start-origin"]}
+            style={{
+              circleRadius: 6,
+              circleColor: "#ea580c",
+              circleStrokeColor: "#ffffff",
+              circleStrokeWidth: 2.5,
+              circleOpacity: 1,
+              circleTranslate: [0, 4],
+              circleTranslateAnchor: "viewport",
+            }}
+          />
+          {/* FROM under the pin; arrow sits next to the M (same line) */}
+          <SymbolLayer
+            id="plan-start-origin-label"
+            filter={["==", ["get", "kind"], "start-origin"]}
+            style={{
+              textField: ["get", "label"],
+              textSize: 11,
+              textColor: "#9a3412",
+              textHaloColor: "#ffffff",
+              textHaloWidth: 1.75,
+              textFont: ["DIN Pro Bold"],
+              // Shift left slightly so "FROM  ▲" reads centered under the pin
+              textOffset: [-0.55, 1.4],
+              textAnchor: "top",
+              textAllowOverlap: true,
+              textIgnorePlacement: true,
+              textTranslate: [0, 4],
+              textTranslateAnchor: "viewport",
+            }}
+          />
+          {/* Larger ▲ just after the M — same height band as FROM, points travel direction */}
+          <SymbolLayer
+            id="plan-start-arrow"
+            filter={["==", ["get", "kind"], "start-origin"]}
+            style={{
+              textField: "▲",
+              textSize: 16,
+              textColor: "#ea580c",
+              textHaloColor: "#ffffff",
+              textHaloWidth: 1.5,
+              // Next to M with a little space; y matches FROM so they share a line
+              textOffset: [1.55, 1.4],
+              textAnchor: "top",
+              textAllowOverlap: true,
+              textIgnorePlacement: true,
+              textRotate: ["get", "bearing"],
+              textRotationAlignment: "map",
+              textTranslate: [0, 4],
+              textTranslateAnchor: "viewport",
+            }}
+          />
+        </ShapeSource>
 
         {/* ── Fields selection highlight + corner points ── */}
         <ShapeSource
@@ -2702,25 +2988,17 @@ export function MapViewNative(props: MapViewProps) {
           />
         </ShapeSource>
 
-        {/* ── Multi-Point Fit snap guide — a Figma/Illustrator-style line + highlight dot
-            from a nearby reference point to the plan while it's being dragged close to one ── */}
+        {/* ── Multi-Point Fit snap guide: dashed line only (butt caps — no end dots) ── */}
         <ShapeSource id="ref-point-snap-guide" shape={snapGuideFC}>
           <LineLayer
             id="ref-point-snap-guide-line"
             style={{
-              lineColor: "#ff2d78",
+              lineColor: "#f59e0b",
               lineWidth: 2,
               lineOpacity: 0.9,
               lineDasharray: [3, 2],
-            }}
-          />
-          <CircleLayer
-            id="ref-point-snap-guide-dot"
-            style={{
-              circleRadius: 5,
-              circleColor: "#ff2d78",
-              circleStrokeWidth: 1.5,
-              circleStrokeColor: "#ffffff",
+              lineCap: "butt",
+              lineJoin: "miter",
             }}
           />
         </ShapeSource>
@@ -2803,17 +3081,52 @@ export function MapViewNative(props: MapViewProps) {
           />
         </ShapeSource>
 
-        {/* ── Selected alignment points (highlighted in yellow) ── */}
-        <ShapeSource id="selected-points" shape={selectedPointsFC}>
+        {/* ── Multi-Point guide anchors (gold pins). Snap-active endpoint is omitted
+            from the FeatureCollection so the dashed snap line never ends on a yellow dot. ── */}
+        <ShapeSource
+          id="selected-points"
+          shape={selectedPointsFC}
+          onPress={
+            onGuidePointFocus || onSelectPoint ? handleMultiPointAnchorPress : undefined
+          }
+          hitbox={{ width: 56, height: 56 }}
+        >
           <CircleLayer
-            id="selected-points-layer"
+            id="selected-points-halo"
             style={{
-              // Larger default radius so Multi-Point taps read clearly on phone screens.
-              circleRadius: ["case", ["get", "isSnapActive"], 12, 9],
-              circleColor: ["case", ["get", "isSnapActive"], "#ff2d78", "#eab308"],
+              circleRadius: 14,
+              circleColor: "#fbbf24",
+              circleOpacity: 0.28,
+            }}
+          />
+          <CircleLayer
+            id="selected-points-body"
+            style={{
+              circleRadius: 10,
+              circleColor: "#f59e0b",
               circleStrokeColor: "#ffffff",
-              circleStrokeWidth: ["case", ["get", "isSnapActive"], 3, 2.5],
+              circleStrokeWidth: 2.5,
               circleOpacity: 1,
+            }}
+          />
+          <CircleLayer
+            id="selected-points-inner"
+            style={{
+              circleRadius: 6,
+              circleColor: "#ffffff",
+              circleOpacity: 1,
+            }}
+          />
+          <SymbolLayer
+            id="selected-points-index"
+            style={{
+              textField: ["to-string", ["get", "index"]],
+              textSize: 12,
+              textColor: "#b45309",
+              textFont: ["DIN Pro Bold"],
+              textAllowOverlap: true,
+              textIgnorePlacement: true,
+              textAnchor: "center",
             }}
           />
         </ShapeSource>
@@ -3059,13 +3372,6 @@ export function MapViewNative(props: MapViewProps) {
         {showRover && roverGeo.center && (
           <MarkerView coordinate={roverGeo.center} anchor={{ x: 0.5, y: 0.5 }} allowOverlap>
             <RoverVehicle heading={roverGeo.heading} mapBearing={cameraBearing} />
-          </MarkerView>
-        )}
-
-        {/* ── Start-direction arrow (rotated to plan start bearing) ── */}
-        {startArrow && (
-          <MarkerView coordinate={startArrow.coord} anchor={{ x: 0.5, y: 0.5 }} allowOverlap>
-            <StartArrow bearing={startArrow.bearing} mapBearing={cameraBearing} />
           </MarkerView>
         )}
 

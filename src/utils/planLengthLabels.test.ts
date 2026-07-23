@@ -39,7 +39,9 @@ describe("buildPlanLengthLabels", () => {
     expect(labels).toHaveLength(1);
     // Centre is (5,0); left-of-north tangent is west → east decreases.
     expect(labels[0].north).toBeCloseTo(5, 5);
-    expect(Math.abs(labels[0].east)).toBeGreaterThanOrEqual(1.2);
+    // Tight offset: near the stroke, not metres away.
+    expect(Math.abs(labels[0].east)).toBeGreaterThanOrEqual(0.3);
+    expect(Math.abs(labels[0].east)).toBeLessThanOrEqual(1.0);
   });
 
   it("uses scaleEast for east-running segments (non-uniform)", () => {
@@ -55,7 +57,8 @@ describe("buildPlanLengthLabels", () => {
     expect(labels[0].lengthM).toBeCloseTo(20, 5);
     // Path along east; centre e≈10, offset perpendicular (north)
     expect(labels[0].east).toBeCloseTo(10, 5);
-    expect(Math.abs(labels[0].north)).toBeGreaterThanOrEqual(1.2);
+    expect(Math.abs(labels[0].north)).toBeGreaterThanOrEqual(0.3);
+    expect(Math.abs(labels[0].north)).toBeLessThanOrEqual(1.0);
   });
 
   it("measurePathLengthAndCenter uses arc-length midpoint on polylines", () => {
@@ -76,7 +79,9 @@ describe("buildPlanLengthLabels", () => {
       { north: 1, east: 0 },
       10
     );
-    expect(Math.hypot(c.north - 5, c.east - 0)).toBeGreaterThanOrEqual(1.2);
+    const gap = Math.hypot(c.north - 5, c.east - 0);
+    expect(gap).toBeGreaterThanOrEqual(0.3);
+    expect(gap).toBeLessThanOrEqual(1.0);
   });
 
   it("includes extension run-ups when extensions are enabled", () => {

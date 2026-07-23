@@ -136,6 +136,7 @@ export type FieldsPageProps = {
     roverHeadingDeg?: number | null;
     selectedPoints?: { x: number; y: number; lat?: number; lon?: number }[];
     onSelectPoint?: (pt: { x: number; y: number }) => void;
+    onGuidePointFocus?: (index: number) => void;
     alignedRefPoints?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
     stagedVerified?: boolean;
     mapViewEnabled?: boolean;
@@ -244,6 +245,8 @@ export function FieldsPage(props: FieldsPageProps) {
   } = props;
 
   const [refPoints, setRefPoints] = useState<RefPoint[]>([]);
+  /** Which Multi-Point guide row should show Lat/Lon focus (map pin tap). */
+  const [focusedGuidePointIndex, setFocusedGuidePointIndex] = useState<number | null>(null);
   /**
    * True after a Multi-Point guide-points CSV is loaded. While active, map tap-to-pick
    * is disabled (CSV is the sole source of ref markers). Cleared with Clear Points /
@@ -455,20 +458,21 @@ export function FieldsPage(props: FieldsPageProps) {
       setAlignmentResult(null);
       setVerifiedAlignmentRequest(null);
       setRefPoints((prev) => {
-        // Toggle only the same snapped location (sub-metre). Wider radii would make
-        // the 2nd/3rd multi-point tap remove an earlier marker instead of adding.
+        // Same location again → focus that row for Lat/Lon entry (do not remove).
         const existingIdx = prev.findIndex(
           (point) => Math.hypot(point.dxf_y - pt.x, point.dxf_x - pt.y) < 0.35
         );
         if (existingIdx >= 0) {
-          console.log(`[AlignDXF][Tap] Deselecting existing point at index ${existingIdx}`);
-          return prev.filter((_, index) => index !== existingIdx);
+          console.log(`[AlignDXF][Tap] Focusing existing point at index ${existingIdx} for Lat/Lon`);
+          setFocusedGuidePointIndex(existingIdx);
+          return prev;
         }
         // Multi-Point Fit: append — no cap on guide markers.
         const next = [...prev, { dxf_x: pt.y, dxf_y: pt.x, lat: "", lon: "" }];
         console.log(
           `[AlignDXF][Tap] Added guide #${next.length}: north=${pt.x.toFixed(3)} east=${pt.y.toFixed(3)}`
         );
+        setFocusedGuidePointIndex(next.length - 1);
         return next;
       });
     },
@@ -484,6 +488,11 @@ export function FieldsPage(props: FieldsPageProps) {
       setVerifiedAlignmentRequest,
     ]
   );
+
+  const handleGuidePointFocus = useCallback((index: number) => {
+    if (!Number.isFinite(index) || index < 0) return;
+    setFocusedGuidePointIndex(index);
+  }, []);
 
   // Determine step statuses
   const hasPath = !!selectedPathName || !!importedPlan;
@@ -669,6 +678,7 @@ export function FieldsPage(props: FieldsPageProps) {
                 })
               : [],
           onSelectPoint: canTapGuidePoints ? handleSelectPoint : undefined,
+          onGuidePointFocus: canTapGuidePoints ? handleGuidePointFocus : undefined,
           alignedRefPoints,
           stagedVerified: stagedWorkflow.staged === "verified",
           mapViewEnabled,
@@ -1001,6 +1011,8 @@ export function FieldsPage(props: FieldsPageProps) {
               isPlanEditingMode={isPlanEditingMode}
               onToggleMovePlan={handleToggleMovePlan}
               onFitToReferencePoints={onFitToReferencePoints}
+              focusedGuidePointIndex={focusedGuidePointIndex}
+              onFocusedGuidePointIndexChange={setFocusedGuidePointIndex}
             />
           </FieldsStepCard>
           )}

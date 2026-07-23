@@ -47,6 +47,107 @@ function detectPointCsvKind(text: string): "gps" | "ned" | "unknown" {
   return "unknown";
 }
 
+const MAX_IMPORT_ATTEMPTS = 3;
+const IMPORT_RETRY_BASE_MS = 450;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Transient network / gateway failures are common on first upload over Wi‑Fi. */
+function isRetryableHttpStatus(status: number): boolean {
+  return status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function mimeForUpload(fileName: string, mimeType?: string | null): string {
+  const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
+  if (mimeType && mimeType !== "application/octet-stream") return mimeType;
+  if (ext === "csv") return "text/csv";
+  if (ext === "dxf") return "application/dxf";
+  if (ext === "waypoints") return "text/plain";
+  return "application/octet-stream";
+}
+
+/**
+ * DocumentPicker URIs (esp. content:// right after pick) can flake on the first
+ * FormData upload. Copy into app cache so every attempt uses a stable file:// URI.
+ */
+async function resolveStableUploadAsset(
+  file: DocumentPicker.DocumentPickerAsset
+): Promise<{ uri: string; name: string; mimeType: string }> {
+  const name = file.name || "upload.bin";
+  const mimeType = mimeForUpload(name, file.mimeType);
+  if (Platform.OS === "web") {
+    return { uri: file.uri, name, mimeType };
+  }
+
+  const safeName = name.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const dest = `${FileSystem.cacheDirectory ?? ""}import_${Date.now()}_${safeName}`;
+  if (!dest || !FileSystem.cacheDirectory) {
+    return { uri: file.uri, name, mimeType };
+  }
+
+  try {
+    const info = await FileSystem.getInfoAsync(file.uri);
+    if (info.exists) {
+      await FileSystem.copyAsync({ from: file.uri, to: dest });
+      return { uri: dest, name, mimeType };
+    }
+  } catch (e) {
+    console.warn("[import] stable cache copy failed; using picker uri", e);
+  }
+  return { uri: file.uri, name, mimeType };
+}
+
+function appendNativeFile(
+  formData: FormData,
+  asset: { uri: string; name: string; mimeType: string }
+) {
+  formData.append("file", {
+    uri: asset.uri,
+    name: asset.name,
+    type: asset.mimeType,
+  } as any);
+}
+
+/**
+ * Rebuilds the request body each attempt (FormData is single-use after fetch).
+ * Retries network throws and 5xx/408/429 so the operator rarely needs manual Retry.
+ */
+async function fetchWithImportRetry(
+  label: string,
+  build: () => Promise<Response>,
+  maxAttempts = MAX_IMPORT_ATTEMPTS
+): Promise<Response> {
+  let lastRes: Response | null = null;
+  let lastErr: unknown = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await build();
+      if (res.ok) return res;
+      lastRes = res;
+      if (!isRetryableHttpStatus(res.status) || attempt === maxAttempts) {
+        return res;
+      }
+      console.warn(
+        `[import] ${label} attempt ${attempt}/${maxAttempts} status=${res.status} — retrying`
+      );
+    } catch (e) {
+      lastErr = e;
+      if (attempt === maxAttempts) throw e;
+      console.warn(
+        `[import] ${label} attempt ${attempt}/${maxAttempts} network error — retrying`,
+        e
+      );
+    }
+    await sleep(IMPORT_RETRY_BASE_MS * attempt);
+  }
+
+  if (lastRes) return lastRes;
+  throw lastErr ?? new Error(`${label} failed`);
+}
+
 export function UploadAndPreviewStep({
   apiBaseUrl,
   importedPlan,
@@ -63,6 +164,7 @@ export function UploadAndPreviewStep({
 }: UploadAndPreviewStepProps) {
   const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
   const [previewData, setPreviewData] = useState<pathApi.PathPreviewResponse | null>(null);
 
   // Extension state (inline, no modal)
@@ -112,6 +214,9 @@ export function UploadAndPreviewStep({
    * Accepts the asset directly (do not rely on React state for the pick→parse race).
    * On success: clears pickedFile, sets importedPlan, calls onSelectPath (map lines).
    * On failure: keeps pickedFile so the operator can Retry without re-picking.
+   *
+   * First-upload flakiness (Wi‑Fi cold path, content:// race) is handled with
+   * stable cache copy + automatic retries before showing the Retry UI.
    */
   const importAndPreviewFile = async (file: DocumentPicker.DocumentPickerAsset) => {
     if (blockProtectedWorkflowMutation("Parsing a new path")) return;
@@ -121,62 +226,85 @@ export function UploadAndPreviewStep({
     }
 
     setPickedFile(file);
+    setImportError(null);
     setIsUploading(true);
     try {
       const ext = file.name.split(".").pop()?.toLowerCase();
-      const formData = new FormData();
-      if (Platform.OS === "web") {
+      const stable = await resolveStableUploadAsset(file);
+
+      const buildNativeFormData = () => {
+        const formData = new FormData();
+        appendNativeFile(formData, stable);
+        return formData;
+      };
+
+      const buildWebFormData = async () => {
+        const formData = new FormData();
         const webFile = (file as any).file ?? (await (await fetch(file.uri)).blob());
         formData.append("file", webFile, file.name);
-      } else {
-        formData.append("file", {
-          uri: file.uri,
-          name: file.name,
-          type: file.mimeType || "application/octet-stream",
-        } as any);
-      }
+        return formData;
+      };
 
       let res: Response;
       if (ext === "dxf") {
-        res = await pathApi.parseDxf(apiBaseUrl, formData);
+        res = await fetchWithImportRetry("parse-dxf", async () => {
+          const formData =
+            Platform.OS === "web" ? await buildWebFormData() : buildNativeFormData();
+          return pathApi.parseDxf(apiBaseUrl, formData);
+        });
       } else if (ext === "csv") {
         try {
-          // Read the file and strip BOM if present
+          // Read the file and strip BOM if present (use stable uri on native).
           let text = "";
           if (Platform.OS === "web") {
             const webFile = (file as any).file ?? (await (await fetch(file.uri)).blob());
             text = await webFile.text();
           } else {
-            text = await (await fetch(file.uri)).text();
+            text = await FileSystem.readAsStringAsync(stable.uri, {
+              encoding: FileSystem.EncodingType.UTF8,
+            });
           }
 
           if (text.charCodeAt(0) === 0xfeff) {
             text = text.slice(1);
           }
 
-          // BOM-clean FormData for the backend CSV parsers.
-          const cleanFormData = new FormData();
-          if (Platform.OS === "web") {
-            const cleanBlob = new Blob([text], { type: "text/csv" });
-            cleanFormData.append("file", cleanBlob as any, file.name);
-          } else {
-            const tempUri = FileSystem.cacheDirectory + "clean_" + file.name;
-            await FileSystem.writeAsStringAsync(tempUri, text, {
+          // BOM-clean file on disk so each retry can rebuild FormData from a real URI.
+          let cleanNativeUri: string | null = null;
+          if (Platform.OS !== "web") {
+            cleanNativeUri =
+              (FileSystem.cacheDirectory ?? "") + `clean_${Date.now()}_${stable.name}`;
+            await FileSystem.writeAsStringAsync(cleanNativeUri, text, {
               encoding: FileSystem.EncodingType.UTF8,
             });
-            cleanFormData.append("file", {
-              uri: tempUri,
-              name: file.name,
-              type: "text/csv",
-            } as any);
           }
+
+          const buildCleanFormData = async () => {
+            const cleanFormData = new FormData();
+            if (Platform.OS === "web") {
+              const cleanBlob = new Blob([text], { type: "text/csv" });
+              cleanFormData.append("file", cleanBlob as any, file.name);
+            } else {
+              appendNativeFile(cleanFormData, {
+                uri: cleanNativeUri!,
+                name: file.name,
+                mimeType: "text/csv",
+              });
+            }
+            return cleanFormData;
+          };
 
           // Detect GPS vs NED CSV and branch parse call
           const kind = detectPointCsvKind(text);
-          const parseRes =
-            kind === "gps"
-              ? await pathApi.parsePointGpsCsv(apiBaseUrl, cleanFormData)
-              : await pathApi.parsePointCsv(apiBaseUrl, cleanFormData);
+          const parseRes = await fetchWithImportRetry(
+            kind === "gps" ? "parse-point-gps-csv" : "parse-point-csv",
+            async () => {
+              const cleanFormData = await buildCleanFormData();
+              return kind === "gps"
+                ? pathApi.parsePointGpsCsv(apiBaseUrl, cleanFormData)
+                : pathApi.parsePointCsv(apiBaseUrl, cleanFormData);
+            }
+          );
           if (!parseRes.ok) {
             res = parseRes;
           } else {
@@ -185,14 +313,25 @@ export function UploadAndPreviewStep({
               onGpsPointMissionParsed?.(parsed);
             }
             // Validation succeeded — persist the file on the backend.
-            res = await pathApi.uploadPath(apiBaseUrl, cleanFormData);
+            res = await fetchWithImportRetry("upload-path", async () => {
+              const cleanFormData = await buildCleanFormData();
+              return pathApi.uploadPath(apiBaseUrl, cleanFormData);
+            });
           }
         } catch (e) {
           console.error("Error preprocessing CSV:", e);
-          res = await pathApi.uploadPath(apiBaseUrl, formData);
+          res = await fetchWithImportRetry("upload-path-fallback", async () => {
+            const formData =
+              Platform.OS === "web" ? await buildWebFormData() : buildNativeFormData();
+            return pathApi.uploadPath(apiBaseUrl, formData);
+          });
         }
       } else {
-        res = await pathApi.uploadPath(apiBaseUrl, formData);
+        res = await fetchWithImportRetry("upload-path", async () => {
+          const formData =
+            Platform.OS === "web" ? await buildWebFormData() : buildNativeFormData();
+          return pathApi.uploadPath(apiBaseUrl, formData);
+        });
       }
 
       if (res.ok) {
@@ -200,19 +339,20 @@ export function UploadAndPreviewStep({
         if (ext === "dxf") {
           setImportedPlan({
             fileName: file.name,
-            uri: file.uri,
+            uri: stable.uri,
             fileType: "dxf",
             source: "builtin",
           });
         } else {
           setImportedPlan({
             fileName: file.name,
-            uri: file.uri,
+            uri: stable.uri,
             fileType: (ext as "csv" | "waypoints") || "csv",
             source: "imported",
           });
         }
         setPickedFile(null);
+        setImportError(null);
         onRefreshPaths();
 
         // Map geometry preview (entities + /plan overlay) — same path as selecting a backend path.
@@ -242,12 +382,18 @@ export function UploadAndPreviewStep({
           }
         }
       } else {
-        const errorText = await res.text();
-        Alert.alert("Import Failed", errorText || "Unknown error occurred");
+        const errorText = (await res.text()) || `Import failed (${res.status})`;
+        setImportError(errorText);
+        Alert.alert("Import Failed", errorText);
       }
     } catch (err) {
       console.log("Error importing file:", err);
-      Alert.alert("Error", "Could not connect to the rover to import the file.");
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : "Could not connect to the rover to import the file.";
+      setImportError(msg);
+      Alert.alert("Error", msg);
     } finally {
       setIsUploading(false);
     }
@@ -386,8 +532,10 @@ export function UploadAndPreviewStep({
                 Uploading and loading map preview…
               </Text>
             ) : (
-              <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, marginTop: 2 }}>
-                Import failed — retry or clear
+              <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, marginTop: 2 }} numberOfLines={2}>
+                {importError
+                  ? `Import failed — ${importError}`
+                  : "Import failed — retry or clear"}
               </Text>
             )}
           </View>
@@ -412,6 +560,7 @@ export function UploadAndPreviewStep({
             onPress={() => {
               if (isUploading) return;
               setPickedFile(null);
+              setImportError(null);
             }}
             disabled={isUploading}
             style={{ padding: 4, opacity: isUploading ? 0.4 : 1 }}
