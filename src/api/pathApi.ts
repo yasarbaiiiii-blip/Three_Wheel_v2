@@ -354,42 +354,50 @@ export async function loadToController(
 ): Promise<LoadToControllerResult> {
   const { entityOrder, sprayOverrides, alignmentRequest, onStep } = opts;
 
-  // Step 1: Save entity order
-  try {
-    onStep?.("saveOrder");
-    const orderRes = await saveEntityOrder(apiBaseUrl, pathName, entityOrder);
-    if (!orderRes.ok) {
-      const errText = await orderRes.text();
-      return { success: false, failedStep: "saveOrder", error: errText || "Failed to save path order" };
-    }
-  } catch (err: any) {
-    return { success: false, failedStep: "saveOrder", error: err.message || "Network error saving order" };
-  }
+  // Entity order / spray overrides / segment verification are DXF-entity
+  // concepts — the backend endpoints require a .dxf and reject anything else.
+  // A survey-line CSV has no entities (the backend owns its spray + must-hit),
+  // so skip straight to plan-and-stage. Otherwise a CSV would fail at "saveOrder".
+  const isDxf = pathName.toLowerCase().endsWith(".dxf");
 
-  // Step 2: Save spray overrides
-  try {
-    onStep?.("saveSpray");
-    const sprayRes = await saveEntityOverrides(apiBaseUrl, pathName, sprayOverrides);
-    if (!sprayRes.ok) {
-      const errText = await sprayRes.text();
-      return { success: false, failedStep: "saveSpray", error: errText || "Failed to save spray settings" };
-    }
-  } catch (err: any) {
-    return { success: false, failedStep: "saveSpray", error: err.message || "Network error saving spray" };
-  }
-
-  // Step 3: Verify segments
   let segmentVerification: PathSegmentsResponse | undefined;
-  try {
-    onStep?.("verifySegments");
-    const segRes = await getPathSegments(apiBaseUrl, pathName);
-    if (!segRes.ok) {
-      const errText = await segRes.text();
-      return { success: false, failedStep: "verifySegments", error: errText || "Segment verification failed" };
+  if (isDxf) {
+    // Step 1: Save entity order
+    try {
+      onStep?.("saveOrder");
+      const orderRes = await saveEntityOrder(apiBaseUrl, pathName, entityOrder);
+      if (!orderRes.ok) {
+        const errText = await orderRes.text();
+        return { success: false, failedStep: "saveOrder", error: errText || "Failed to save path order" };
+      }
+    } catch (err: any) {
+      return { success: false, failedStep: "saveOrder", error: err.message || "Network error saving order" };
     }
-    segmentVerification = await segRes.json();
-  } catch (err: any) {
-    return { success: false, failedStep: "verifySegments", error: err.message || "Network error verifying segments" };
+
+    // Step 2: Save spray overrides
+    try {
+      onStep?.("saveSpray");
+      const sprayRes = await saveEntityOverrides(apiBaseUrl, pathName, sprayOverrides);
+      if (!sprayRes.ok) {
+        const errText = await sprayRes.text();
+        return { success: false, failedStep: "saveSpray", error: errText || "Failed to save spray settings" };
+      }
+    } catch (err: any) {
+      return { success: false, failedStep: "saveSpray", error: err.message || "Network error saving spray" };
+    }
+
+    // Step 3: Verify segments
+    try {
+      onStep?.("verifySegments");
+      const segRes = await getPathSegments(apiBaseUrl, pathName);
+      if (!segRes.ok) {
+        const errText = await segRes.text();
+        return { success: false, failedStep: "verifySegments", error: errText || "Segment verification failed" };
+      }
+      segmentVerification = await segRes.json();
+    } catch (err: any) {
+      return { success: false, failedStep: "verifySegments", error: err.message || "Network error verifying segments" };
+    }
   }
 
   // Step 4: Plan & Stage
