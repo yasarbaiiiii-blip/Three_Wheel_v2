@@ -93,6 +93,11 @@ export interface LayerVisibility {
   /** Whether the rover marker itself is shown. Defaults to visible when omitted. */
   rover?: boolean;
   /**
+   * Guide / CSV / multi-point ref markers (gold pins + labels).
+   * Defaults to visible when omitted.
+   */
+  refPoints?: boolean;
+  /**
    * Per-geometry-type visibility for plan segments (keyed by normalizeCurveEntityType,
    * e.g. "line" | "arc" | "circle"). A type missing from the map is treated as visible —
    * this only needs to record explicit opt-outs.

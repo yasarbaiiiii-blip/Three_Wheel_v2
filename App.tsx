@@ -969,6 +969,7 @@ export default function App() {
     transit: true,
     extension: true,
     rover: true,
+    refPoints: true,
     segmentTypes: {},
   });
   const [showRefPointLabels, setShowRefPointLabels] = useState(false);
@@ -1543,7 +1544,16 @@ export default function App() {
     setSelectedLineId(null);
     setImportedPlan(null);
     setAutoOriginReference(null);
-    setLayerVisibility({ boundary: true, marking: true, center: true, transit: true, extension: true, rover: true, segmentTypes: {} });
+    setLayerVisibility({
+      boundary: true,
+      marking: true,
+      center: true,
+      transit: true,
+      extension: true,
+      rover: true,
+      refPoints: true,
+      segmentTypes: {},
+    });
   };
 
   const connectSelectedWebsocket = async () => {
@@ -6976,6 +6986,12 @@ function PlanPreview({
     [visibility]
   );
 
+  /** Guide / CSV / multi-point pins — hide when Layers → Ref points is off. */
+  const showRefPointsLayer = visibility.refPoints !== false;
+  const visibleSelectedPoints = showRefPointsLayer ? selectedPoints : [];
+  const visibleSnapRefPoints = showRefPointsLayer ? snapRefPoints : undefined;
+  const visibleShowRefPointLabels = showRefPointsLayer && showRefPointLabels;
+
   const filtered = useMemo(() => applyLayerVisibility(lines), [lines, applyLayerVisibility]);
 
   // The Mapbox <MapView> below uses raw `mapSourceLines` instead of `filtered`
@@ -7519,7 +7535,7 @@ function PlanPreview({
           const tapX = evt.nativeEvent.locationX;
           const tapY = evt.nativeEvent.locationY;
 
-          if (showRefPointLabels && alignedRefPoints.length > 0 && onToggleRefPointLabel) {
+          if (visibleShowRefPointLabels && alignedRefPoints.length > 0 && onToggleRefPointLabel) {
             let hitIndex: number | null = null;
             let hitDist = 20;
             for (let i = 0; i < alignedRefPoints.length; i++) {
@@ -7678,7 +7694,7 @@ function PlanPreview({
             onRotateBoundary={onRotateBoundary}
             sketchMode={sketchMode}
             showBoundaryPoints={showBoundaryPoints}
-            snapRefPoints={snapRefPoints}
+            snapRefPoints={visibleSnapRefPoints}
             planPlacementPhase={
               isPlanEditingMode ? multiPointPlacementPhase : "idle"
             }
@@ -7739,16 +7755,18 @@ function PlanPreview({
             visualAlignmentAnchor={visualAlignmentAnchor}
             previewFallbackGps={previewFallbackGps}
             visible
+            showRover={visibility.rover !== false}
+            showRefPointLabels={visibleShowRefPointLabels}
             recenterRoverTrigger={recenterRoverTrigger || recenterRoverCount}
             recenterPlanTrigger={recenterPlanTrigger || recenterPlanCount}
             resetNorthTrigger={resetNorthTrigger}
-            onSelectPoint={onSelectPoint}
-            onGuidePointFocus={onGuidePointFocus}
+            onSelectPoint={showRefPointsLayer ? onSelectPoint : undefined}
+            onGuidePointFocus={showRefPointsLayer ? onGuidePointFocus : undefined}
             onSelectLine={onSelectLine}
             selectedLineId={selectedLineId}
             highlightedLines={selectedLines}
             showCornerPoints={true}
-            selectedPoints={selectedPoints}
+            selectedPoints={visibleSelectedPoints}
           />
         ) : filtered.length === 0 && !hasRover ? (
           // No plan, no rover: show placeholder
@@ -7878,7 +7896,7 @@ function PlanPreview({
                 />
               ))}
               {/* ── Selected Points (yellow highlight for alignment) ── */}
-              {selectedPoints?.map((pt, i) => (
+              {visibleSelectedPoints?.map((pt, i) => (
                 <Circle
                   key={`sp-${i}`}
                   cx={pt.y}
@@ -8030,7 +8048,7 @@ function PlanPreview({
             })()}
 
             {/* ── Aligned ref labels only (green map dots removed) ── */}
-            {showRefPointLabels &&
+            {visibleShowRefPointLabels &&
               alignedRefPoints?.map((pt, i) => {
                 if (activeRefPointLabelIndex !== i) return null;
                 const rawSX = pt.dxf_y * viewport.zoom + viewport.panX;

@@ -10,6 +10,7 @@
 
 import { projectGpsToLocalMeters } from "./visualAlignment";
 import { splitCsvCells } from "./refPointsCsv";
+import { buildRoadMarkingPreviewPoints } from "./roadMarkingCsvPath";
 import type { PlanLine } from "../types/plan";
 
 /** Soft cap for map pin markers (polyline still uses full point set). */
@@ -303,26 +304,69 @@ export function sampleEvenly<T>(items: T[], maxCount: number): T[] {
 }
 
 /**
- * One connected polyline (preview_points) so Mapbox draws a real path —
- * not N invisible zero-length LineStrings.
+ * One connected OPEN road-marking path for Mapbox preview.
+ *
+ * Survey points are refined into straights + circular-arc curves only
+ * (Hyper fit, segment-then geometric joint fillets; never a closed ring).
+ * Pin markers still use the raw CSV points via `localCsvToMapPins`.
  */
 export function localCsvPointsToPlanLines(points: LocalPointCsvPoint[]): PlanLine[] {
   if (points.length === 0) return [];
 
-  const preview_points = points.map((p) => ({
+  const rawNed = points.map((p) => ({
     north: p.north_m,
     east: p.east_m,
   }));
-  const first = points[0];
-  const last = points[points.length - 1];
+  const preview_points = buildRoadMarkingPreviewPoints(rawNed);
+  if (preview_points.length < 2) {
+    // Degenerate after open/dedupe — fall back to raw open chain (still not a polygon).
+    const fallback =
+      rawNed.length >= 2
+        ? rawNed[0].north === rawNed[rawNed.length - 1].north &&
+          rawNed[0].east === rawNed[rawNed.length - 1].east
+          ? rawNed.slice(0, -1)
+          : rawNed
+        : rawNed;
+    if (fallback.length < 2) return [];
+    const first = fallback[0];
+    const last = fallback[fallback.length - 1];
+    return [
+      {
+        id: "local-csv-path",
+        label: `CSV path (${points.length} pts)`,
+        layer: "marking",
+        from: { id: 1, x: first.north, y: first.east },
+        to: { id: 2, x: last.north, y: last.east },
+        width: 0.1,
+        is_mark: true,
+        entity: {
+          entity_id: "local-csv-path",
+          entity_type: "LWPOLYLINE",
+          layer: "MARK",
+          color: 7,
+          is_mark: true,
+          length_m: 0,
+          geometry: {
+            closed: false,
+            road_marking: true,
+            vertexCount: fallback.length,
+          },
+          preview_points: fallback,
+        },
+      },
+    ];
+  }
+
+  const first = preview_points[0];
+  const last = preview_points[preview_points.length - 1];
 
   return [
     {
       id: "local-csv-path",
       label: `CSV path (${points.length} pts)`,
       layer: "marking",
-      from: { id: 1, x: first.north_m, y: first.east_m },
-      to: { id: 2, x: last.north_m, y: last.east_m },
+      from: { id: 1, x: first.north, y: first.east },
+      to: { id: 2, x: last.north, y: last.east },
       width: 0.1,
       is_mark: true,
       entity: {
@@ -332,7 +376,13 @@ export function localCsvPointsToPlanLines(points: LocalPointCsvPoint[]): PlanLin
         color: 7,
         is_mark: true,
         length_m: 0,
-        geometry: { closed: false, vertexCount: points.length },
+        geometry: {
+          closed: false,
+          /** Road-marking preview: open stroke only (never a polygon ring). */
+          road_marking: true,
+          vertexCount: preview_points.length,
+          source_vertex_count: points.length,
+        },
         preview_points,
       },
     },

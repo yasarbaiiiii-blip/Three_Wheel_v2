@@ -109,12 +109,17 @@ describe("parseLocalPointCsv", () => {
 });
 
 describe("localCsvPointsToPlanLines", () => {
-  it("builds one polyline with all preview_points", () => {
+  it("builds one open road-marking path (not a closed polygon)", () => {
     const r = parseLocalPointCsv(["lat,lon", "13,80", "13.001,80", "13.002,80.001"].join("\n"));
     const lines = localCsvPointsToPlanLines(r.points);
     expect(lines).toHaveLength(1);
-    expect(lines[0].entity?.preview_points).toHaveLength(3);
-    expect(lines[0].from.x).toBeCloseTo(r.points[0].north_m, 6);
+    expect(lines[0].entity?.geometry?.closed).toBe(false);
+    expect(lines[0].entity?.geometry?.road_marking).toBe(true);
+    const pts = lines[0].entity?.preview_points ?? [];
+    expect(pts.length).toBeGreaterThanOrEqual(2);
+    // Path starts at the first survey point (anchor).
+    expect(lines[0].from.x).toBeCloseTo(r.points[0].north_m, 1);
+    expect(lines[0].from.y).toBeCloseTo(r.points[0].east_m, 1);
   });
 });
 

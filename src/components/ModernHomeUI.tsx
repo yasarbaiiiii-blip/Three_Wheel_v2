@@ -1100,6 +1100,7 @@ export default function ModernHomeUI(props) {
   // ── Click to Mark handlers ──
   const handleToggleMarkMenu = useCallback(() => {
     setShowMarkMenu((v) => !v);
+    setShowLayersMenu(false);
   }, []);
 
   const handleStartDrawingMode = useCallback((mode: "click" | "manual") => {
@@ -1364,12 +1365,19 @@ export default function ModernHomeUI(props) {
                   </View>
                 )}
               </View>
+            </>
+          )}
 
+          {(isHomePage || isFieldsPage) && (
+            <>
               <View style={styles.mapToolsDivider} />
               <View>
                 <Pressable
                   style={({ pressed }) => [styles.focusToolBtnGrouped, pressed && styles.focusToolBtnPressed]}
-                  onPress={() => setShowLayersMenu((v) => !v)}
+                  onPress={() => {
+                    setShowLayersMenu((v) => !v);
+                    if (isHomePage) setShowMarkMenu(false);
+                  }}
                   accessibilityLabel="Layers"
                 >
                   <Layers color={COLORS.accentBrand} size={18} strokeWidth={2.2} />
@@ -1420,6 +1428,12 @@ export default function ModernHomeUI(props) {
                       label="Rover"
                       checked={showRoverMarker}
                       onPress={() => toggleLayerFlag("rover")}
+                      colors={COLORS}
+                    />
+                    <LayerCheckboxRow
+                      label="Ref points"
+                      checked={layerVisibility?.refPoints !== false}
+                      onPress={() => toggleLayerFlag("refPoints")}
                       colors={COLORS}
                     />
 

@@ -697,12 +697,17 @@ export function MapViewNative(props: MapViewProps) {
       const segs = projectPlanLineToGpsSegments(line, projectionOrigin);
       if (segs.length >= 2) {
         const coords = segs.map(([lat, lon]) => toMapboxCoord(lat, lon));
+        // Road-marking CSV (and any line tagged closed:false) must never render as a
+        // closed polygon ring — only explicit geometry.closed === true may close.
+        const allowClosed =
+          line.entity?.geometry?.closed === true &&
+          line.entity?.geometry?.road_marking !== true;
         features.push(
           lineFeature(coords, {
             id: line.id,
             layer: line.layer,
             color: colorForLayer(line.layer),
-            closedRing: isClosedCoordRing(coords),
+            closedRing: allowClosed && isClosedCoordRing(coords),
           })
         );
       }
@@ -916,16 +921,27 @@ export function MapViewNative(props: MapViewProps) {
       const segs = projectPlanLineToGpsSegments(selected, projectionOrigin);
       if (segs.length < 2) continue;
       const coords = segs.map(([lat, lon]) => toMapboxCoord(lat, lon));
-      const closedRing = isClosedCoordRing(coords);
+      const allowClosed =
+        selected.entity?.geometry?.closed === true &&
+        selected.entity?.geometry?.road_marking !== true;
+      const closedRing = allowClosed && isClosedCoordRing(coords);
       lineFeatures.push(lineFeature(coords, { closedRing }));
 
-      const cornerAnchors = isCurveEntity(selected) || isCircleLikeLine(selected)
-        ? getCurveSelectionAnchors(selected).map((pt) => {
-            const gps = projectPlanNorthEastToGps(pt.north, pt.east, projectionOrigin);
-            return pointFeature(toMapboxCoord(gps.lat, gps.lon));
-          })
-        : coords.map((c) => pointFeature(c));
-      cornerFeatures.push(...cornerAnchors);
+      // Road-marking CSV paths are densely sampled (straights + arcs). Plotting a blue
+      // corner dot on every vertex floods the map — keep the blue stroke only.
+      const isRoadMarkingCsv =
+        selected.id === "local-csv-path" ||
+        selected.entity?.geometry?.road_marking === true ||
+        selected.entity?.entity_id === "local-csv-path";
+      if (!isRoadMarkingCsv) {
+        const cornerAnchors = isCurveEntity(selected) || isCircleLikeLine(selected)
+          ? getCurveSelectionAnchors(selected).map((pt) => {
+              const gps = projectPlanNorthEastToGps(pt.north, pt.east, projectionOrigin);
+              return pointFeature(toMapboxCoord(gps.lat, gps.lon));
+            })
+          : coords.map((c) => pointFeature(c));
+        cornerFeatures.push(...cornerAnchors);
+      }
 
       const midSeg = segs[Math.floor(segs.length / 2)];
       const lengthM = getLineLengthM(selected);
