@@ -187,7 +187,10 @@ import {
   stagedMissionMatchesId,
   waypointsToPlanLines,
 } from "./src/utils/stagedMissionHydration";
-import type { LocalPointCsvResult } from "./src/utils/localPointCsv";
+import {
+  localCsvPointsToPlanLines,
+  type LocalPointCsvResult,
+} from "./src/utils/localPointCsv";
 import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
 import { rehydrateAlignedPlanLines } from "./src/utils/rehydrateAlignedPlan";
 import type { AutoOriginReference, MapGeometryFrame } from "./src/types/autoOrigin";
@@ -2836,14 +2839,16 @@ export default function App() {
     setMissionLoaded(false);
     setMissionRunning(false);
 
-    const previewLines = pointMissionPointsToPlanLines(data.points);
+    // One connected polyline (not N zero-length segments — those are invisible on Mapbox).
+    const previewLines = localCsvPointsToPlanLines(data.points);
     setLines(sanitizePlanLines(previewLines));
     setSelectedLineId(previewLines[0]?.id ?? null);
     setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
 
     if (data.kind === "gps" && data.anchor) {
-      // Map projects local NED relative to the first GPS row.
+      // Same geo anchor contract as staged GPS missions: design (0,0) = first CSV row.
+      // Map pins also pass raw lat/lon (FieldsPage) so they match guide/ref CSV exactly.
       setVerifiedAlignmentRequest({
         origin_gps: [data.anchor.lat, data.anchor.lon],
         rotation_deg: 0,

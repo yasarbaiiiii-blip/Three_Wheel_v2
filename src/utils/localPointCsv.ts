@@ -1,18 +1,25 @@
 /**
- * Client-side point-mission CSV parse for Fields upload.
+ * Client-side point CSV parse for Fields "Select File" upload.
  *
- * Mission Select File (.csv) must NOT hit the rover path APIs. This module
- * reads lat/lon or north/east CSVs on-device and produces local NED points for
- * map preview only (no upload / parse-point-* / /preview).
+ * Mission Select File (.csv) must NOT hit the rover path APIs. Parse on-device
+ * and produce local NED + original lat/lon (when present) for map preview.
+ *
+ * GPS header rules match guide/ref CSV (`parseGuidePointsCsv`) so the same file
+ * lands at the same map position in both Upload plan and Import guide CSV.
  */
 
 import { projectGpsToLocalMeters } from "./visualAlignment";
 import { splitCsvCells } from "./refPointsCsv";
+import type { PlanLine } from "../types/plan";
+
+/** Soft cap for map pin markers (polyline still uses full point set). */
+export const LOCAL_CSV_MAX_MAP_PINS = 1000;
 
 const LAT_ALIASES = new Set(["lat", "latitude"]);
 const LON_ALIASES = new Set(["lon", "lng", "long", "longitude"]);
-const NORTH_ALIASES = new Set(["north", "north_m", "n", "y"]);
-const EAST_ALIASES = new Set(["east", "east_m", "e", "x"]);
+/** Explicit NED headers only — not bare n/e/x/y (too easy to steal survey columns). */
+const NORTH_ALIASES = new Set(["north", "north_m", "northing"]);
+const EAST_ALIASES = new Set(["east", "east_m", "easting"]);
 const DWELL_ALIASES = new Set(["dwell_s", "dwell", "dwell_sec"]);
 const MARK_ALIASES = new Set(["mark", "is_mark", "spray"]);
 
@@ -38,6 +45,15 @@ export type LocalPointCsvResult = {
   anchor: { lat: number; lon: number } | null;
   point_source_frame: "GPS_SURVEYED" | "LOCAL_NED";
   warnings: string[];
+};
+
+export type LocalCsvMapPin = {
+  /** Plan north (metres) — used when lat/lon absent. */
+  x: number;
+  /** Plan east (metres). */
+  y: number;
+  lat?: number;
+  lon?: number;
 };
 
 function stripBom(text: string): string {
@@ -87,6 +103,7 @@ function resolveHeader(cells: string[]): ColMap | null {
   const lower = cells.map((c) => c.trim().toLowerCase());
   const find = (aliases: Set<string>) => lower.findIndex((c) => aliases.has(c));
 
+  // Prefer GPS (same as guide CSV) so multi-column survey exports with Lat/Lon work.
   const latIdx = find(LAT_ALIASES);
   const lonIdx = find(LON_ALIASES);
   if (latIdx >= 0 && lonIdx >= 0) {
@@ -103,8 +120,6 @@ function resolveHeader(cells: string[]): ColMap | null {
 
   const northIdx = find(NORTH_ALIASES);
   const eastIdx = find(EAST_ALIASES);
-  // Prefer explicit north/east headers; avoid treating "y,x" alone as NED when
-  // the file is clearly a multi-column survey export without lat/lon.
   if (northIdx >= 0 && eastIdx >= 0) {
     const dwellIdx = find(DWELL_ALIASES);
     const markIdx = find(MARK_ALIASES);
@@ -120,14 +135,23 @@ function resolveHeader(cells: string[]): ColMap | null {
   return null;
 }
 
-function headerlessMap(firstRow: string[]): ColMap | null {
+/**
+ * Headerless rows: treat as lat,lon (matches guide/ref CSV), not NED metres.
+ * Optional 3rd/4th columns: dwell_s[, mark].
+ */
+function headerlessGpsMap(firstRow: string[]): ColMap | null {
   if (firstRow.length < 2) return null;
   if (!looksNumeric(firstRow[0]) || !looksNumeric(firstRow[1])) return null;
-  // Headerless always NED metres (same contract as former /parse-point-csv).
+  const lat = Number(firstRow[0]);
+  const lon = Number(firstRow[1]);
+  // Guard: pure NED metre files that are clearly not geographic (e.g. 0,0 / 5,1)
+  // still parse as GPS if values fit lat/lon range — operators with headerless
+  // lat,lon (the common survey drop) must win; headered north,east is the NED path.
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
   return {
-    kind: "ned",
-    northIdx: 0,
-    eastIdx: 1,
+    kind: "gps",
+    latIdx: 0,
+    lonIdx: 1,
     dwellIdx: firstRow.length >= 3 ? 2 : undefined,
     markIdx: firstRow.length >= 4 ? 3 : undefined,
   };
@@ -150,11 +174,11 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
   if (colMap) {
     dataStart = 1;
   } else {
-    colMap = headerlessMap(firstCells);
+    colMap = headerlessGpsMap(firstCells);
     if (!colMap) {
       throw new Error(
-        "Unrecognized CSV. Expected lat/lon (or latitude/longitude) columns, " +
-          "north/east columns, or headerless north,east[,dwell_s[,mark]] metres."
+        "Unrecognized CSV. Expected lat/lon (or latitude/longitude) columns " +
+          "(same as guide CSV), north/east headers, or headerless lat,lon rows."
       );
     }
     dataStart = 0;
@@ -208,7 +232,9 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      warnings.push(msg);
+      // Cap warning list so a 5k-row bad file cannot explode memory.
+      if (warnings.length < 50) warnings.push(msg);
+      else if (warnings.length === 50) warnings.push("…further row errors omitted");
     }
   }
 
@@ -261,4 +287,73 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
     point_source_frame: "LOCAL_NED",
     warnings,
   };
+}
+
+/** Evenly sample indices so large CSVs still get representative map pins. */
+export function sampleEvenly<T>(items: T[], maxCount: number): T[] {
+  if (maxCount <= 0 || items.length === 0) return [];
+  if (items.length <= maxCount) return items.slice();
+  if (maxCount === 1) return [items[0]];
+  const out: T[] = [];
+  for (let i = 0; i < maxCount; i++) {
+    const idx = Math.round((i * (items.length - 1)) / (maxCount - 1));
+    out.push(items[idx]);
+  }
+  return out;
+}
+
+/**
+ * One connected polyline (preview_points) so Mapbox draws a real path —
+ * not N invisible zero-length LineStrings.
+ */
+export function localCsvPointsToPlanLines(points: LocalPointCsvPoint[]): PlanLine[] {
+  if (points.length === 0) return [];
+
+  const preview_points = points.map((p) => ({
+    north: p.north_m,
+    east: p.east_m,
+  }));
+  const first = points[0];
+  const last = points[points.length - 1];
+
+  return [
+    {
+      id: "local-csv-path",
+      label: `CSV path (${points.length} pts)`,
+      layer: "marking",
+      from: { id: 1, x: first.north_m, y: first.east_m },
+      to: { id: 2, x: last.north_m, y: last.east_m },
+      width: 0.1,
+      is_mark: true,
+      entity: {
+        entity_id: "local-csv-path",
+        entity_type: "LWPOLYLINE",
+        layer: "MARK",
+        color: 7,
+        is_mark: true,
+        length_m: 0,
+        geometry: { closed: false, vertexCount: points.length },
+        preview_points,
+      },
+    },
+  ];
+}
+
+/**
+ * Map pins in the same shape as guide/ref selectedPoints.
+ * GPS rows include lat/lon so MapView draws them directly (no plan-origin reproject).
+ */
+export function localCsvToMapPins(
+  result: LocalPointCsvResult,
+  maxPins = LOCAL_CSV_MAX_MAP_PINS
+): LocalCsvMapPin[] {
+  const sampled = sampleEvenly(result.points, maxPins);
+  return sampled.map((p) => {
+    const pin: LocalCsvMapPin = { x: p.north_m, y: p.east_m };
+    if (p.lat != null && p.lon != null && Number.isFinite(p.lat) && Number.isFinite(p.lon)) {
+      pin.lat = p.lat;
+      pin.lon = p.lon;
+    }
+    return pin;
+  });
 }

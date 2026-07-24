@@ -22,7 +22,10 @@ import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPrevi
 import { useFieldsWorkflow } from "../hooks/useFieldsWorkflow";
 import { parseGuidePointsCsv } from "../utils/refPointsCsv";
 import { designObbFromLines } from "../utils/planResizeHandles";
-import type { LocalPointCsvResult } from "../utils/localPointCsv";
+import {
+  localCsvToMapPins,
+  type LocalPointCsvResult,
+} from "../utils/localPointCsv";
 import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
 import type {
   AlignmentResultState,
@@ -508,6 +511,16 @@ export function FieldsPage(props: FieldsPageProps) {
     autoOrigin ||
     isGeographicDxf;
 
+  /**
+   * Upload-plan CSV pins: same direct lat/lon draw path as guide/ref points
+   * (MapView selectedPointsFC). Always shown while a local CSV is loaded —
+   * not gated on Align step (Align is hidden for local CSV).
+   */
+  const localCsvMapPins = useMemo(() => {
+    if (!localCsvPreview || localCsvPreview.points.length === 0) return null;
+    return localCsvToMapPins(localCsvPreview);
+  }, [localCsvPreview]);
+
   const stepStatus = (id: FieldsStepId): "pending" | "active" | "done" => {
     switch (id) {
       case "boundingBox":
@@ -672,8 +685,9 @@ export function FieldsPage(props: FieldsPageProps) {
           roverPosN: previewRoverPoint?.north ?? null,
           roverPosE: previewRoverPoint?.east ?? null,
           roverHeadingDeg: telemetrySnapshot?.heading_ned_deg ?? null,
-          selectedPoints:
-            activeStep === "align"
+          selectedPoints: localCsvMapPins
+            ? localCsvMapPins
+            : activeStep === "align"
               ? refPoints.map((point) => {
                   const lat = parseFloat(point.lat);
                   const lon = parseFloat(point.lon);
@@ -684,8 +698,16 @@ export function FieldsPage(props: FieldsPageProps) {
                   };
                 })
               : [],
-          onSelectPoint: canTapGuidePoints ? handleSelectPoint : undefined,
-          onGuidePointFocus: canTapGuidePoints ? handleGuidePointFocus : undefined,
+          onSelectPoint: localCsvMapPins
+            ? undefined
+            : canTapGuidePoints
+              ? handleSelectPoint
+              : undefined,
+          onGuidePointFocus: localCsvMapPins
+            ? undefined
+            : canTapGuidePoints
+              ? handleGuidePointFocus
+              : undefined,
           alignedRefPoints,
           stagedVerified: stagedWorkflow.staged === "verified",
           mapViewEnabled,
@@ -1089,11 +1111,16 @@ export function FieldsPage(props: FieldsPageProps) {
                   Local preview only — this file is not uploaded to the rover.{"\n"}
                   {localCsvPreview.num_points} point
                   {localCsvPreview.num_points === 1 ? "" : "s"} ·{" "}
-                  {localCsvPreview.kind === "gps" ? "GPS (anchor-relative NED)" : "NED metres"}
+                  {localCsvPreview.kind === "gps"
+                    ? "GPS pins at CSV lat/lon (same as guide CSV)"
+                    : "NED metres path"}
                   {"\n"}
                   Frame: {localCsvPreview.point_source_frame}
                   {localCsvPreview.kind === "gps" && localCsvPreview.anchor
                     ? `\nAnchor: ${localCsvPreview.anchor.lat.toFixed(6)}, ${localCsvPreview.anchor.lon.toFixed(6)}`
+                    : ""}
+                  {localCsvMapPins && localCsvMapPins.length < localCsvPreview.num_points
+                    ? `\nMap shows ${localCsvMapPins.length} pins (sampled) + full path line.`
                     : ""}
                 </Text>
                 {localCsvPreview.warnings.length > 0 ? (

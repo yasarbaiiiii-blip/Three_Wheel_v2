@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { parseLocalPointCsv } from "./localPointCsv";
+import {
+  localCsvPointsToPlanLines,
+  localCsvToMapPins,
+  parseLocalPointCsv,
+  sampleEvenly,
+} from "./localPointCsv";
+import { projectPlanNorthEastToGps } from "./mapGeometryProjection";
 
 describe("parseLocalPointCsv", () => {
   it("parses lat,lon GPS header and anchors at first row", () => {
@@ -23,7 +29,17 @@ describe("parseLocalPointCsv", () => {
     expect(r.anchor?.lon).toBe(80.0);
   });
 
-  it("parses north,east header", () => {
+  it("headerless numeric rows are lat,lon (same as guide CSV)", () => {
+    const text = ["13.0,80.0", "13.001,80.0"].join("\n");
+    const r = parseLocalPointCsv(text);
+    expect(r.kind).toBe("gps");
+    expect(r.num_points).toBe(2);
+    expect(r.anchor).toEqual({ lat: 13.0, lon: 80.0 });
+    expect(r.points[0].lat).toBe(13.0);
+    expect(r.points[0].lon).toBe(80.0);
+  });
+
+  it("parses north,east header as NED", () => {
     const text = ["north,east", "0,0", "5,1"].join("\n");
     const r = parseLocalPointCsv(text);
     expect(r.kind).toBe("ned");
@@ -33,15 +49,25 @@ describe("parseLocalPointCsv", () => {
     ]);
   });
 
-  it("parses headerless NED metres", () => {
-    const text = ["0,0", "2,3"].join("\n");
+  it("parses northing,easting headers as NED", () => {
+    const text = ["northing,easting", "1,2", "3,4"].join("\n");
     const r = parseLocalPointCsv(text);
     expect(r.kind).toBe("ned");
-    expect(r.num_points).toBe(2);
-    expect(r.points[1]).toMatchObject({ north_m: 2, east_m: 3, mark: true });
+    expect(r.points[1]).toMatchObject({ north_m: 3, east_m: 4 });
   });
 
-  it("parses mark column", () => {
+  it("prefers lat/lon when survey file also has northing/easting", () => {
+    const text = [
+      "Name,Northing,Easting,Latitude,Longitude",
+      "1,100,200,13.0,80.0",
+      "2,101,201,13.001,80.0",
+    ].join("\n");
+    const r = parseLocalPointCsv(text);
+    expect(r.kind).toBe("gps");
+    expect(r.anchor).toEqual({ lat: 13.0, lon: 80.0 });
+  });
+
+  it("parses mark column on NED", () => {
     const text = ["north,east,mark", "0,0,true", "1,0,false"].join("\n");
     const r = parseLocalPointCsv(text);
     expect(r.points[0].mark).toBe(true);
@@ -62,5 +88,57 @@ describe("parseLocalPointCsv", () => {
     const r = parseLocalPointCsv(text);
     expect(r.kind).toBe("gps");
     expect(r.num_points).toBe(1);
+  });
+
+  it("round-trips GPS lat/lon through NED projection (map path)", () => {
+    const text = ["lat,lon", "13.07208106,80.26195346", "13.08,80.27"].join("\n");
+    const r = parseLocalPointCsv(text);
+    const origin = {
+      frame: "ALIGNED_DESIGN" as const,
+      originLat: r.anchor!.lat,
+      originLon: r.anchor!.lon,
+      originDxfNorth: 0,
+      originDxfEast: 0,
+    };
+    for (const p of r.points) {
+      const gps = projectPlanNorthEastToGps(p.north_m, p.east_m, origin);
+      expect(gps.lat).toBeCloseTo(p.lat!, 8);
+      expect(gps.lon).toBeCloseTo(p.lon!, 8);
+    }
+  });
+});
+
+describe("localCsvPointsToPlanLines", () => {
+  it("builds one polyline with all preview_points", () => {
+    const r = parseLocalPointCsv(["lat,lon", "13,80", "13.001,80", "13.002,80.001"].join("\n"));
+    const lines = localCsvPointsToPlanLines(r.points);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].entity?.preview_points).toHaveLength(3);
+    expect(lines[0].from.x).toBeCloseTo(r.points[0].north_m, 6);
+  });
+});
+
+describe("localCsvToMapPins", () => {
+  it("includes lat/lon for GPS pins (direct map draw like guide CSV)", () => {
+    const r = parseLocalPointCsv(["lat,lon", "13,80", "13.001,80"].join("\n"));
+    const pins = localCsvToMapPins(r);
+    expect(pins).toHaveLength(2);
+    expect(pins[0].lat).toBe(13);
+    expect(pins[0].lon).toBe(80);
+  });
+
+  it("samples evenly when over pin cap", () => {
+    const rows = ["lat,lon", ...Array.from({ length: 200 }, (_, i) => `${13 + i * 0.0001},80`)];
+    const r = parseLocalPointCsv(rows.join("\n"));
+    const pins = localCsvToMapPins(r, 50);
+    expect(pins.length).toBe(50);
+    expect(pins[0].lat).toBeCloseTo(13, 5);
+    expect(pins[pins.length - 1].lat).toBeCloseTo(13 + 199 * 0.0001, 5);
+  });
+});
+
+describe("sampleEvenly", () => {
+  it("returns all when under cap", () => {
+    expect(sampleEvenly([1, 2, 3], 10)).toEqual([1, 2, 3]);
   });
 });
