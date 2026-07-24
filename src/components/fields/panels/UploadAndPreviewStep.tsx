@@ -38,6 +38,13 @@ type UploadAndPreviewStepProps = {
   isImportingRefPointsCsv?: boolean;
   /** When set, the guide-CSV button shows this file name instead of a generic label. */
   guideCsvFileName?: string | null;
+  /**
+   * Pre-line marking mode. When true, a `.csv` is a SURVEY LINE file: upload it
+   * to the backend and preview the planner's real waypoints (WYSIWYG), exactly
+   * like a DXF — instead of the on-device point-mission parse. Default false
+   * preserves the local point-CSV flow.
+   */
+  preLineCsvMode?: boolean;
 };
 
 const MAX_IMPORT_ATTEMPTS = 3;
@@ -155,7 +162,11 @@ export function UploadAndPreviewStep({
   onImportRefPointsCsv,
   isImportingRefPointsCsv = false,
   guideCsvFileName = null,
+  preLineCsvMode: preLineCsvModeDefault = false,
 }: UploadAndPreviewStepProps) {
+  // Pre-line marking: treat a .csv as a survey LINE (upload → backend /preview),
+  // not an on-device point mission. Operator-toggled; seeded from the prop.
+  const [preLineCsvMode, setPreLineCsvMode] = useState<boolean>(preLineCsvModeDefault);
   const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
@@ -176,8 +187,11 @@ export function UploadAndPreviewStep({
 
   const targetPathName = importedPlan?.fileName ?? null;
   const isDxfPath = targetPathName?.toLowerCase().endsWith(".dxf");
-  const isCsvPath =
-    importedPlan?.fileType === "csv" || targetPathName?.toLowerCase().endsWith(".csv");
+  // A pre-line CSV is a backend path (previewed via /preview), so it must NOT be
+  // treated as a local-only CSV that suppresses the backend preview.
+  const isLocalCsvPath =
+    !preLineCsvMode &&
+    (importedPlan?.fileType === "csv" || !!targetPathName?.toLowerCase().endsWith(".csv"));
 
   useEffect(() => {
     if (isDxfPath && targetPathName && apiBaseUrl) {
@@ -196,7 +210,7 @@ export function UploadAndPreviewStep({
 
   // Backend path preview for DXF / waypoints only — never for local CSV.
   useEffect(() => {
-    if (!targetPathName || !apiBaseUrl || isCsvPath) return;
+    if (!targetPathName || !apiBaseUrl || isLocalCsvPath) return;
     setPreviewData(null);
     pathApi.getPathPreview(apiBaseUrl, targetPathName)
       .then(res => {
@@ -207,7 +221,7 @@ export function UploadAndPreviewStep({
       .catch(() => {
         // Preview is optional — swallow errors silently
       });
-  }, [targetPathName, apiBaseUrl, isCsvPath]);
+  }, [targetPathName, apiBaseUrl, isLocalCsvPath]);
 
   /**
    * CSV: parse entirely on-device — no parse-point-*, upload, or /preview.
@@ -218,8 +232,10 @@ export function UploadAndPreviewStep({
 
     const ext = file.name.split(".").pop()?.toLowerCase();
 
-    // CSV is local-only and does not require a rover connection.
-    if (ext === "csv") {
+    // CSV is local-only and does not require a rover connection — UNLESS pre-line
+    // mode is on, where a .csv is a survey LINE file that goes to the backend
+    // (falls through to the upload + /preview branch below, like a DXF).
+    if (ext === "csv" && !preLineCsvMode) {
       setPickedFile(file);
       setImportError(null);
       setIsUploading(true);
@@ -460,9 +476,44 @@ export function UploadAndPreviewStep({
     <View style={{ gap: 14 }}>
       {/* File Upload Section */}
       <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
-        Import a .dxf, .csv, or .waypoints file. DXF/waypoints use the rover; CSV is parsed
-        on-device and drawn locally (not uploaded).
+        Import a .dxf, .csv, or .waypoints file. DXF/waypoints use the rover.
+        {preLineCsvMode
+          ? " Pre-line: a CSV is a survey line — uploaded and previewed on the rover."
+          : " CSV is parsed on-device and drawn locally (not uploaded)."}
       </Text>
+
+      {/* Pre-line CSV mode: route a survey-line CSV through the backend planner
+          (WYSIWYG /preview) instead of the on-device point-mission parse. */}
+      {!targetPathName ? (
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+            backgroundColor: FIELDS_COLORS.surfaceSolid,
+            borderRadius: 10,
+            borderWidth: 1,
+            borderColor: FIELDS_COLORS.panelBorder,
+            padding: 12,
+          }}
+        >
+          <View style={{ flex: 1, paddingRight: 10 }}>
+            <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "800" }}>
+              Pre-line CSV (survey line)
+            </Text>
+            <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
+              Upload a lat/lon survey CSV and preview the marking line on the rover
+            </Text>
+          </View>
+          <Switch
+            value={preLineCsvMode}
+            onValueChange={setPreLineCsvMode}
+            disabled={protectedResident || isUploading}
+            trackColor={{ false: FIELDS_COLORS.panelBorder, true: "#8b5cf6" }}
+            thumbColor={preLineCsvMode ? "#ffffff" : "#94a3b8"}
+          />
+        </View>
+      ) : null}
 
       {!pickedFile && !targetPathName ? (
         <TouchableOpacity

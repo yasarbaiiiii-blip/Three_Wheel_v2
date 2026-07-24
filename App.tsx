@@ -2279,7 +2279,20 @@ export default function App() {
             if (pts.length === 0) {
               throw new Error("Preview returned no waypoints");
             }
-            
+
+            // A georeferenced source (survey CSV, geo DXF) reports the WGS84
+            // origin its local NED frame is anchored at. Placing the preview at
+            // that origin is what makes the map WYSIWYG — the surveyed lat/lon
+            // the rover will actually drive. A metric/local source reports null.
+            const geoOrigin = Array.isArray(body?.geo_origin) ? body.geo_origin : null;
+            if (geoOrigin && geoOrigin.length === 2) {
+              setGeoOriginDxf([Number(geoOrigin[0]), Number(geoOrigin[1])]);
+              setIsGeographicDxf(true);
+            } else {
+              setGeoOriginDxf(null);
+              setIsGeographicDxf(false);
+            }
+
             // If only 1 point was drawn, create a zero-length segment so it can still be aligned and previewed
             const effectivePts = pts.length === 1 ? [pts[0], pts[0]] : pts;
 
@@ -2300,8 +2313,10 @@ export default function App() {
                 id: `rpp-line-${i}`,
                 label: `Segment ${i + 1}`,
                 layer: sprayFlag ? "marking" : "center",
-                from: { id: i * 2 + 1, x: fromNorth, y: fromEast },
-                to: { id: i * 2 + 2, x: toNorth, y: toEast },
+                // Carry surveyed-vertex provenance so the viewport/map can mark
+                // must-hit points (RPP must never simplify these away).
+                from: { id: i * 2 + 1, x: fromNorth, y: fromEast, mustHit: fromPt?.must_hit === true },
+                to: { id: i * 2 + 2, x: toNorth, y: toEast, mustHit: toPt?.must_hit === true },
                 width: 0.1,
               });
             }

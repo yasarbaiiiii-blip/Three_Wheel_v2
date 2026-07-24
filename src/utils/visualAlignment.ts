@@ -23,7 +23,25 @@ export type VisualAlignmentTransform = {
   scaleEast?: number;
 };
 
-const EARTH_RADIUS = 6378137.0;
+// WGS84 ellipsoid — must match the backend `georef.metres_per_degree`
+// (path_engine/parsers/georef.py). North uses the meridional radius of
+// curvature M, east the prime-vertical radius N times cos(lat). Using a single
+// spherical radius for north is a +0.62 % scale error at 13° latitude (62 cm per
+// 100 m), which is exactly the north-scale bug that was fixed on the backend.
+const WGS84_A = 6378137.0;
+const WGS84_F = 1.0 / 298.257223563;
+const WGS84_E2 = WGS84_F * (2.0 - WGS84_F);
+
+/** Meridional (M) and prime-vertical (N) radii of curvature at a latitude. */
+function radiiOfCurvature(latRad: number): { M: number; N: number } {
+  const s = Math.sin(latRad);
+  const w2 = 1.0 - WGS84_E2 * s * s;
+  const w = Math.sqrt(w2);
+  return {
+    M: (WGS84_A * (1.0 - WGS84_E2)) / (w2 * w),
+    N: WGS84_A / w,
+  };
+}
 
 /** Rotate + translate a DXF point into local north/east metres (latchedOrigin frame). */
 export function transformVisualDxfPoint(
@@ -51,9 +69,10 @@ export function projectLocalMetersToGps(
   originLon: number
 ): { lat: number; lon: number } {
   const originLatRad = (originLat * Math.PI) / 180;
-  const lat = originLat + (north / EARTH_RADIUS) * (180 / Math.PI);
+  const { M, N } = radiiOfCurvature(originLatRad);
+  const lat = originLat + (north / M) * (180 / Math.PI);
   const lon =
-    originLon + (east / (EARTH_RADIUS * Math.cos(originLatRad))) * (180 / Math.PI);
+    originLon + (east / (N * Math.cos(originLatRad))) * (180 / Math.PI);
   return { lat, lon };
 }
 
@@ -64,9 +83,9 @@ export function projectGpsToLocalMeters(
   originLon: number
 ): { north: number; east: number } {
   const originLatRad = (originLat * Math.PI) / 180;
-  const north = (lat - originLat) * (EARTH_RADIUS * Math.PI) / 180;
-  const east =
-    (lon - originLon) * (EARTH_RADIUS * Math.cos(originLatRad) * Math.PI) / 180;
+  const { M, N } = radiiOfCurvature(originLatRad);
+  const north = ((lat - originLat) * (M * Math.PI)) / 180;
+  const east = ((lon - originLon) * (N * Math.cos(originLatRad) * Math.PI)) / 180;
   return { north, east };
 }
 

@@ -8,6 +8,7 @@ import {
   projectPlanNorthEastToGps,
   resolvePreviewProjectionOrigin,
 } from "./mapGeometryProjection";
+import { projectLocalMetersToGps } from "./visualAlignment";
 
 function makeOrigin() {
   return {
@@ -325,10 +326,14 @@ function projectLatLonForOffset(
   northM: number,
   eastM: number
 ): [number, number] {
-  // Mirrors projectLocalMetersToGps() in visualAlignment.ts (same EARTH_RADIUS).
-  const EARTH_RADIUS = 6378137.0;
-  const originLatRad = (origin.originLat * Math.PI) / 180;
-  const lat = origin.originLat + (northM / EARTH_RADIUS) * (180 / Math.PI);
-  const lon = origin.originLon + (eastM / (EARTH_RADIUS * Math.cos(originLatRad))) * (180 / Math.PI);
+  // Delegate to the real projection (WGS84 meridional/prime-vertical radii) so
+  // this helper can never drift from production, as it did when it hardcoded a
+  // single spherical radius.
+  const { lat, lon } = projectLocalMetersToGps(
+    northM,
+    eastM,
+    origin.originLat,
+    origin.originLon
+  );
   return [lat, lon];
 }

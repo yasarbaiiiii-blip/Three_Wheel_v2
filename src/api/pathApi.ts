@@ -21,8 +21,13 @@ export type PathPreviewResponse = {
     north: number;
     east: number;
     spray?: boolean;
+    /** True = a source vertex (CAD/survey), not densification fill. */
+    must_hit?: boolean;
     [key: string]: unknown;
   }>;
+  /** WGS84 [lat, lon] the local NED frame is anchored at, or null for a
+   * metric/local source. Present for a survey CSV or geo DXF. */
+  geo_origin?: [number, number] | null;
   [key: string]: unknown;
 };
 

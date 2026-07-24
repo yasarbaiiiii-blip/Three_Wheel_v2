@@ -6,6 +6,10 @@ export interface PlanPoint {
   id: number;
   x: number;
   y: number;
+  /** True = a source vertex (survey/CAD) the rover must hit, not densification
+   * fill. Carried from the backend preview `must_hit` so the map/viewport can
+   * mark surveyed points. */
+  mustHit?: boolean;
 }
 
 /**

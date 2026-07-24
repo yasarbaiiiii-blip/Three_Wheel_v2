@@ -2,8 +2,48 @@ import { describe, it, expect } from "vitest";
 import {
   buildVisualAlignmentRefPoints,
   projectGpsToLocalMeters,
+  projectLocalMetersToGps,
   transformVisualDxfPoint,
 } from "./visualAlignment";
+
+describe("visualAlignment WGS84 projection", () => {
+  // Must match backend georef.metres_per_degree at Chennai (path_engine).
+  const originLat = 13.0721;
+  const originLon = 80.262;
+
+  it("uses the meridional radius for north (matches backend metres/degree)", () => {
+    // Backend: M(13.0721°) = a(1-e²)/(1-e²sin²)^1.5 → ~110560 m/deg north.
+    const a = 6378137.0;
+    const f = 1.0 / 298.257223563;
+    const e2 = f * (2 - f);
+    const s = Math.sin((originLat * Math.PI) / 180);
+    const w2 = 1 - e2 * s * s;
+    const M = (a * (1 - e2)) / (w2 * Math.sqrt(w2));
+    const northMetresPerDeg = (M * Math.PI) / 180;
+
+    const { lat } = projectLocalMetersToGps(northMetresPerDeg, 0, originLat, originLon);
+    expect(lat - originLat).toBeCloseTo(1.0, 9); // exactly one degree of latitude
+  });
+
+  it("north scale differs from the old single-radius by ~0.6%", () => {
+    const oldRadius = 6378137.0;
+    const oldLatDelta = (100 / oldRadius) * (180 / Math.PI);
+    const { lat } = projectLocalMetersToGps(100, 0, originLat, originLon);
+    const newLatDelta = lat - originLat;
+    const pctDiff = Math.abs(newLatDelta - oldLatDelta) / oldLatDelta;
+    expect(pctDiff).toBeGreaterThan(0.004);
+    expect(pctDiff).toBeLessThan(0.008);
+  });
+
+  it("round-trips local → gps → local to sub-millimetre over 50 m", () => {
+    for (const [n, e] of [[50, -30], [-12, 44], [0, 0]] as const) {
+      const g = projectLocalMetersToGps(n, e, originLat, originLon);
+      const back = projectGpsToLocalMeters(g.lat, g.lon, originLat, originLon);
+      expect(back.north).toBeCloseTo(n, 6);
+      expect(back.east).toBeCloseTo(e, 6);
+    }
+  });
+});
 
 describe("visualAlignment", () => {
   it("preview matches MapView formula", () => {
