@@ -22,6 +22,7 @@ import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPrevi
 import { useFieldsWorkflow } from "../hooks/useFieldsWorkflow";
 import { parseGuidePointsCsv } from "../utils/refPointsCsv";
 import { designObbFromLines } from "../utils/planResizeHandles";
+import type { LocalPointCsvResult } from "../utils/localPointCsv";
 import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
 import type {
   AlignmentResultState,
@@ -160,9 +161,9 @@ export type FieldsPageProps = {
     showBoundaryPoints?: boolean;
     snapRefPoints?: { lat: number; lon: number }[];
   }) => React.ReactNode;
-  gpsPointMission?: pathApi.ParsePointGpsCsvResponse | null;
-  onGpsPointMissionParsed?: (data: pathApi.ParsePointGpsCsvResponse) => void;
-  onStageAndLoadGpsPointMission?: () => Promise<void>;
+  localCsvPreview?: LocalPointCsvResult | null;
+  onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
+  onClearLocalCsv?: () => void;
 };
 
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
@@ -239,9 +240,9 @@ export function FieldsPage(props: FieldsPageProps) {
     onClearMission,
     onNavigateHome,
     renderPlanPreview,
-    gpsPointMission = null,
-    onGpsPointMissionParsed,
-    onStageAndLoadGpsPointMission,
+    localCsvPreview = null,
+    onLocalCsvParsed,
+    onClearLocalCsv,
   } = props;
 
   const [refPoints, setRefPoints] = useState<RefPoint[]>([]);
@@ -498,8 +499,14 @@ export function FieldsPage(props: FieldsPageProps) {
   const hasPath = !!selectedPathName || !!importedPlan;
   const uploadDone = hasPath;
   const isDxfPath = importedPlan?.fileType === "dxf" || selectedPathName?.toLowerCase().endsWith(".dxf");
-  const alignDone = !isDxfPath || stagedWorkflow.alignment === "verified" || !!verifiedAlignmentRequest || autoOrigin || isGeographicDxf;
-  const isGpsPointFlow = gpsPointMission != null;
+  const isLocalCsvFlow = localCsvPreview != null || importedPlan?.fileType === "csv";
+  const alignDone =
+    isLocalCsvFlow ||
+    !isDxfPath ||
+    stagedWorkflow.alignment === "verified" ||
+    !!verifiedAlignmentRequest ||
+    autoOrigin ||
+    isGeographicDxf;
 
   const stepStatus = (id: FieldsStepId): "pending" | "active" | "done" => {
     switch (id) {
@@ -873,7 +880,12 @@ export function FieldsPage(props: FieldsPageProps) {
               onInvalidateWorkflow={onInvalidateWorkflow}
               blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
               protectedResident={protectedResident}
-              onGpsPointMissionParsed={onGpsPointMissionParsed}
+              onLocalCsvParsed={(data) => {
+                onLocalCsvParsed?.(data);
+                // Same as onSelectPath success: show map interaction for local points.
+                setShowMapInteraction(true);
+              }}
+              onClearLocalCsv={onClearLocalCsv}
               onImportRefPointsCsv={handleImportRefPointsCsvFromUpload}
               isImportingRefPointsCsv={isImportingRefPointsCsv}
               guideCsvFileName={guideCsvFileName}
@@ -961,8 +973,8 @@ export function FieldsPage(props: FieldsPageProps) {
             </View>
           </FieldsStepCard>
 
-          {/* Step 3: Align DXF — visible after plan is loaded, hidden for GPS point flow and non-DXF files */}
-          {!isGpsPointFlow && isDxfPath && (
+          {/* Step 3: Align DXF — visible after plan is loaded, hidden for local CSV and non-DXF files */}
+          {!isLocalCsvFlow && isDxfPath && (
           <FieldsStepCard
             stepNumber={3}
             title="Align DXF"
@@ -1017,8 +1029,8 @@ export function FieldsPage(props: FieldsPageProps) {
           </FieldsStepCard>
           )}
 
-          {/* Step 4: Path Order & Load — hidden for GPS point flow */}
-          {!isGpsPointFlow && (
+          {/* Step 4: Path Order & Load — DXF/waypoints only (local CSV never stages to the rover) */}
+          {!isLocalCsvFlow && (
           <FieldsStepCard
             stepNumber={4}
             title="Path Order & Load"
@@ -1063,50 +1075,33 @@ export function FieldsPage(props: FieldsPageProps) {
           </FieldsStepCard>
           )}
 
-          {/* GPS Point Mission — single Load to Controller action (replaces steps 3 & 4),
-              mirrors the DXF flow: one press stages with the parsed CSV data, commits
-              to the controller, and navigates Home. */}
-          {isGpsPointFlow && (
+          {/* Local CSV — preview only (no backend upload / plan-and-stage). */}
+          {isLocalCsvFlow && localCsvPreview && (
             <FieldsStepCard
               stepNumber={3}
-              title="Load to Controller"
-              status={stagedWorkflow.loaded === "verified" ? "done" : "active"}
+              title="CSV Preview"
+              status="done"
               expanded={true}
               onToggle={() => {}}
             >
-              <View style={{ gap: 12 }}>
+              <View style={{ gap: 10 }}>
                 <Text style={{ color: "#a1a1aa", fontSize: 12, lineHeight: 17 }}>
-                  GPS Point Mission detected ({gpsPointMission.num_points} points).{"\n"}
-                  Anchor: {gpsPointMission.anchor.lat.toFixed(6)}, {gpsPointMission.anchor.lon.toFixed(6)}{"\n"}
-                  Alignment is auto-verified from the CSV anchor. Points are previewed on the map above.
+                  Local preview only — this file is not uploaded to the rover.{"\n"}
+                  {localCsvPreview.num_points} point
+                  {localCsvPreview.num_points === 1 ? "" : "s"} ·{" "}
+                  {localCsvPreview.kind === "gps" ? "GPS (anchor-relative NED)" : "NED metres"}
+                  {"\n"}
+                  Frame: {localCsvPreview.point_source_frame}
+                  {localCsvPreview.kind === "gps" && localCsvPreview.anchor
+                    ? `\nAnchor: ${localCsvPreview.anchor.lat.toFixed(6)}, ${localCsvPreview.anchor.lon.toFixed(6)}`
+                    : ""}
                 </Text>
-
-                <Pressable
-                  onPress={onStageAndLoadGpsPointMission}
-                  disabled={missionActionBusy || stagedWorkflow.loaded === "verified"}
-                  style={{
-                    height: 44,
-                    borderRadius: 10,
-                    alignItems: "center",
-                    justifyContent: "center",
-                    backgroundColor:
-                      stagedWorkflow.loaded === "verified"
-                        ? "#22c55e"
-                        : missionActionBusy
-                        ? "#3f3f46"
-                        : "#0ea5e9",
-                  }}
-                >
-                  <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>
-                    {stagedWorkflow.loaded === "verified"
-                      ? "✓ Loaded to Controller"
-                      : missionActionBusy
-                      ? stagedWorkflow.staged === "verified"
-                        ? "Loading..."
-                        : "Staging..."
-                      : "Load to Controller"}
+                {localCsvPreview.warnings.length > 0 ? (
+                  <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}>
+                    {localCsvPreview.warnings.length} row warning
+                    {localCsvPreview.warnings.length === 1 ? "" : "s"} (skipped invalid rows).
                   </Text>
-                </Pressable>
+                ) : null}
               </View>
             </FieldsStepCard>
           )}

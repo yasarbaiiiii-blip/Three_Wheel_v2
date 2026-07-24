@@ -6,6 +6,7 @@ import { Upload, X } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
 import type { ImportedPlan } from "../../../types/plan";
+import { parseLocalPointCsv, type LocalPointCsvResult } from "../../../utils/localPointCsv";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 type UploadAndPreviewStepProps = {
@@ -22,8 +23,13 @@ type UploadAndPreviewStepProps = {
   onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
   blockProtectedWorkflowMutation: (action: string) => boolean;
   protectedResident: boolean;
-  /** Called when a GPS lat/lon point CSV is successfully parsed */
-  onGpsPointMissionParsed?: (data: pathApi.ParsePointGpsCsvResponse) => void;
+  /**
+   * Local-only CSV parse result (no backend). Parent draws map points from this.
+   * Mission Select File .csv never calls parse-point-* / upload / preview.
+   */
+  onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
+  /** Clears parent local-CSV preview state when the operator dismisses LOADED. */
+  onClearLocalCsv?: () => void;
   /**
    * Lets the operator import a guide-points CSV once the plan preview is up
    * (same parser as Align step).
@@ -33,19 +39,6 @@ type UploadAndPreviewStepProps = {
   /** When set, the guide-CSV button shows this file name instead of a generic label. */
   guideCsvFileName?: string | null;
 };
-
-/** Peek at CSV header to decide GPS vs NED parse route */
-function detectPointCsvKind(text: string): "gps" | "ned" | "unknown" {
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const header = trimmed.split(",").map((c) => c.trim().toLowerCase());
-    if (header[0] === "lat" && header[1] === "lon") return "gps";
-    if (header[0] === "north" && header[1] === "east") return "ned";
-    return "unknown";
-  }
-  return "unknown";
-}
 
 const MAX_IMPORT_ATTEMPTS = 3;
 const IMPORT_RETRY_BASE_MS = 450;
@@ -157,7 +150,8 @@ export function UploadAndPreviewStep({
   onInvalidateWorkflow,
   blockProtectedWorkflowMutation,
   protectedResident,
-  onGpsPointMissionParsed,
+  onLocalCsvParsed,
+  onClearLocalCsv,
   onImportRefPointsCsv,
   isImportingRefPointsCsv = false,
   guideCsvFileName = null,
@@ -166,6 +160,12 @@ export function UploadAndPreviewStep({
   const [isUploading, setIsUploading] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [previewData, setPreviewData] = useState<pathApi.PathPreviewResponse | null>(null);
+  /** Local CSV summary for LOADED chip (never from /preview). */
+  const [localCsvSummary, setLocalCsvSummary] = useState<{
+    num_points: number;
+    kind: string;
+    frame: string;
+  } | null>(null);
 
   // Extension state (inline, no modal)
   const [extEnabled, setExtEnabled] = useState(false);
@@ -176,6 +176,8 @@ export function UploadAndPreviewStep({
 
   const targetPathName = importedPlan?.fileName ?? null;
   const isDxfPath = targetPathName?.toLowerCase().endsWith(".dxf");
+  const isCsvPath =
+    importedPlan?.fileType === "csv" || targetPathName?.toLowerCase().endsWith(".csv");
 
   useEffect(() => {
     if (isDxfPath && targetPathName && apiBaseUrl) {
@@ -192,11 +194,9 @@ export function UploadAndPreviewStep({
     }
   }, [targetPathName, isDxfPath, apiBaseUrl]);
 
-  // Auto-fetch preview whenever a path is already loaded (e.g. navigating from Click-to-Mark).
-  // This covers the case where the file was uploaded externally before the user opened this step.
+  // Backend path preview for DXF / waypoints only — never for local CSV.
   useEffect(() => {
-    if (!targetPathName || !apiBaseUrl) return;
-    // Reset stale preview when the path changes
+    if (!targetPathName || !apiBaseUrl || isCsvPath) return;
     setPreviewData(null);
     pathApi.getPathPreview(apiBaseUrl, targetPathName)
       .then(res => {
@@ -207,19 +207,69 @@ export function UploadAndPreviewStep({
       .catch(() => {
         // Preview is optional — swallow errors silently
       });
-  }, [targetPathName, apiBaseUrl]);
+  }, [targetPathName, apiBaseUrl, isCsvPath]);
 
   /**
-   * Upload + parse + map preview in one shot.
-   * Accepts the asset directly (do not rely on React state for the pick→parse race).
-   * On success: clears pickedFile, sets importedPlan, calls onSelectPath (map lines).
-   * On failure: keeps pickedFile so the operator can Retry without re-picking.
-   *
-   * First-upload flakiness (Wi‑Fi cold path, content:// race) is handled with
-   * stable cache copy + automatic retries before showing the Retry UI.
+   * CSV: parse entirely on-device — no parse-point-*, upload, or /preview.
+   * DXF / waypoints: upload + backend map preview (unchanged).
    */
   const importAndPreviewFile = async (file: DocumentPicker.DocumentPickerAsset) => {
     if (blockProtectedWorkflowMutation("Parsing a new path")) return;
+
+    const ext = file.name.split(".").pop()?.toLowerCase();
+
+    // CSV is local-only and does not require a rover connection.
+    if (ext === "csv") {
+      setPickedFile(file);
+      setImportError(null);
+      setIsUploading(true);
+      try {
+        const stable = await resolveStableUploadAsset(file);
+        let text = "";
+        if (Platform.OS === "web") {
+          const webFile = (file as any).file ?? (await (await fetch(file.uri)).blob());
+          text = await webFile.text();
+        } else {
+          text = await FileSystem.readAsStringAsync(stable.uri, {
+            encoding: FileSystem.EncodingType.UTF8,
+          });
+        }
+
+        const parsed = parseLocalPointCsv(text, file.name);
+        onInvalidateWorkflow("alignment");
+        onLocalCsvParsed?.(parsed);
+        setImportedPlan({
+          fileName: file.name,
+          uri: stable.uri,
+          fileType: "csv",
+          source: "imported",
+        });
+        setLocalCsvSummary({
+          num_points: parsed.num_points,
+          kind: parsed.kind,
+          frame: parsed.point_source_frame,
+        });
+        setPreviewData(null);
+        setPickedFile(null);
+        setImportError(null);
+
+        if (parsed.warnings.length > 0) {
+          console.warn("[import][csv] row warnings:", parsed.warnings);
+        }
+      } catch (err) {
+        console.log("Error importing CSV locally:", err);
+        const msg =
+          err instanceof Error && err.message
+            ? err.message
+            : "Could not parse the CSV file.";
+        setImportError(msg);
+        Alert.alert("Import Failed", msg);
+      } finally {
+        setIsUploading(false);
+      }
+      return;
+    }
+
     if (!apiBaseUrl) {
       Alert.alert("Not connected", "Connect to the rover before importing a file.");
       return;
@@ -229,7 +279,6 @@ export function UploadAndPreviewStep({
     setImportError(null);
     setIsUploading(true);
     try {
-      const ext = file.name.split(".").pop()?.toLowerCase();
       const stable = await resolveStableUploadAsset(file);
 
       const buildNativeFormData = () => {
@@ -252,80 +301,6 @@ export function UploadAndPreviewStep({
             Platform.OS === "web" ? await buildWebFormData() : buildNativeFormData();
           return pathApi.parseDxf(apiBaseUrl, formData);
         });
-      } else if (ext === "csv") {
-        try {
-          // Read the file and strip BOM if present (use stable uri on native).
-          let text = "";
-          if (Platform.OS === "web") {
-            const webFile = (file as any).file ?? (await (await fetch(file.uri)).blob());
-            text = await webFile.text();
-          } else {
-            text = await FileSystem.readAsStringAsync(stable.uri, {
-              encoding: FileSystem.EncodingType.UTF8,
-            });
-          }
-
-          if (text.charCodeAt(0) === 0xfeff) {
-            text = text.slice(1);
-          }
-
-          // BOM-clean file on disk so each retry can rebuild FormData from a real URI.
-          let cleanNativeUri: string | null = null;
-          if (Platform.OS !== "web") {
-            cleanNativeUri =
-              (FileSystem.cacheDirectory ?? "") + `clean_${Date.now()}_${stable.name}`;
-            await FileSystem.writeAsStringAsync(cleanNativeUri, text, {
-              encoding: FileSystem.EncodingType.UTF8,
-            });
-          }
-
-          const buildCleanFormData = async () => {
-            const cleanFormData = new FormData();
-            if (Platform.OS === "web") {
-              const cleanBlob = new Blob([text], { type: "text/csv" });
-              cleanFormData.append("file", cleanBlob as any, file.name);
-            } else {
-              appendNativeFile(cleanFormData, {
-                uri: cleanNativeUri!,
-                name: file.name,
-                mimeType: "text/csv",
-              });
-            }
-            return cleanFormData;
-          };
-
-          // Detect GPS vs NED CSV and branch parse call
-          const kind = detectPointCsvKind(text);
-          const parseRes = await fetchWithImportRetry(
-            kind === "gps" ? "parse-point-gps-csv" : "parse-point-csv",
-            async () => {
-              const cleanFormData = await buildCleanFormData();
-              return kind === "gps"
-                ? pathApi.parsePointGpsCsv(apiBaseUrl, cleanFormData)
-                : pathApi.parsePointCsv(apiBaseUrl, cleanFormData);
-            }
-          );
-          if (!parseRes.ok) {
-            res = parseRes;
-          } else {
-            if (kind === "gps") {
-              const parsed = (await parseRes.clone().json()) as pathApi.ParsePointGpsCsvResponse;
-              onGpsPointMissionParsed?.(parsed);
-            }
-            // Validation succeeded — persist the file on the backend.
-            res = await fetchWithImportRetry("upload-path", async () => {
-              const cleanFormData = await buildCleanFormData();
-              return pathApi.uploadPath(apiBaseUrl, cleanFormData);
-            });
-          }
-        } catch (e) {
-          console.error("Error preprocessing CSV:", e);
-          res = await fetchWithImportRetry("upload-path-fallback", async () => {
-            const formData =
-              Platform.OS === "web" ? await buildWebFormData() : buildNativeFormData();
-            return pathApi.uploadPath(apiBaseUrl, formData);
-          });
-        }
       } else {
         res = await fetchWithImportRetry("upload-path", async () => {
           const formData =
@@ -336,6 +311,8 @@ export function UploadAndPreviewStep({
 
       if (res.ok) {
         onInvalidateWorkflow("alignment");
+        onClearLocalCsv?.();
+        setLocalCsvSummary(null);
         if (ext === "dxf") {
           setImportedPlan({
             fileName: file.name,
@@ -355,10 +332,9 @@ export function UploadAndPreviewStep({
         setImportError(null);
         onRefreshPaths();
 
-        // Map geometry preview (entities + /plan overlay) — same path as selecting a backend path.
+        // Map geometry preview (entities + /plan overlay) — backend paths only.
         onSelectPath(file.name);
 
-        // Lightweight path-preview summary for the LOADED chip (optional).
         try {
           const previewRes = await pathApi.getPathPreview(apiBaseUrl, file.name);
           if (previewRes.ok) {
@@ -369,7 +345,6 @@ export function UploadAndPreviewStep({
           // Preview summary is optional; map lines still load via onSelectPath.
         }
 
-        // Auto-fetch extension config if DXF
         if (ext === "dxf") {
           try {
             const cfg = await pathApi.getExtensions(apiBaseUrl, file.name);
@@ -485,7 +460,8 @@ export function UploadAndPreviewStep({
     <View style={{ gap: 14 }}>
       {/* File Upload Section */}
       <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
-        Import a .dxf, .csv, or .waypoints file. Parsing and map preview start automatically.
+        Import a .dxf, .csv, or .waypoints file. DXF/waypoints use the rover; CSV is parsed
+        on-device and drawn locally (not uploaded).
       </Text>
 
       {!pickedFile && !targetPathName ? (
@@ -590,17 +566,24 @@ export function UploadAndPreviewStep({
               <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700", marginTop: 2 }} numberOfLines={1}>
                 {targetPathName}
               </Text>
-              {previewData && (
+              {localCsvSummary ? (
+                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
+                  {localCsvSummary.num_points} points · local {localCsvSummary.kind.toUpperCase()} ·{" "}
+                  {localCsvSummary.frame}
+                </Text>
+              ) : previewData ? (
                 <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
                   {previewData.num_points ?? "?"} points · {previewData.frame ?? "DXF"}
                 </Text>
-              )}
+              ) : null}
             </View>
             <Pressable
               onPress={() => {
                 setImportedPlan(null);
                 setPreviewData(null);
+                setLocalCsvSummary(null);
                 setExtEnabled(false);
+                onClearLocalCsv?.();
               }}
               style={{ padding: 6 }}
             >

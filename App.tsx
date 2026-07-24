@@ -187,6 +187,7 @@ import {
   stagedMissionMatchesId,
   waypointsToPlanLines,
 } from "./src/utils/stagedMissionHydration";
+import type { LocalPointCsvResult } from "./src/utils/localPointCsv";
 import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
 import { rehydrateAlignedPlanLines } from "./src/utils/rehydrateAlignedPlan";
 import type { AutoOriginReference, MapGeometryFrame } from "./src/types/autoOrigin";
@@ -1036,7 +1037,8 @@ export default function App() {
   const [stagedPlanResult, setStagedPlanResult] = useState<StagedPlanResultState | null>(null);
   const [stagedMissionInspection, setStagedMissionInspection] = useState<pathApi.StagedMissionResponse | null>(null);
   const [stagedMissionId, setStagedMissionId] = useState<string | null>(null);
-  const [gpsPointMission, setGpsPointMission] = useState<pathApi.ParsePointGpsCsvResponse | null>(null);
+  /** Local-only CSV preview (Select File .csv never hits backend path APIs). */
+  const [localCsvPreview, setLocalCsvPreview] = useState<LocalPointCsvResult | null>(null);
   const [loadedPathInspection, setLoadedPathInspection] = useState<missionApi.LoadedPathResponse | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   const [extensionsEnabled, setExtensionsEnabled] = useState(false);
@@ -1300,7 +1302,7 @@ export default function App() {
     }
     setLoadedPathInspection(null);
     setMissionLoaded(false);
-    setGpsPointMission(null);
+    setLocalCsvPreview(null);
   }, []);
 
   /**
@@ -1441,6 +1443,9 @@ export default function App() {
     previousSelectedPathRef.current = selectedPathName;
     // Skip the reset when we are recovering a loaded mission on reload
     if (isRecoveringRef.current) return;
+    // Clearing selection (null) is owned by clear-mission / local CSV import so
+    // those flows can set their own map + alignment state without this wipe.
+    if (selectedPathName == null) return;
     missionIdentityGenerationRef.current += 1;
     setStagedWorkflow((prev) => ({
       ...prev,
@@ -1458,7 +1463,6 @@ export default function App() {
     setStagedPlanResult(null);
     setStagedMissionInspection(null);
     setStagedMissionId(null);
-    setGpsPointMission(null);
     setLoadedPathInspection(null);
   }, [selectedPathName]);
 
@@ -2069,6 +2073,8 @@ export default function App() {
   const previewSelectedPath = async (pathName: string) => {
     if (!apiBaseUrl) return;
     setLoadedPathInspection(null);
+    // Backend path selection replaces any on-device CSV preview.
+    setLocalCsvPreview(null);
     setMissionActionBusy(true);
     try {
       console.log(`[API GET] /api/path/${pathName}/preview - Fetching detailed preview...`);
@@ -2815,105 +2821,62 @@ export default function App() {
     }
   }
 
-  function handleGpsPointMissionParsed(data: pathApi.ParsePointGpsCsvResponse) {
-    setGpsPointMission(data);
-    // GPS point missions don't need DXF alignment — anchor comes from CSV row 1
-    setVerifiedAlignmentRequest({
-      origin_gps: [data.anchor.lat, data.anchor.lon],
-      rotation_deg: 0,
-    });
-    setStagedWorkflow((prev) => ({
-      ...prev,
-      alignment: "verified",
-      spray: "pending",
-      staged: "pending",
-      loaded: "pending",
-      started: "pending",
-    }));
+  /**
+   * Local CSV (Select File) — parse result already computed on-device.
+   * Draws points on the map; never uploads or stages to the rover.
+   */
+  function handleLocalCsvParsed(data: LocalPointCsvResult) {
+    setLocalCsvPreview(data);
+    // Keep selectedPathName null so we never hit GET /api/path/{csv}/preview.
+    // Avoid setSelectedPathName here if it would only clear; wipe backend selection
+    // without going through previewSelectedPath.
+    previousSelectedPathRef.current = null;
+    setSelectedPathName(null);
+    setMissionFileReady(false);
+    setMissionLoaded(false);
+    setMissionRunning(false);
 
-    // Preview the parsed points on the map immediately — same map-hydration
-    // path the staged-load flow uses, just run before staging exists.
-    const previewLines = pointMissionPointsToPlanLines(data.point_mission_points);
-    setAlignedRefPoints(anchorToAlignedRefPoints(data.anchor));
+    const previewLines = pointMissionPointsToPlanLines(data.points);
     setLines(sanitizePlanLines(previewLines));
     setSelectedLineId(previewLines[0]?.id ?? null);
     setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
-  }
 
-  /**
-   * GPS point mission "Load to Controller" — mirrors the DXF single-button
-   * flow (pathApi.loadToController + onLoadSelectedPath): plan & stage with
-   * the parsed CSV data, then immediately commit the resulting mission_id to
-   * the controller and navigate home. No separate manual staging step.
-   */
-  async function handleStageAndLoadGpsPointMission() {
-    const pathName = selectedPathName || importedPlan?.fileName;
-    if (!apiBaseUrl || !pathName || !gpsPointMission) {
-      Alert.alert("Missing data", "Upload a lat,lon CSV and parse it first.");
-      return;
-    }
-
-    setMissionActionBusy(true);
-    try {
-      const planRes = await pathApi.planAndStage(apiBaseUrl, pathName, {
-        source: pathName,
-        point_source_frame: "GPS_SURVEYED",
-        origin_gps: [gpsPointMission.anchor.lat, gpsPointMission.anchor.lon],
-        point_mission_points: gpsPointMission.point_mission_points,
+    if (data.kind === "gps" && data.anchor) {
+      // Map projects local NED relative to the first GPS row.
+      setVerifiedAlignmentRequest({
+        origin_gps: [data.anchor.lat, data.anchor.lon],
         rotation_deg: 0,
       });
-
-      if (!planRes.ok) {
-        throw new Error(await planRes.text());
-      }
-
-      const planData = (await planRes.json()) as pathApi.PathPlanResponse;
-      const missionId =
-        planData.mission_summary?.mission_id ?? planData.mission_id;
-
-      if (!missionId) {
-        throw new Error("Plan & stage succeeded but no mission_id returned.");
-      }
-
-      setStagedMissionId(missionId);
-      setStagedPlanResult({
-        missionId,
-        numWaypoints: gpsPointMission.num_points,
-        numSegments: null,
-        totalLengthM: null,
-        markLengthM: null,
-        transitLengthM: null,
-        estimatedPaintL: null,
-        estimatedRuntimeS: null,
-        rmseM: null,
-        warnings: planData.warnings ?? [],
-      });
-      setStagedWorkflow((prev) => ({ ...prev, staged: "verified" }));
-
-      // Optional: inspect staged artifact
-      try {
-        const stagedRes = await pathApi.getStagedMission(apiBaseUrl, missionId);
-        if (stagedRes.ok) {
-          setStagedMissionInspection(await stagedRes.json());
-        }
-      } catch {
-        // inspection is optional
-      }
-
-      // Same load path the DXF flow uses: commits to the controller, verifies,
-      // hydrates the map from the staged artifact, shows its own success toast,
-      // and navigates to Home.
-      const loaded = await loadMissionOnBackend(missionId);
-      if (!loaded) {
-        setWorkflowStep("staged", "verified");
-      }
-    } catch (err: any) {
-      setWorkflowStep("staged", "failed");
-      Alert.alert("Plan & Stage failed", err.message ?? String(err));
-    } finally {
-      setMissionActionBusy(false);
+      setAlignedRefPoints(anchorToAlignedRefPoints(data.anchor));
+      setStagedWorkflow((prev) => ({
+        ...prev,
+        alignment: "verified",
+        spray: "pending",
+        staged: "pending",
+        loaded: "pending",
+        started: "pending",
+      }));
+    } else {
+      setVerifiedAlignmentRequest(null);
+      setAlignedRefPoints([]);
+      setStagedWorkflow((prev) => ({
+        ...prev,
+        alignment: "pending",
+        spray: "pending",
+        staged: "pending",
+        loaded: "pending",
+        started: "pending",
+      }));
     }
+  }
+
+  function handleClearLocalCsv() {
+    setLocalCsvPreview(null);
+    setLines((prev) => prev.filter((l) => l.layer === "virtual_boundary"));
+    setSelectedLineId(null);
+    setAlignedRefPoints([]);
+    setVerifiedAlignmentRequest(null);
   }
 
   async function startLoadedMission() {
@@ -3393,6 +3356,7 @@ export default function App() {
       setLines([]);
       setSelectedLineId(null);
       setSelectedPathName(null);
+      setLocalCsvPreview(null);
       setMissionFileReady(false);
       setMissionLoaded(false);
       setMissionRunning(false);
@@ -4153,9 +4117,9 @@ export default function App() {
                             rtkAutoConnect={rtkAutoConnect}
                             setRtkAutoConnect={setRtkAutoConnect}
                             stopRtk={stopRtk}
-                            gpsPointMission={gpsPointMission}
-                            onGpsPointMissionParsed={handleGpsPointMissionParsed}
-                            onStageAndLoadGpsPointMission={handleStageAndLoadGpsPointMission}
+                            localCsvPreview={localCsvPreview}
+                            onLocalCsvParsed={handleLocalCsvParsed}
+                            onClearLocalCsv={handleClearLocalCsv}
                           />
                         )
                       : undefined
@@ -5724,9 +5688,9 @@ function SectionPages(props: {
     } | null>
   >;
   previewFallbackGps?: { lat: number; lon: number } | null;
-  gpsPointMission?: pathApi.ParsePointGpsCsvResponse | null;
-  onGpsPointMissionParsed?: (data: pathApi.ParsePointGpsCsvResponse) => void;
-  onStageAndLoadGpsPointMission?: () => Promise<void>;
+  localCsvPreview?: LocalPointCsvResult | null;
+  onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
+  onClearLocalCsv?: () => void;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
 

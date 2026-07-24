@@ -169,6 +169,10 @@ export function parseDxf(apiBaseUrl: string, formData: FormData): Promise<Respon
   });
 }
 
+/**
+ * @deprecated Fields Select File CSV is local-only (`parseLocalPointCsv`).
+ * Kept for optional tooling / non-UI callers — do not wire mission upload UI to these.
+ */
 export function parsePointCsv(apiBaseUrl: string, formData: FormData): Promise<Response> {
   return fetch(apiUrl(apiBaseUrl, "/api/path/parse-point-csv"), {
     method: "POST",
@@ -176,6 +180,10 @@ export function parsePointCsv(apiBaseUrl: string, formData: FormData): Promise<R
   });
 }
 
+/**
+ * @deprecated Fields Select File CSV is local-only (`parseLocalPointCsv`).
+ * Kept for optional tooling / non-UI callers — do not wire mission upload UI to these.
+ */
 export function parsePointGpsCsv(apiBaseUrl: string, formData: FormData): Promise<Response> {
   return fetch(apiUrl(apiBaseUrl, "/api/path/parse-point-gps-csv"), {
     method: "POST",
