@@ -693,10 +693,44 @@ export function MapViewNative(props: MapViewProps) {
       return featureCollection([]);
     }
     const features: GeoJSON.Feature[] = [];
+
+    // A CSV / survey preview arrives as thousands of tiny straight segments (one
+    // PlanLine per waypoint pair). Emitting a separate 2-point feature for each
+    // makes the native map draw a coarse polygon (and 48k features tanks perf).
+    // Merge each contiguous run of connected, same-layer, entity-less segments
+    // into ONE multi-point LineString — the same shape a DXF circle renders as,
+    // which is smooth. Lines that carry a DXF entity (per-line selectable /
+    // orderable) are never merged, so DXF behaviour is unchanged.
+    let runCoords: Coord[] | null = null;
+    let runLayer: string | null = null;
+    let runId: string | null = null;
+    const coordsEqual = (a: Coord, b: Coord) =>
+      Math.abs(a[0] - b[0]) < 1e-12 && Math.abs(a[1] - b[1]) < 1e-12;
+    const flushRun = () => {
+      if (runCoords && runCoords.length >= 2) {
+        features.push(
+          lineFeature(runCoords, {
+            id: runId,
+            layer: runLayer,
+            color: colorForLayer(runLayer as string),
+            closedRing: isClosedCoordRing(runCoords),
+          })
+        );
+      }
+      runCoords = null;
+      runLayer = null;
+      runId = null;
+    };
+
     for (const line of lines) {
       const segs = projectPlanLineToGpsSegments(line, projectionOrigin);
-      if (segs.length >= 2) {
-        const coords = segs.map(([lat, lon]) => toMapboxCoord(lat, lon));
+      if (segs.length < 2) continue;
+      const coords = segs.map(([lat, lon]) => toMapboxCoord(lat, lon));
+
+      // Curve/entity-bearing lines keep their own feature (identity + curve
+      // sampling preserved); only plain straight preview segments merge.
+      if (line.entity) {
+        flushRun();
         features.push(
           lineFeature(coords, {
             id: line.id,
@@ -705,8 +739,23 @@ export function MapViewNative(props: MapViewProps) {
             closedRing: isClosedCoordRing(coords),
           })
         );
+        continue;
+      }
+
+      if (
+        runCoords &&
+        runLayer === line.layer &&
+        coordsEqual(runCoords[runCoords.length - 1], coords[0])
+      ) {
+        for (let k = 1; k < coords.length; k++) runCoords.push(coords[k]);
+      } else {
+        flushRun();
+        runCoords = coords.slice();
+        runLayer = line.layer;
+        runId = line.id;
       }
     }
+    flushRun();
     return featureCollection(features);
   }, [lines, originSig, mode]);
 
