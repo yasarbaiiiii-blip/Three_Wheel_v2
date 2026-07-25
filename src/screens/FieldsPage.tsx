@@ -1,6 +1,5 @@
 import React, { useCallback, useMemo, useState } from "react";
 import { Alert, Platform, Pressable, StyleSheet, Text, View } from "react-native";
-import { ChevronDown, ChevronRight } from "lucide-react-native";
 import * as DocumentPicker from "expo-document-picker";
 
 import * as missionApi from "../api/missionApi";
@@ -15,7 +14,6 @@ import { FieldsClearBar } from "../components/fields/FieldsClearBar";
 import { MapPlanInteractionOverlay } from "../components/fields/MapPlanInteractionOverlay";
 import { FIELDS_COLORS } from "../components/fields/fieldsTheme";
 import { AlignDxfPanel } from "../components/fields/panels/AlignDxfPanel";
-import { BoundingBoxStep } from "../components/fields/panels/BoundingBoxStep";
 import { PathOrderAndSprayStep } from "../components/fields/panels/PathOrderAndSprayStep";
 import { TemplatePanel } from "../components/fields/panels/TemplatePanel";
 import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPreviewStep";
@@ -264,7 +262,6 @@ export function FieldsPage(props: FieldsPageProps) {
   /** Align DXF methods: Multi-Point Fit | Visual (1-Point Fit removed). Auto Origin is a separate toggle peer. */
   const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "visual_alignment">("least_squares");
 
-  const [showTemplates, setShowTemplates] = useState(false);
   const [boundaryMode, setBoundaryMode] = useState(false);
   const [boundaryWidthStr, setBoundaryWidthStr] = useState("4.0");
   const [boundaryHeightStr, setBoundaryHeightStr] = useState("3.0");
@@ -523,12 +520,11 @@ export function FieldsPage(props: FieldsPageProps) {
 
   const stepStatus = (id: FieldsStepId): "pending" | "active" | "done" => {
     switch (id) {
-      case "boundingBox":
-        return activeBoundaryWidth != null && activeBoundaryHeight != null
-          ? "done"
-          : activeStep === "boundingBox"
-          ? "active"
-          : "pending";
+      case "templates":
+        // No completion criterion — picking a template is optional, so this step
+        // is only ever active or pending. (It reported "done" off the bounding
+        // box dimensions before that panel was removed from this page.)
+        return activeStep === "templates" ? "active" : "pending";
       case "upload":
         return uploadDone ? "done" : activeStep === "upload" ? "active" : "pending";
       case "align":
@@ -914,85 +910,44 @@ export function FieldsPage(props: FieldsPageProps) {
             />
           </FieldsStepCard>
 
-          {/* Step 2: Bounding Box + Templates */}
+          {/* Step 2: Templates */}
+          {/* Bounding Box was removed from this page; Templates was nested
+              inside its card and is an independent feature, so it keeps its
+              own step here rather than disappearing with it. The boundary
+              state it still takes (boundaryMode / boundaryWidthStr / ...) is
+              retained for exactly that reason. */}
           <FieldsStepCard
             stepNumber={2}
-            title="Bounding Box"
-            status={stepStatus("boundingBox")}
-            expanded={activeStep === "boundingBox"}
-            onToggle={() => toggleStep("boundingBox")}
+            title="Templates"
+            status={stepStatus("templates")}
+            expanded={activeStep === "templates"}
+            onToggle={() => toggleStep("templates")}
           >
-            <View style={{ gap: 14 }}>
-              <BoundingBoxStep
-                widthStr={boundaryWidthStr}
-                onChangeWidthStr={setBoundaryWidthStr}
-                heightStr={boundaryHeightStr}
-                onChangeHeightStr={setBoundaryHeightStr}
-                onApplyBoundary={handleApplyBoundary}
-                activeWidth={activeBoundaryWidth}
-                activeHeight={activeBoundaryHeight}
-                onProceedNext={() => setActiveStep("align")}
-              />
-
-              {/* Templates Section (collapsible) */}
-              <View>
-                <Pressable
-                  onPress={() => setShowTemplates(!showTemplates)}
-                  style={{
-                    flexDirection: "row",
-                    alignItems: "center",
-                    gap: 8,
-                    paddingVertical: 8,
-                  }}
-                >
-                  {showTemplates ? (
-                    <ChevronDown size={14} color={FIELDS_COLORS.textMuted} />
-                  ) : (
-                    <ChevronRight size={14} color={FIELDS_COLORS.textDim} />
-                  )}
-                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "700" }}>
-                    Templates
-                  </Text>
-                </Pressable>
-                {showTemplates && (
-                  <View
-                    style={{
-                      borderRadius: 10,
-                      backgroundColor: FIELDS_COLORS.surfaceSolid,
-                      borderWidth: 1,
-                      borderColor: FIELDS_COLORS.panelBorder,
-                      padding: 12,
-                    }}
-                  >
-                    <TemplatePanel
-                      apiBaseUrl={apiBaseUrl}
-                      onRefreshPaths={onRefreshPaths}
-                      onSelectPath={(name) => {
-                        onSelectPath(name);
-                        setShowMapInteraction(true);
-                        if (isPlanEditingMode !== true) {
-                          onStartPlanEditing?.();
-                        }
-                        setActiveStep("align");
-                      }}
-                      boundaryMode={boundaryMode}
-                      onToggleBoundaryMode={handleToggleBoundaryMode}
-                      boundaryWidthStr={boundaryWidthStr}
-                      onChangeBoundaryWidthStr={setBoundaryWidthStr}
-                      boundaryHeightStr={boundaryHeightStr}
-                      onChangeBoundaryHeightStr={setBoundaryHeightStr}
-                      onApplyBoundary={handleApplyBoundary}
-                      sketchMode={sketchMode}
-                      onToggleSketchMode={setSketchMode}
-                      showSnapPoints={showSnapPoints}
-                      onToggleShowSnapPoints={setShowSnapPoints}
-                      telemetryPosN={telemetrySnapshot?.pos_n ?? null}
-                      telemetryPosE={telemetrySnapshot?.pos_e ?? null}
-                    />
-                  </View>
-                )}
-              </View>
-            </View>
+            <TemplatePanel
+              apiBaseUrl={apiBaseUrl}
+              onRefreshPaths={onRefreshPaths}
+              onSelectPath={(name) => {
+                onSelectPath(name);
+                setShowMapInteraction(true);
+                if (isPlanEditingMode !== true) {
+                  onStartPlanEditing?.();
+                }
+                setActiveStep("align");
+              }}
+              boundaryMode={boundaryMode}
+              onToggleBoundaryMode={handleToggleBoundaryMode}
+              boundaryWidthStr={boundaryWidthStr}
+              onChangeBoundaryWidthStr={setBoundaryWidthStr}
+              boundaryHeightStr={boundaryHeightStr}
+              onChangeBoundaryHeightStr={setBoundaryHeightStr}
+              onApplyBoundary={handleApplyBoundary}
+              sketchMode={sketchMode}
+              onToggleSketchMode={setSketchMode}
+              showSnapPoints={showSnapPoints}
+              onToggleShowSnapPoints={setShowSnapPoints}
+              telemetryPosN={telemetrySnapshot?.pos_n ?? null}
+              telemetryPosE={telemetrySnapshot?.pos_e ?? null}
+            />
           </FieldsStepCard>
 
           {/* Step 3: Align DXF — visible after plan is loaded, hidden for local CSV and non-DXF files */}

@@ -1,5 +1,5 @@
 /** New streamlined 4-step workflow IDs */
-export type FieldsStepId = "boundingBox" | "upload" | "align" | "orderAndSpray";
+export type FieldsStepId = "templates" | "upload" | "align" | "orderAndSpray";
 
 /** Map-centric plan manipulation modes */
 export type PlanManipulationMode = "idle" | "scale" | "drag" | "rotate" | "resize";
