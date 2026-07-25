@@ -191,10 +191,29 @@ Splits one CSV's points into independent open paths on two signals, applied in o
 A real feature/road column always resolves this correctly; there is no reliable way to
 detect it from geometry alone without risking false splits on legitimate dense data.
 
+#### Transit connectors between groups (`buildCsvTransitLines`, in `localPointCsv.ts`)
+
+When a CSV splits into more than one group path (§3.5 above), a straight, unsmoothed
+`layer: "transit"` `PlanLine` is drawn between the end of one group's path and the start of
+the next — FROM = `planLines[i].to`, TO = `planLines[i + 1].from`, in file order (CSV has no
+TSP route optimizer to reorder groups). Skipped when the gap is under 2 cm (the two paths
+already touch).
+
+This mirrors the backend's own plan-time TRANSIT connector convention exactly
+(`path_engine`'s `_insert_transit_connectors_between_segments`, already exposed to this
+app's **DXF** upload flow via `buildRuntimeTransitOverlayFromPlan` / the `transit_preview`
+fallback in `App.tsx`) — same `layer: "transit"` tag, same straight/never-curve-fit
+geometry (corner smoothing only ever applies to the marking path, never to a transit leg),
+same reasoning: show how the rover gets from one path to the next instead of a silent gap.
+Reusing the existing `layer: "transit"` tag means no new rendering/exclusion logic was
+needed — map color, length-label exclusion, snap-point exclusion, resize-handle exclusion,
+and the Path Order list's transit row all already key off that tag generically.
+
 ### 3.5 App wiring (`App.tsx` → `handleLocalCsvParsed`)
 
 - Stores `localCsvPreview`
-- Builds plan lines + selects `local-csv-path`
+- Builds plan lines (`localCsvPointsToPlanLines`) + transit connectors between groups
+  (`buildCsvTransitLines`) + selects `local-csv-path`
 - Does **not** set mission file from backend CSV
 - GPS: alignment origin = first CSV row; stages alignment as verified for local GPS CSV
 
@@ -259,7 +278,7 @@ npx vitest run src/utils/localPointCsv.test.ts src/utils/roadMarkingCsvPath.test
 | Result | Count |
 |--------|--------|
 | Test files | 2 |
-| Tests | 60 (parse, pins, open path, fillets, arcs, plan tags, grouping, adaptive tolerance, whole-loop fit, merge/reclassify passes, arc/line joint continuity) |
+| Tests | 64 (parse, pins, open path, fillets, arcs, plan tags, grouping, adaptive tolerance, whole-loop fit, merge/reclassify passes, arc/line joint continuity, transit connectors) |
 
 Expected: all tests pass (exit code 0).
 

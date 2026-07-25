@@ -188,6 +188,7 @@ import {
   waypointsToPlanLines,
 } from "./src/utils/stagedMissionHydration";
 import {
+  buildCsvTransitLines,
   localCsvPointsToPlanLines,
   type LocalPointCsvResult,
 } from "./src/utils/localPointCsv";
@@ -2851,7 +2852,13 @@ export default function App() {
 
     // One connected polyline (not N zero-length segments — those are invisible on Mapbox).
     const previewLines = localCsvPointsToPlanLines(data.points);
-    setLines(sanitizePlanLines(previewLines));
+    // Straight, unsmoothed connector between consecutive feature/road groups — same
+    // layer:"transit" convention the DXF upload flow already draws for inter-shape
+    // dead-heading (see buildRuntimeTransitOverlayFromPlan / transit_preview above), so a
+    // multi-group CSV shows how the rover gets from one path to the next instead of a
+    // silent gap.
+    const transitLines = buildCsvTransitLines(previewLines);
+    setLines(sanitizePlanLines([...previewLines, ...transitLines]));
     setSelectedLineId(previewLines[0]?.id ?? null);
     setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);

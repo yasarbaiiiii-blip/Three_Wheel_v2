@@ -482,6 +482,72 @@ export function localCsvPointsToPlanLines(points: LocalPointCsvPoint[]): PlanLin
   return lines;
 }
 
+function csvTransitLineId(i: number): string {
+  return `local-csv-transit-${i}`;
+}
+
+/** Below this gap (m), two consecutive group paths already touch — no connector needed. */
+const CSV_TRANSIT_MIN_GAP_M = 0.02;
+
+/**
+ * Straight, unsmoothed "transit" connector lines between consecutive CSV group paths —
+ * mirrors the backend's plan-time TRANSIT connector convention (path_engine's
+ * `_insert_transit_connectors_between_segments`, already exposed to the DXF upload flow via
+ * `buildRuntimeTransitOverlayFromPlan` / the `transit_preview` fallback in App.tsx): FROM =
+ * end of one marking path, TO = start of the next, in file order (CSV has no TSP route
+ * optimizer to reorder groups). Never smoothed/curve-fit — matches the backend's rule that
+ * corner smoothing only ever applies to MARK geometry, never to transit/dead-heading legs.
+ *
+ * `layer: "transit"` already gets full generic treatment everywhere else in this app (map
+ * color, exclusion from length labels / snap points / resize handles / primary-editable
+ * classification, its own Path Order row kind) — no further wiring needed beyond appending
+ * these to the line list the CSV flow already builds.
+ */
+export function buildCsvTransitLines(planLines: PlanLine[]): PlanLine[] {
+  const transitLines: PlanLine[] = [];
+  for (let i = 0; i < planLines.length - 1; i++) {
+    const from = planLines[i].to;
+    const to = planLines[i + 1].from;
+    if (
+      from == null ||
+      to == null ||
+      !Number.isFinite(from.x) ||
+      !Number.isFinite(from.y) ||
+      !Number.isFinite(to.x) ||
+      !Number.isFinite(to.y)
+    ) {
+      continue;
+    }
+    const length_m = Math.hypot(to.x - from.x, to.y - from.y);
+    if (length_m < CSV_TRANSIT_MIN_GAP_M) continue;
+
+    const id = csvTransitLineId(i + 1);
+    transitLines.push({
+      id,
+      label: `Transit: ${planLines[i].label} → ${planLines[i + 1].label}`,
+      layer: "transit",
+      segmentRole: "none",
+      from: { id: i * 2 + 1, x: from.x, y: from.y },
+      to: { id: i * 2 + 2, x: to.x, y: to.y },
+      width: 0.1,
+      entity: {
+        entity_id: id,
+        entity_type: "TRANSIT",
+        layer: "TRANSIT",
+        color: 0,
+        is_mark: false,
+        length_m,
+        geometry: {},
+        preview_points: [
+          { north: from.x, east: from.y },
+          { north: to.x, east: to.y },
+        ],
+      },
+    });
+  }
+  return transitLines;
+}
+
 /**
  * Map pins in the same shape as guide/ref selectedPoints.
  * GPS rows include lat/lon so MapView draws them directly (no plan-origin reproject).

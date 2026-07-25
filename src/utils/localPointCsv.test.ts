@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildCsvTransitLines,
   localCsvPointsToPlanLines,
   localCsvToMapPins,
   parseLocalPointCsv,
@@ -212,6 +213,78 @@ describe("localCsvPointsToPlanLines", () => {
 
     const lines = localCsvPointsToPlanLines(r.points);
     expect(lines).toHaveLength(2);
+  });
+});
+
+describe("buildCsvTransitLines", () => {
+  it("connects consecutive group paths with a straight, no-spray-style transit line", () => {
+    const rows = ["feature,north,east"];
+    for (let i = 0; i < 10; i++) rows.push(`West circle,${i * 0.5},${0}`);
+    for (let i = 0; i < 10; i++) rows.push(`East circle,${30 + i * 0.5},${30}`);
+    const r = parseLocalPointCsv(rows.join("\n"));
+    const lines = localCsvPointsToPlanLines(r.points);
+    expect(lines).toHaveLength(2);
+
+    const transit = buildCsvTransitLines(lines);
+    expect(transit).toHaveLength(1);
+    expect(transit[0].layer).toBe("transit");
+    expect(transit[0].segmentRole).toBe("none");
+    expect(transit[0].entity?.entity_type).toBe("TRANSIT");
+    // FROM = end of the first group's path, TO = start of the second's — same convention
+    // as the backend's inter-shape connector (path_engine's transit segments) and the
+    // frontend's existing DXF transit overlay (buildRuntimeTransitOverlayFromPlan).
+    expect(transit[0].from.x).toBeCloseTo(lines[0].to.x, 6);
+    expect(transit[0].from.y).toBeCloseTo(lines[0].to.y, 6);
+    expect(transit[0].to.x).toBeCloseTo(lines[1].from.x, 6);
+    expect(transit[0].to.y).toBeCloseTo(lines[1].from.y, 6);
+  });
+
+  it("produces N-1 transit lines for N groups, in file order", () => {
+    const rows = ["road,north,east"];
+    for (let i = 0; i < 10; i++) rows.push(`A,${i * 0.5},0`);
+    for (let i = 0; i < 10; i++) rows.push(`B,${20 + i * 0.5},20`);
+    for (let i = 0; i < 10; i++) rows.push(`C,${40 + i * 0.5},40`);
+    const r = parseLocalPointCsv(rows.join("\n"));
+    const lines = localCsvPointsToPlanLines(r.points);
+    expect(lines).toHaveLength(3);
+
+    const transit = buildCsvTransitLines(lines);
+    expect(transit).toHaveLength(2);
+    expect(transit[0].label).toContain("A");
+    expect(transit[0].label).toContain("B");
+    expect(transit[1].label).toContain("B");
+    expect(transit[1].label).toContain("C");
+  });
+
+  it("produces no transit lines for a single-group (single-path) CSV", () => {
+    const rows = ["road,north,east"];
+    for (let i = 0; i < 15; i++) rows.push(`Main St,${i * 0.5},0`);
+    const r = parseLocalPointCsv(rows.join("\n"));
+    const lines = localCsvPointsToPlanLines(r.points);
+    expect(lines).toHaveLength(1);
+    expect(buildCsvTransitLines(lines)).toHaveLength(0);
+  });
+
+  it("skips a connector when two group paths already touch (no real gap)", () => {
+    const lines = [
+      {
+        id: "a",
+        label: "A",
+        layer: "marking" as const,
+        from: { id: 1, x: 0, y: 0 },
+        to: { id: 2, x: 10, y: 0 },
+        width: 0.1,
+      },
+      {
+        id: "b",
+        label: "B",
+        layer: "marking" as const,
+        from: { id: 3, x: 10, y: 0 },
+        to: { id: 4, x: 20, y: 0 },
+        width: 0.1,
+      },
+    ];
+    expect(buildCsvTransitLines(lines)).toHaveLength(0);
   });
 });
 
