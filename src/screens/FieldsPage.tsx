@@ -19,6 +19,7 @@ import { TemplatePanel } from "../components/fields/panels/TemplatePanel";
 import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPreviewStep";
 import { useFieldsWorkflow } from "../hooks/useFieldsWorkflow";
 import { parseGuidePointsCsv } from "../utils/refPointsCsv";
+import { classifyCsvFlow, hidesLoadStep } from "../utils/csvFlowKind";
 import { designObbFromLines } from "../utils/planResizeHandles";
 import {
   localCsvToMapPins,
@@ -498,8 +499,22 @@ export function FieldsPage(props: FieldsPageProps) {
   // Determine step statuses
   const hasPath = !!selectedPathName || !!importedPlan;
   const uploadDone = hasPath;
+  // Pre-line = a SURVEY line CSV: uploaded to the rover, previewed via /preview,
+  // staged and driven. Distinct from a LOCAL point CSV, which is parsed on-device
+  // and never reaches the controller. Both have fileType "csv", so without this
+  // flag the page cannot tell them apart — and the load step below was hidden for
+  // both, making a pre-line CSV impossible to load.
+  const [preLineCsvMode, setPreLineCsvMode] = useState(false);
   const isDxfPath = importedPlan?.fileType === "dxf" || selectedPathName?.toLowerCase().endsWith(".dxf");
-  const isLocalCsvFlow = localCsvPreview != null || importedPlan?.fileType === "csv";
+  const csvFlowKind = classifyCsvFlow({
+    localCsvPreview,
+    fileType: importedPlan?.fileType ?? null,
+    preLineCsvMode,
+  });
+  const isLocalCsvFlow = hidesLoadStep(csvFlowKind);
+  // Align DXF is hidden for a non-DXF source, so the load step must not keep
+  // a hardcoded 4 — a pre-line CSV would read "1, 2, 4".
+  const orderStepNumber = !isLocalCsvFlow && isDxfPath ? 4 : 3;
   const alignDone =
     isLocalCsvFlow ||
     !isDxfPath ||
@@ -878,6 +893,8 @@ export function FieldsPage(props: FieldsPageProps) {
             onToggle={() => toggleStep("upload")}
           >
             <UploadAndPreviewStep
+              preLineCsvMode={preLineCsvMode}
+              onChangePreLineCsvMode={setPreLineCsvMode}
               apiBaseUrl={apiBaseUrl}
               importedPlan={importedPlan}
               setImportedPlan={setImportedPlan}
@@ -1009,7 +1026,7 @@ export function FieldsPage(props: FieldsPageProps) {
           {/* Step 4: Path Order & Load — DXF/waypoints only (local CSV never stages to the rover) */}
           {!isLocalCsvFlow && (
           <FieldsStepCard
-            stepNumber={4}
+            stepNumber={orderStepNumber}
             title="Path Order & Load"
             status={stepStatus("orderAndSpray")}
             expanded={activeStep === "orderAndSpray"}

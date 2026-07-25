@@ -45,6 +45,13 @@ type UploadAndPreviewStepProps = {
    * preserves the local point-CSV flow.
    */
   preLineCsvMode?: boolean;
+  /**
+   * Lifts the pre-line toggle to the page. FieldsPage has to know whether a .csv
+   * is a pre-line SURVEY line (uploaded, staged, driven) or a LOCAL point CSV
+   * (parsed on-device, never staged) — they take different steps. Without this
+   * it can only see `fileType === "csv"` and cannot tell them apart.
+   */
+  onChangePreLineCsvMode?: (next: boolean) => void;
 };
 
 const MAX_IMPORT_ATTEMPTS = 3;
@@ -163,10 +170,19 @@ export function UploadAndPreviewStep({
   isImportingRefPointsCsv = false,
   guideCsvFileName = null,
   preLineCsvMode: preLineCsvModeDefault = false,
+  onChangePreLineCsvMode,
 }: UploadAndPreviewStepProps) {
   // Pre-line marking: treat a .csv as a survey LINE (upload → backend /preview),
   // not an on-device point mission. Operator-toggled; seeded from the prop.
-  const [preLineCsvMode, setPreLineCsvMode] = useState<boolean>(preLineCsvModeDefault);
+  const [preLineCsvModeLocal, setPreLineCsvModeLocal] = useState<boolean>(preLineCsvModeDefault);
+  // Controlled when the page supplies a value + handler, uncontrolled otherwise
+  // (keeps every existing call site working unchanged).
+  const isControlled = onChangePreLineCsvMode != null;
+  const preLineCsvMode = isControlled ? preLineCsvModeDefault : preLineCsvModeLocal;
+  const setPreLineCsvMode = (next: boolean) => {
+    if (isControlled) onChangePreLineCsvMode!(next);
+    else setPreLineCsvModeLocal(next);
+  };
   const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
