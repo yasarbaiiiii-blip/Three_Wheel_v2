@@ -667,6 +667,9 @@ export default function ModernHomeUI(props) {
   const [showLayersMenu, setShowLayersMenu] = useState(false);
   const [showLayersPlanSubmenu, setShowLayersPlanSubmenu] = useState(false);
   const showRoverMarker = layerVisibility?.rover !== false;
+  // Opt-in, unlike the flags around it: path length labels stay hidden until explicitly
+  // enabled, so a dense plan reads as geometry rather than a wall of numbers.
+  const showLengthLabels = layerVisibility?.lengths === true;
   // Prefer the backend-confirmed extensionsEnabled flag (authoritative, set from
   // extension_config.enabled on every path refresh) over inferring purely from
   // line tags — some renderer paths may not tag layer:"extension" precisely, but
@@ -699,6 +702,17 @@ export default function ModernHomeUI(props) {
 
   const toggleLayerFlag = useCallback((key) => {
     setLayerVisibility?.((prev) => ({ ...(prev || {}), [key]: prev?.[key] === false ? true : false }));
+  }, [setLayerVisibility]);
+
+  /**
+   * `lengths` is opt-in (hidden unless explicitly true), so it cannot use
+   * `toggleLayerFlag`: that helper's `=== false ? true : false` assumes the default-visible
+   * flags around it, and would map an unset value to `false` — a first tap that visibly
+   * does nothing. Flip against the effective value instead, which is correct from unset,
+   * false, or true alike.
+   */
+  const toggleLengthLabels = useCallback(() => {
+    setLayerVisibility?.((prev) => ({ ...(prev || {}), lengths: !(prev?.lengths === true) }));
   }, [setLayerVisibility]);
 
   const toggleSegmentKind = useCallback((kind) => {
@@ -1436,6 +1450,12 @@ export default function ModernHomeUI(props) {
                       onPress={() => toggleLayerFlag("refPoints")}
                       colors={COLORS}
                     />
+                    <LayerCheckboxRow
+                      label="Lengths"
+                      checked={showLengthLabels}
+                      onPress={toggleLengthLabels}
+                      colors={COLORS}
+                    />
 
                     <View style={{ height: 1, backgroundColor: COLORS.panelBorder, marginVertical: 4, marginHorizontal: 6 }} />
 
@@ -1956,6 +1976,7 @@ export default function ModernHomeUI(props) {
               telemetrySnapshot={telemetrySnapshot}
               lines={visibleMapLines}
               showRover={showRoverMarker}
+              showLengths={showLengthLabels}
               alignedRefPoints={alignedRefPoints}
               autoOriginReference={autoOriginReference}
               mapGeometryFrame={mapGeometryFrame}

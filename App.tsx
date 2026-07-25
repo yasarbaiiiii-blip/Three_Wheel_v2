@@ -971,6 +971,8 @@ export default function App() {
     extension: true,
     rover: true,
     refPoints: true,
+    // Opt-in (see LayerVisibility.lengths) — enabled from Layers ▸ Lengths, not by default.
+    lengths: false,
     segmentTypes: {},
   });
   const [showRefPointLabels, setShowRefPointLabels] = useState(false);
@@ -7763,6 +7765,7 @@ function PlanPreview({
             previewFallbackGps={previewFallbackGps}
             visible
             showRover={visibility.rover !== false}
+            showLengths={visibility.lengths === true}
             showRefPointLabels={visibleShowRefPointLabels}
             recenterRoverTrigger={recenterRoverTrigger || recenterRoverCount}
             recenterPlanTrigger={recenterPlanTrigger || recenterPlanCount}

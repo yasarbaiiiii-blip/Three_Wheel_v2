@@ -19,6 +19,13 @@ export interface MapViewProps {
   visible: boolean;
   /** Layers filter: whether the rover marker itself is drawn. Defaults to visible when omitted. */
   showRover?: boolean;
+  /**
+   * Layers filter: whether per-path length labels are drawn. Defaults to HIDDEN when
+   * omitted (opt-in — see `LayerVisibility.lengths`). Does not affect the live W × H
+   * pill shown while actively resizing, which is gesture feedback rather than a passive
+   * detail label.
+   */
+  showLengths?: boolean;
   recenterRoverTrigger?: number;
   recenterPlanTrigger?: number;
   resetNorthTrigger?: number;

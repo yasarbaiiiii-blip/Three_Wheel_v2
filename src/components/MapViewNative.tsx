@@ -312,6 +312,8 @@ export function MapViewNative(props: MapViewProps) {
     alignedRefPoints,
     visible,
     showRover = true,
+    // Opt-in (see LayerVisibility.lengths) — path detail labels are off unless asked for.
+    showLengths = false,
     recenterRoverTrigger,
     recenterPlanTrigger,
     resetNorthTrigger,
@@ -1570,23 +1572,27 @@ export function MapViewNative(props: MapViewProps) {
           continue;
         }
 
-        // Always show each path length (including during resize).
-        const labels = buildPlanLengthLabels(item.lines, {
-          x: item.x,
-          y: item.y,
-          rotation: item.rotation || 0,
-          scale: item.scale || 1,
-          scaleNorth: item.scaleNorth,
-          scaleEast: item.scaleEast,
-        });
-        for (const lbl of labels) {
-          const gps = projectPlanNorthEastToGps(lbl.north, lbl.east, projectionOrigin);
-          features.push(
-            pointFeature(toMapboxCoord(gps.lat, gps.lon), {
-              id: lbl.id,
-              label: lbl.label,
-            })
-          );
+        // Per-path length labels (including during resize) — only when the operator has
+        // enabled Layers ▸ Lengths. The W × H resize pill below is deliberately NOT gated:
+        // it is live feedback for an in-progress gesture, not a passive detail label.
+        if (showLengths) {
+          const labels = buildPlanLengthLabels(item.lines, {
+            x: item.x,
+            y: item.y,
+            rotation: item.rotation || 0,
+            scale: item.scale || 1,
+            scaleNorth: item.scaleNorth,
+            scaleEast: item.scaleEast,
+          });
+          for (const lbl of labels) {
+            const gps = projectPlanNorthEastToGps(lbl.north, lbl.east, projectionOrigin);
+            features.push(
+              pointFeature(toMapboxCoord(gps.lat, gps.lon), {
+                id: lbl.id,
+                label: lbl.label,
+              })
+            );
+          }
         }
 
         // Resize phase: also show live W × H m pill below the OBB.
@@ -1612,12 +1618,12 @@ export function MapViewNative(props: MapViewProps) {
       }
       return featureCollection(features);
     },
-    [projectionOrigin, poseFromPlanItem]
+    [projectionOrigin, poseFromPlanItem, showLengths]
   );
 
   /** Fields mode (no sticker): path lengths on committed plan lines, identity pose. */
   const buildFieldsLengthLabelsFC = useCallback((): GeoJSON.FeatureCollection => {
-    if (!projectionOrigin || lines.length === 0) return featureCollection([]);
+    if (!projectionOrigin || lines.length === 0 || !showLengths) return featureCollection([]);
     const labels = buildPlanLengthLabels(lines, {
       x: 0,
       y: 0,
@@ -1635,7 +1641,7 @@ export function MapViewNative(props: MapViewProps) {
       );
     }
     return featureCollection(features);
-  }, [projectionOrigin, lines]);
+  }, [projectionOrigin, lines, showLengths]);
 
   /**
    * Resize-mode affordances: four edge-midpoint arrows only (n/e/s/w).

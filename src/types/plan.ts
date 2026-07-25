@@ -98,6 +98,16 @@ export interface LayerVisibility {
    */
   refPoints?: boolean;
   /**
+   * Per-path length labels ("12.34 m" beside each plan line).
+   *
+   * NOTE the inverted default: unlike every other flag here, this one is HIDDEN unless
+   * explicitly `true`. A plan with many segments prints a length beside each one, which
+   * buries the geometry itself — so path details are opt-in via the Layers ▸ Lengths
+   * checkbox rather than something the operator has to turn off. Read it as
+   * `lengths === true`, never `lengths !== false`.
+   */
+  lengths?: boolean;
+  /**
    * Per-geometry-type visibility for plan segments (keyed by normalizeCurveEntityType,
    * e.g. "line" | "arc" | "circle"). A type missing from the map is treated as visible —
    * this only needs to record explicit opt-outs.
