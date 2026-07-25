@@ -160,6 +160,42 @@ Preview pipeline (per group, after §3.5 splits the raw points):
 > single primitive spanning the whole path has no internal joints — confirmed unchanged
 > (roundabout max turn 1.7–1.8°, `curve_6_points.csv` 8.2°, before and after).
 
+> **"Minor edges" on tight curves and sub-`sharpCornerDeg` joints (fixed):** three compounding
+> issues, all confirmed against the real `curve_6_points.csv` / `roads_coordinates.csv`
+> fixtures:
+> 1. **Radius-blind sampling.** `sampleArc` paced samples by a fixed arc length
+>    (`sampleSpacingM`, 0.35 m) only — radius-blind. A large-radius arc (roundabout, ~11.5 m)
+>    lands ~1.7°/step "for free"; a tight-radius real curve (`curve_6_points.csv`, ~2.37 m; a
+>    typical street curve/intersection) landed 8-11°/step at the same spacing — visible
+>    facets, even though the primitive is a single perfect circle. Fixed by also capping the
+>    **angle** a sample step may subtend (`MAX_ARC_SAMPLE_ANGLE_RAD`, ~3°), taking whichever
+>    constraint (length or angle) needs more samples. `curve_6_points.csv`: 8.2° → 2.9°.
+> 2. **Bare sub-`sharpCornerDeg` joints.** `sharpCornerDeg` (12°) alone left every joint
+>    below it completely unrounded — and a real, gentle road bend routinely segments into
+>    several short line primitives each turning *less* than 12° (`fitLineOrCircle`
+>    deliberately prefers "line" over a fragile short/shallow-sweep arc), so a chain of these
+>    reads as a series of small "minor edges." Fixed by flooring the fillet gate to
+>    `min(sharpCornerDeg, MIN_VISIBLE_TURN_DEG≈3°)` — a caller-configured *smaller*
+>    `sharpCornerDeg` (more aggressive smoothing) is still honored.
+> 3. **Offset skip → floor.** A joint whose geometrically-derived tangent offset landed
+>    marginally under the 2 cm minimum-fillet-offset guard was skipped outright, even when the
+>    turn itself was clearly visible (confirmed: a real ~11° College Road joint had
+>    offset=0.0188 m, just under the 0.02 m guard). Fixed by flooring the offset up to the
+>    minimum instead of skipping, as long as it still fits the joint's own trim budget.
+>
+> Two smaller supporting fixes, needed once (1)-(3) made joints noticeably finer-grained:
+> forcing an arc-boundary sample to an exact neighbor point (the earlier "notch" fix, above)
+> now tapers that correction across a few samples (`blendArcBoundary`,
+> `BOUNDARY_BLEND_SAMPLES`) instead of dumping it into one segment; and the tessellation
+> dedupe threshold dropped from 1.5 cm to 3 mm (`TESSELLATION_DEDUPE_M`) — 1.5 cm sat right in
+> the range the angle cap's own fine samples land at for a small-radius fillet, so it was
+> silently discarding roughly every other one of them, undoing fix (1) exactly where it
+> mattered most. **Haddows Road max turning angle: 11.0° → 2.95°.** **College Road: 94.8°
+> (original) → 10.9° (notch fix) → 10.1° (this pass)** — one narrow remaining edge case (a
+> ~0.5 m primitive immediately flanked by both a very-large-radius arc transition *and* a
+> real corner) documented in §9; not chased further given the risk/effort of a new
+> primitive-merging pass for one location in one file.
+
 Defaults (tunable via options; `fitToleranceM` is now adaptive unless explicitly set):
 
 | Parameter | Default | Role |
@@ -278,7 +314,7 @@ npx vitest run src/utils/localPointCsv.test.ts src/utils/roadMarkingCsvPath.test
 | Result | Count |
 |--------|--------|
 | Test files | 2 |
-| Tests | 64 (parse, pins, open path, fillets, arcs, plan tags, grouping, adaptive tolerance, whole-loop fit, merge/reclassify passes, arc/line joint continuity, transit connectors) |
+| Tests | 68 (parse, pins, open path, fillets, arcs, plan tags, grouping, adaptive tolerance, whole-loop fit, merge/reclassify passes, arc/line joint continuity, transit connectors, arc angular resolution, sub-sharpCornerDeg joint fillet floor) |
 
 Expected: all tests pass (exit code 0).
 
@@ -358,7 +394,7 @@ Roundabout B,24.720050,46.680050
 | No blue cloud | No dense small blue vertex dots |
 | Gold pins | Present; if N&gt;1000, UI notes sampled pins + full path |
 | No backend stage | Mission not auto-loaded from rover CSV APIs |
-| Multi-feature file (format D) | Two separate smooth strokes appear, **no straight line connecting them** |
+| Multi-feature file (format D) | Two separate smooth strokes appear, joined only by a distinct gray **transit** connector (§3.5 Transit connectors) — never bridged as if it were one continuous marking path |
 
 ### Regression (sanity)
 
@@ -391,6 +427,7 @@ Roundabout B,24.720050,46.680050
 | Fillet needs room | Very short legs may keep a kink |
 | Arc model | Circular only; residual up to ~fitToleranceM; a true variable-radius spiral/clothoid gets approximated as several fixed-radius arcs |
 | Path-terminus reconstruction | The very first/last sample of the whole tessellated path (open-path end, or either end of a single whole-loop-fit arc) is the fitted circle's own angle+radius reconstruction, not the raw survey point — by design, so it stays smooth/on-circle with its neighbors — so it can differ from the raw endpoint by up to `fitToleranceM`. Internal joints between two primitives do not have this gap (fixed; see §3.4) |
+| Very short primitive flanked by a large-radius arc and a real corner | One documented edge case in `roads_coordinates.csv` (College Road): a ~0.5 m primitive sandwiched between a very-large-radius ("nearly straight") arc transition and a real corner still shows a ~10° kink after the §3.4 smoothing-floor fixes — the two adjacent joints' fillets interact in a way the per-joint budget model doesn't fully resolve. Down from 94.8° (unfixed) / 10.9° (notch fix only); not chased further via a new primitive-merging pass given the narrow, single-location scope |
 | Pin cap | Max 1000 gold markers; full path still drawn |
 | NED CSV | No lat/lon → not absolute Earth placement like GPS |
 | Preview vs mission | Refined path is for **preview**; full mission stage to rover is separate product work |

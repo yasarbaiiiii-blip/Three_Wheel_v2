@@ -632,6 +632,30 @@ function unwrapAngles(start: number, end: number, mid: number): { a0: number; a1
   return { a0: start, a1: start - e };
 }
 
+/**
+ * Cap on the angle a single tessellated sample step may subtend, independent of
+ * `sampleSpacingM`'s fixed arc-length pacing. Arc-length-only spacing is radius-blind: a
+ * large-radius arc (e.g. an ~11.5 m roundabout) lands well under 2° per step "for free," but
+ * a tight-radius real road curve (a few metres — typical for a street curve/intersection)
+ * lands 8-11° per step at the same spacing — visually a series of straight facets ("minor
+ * edges"), not a smooth curve, even though the underlying primitive is a single perfect
+ * circle. ~3° matches the smoothness large-radius arcs already get for free.
+ */
+const MAX_ARC_SAMPLE_ANGLE_RAD = (3 * Math.PI) / 180;
+
+/**
+ * Floor for "is this joint worth a fillet at all," independent of `sharpCornerDeg` (see
+ * `tessellatePrimitivesWithJointFillets`). ~3° matches MAX_ARC_SAMPLE_ANGLE_RAD — turns
+ * below this are the same order of magnitude as a single arc-sampling step, i.e. genuinely
+ * imperceptible; turns at or above it read as a visible kink if left as a bare vertex.
+ */
+const MIN_VISIBLE_TURN_DEG = 3;
+
+/** Minimum tangent offset for a joint fillet — see the flooring logic in
+ * `tessellatePrimitivesWithJointFillets`: a visible turn is floored up to this instead of
+ * being skipped when the geometrically-derived offset lands marginally below it. */
+const MIN_FILLET_OFFSET_M = 0.02;
+
 function sampleArc(
   c: Circle,
   a0: number,
@@ -640,7 +664,9 @@ function sampleArc(
 ): RoadMarkingNedPoint[] {
   const sweep = a1 - a0;
   const arcLen = Math.abs(sweep) * c.r;
-  const steps = Math.max(2, Math.ceil(arcLen / Math.max(spacingM, 0.05)));
+  const stepsFromSpacing = Math.ceil(arcLen / Math.max(spacingM, 0.05));
+  const stepsFromAngle = Math.ceil(Math.abs(sweep) / MAX_ARC_SAMPLE_ANGLE_RAD);
+  const steps = Math.max(2, stepsFromSpacing, stepsFromAngle);
   const out: RoadMarkingNedPoint[] = [];
   for (let i = 0; i <= steps; i++) {
     const t = i / steps;
@@ -1018,6 +1044,48 @@ function primitiveLength(points: RoadMarkingNedPoint[], prim: PathPrimitive): nu
   return Math.abs(ab - aa) * prim.circle.r;
 }
 
+/** Samples over which a forced arc-boundary correction is tapered — see `blendArcBoundary`. */
+const BOUNDARY_BLEND_SAMPLES = 3;
+
+/**
+ * Final near-duplicate-point dedupe threshold for the tessellated preview. Must stay well
+ * below the finest sample spacing MAX_ARC_SAMPLE_ANGLE_RAD legitimately produces for a
+ * small-radius fillet (e.g. a 0.2 m-radius fillet's 3°-capped samples land ~1 cm apart) — the
+ * previous 0.015 m (1.5 cm) threshold sat right in that range and silently discarded roughly
+ * every other sample from exactly these small fillets, undoing the angular-resolution fix and
+ * leaving an uneven, visibly kinked result at tight corners (confirmed against the real
+ * roads_coordinates.csv fixture). 3 mm is comfortably below any intentional fine sampling
+ * this module produces, while still collapsing genuine floating-point-precision duplicates.
+ */
+const TESSELLATION_DEDUPE_M = 0.003;
+
+/**
+ * Nudge `samples[endIdx]` to exactly `target`, tapering a fraction of that same
+ * correction into the `BOUNDARY_BLEND_SAMPLES - 1` samples walking inward from it (full
+ * correction at `endIdx`, decreasing to zero by the edge of the blend window). Spreads a
+ * forced position correction (fitted-circle reconstruction vs. the exact point a neighbor
+ * uses for the same joint) across several segments instead of dumping it into one.
+ */
+function blendArcBoundary(
+  samples: RoadMarkingNedPoint[],
+  endIdx: number,
+  target: RoadMarkingNedPoint
+): void {
+  const step = endIdx === 0 ? 1 : -1;
+  const maxReach = Math.floor((samples.length - 1) / 2);
+  const blendN = Math.max(1, Math.min(BOUNDARY_BLEND_SAMPLES, maxReach));
+  const dn = target.north - samples[endIdx].north;
+  const de = target.east - samples[endIdx].east;
+  for (let k = 0; k < blendN; k++) {
+    const idx = endIdx + k * step;
+    const w = 1 - k / blendN;
+    samples[idx] = {
+      north: samples[idx].north + dn * w,
+      east: samples[idx].east + de * w,
+    };
+  }
+}
+
 /**
  * Tessellate primitives once, inserting geometric fillets only at joints.
  * Fillet samples are never re-fed into Hyper/Kåsa — avoids re-flatten bug.
@@ -1082,7 +1150,19 @@ export function tessellatePrimitivesWithJointFillets(
     const probeA = add(jointPt, scale(uIn, -1));
     const probeB = add(jointPt, scale(uOut, 1));
     const turn = Math.abs(turningAngleDeg(probeA, jointPt, probeB));
-    if (turn < options.sharpCornerDeg) {
+    // Gate on whichever is smaller: the caller's configured sharpCornerDeg, or
+    // MIN_VISIBLE_TURN_DEG. `sharpCornerDeg` alone (12° default) leaves plenty of
+    // genuinely visible joints unrounded: a real, gentle road bend routinely segments into
+    // several short line primitives each turning less than 12° (the arc-fit heuristic
+    // deliberately prefers "line" over a fragile short/shallow-sweep arc — see
+    // fitLineOrCircle) — every one of those sub-12° joints was a bare, unfilleted vertex, so
+    // a chain of them reads as a series of small "minor edges" even though each individual
+    // turn looks negligible in isolation. Confirmed against the real roads_coordinates.csv
+    // fixture: an ~11° joint stayed a bare kink even after the arc-sampling fix (which only
+    // helps a joint's SAMPLING density, not whether a joint gets rounded at all). A caller
+    // that explicitly configures a SMALLER sharpCornerDeg (more aggressive smoothing) is
+    // still honored via the min().
+    if (turn < Math.min(options.sharpCornerDeg, MIN_VISIBLE_TURN_DEG)) {
       joints.push(null);
       continue;
     }
@@ -1131,7 +1211,18 @@ export function tessellatePrimitivesWithJointFillets(
       r = budget / Math.tan(turnRad / 2);
       offset = budget;
     }
-    if (r < 0.05 || offset < 0.02) {
+    // A joint that already cleared the MIN_VISIBLE_TURN_DEG gate above is a genuinely visible
+    // turn — never leave it completely unrounded just because the geometrically-derived
+    // offset happens to land marginally under MIN_FILLET_OFFSET_M (a tight per-joint budget,
+    // or a data-aware radius fit across a real corner rather than real curvature, both push r
+    // — and so offset — down). Floor the offset up to the minimum instead of skipping,
+    // as long as it still fits the budget; only a truly degenerate turn or an
+    // impossibly-tight budget still falls through to skip.
+    if (turnRad > 1e-6 && offset < MIN_FILLET_OFFSET_M && MIN_FILLET_OFFSET_M <= budget) {
+      offset = MIN_FILLET_OFFSET_M;
+      r = offset / Math.tan(turnRad / 2);
+    }
+    if (r < 0.05 || offset < MIN_FILLET_OFFSET_M) {
       joints.push(null);
       continue;
     }
@@ -1159,7 +1250,7 @@ export function tessellatePrimitivesWithJointFillets(
   const out: RoadMarkingNedPoint[] = [];
   const pushSamples = (samples: RoadMarkingNedPoint[]) => {
     for (const p of samples) {
-      if (out.length > 0 && dist(out[out.length - 1], p) < 0.015) continue;
+      if (out.length > 0 && dist(out[out.length - 1], p) < TESSELLATION_DEDUPE_M) continue;
       out.push(p);
     }
   };
@@ -1189,19 +1280,22 @@ export function tessellatePrimitivesWithJointFillets(
       const { a0: aa, a1: ab } = unwrapAngles(aStart, aEnd, midA);
       if (Math.abs(ab - aa) * prim.circle.r >= 0.02) {
         const arcSamples = sampleArc(prim.circle, aa, ab, options.sampleSpacingM);
-        // Anchor a boundary exactly to `start`/`end` (the raw survey vertex, or the
-        // fillet's own tangent point) ONLY when a neighboring primitive/fillet shares
-        // that same boundary — i.e. never at i===0's start or the last primitive's
-        // end, which are termini of the whole open path with nothing to match, where
-        // the fitted circle's own smooth angle+radius reconstruction is preferred.
-        // At a genuine internal joint, the Hyper fit only approximates the data
-        // (residual up to fitToleranceM), so that reconstruction can land a few cm
-        // sideways of the exact point the neighboring primitive/fillet uses for the
-        // SAME joint — visible as a small sideways notch right at the seam (see
-        // docs/csv-road-marking-workflow.md). Interior samples keep the fitted-circle
-        // interpolation either way.
-        if (i > 0) arcSamples[0] = start;
-        if (i < prims.length - 1) arcSamples[arcSamples.length - 1] = end;
+        // Anchor a boundary to `start`/`end` (the raw survey vertex, or the fillet's own
+        // tangent point) ONLY when a neighboring primitive/fillet shares that same
+        // boundary — i.e. never at i===0's start or the last primitive's end, which are
+        // termini of the whole open path with nothing to match, where the fitted circle's
+        // own smooth angle+radius reconstruction is preferred. At a genuine internal
+        // joint, the Hyper fit only approximates the data (residual up to fitToleranceM),
+        // so that reconstruction can land a few cm sideways of the exact point the
+        // neighboring primitive/fillet uses for the SAME joint — a hard single-sample
+        // snap there would fix the position gap but dump the whole correction into one
+        // segment, still reading as a small kink (confirmed on the real roads_coordinates
+        // fixture: a snap-only version left a 5-10° kink at exactly this seam). Instead
+        // taper the correction across `BOUNDARY_BLEND_SAMPLES` samples, so no single
+        // segment absorbs more than a fraction of the fit residual. Samples beyond the
+        // blend window keep the pure fitted-circle interpolation.
+        if (i > 0) blendArcBoundary(arcSamples, 0, start);
+        if (i < prims.length - 1) blendArcBoundary(arcSamples, arcSamples.length - 1, end);
         pushSamples(arcSamples);
       }
     }
@@ -1212,7 +1306,7 @@ export function tessellatePrimitivesWithJointFillets(
   }
 
   if (out.length < 2) return points.slice();
-  return dedupeNearPoints(out, 0.015);
+  return dedupeNearPoints(out, TESSELLATION_DEDUPE_M);
 }
 
 /**

@@ -681,6 +681,71 @@ describe("buildRoadMarkingPreviewPoints — noisy roundabout regression", () => 
   });
 });
 
+describe("sampleArc angular resolution (real bug regression: curve_6_points.csv)", () => {
+  it("keeps per-step turning angle small for a tight-radius arc, not just a large one", () => {
+    // Mirrors curve_6_points.csv: a single r≈2.37m open arc. Fixed arc-length-only sampling
+    // (0.35m spacing) put ~8.5° between consecutive samples on this radius — visible facets
+    // — even though the same spacing gives a large-radius arc (e.g. an ~11.5m roundabout)
+    // under 2°/step "for free". The angle cap must kick in regardless of radius.
+    const circle = { cn: 0, ce: 0, r: 2.5 };
+    const angles = [0, 50, 100].map((d) => (d * Math.PI) / 180);
+    const points: RoadMarkingNedPoint[] = angles.map((a) => ({
+      north: circle.r * Math.sin(a),
+      east: circle.ce + circle.r * Math.cos(a),
+    }));
+    const prims: PathPrimitive[] = [{ kind: "arc", i0: 0, i1: 2, circle }];
+    const out = tessellatePrimitivesWithJointFillets(points, prims, {
+      sharpCornerDeg: 12,
+      filletRadiusFraction: 0.4,
+      maxFilletRadiusM: 8,
+      sampleSpacingM: 0.35,
+    });
+    // ~100° sweep at r=2.5 is only ~4.4m of arc length — fixed 0.35m spacing alone would
+    // give ~13 points (~8°/step); the angle cap should push this well past 30.
+    expect(out.length).toBeGreaterThan(30);
+    let maxStep = 0;
+    for (let i = 1; i < out.length - 1; i++) {
+      maxStep = Math.max(maxStep, Math.abs(turningAngleDeg(out[i - 1], out[i], out[i + 1])));
+    }
+    expect(maxStep).toBeLessThan(4);
+  });
+});
+
+describe("joint fillet floor (real bug regression: roads_coordinates.csv sub-sharpCornerDeg kinks)", () => {
+  it("rounds a modest ~8° joint that sharpCornerDeg=12 alone would leave as a bare vertex", () => {
+    // A real, gentle road bend routinely segments into several short line primitives each
+    // turning less than sharpCornerDeg (12°) — fitLineOrCircle deliberately prefers "line"
+    // over a fragile short/shallow-sweep arc. Every one of those joints used to be a
+    // completely unrounded vertex; a chain of them reads as a series of small "minor edges."
+    const points: RoadMarkingNedPoint[] = [];
+    for (let i = 0; i <= 10; i++) points.push({ north: i * 2, east: 0 });
+    const turnRad = (8 * Math.PI) / 180;
+    const dir = { north: Math.cos(turnRad), east: Math.sin(turnRad) };
+    for (let i = 1; i <= 10; i++) {
+      points.push({ north: 20 + i * 2 * dir.north, east: i * 2 * dir.east });
+    }
+    const prims: PathPrimitive[] = [
+      { kind: "line", i0: 0, i1: 10 },
+      { kind: "line", i0: 10, i1: 20 },
+    ];
+    const out = tessellatePrimitivesWithJointFillets(points, prims, {
+      sharpCornerDeg: 12,
+      filletRadiusFraction: 0.4,
+      maxFilletRadiusM: 8,
+      sampleSpacingM: 0.35,
+      minArcPoints: 4,
+      fitToleranceM: 0.05,
+    });
+    let maxStep = 0;
+    for (let i = 1; i < out.length - 1; i++) {
+      maxStep = Math.max(maxStep, Math.abs(turningAngleDeg(out[i - 1], out[i], out[i + 1])));
+    }
+    // Before the fix this joint was a single bare ~8° vertex (maxStep ≈ 8). After, the ~8°
+    // turn is rounded into several smaller steps.
+    expect(maxStep).toBeLessThan(5);
+  });
+});
+
 describe("tessellatePrimitivesWithJointFillets — arc/line joint continuity (real bug regression)", () => {
   it("does not show a spurious sharp turn when the arc's fitted circle doesn't pass exactly through the shared raw joint point", () => {
     // Mirrors roads_coordinates.csv (Haddows Road): a long, gently-curving, large-radius
