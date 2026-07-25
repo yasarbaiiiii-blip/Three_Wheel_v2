@@ -66,6 +66,7 @@ import {
 } from "../utils/visualAlignment";
 import { type LocalMeters } from "../utils/refPointSnap";
 import { computeShapeSnapPoints } from "../utils/planShapeSnapPoints";
+import { buildControlPointMarkers } from "../utils/surveyControlPoints";
 import {
   type SnapRefPoint,
 } from "../utils/rigidRefPointSnap";
@@ -328,6 +329,8 @@ export function MapViewNative(props: MapViewProps) {
     boundaryHeight,
     indentSpacing,
     showRefPointLabels,
+    showCsvPoints,
+    controlPoints,
     boundaryPosition,
     onMoveBoundary,
     boundaryRotation = 0,
@@ -758,6 +761,27 @@ export function MapViewNative(props: MapViewProps) {
     flushRun();
     return featureCollection(features);
   }, [lines, originSig, mode]);
+
+  // ── Original CSV points: a dot at each surveyed shot ──────────────────────
+  // Source selection lives in buildControlPointMarkers (pure + unit-tested):
+  // prefer the backend's `control_points` (the real measurements, carrying the
+  // lat/lon parsed from the file), and fall back to the PlanPoint.mustHit scan
+  // only for sources the backend does not arc-fit. Using mustHit on a fitted
+  // survey would draw the FITTED ARC ENDPOINTS rather than the shots — 2 dots
+  // for an 8-shot curve, 4 for a 288-shot roundabout.
+  const csvPointsFC = useMemo(() => {
+    if (mode === "templates" || !projectionOrigin) {
+      return featureCollection([]);
+    }
+    const markers = buildControlPointMarkers(controlPoints, lines, (north, east) =>
+      projectPlanNorthEastToGps(north, east, projectionOrigin)
+    );
+    return featureCollection(
+      markers.map((m) =>
+        pointFeature(toMapboxCoord(m.lat, m.lon), { label: m.label, code: m.code })
+      )
+    );
+  }, [lines, controlPoints, originSig, mode]);
 
   // ── Rover start pin: exact first vertex of the start travel segment.
   // Uses the same GPS projection as the drawn plan stroke so the red pin sits on
@@ -2847,6 +2871,7 @@ export function MapViewNative(props: MapViewProps) {
   if (!visible) return null;
 
   const refLabelsVisible = !!showRefPointLabels;
+  const csvPointsVisible = !!showCsvPoints;
   // Active preview overrides the committed sources during a live gesture.
   const activeItemsGeo = previewItemsGeo ?? placedItemsGeo;
   const activeLengthLabelsFC = previewLengthLabelsFC ?? steadyLengthLabelsFC;
@@ -3048,6 +3073,20 @@ export function MapViewNative(props: MapViewProps) {
               textSize: 12,
               textOffset: ["get", "offset"],
               textAllowOverlap: true,
+            }}
+          />
+        </ShapeSource>
+
+        {/* ── Original CSV points: surveyed vertices (must_hit) as toggleable dots ── */}
+        <ShapeSource id="csv-original-points" shape={csvPointsFC}>
+          <CircleLayer
+            id="csv-original-points-layer"
+            style={{
+              circleRadius: 5,
+              circleColor: "#f97316",
+              circleOpacity: csvPointsVisible ? 0.95 : 0,
+              circleStrokeColor: "#ffffff",
+              circleStrokeWidth: csvPointsVisible ? 1.5 : 0,
             }}
           />
         </ShapeSource>

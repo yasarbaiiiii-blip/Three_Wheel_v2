@@ -28,7 +28,53 @@ export type PathPreviewResponse = {
   /** WGS84 [lat, lon] the local NED frame is anchored at, or null for a
    * metric/local source. Present for a survey CSV or geo DXF. */
   geo_origin?: [number, number] | null;
+  /**
+   * The ORIGINAL surveyed shots behind this path, before any fitting moved them.
+   *
+   * NOT the same as `waypoints[].must_hit`: after the backend fits arcs through
+   * the survey, must_hit marks the FITTED arc endpoints, so a 8-shot curve
+   * reports 2. These are the real measurements — 8 of them — each carrying the
+   * lat/lon parsed from the source file.
+   *
+   * `north`/`east` are in the same frame as `waypoints` (same projection about
+   * the same `geo_origin`), so the two overlay directly. `lat`/`lon` are the
+   * source values, NOT re-derived from north/east, so prefer them for the map.
+   * Empty for a source with no surveyed provenance (builtin / legacy headerless
+   * NED CSV / plain DXF). lat/lon are null for a grid-only (Northing/Easting)
+   * export, which has no geographic anchor — fall back to north/east there.
+   */
+  control_points?: SurveyControlPointDto[];
   [key: string]: unknown;
+};
+
+/** One surveyed shot as emitted by GET /api/path/{name}/preview. */
+export type SurveyControlPointDto = {
+  north: number;
+  east: number;
+  lat: number | null;
+  lon: number | null;
+  /** Survey point Name — the label the surveyor gave it. */
+  name: string | null;
+  /** Survey Code — feature / line id. Groups points ("College Road", "L_1"). */
+  code: string | null;
+};
+
+/**
+ * Per-file survey-LINE reconstruction settings (survey CSV only).
+ * Read by the backend's preview, plan AND load, so changing it changes what the
+ * map draws and what the rover drives together.
+ */
+export type SurveyLineConfig = {
+  /**
+   * Radius of the arc inserted at each surveyed corner; 0 = leave corners as
+   * surveyed. This INVENTS geometry — a road survey captures a bend as two
+   * straights meeting at a vertex, so the radius is a marking-spec value, not
+   * something measured. It has a real cost: on the roads survey r=10 m cuts
+   * corners by up to 90 cm. Always surface the number to the operator.
+   */
+  fillet_corners_m: number;
+  /** How far a fitted arc may sit from the shots it replaces. Backend default 0.15. */
+  fit_arcs_max_dev_m: number;
 };
 
 export type EntityOverride = {
@@ -164,6 +210,31 @@ export function getPathPreview(apiBaseUrl: string, pathName: string): Promise<Re
   return fetch(apiUrl(apiBaseUrl, `/api/path/${encodeURIComponent(pathName)}/preview`), {
     method: "GET",
     headers: { Accept: "application/json" },
+  });
+}
+
+/** Saved survey-line reconstruction settings for a survey CSV. */
+export function getLineConfig(apiBaseUrl: string, pathName: string): Promise<Response> {
+  return fetch(apiUrl(apiBaseUrl, `/api/path/${encodeURIComponent(pathName)}/line-config`), {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+}
+
+/**
+ * Persist survey-line reconstruction settings. Affects preview, plan and load
+ * alike, so re-fetch the preview afterwards to see (and drive) the new shape.
+ * Omit fit_arcs_max_dev_m to leave it unchanged.
+ */
+export function saveLineConfig(
+  apiBaseUrl: string,
+  pathName: string,
+  config: { fillet_corners_m: number; fit_arcs_max_dev_m?: number }
+): Promise<Response> {
+  return fetch(apiUrl(apiBaseUrl, `/api/path/${encodeURIComponent(pathName)}/line-config`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(config),
   });
 }
 

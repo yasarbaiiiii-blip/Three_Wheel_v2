@@ -121,7 +121,7 @@ import { generateAlphabetLines, generateNumberLines, FontStyle, AlphabetType, Nu
 import { generateRoadSignLines, RoadSignType, ROAD_SIGN_LABELS } from "./src/utils/roadSignTemplates";
 import { canAcquireJoystick as canAcquireJoystickForState } from "./src/utils/joystickFrontendSafety";
 
-import type { Page, TelemetrySnapshot, LayerVisibility } from "./src/types/plan";
+import type { Page, TelemetrySnapshot, LayerVisibility, SurveyControlPoint } from "./src/types/plan";
 const TemplatesPage = lazyDefault(
   () => import("./src/screens/TemplatesPage").then((m) => ({ default: m.TemplatesPage })),
   "TemplatesPage"
@@ -1036,6 +1036,11 @@ export default function App() {
   // alignment gate for these files only (metric DXFs still require alignment).
   const [isGeographicDxf, setIsGeographicDxf] = useState<boolean>(false);
   const [geoOriginDxf, setGeoOriginDxf] = useState<[number, number] | null>(null);
+  // The ORIGINAL surveyed shots behind the previewed path (backend
+  // `control_points`). Kept separate from `lines` because the backend's arc fit
+  // and corner fillet deliberately move the drawn geometry off the measurements
+  // — that offset is exactly what this layer exists to show.
+  const [surveyControlPoints, setSurveyControlPoints] = useState<SurveyControlPoint[]>([]);
   const [segmentVerification, setSegmentVerification] = useState<pathApi.PathSegmentsResponse | null>(null);
   const [stagedPlanResult, setStagedPlanResult] = useState<StagedPlanResultState | null>(null);
   const [stagedMissionInspection, setStagedMissionInspection] = useState<pathApi.StagedMissionResponse | null>(null);
@@ -1462,6 +1467,7 @@ export default function App() {
     setVerifiedAlignmentRequest(null);
     setIsGeographicDxf(false);
     setGeoOriginDxf(null);
+    setSurveyControlPoints([]);
     setSegmentVerification(null);
     setStagedPlanResult(null);
     setStagedMissionInspection(null);
@@ -2097,6 +2103,7 @@ export default function App() {
             console.log(`[API GET] /api/path/${pathName}/entities - Success, loaded ${body.num_entities} entities`);
             setIsGeographicDxf(!!body.is_geographic);
             setGeoOriginDxf(body.geo_origin ?? null);
+            setSurveyControlPoints([]);   // DXF carries no surveyed shots
             setWorkflowStep("entities", "verified");
             const entities = body.entities || [];
             // Per-entity extension run-ups are only drawn in the fallback path.
@@ -2284,6 +2291,26 @@ export default function App() {
             // origin its local NED frame is anchored at. Placing the preview at
             // that origin is what makes the map WYSIWYG — the surveyed lat/lon
             // the rover will actually drive. A metric/local source reports null.
+            // The original surveyed shots, straight from the backend. Note this
+            // is NOT waypoints[].must_hit: once the backend fits arcs, must_hit
+            // marks the FITTED arc endpoints (2 for an 8-shot curve), not the
+            // measurements. Empty for a source with no surveyed provenance.
+            const rawControl = Array.isArray(body?.control_points) ? body.control_points : [];
+            setSurveyControlPoints(
+              rawControl
+                .map((c: any) => ({
+                  north: coerceFiniteNumber(c?.north),
+                  east: coerceFiniteNumber(c?.east),
+                  lat: coerceFiniteNumber(c?.lat),
+                  lon: coerceFiniteNumber(c?.lon),
+                  name: typeof c?.name === "string" ? c.name : null,
+                  code: typeof c?.code === "string" ? c.code : null,
+                }))
+                .filter(
+                  (c: any): c is SurveyControlPoint => c.north != null && c.east != null
+                )
+            );
+
             const geoOrigin = Array.isArray(body?.geo_origin) ? body.geo_origin : null;
             if (geoOrigin && geoOrigin.length === 2) {
               setGeoOriginDxf([Number(geoOrigin[0]), Number(geoOrigin[1])]);
@@ -3388,6 +3415,7 @@ export default function App() {
       setVerifiedAlignmentRequest(null);
       setIsGeographicDxf(false);
       setGeoOriginDxf(null);
+      setSurveyControlPoints([]);
       setVisualAlignmentItem(null);
       setIsVisualAlignmentMode(false);
       setSegmentVerification(null);
@@ -3916,6 +3944,7 @@ export default function App() {
                   setImportedPlan={setImportedPlan}
                   onSelectPath={previewSelectedPath}
                   lines={displayedLines}
+                  controlPoints={surveyControlPoints}
                   mapSourceLines={mapSourceLines}
                   autoOriginReference={autoOriginReference}
                   mapGeometryFrame={mapGeometryFrame}
@@ -4012,6 +4041,7 @@ export default function App() {
                             page={page}
                             importedPlan={importedPlan}
                             lines={displayedLines}
+                            controlPoints={surveyControlPoints}
                             mapSourceLines={mapSourceLines}
                             autoOriginReference={autoOriginReference}
                             mapGeometryFrame={mapGeometryFrame}
@@ -4326,6 +4356,8 @@ type HomeViewProps = {
   setImportedPlan?: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
   onSelectPath?: (name: string) => void;
   lines: PlanLine[];
+  /** Original surveyed shots from the backend preview (`control_points`). */
+  controlPoints?: SurveyControlPoint[];
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   selectedLineId: string | null;
   onSelectLine: (id: string | null, options?: { highlightLineIds?: string[] | null }) => void;
@@ -4420,6 +4452,7 @@ function HomeView(props: HomeViewProps) {
     geoOrigin = null,
     importedPlan,
     lines,
+    controlPoints = [],
     setLines,
     selectedLineId,
     onSelectLine,
@@ -4796,6 +4829,7 @@ function HomeView(props: HomeViewProps) {
       renderPlanPreview={page === "home" ? () => (
         <PlanPreview
           lines={lines}
+          controlPoints={controlPoints}
           mapSourceLines={mapSourceLines}
           autoOriginReference={autoOriginReference}
           mapGeometryFrame={mapGeometryFrame}
@@ -5588,6 +5622,8 @@ function SectionPages(props: {
   previewRoverPoint: { north: number; east: number } | null;
   importedPlan: ImportedPlan | null;
   lines: PlanLine[];
+   /** Original surveyed shots from the backend preview (`control_points`). */
+   controlPoints?: SurveyControlPoint[];
   mapSourceLines?: PlanLine[];
   autoOriginReference?: AutoOriginReference | null;
   mapGeometryFrame?: MapGeometryFrame;
@@ -5724,6 +5760,7 @@ function SectionPages(props: {
           renderPlanPreview={(previewProps) => (
             <PlanPreview
               {...previewProps}
+              controlPoints={props.controlPoints}
               mapViewEnabled={mapViewEnabled}
               telemetryPosN={props.telemetrySnapshot?.pos_n ?? null}
               telemetryPosE={props.telemetrySnapshot?.pos_e ?? null}
@@ -6841,6 +6878,7 @@ function PlanPreview({
   geoOrigin = null,
   stagedVerified = false,
   visibility,
+  controlPoints = [],
   selectedLineId,
   onSelectLine,
   highlightLineIds = null,
@@ -6894,6 +6932,8 @@ function PlanPreview({
   geoOrigin?: [number, number] | null;
   stagedVerified?: boolean;
   visibility: LayerVisibility;
+  /** Original surveyed shots from the backend preview (`control_points`). */
+  controlPoints?: SurveyControlPoint[];
   selectedLineId: string | null;
   onSelectLine?: (id: string | null, options?: { highlightLineIds?: string[] | null }) => void;
   /**
@@ -6992,6 +7032,13 @@ function PlanPreview({
   );
 
   const filtered = useMemo(() => applyLayerVisibility(lines), [lines, applyLayerVisibility]);
+
+  // ── "Control Points" layer ──────────────────────────────────────────────────
+  // Draws a dot at each surveyed vertex (PlanPoint.mustHit) — the true rows from
+  // the uploaded survey CSV, not the densified fill between them. Driven by the
+  // shared Layers menu in the map-tools HUD (ModernHomeUI), not local state, so
+  // Home and Fields stay in sync. Opt-in: absent flag means hidden.
+  const showCsvPoints = visibility.controlPoints === true;
 
   // The Mapbox <MapView> below uses raw `mapSourceLines` instead of `filtered`
   // whenever autoOriginEnabled (it needs pre-origin-shift coordinates for its own
@@ -7764,6 +7811,8 @@ function PlanPreview({
             highlightedLines={selectedLines}
             showCornerPoints={true}
             selectedPoints={selectedPoints}
+            showCsvPoints={showCsvPoints}
+            controlPoints={controlPoints}
           />
         ) : filtered.length === 0 && !hasRover ? (
           // No plan, no rover: show placeholder
@@ -8215,6 +8264,7 @@ function PlanPreview({
           </Svg>
         )}
       </View>
+
 
       {!hideRefocusControls ? (
         <View

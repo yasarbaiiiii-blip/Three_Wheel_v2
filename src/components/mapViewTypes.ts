@@ -5,7 +5,7 @@
  * them. Keeping the type here (rather than inside an implementation file) lets
  * the dispatcher lazy-load implementations without creating import cycles.
  */
-import type { TelemetrySnapshot, PlanLine } from "../types/plan";
+import type { TelemetrySnapshot, PlanLine, SurveyControlPoint } from "../types/plan";
 import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
 import type { MultiPointPlacementPhase } from "../types/fieldsWorkflow";
 import type { PlacedItem } from "./BoundaryEditor";
@@ -61,6 +61,17 @@ export interface MapViewProps {
   indentSpacing?: number;
   sketchMode?: boolean;
   showRefPointLabels?: boolean;
+  /** Show a marker layer at the original surveyed CSV shots. */
+  showCsvPoints?: boolean;
+  /**
+   * The ORIGINAL surveyed shots from the backend preview's `control_points`.
+   * Preferred source for the marker layer: after arc fitting, PlanPoint.mustHit
+   * marks fitted arc endpoints rather than measurements, so deriving the dots
+   * from it under-reports badly (2 instead of 8 on an 8-shot curve). When this
+   * is empty the layer falls back to the mustHit scan, which is still right for
+   * un-fitted sources such as DXF.
+   */
+  controlPoints?: SurveyControlPoint[];
   boundaryPosition?: { x: number; y: number };
   onMoveBoundary?: (x: number, y: number) => void;
   boundaryRotation?: number;

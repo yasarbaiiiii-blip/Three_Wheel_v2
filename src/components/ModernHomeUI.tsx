@@ -675,6 +675,13 @@ export default function ModernHomeUI(props) {
     () => Boolean(extensionsEnabled) || lines.some((line) => line.layer === "extension"),
     [lines, extensionsEnabled]
   );
+  // Surveyed control points exist only for plans imported from a survey CSV — the
+  // parser tags the true CSV rows as must-hit vertices and densifies between them.
+  // Row is hidden entirely for DXF-only plans, same as the Extension row above.
+  const hasControlPoints = useMemo(
+    () => lines.some((line) => line.from?.mustHit === true || line.to?.mustHit === true),
+    [lines]
+  );
   const availableSegmentKinds = useMemo(() => {
     const kinds = new Set();
     for (const line of lines) {
@@ -699,6 +706,12 @@ export default function ModernHomeUI(props) {
 
   const toggleLayerFlag = useCallback((key) => {
     setLayerVisibility?.((prev) => ({ ...(prev || {}), [key]: prev?.[key] === false ? true : false }));
+  }, [setLayerVisibility]);
+
+  // Control points are opt-IN (absent = hidden), so this can't reuse toggleLayerFlag,
+  // which treats an absent flag as "currently visible" and would switch it off first.
+  const toggleControlPoints = useCallback(() => {
+    setLayerVisibility?.((prev) => ({ ...(prev || {}), controlPoints: prev?.controlPoints !== true }));
   }, [setLayerVisibility]);
 
   const toggleSegmentKind = useCallback((kind) => {
@@ -1364,104 +1377,115 @@ export default function ModernHomeUI(props) {
                   </View>
                 )}
               </View>
+            </>
+          )}
 
-              <View style={styles.mapToolsDivider} />
-              <View>
+          {/* Layers — Home and Fields both render a map driven by the same App-level
+              `layerVisibility` state, so this control serves both pages. Only "Mark"
+              above stays Home-only (the Fields page has its own drawing workflow). */}
+          <View style={styles.mapToolsDivider} />
+          <View>
+            <Pressable
+              style={({ pressed }) => [styles.focusToolBtnGrouped, pressed && styles.focusToolBtnPressed]}
+              onPress={() => setShowLayersMenu((v) => !v)}
+              accessibilityLabel="Layers"
+            >
+              <Layers color={COLORS.accentBrand} size={18} strokeWidth={2.2} />
+              <Text style={styles.focusToolLabel}>Layers</Text>
+            </Pressable>
+            {showLayersMenu && (
+              <View style={{
+                position: "absolute",
+                top: "100%",
+                marginTop: 14,
+                right: 0,
+                backgroundColor: COLORS.cardSolid,
+                borderRadius: 12,
+                padding: 6,
+                minWidth: 200,
+                borderWidth: 1,
+                borderColor: COLORS.panelBorder,
+                shadowColor: "#000",
+                shadowOffset: { width: 0, height: 8 },
+                shadowOpacity: 0.5,
+                shadowRadius: 24,
+                elevation: 10,
+                zIndex: 100,
+              }}>
+                {/* Top Pointer Triangle */}
+                <View style={{
+                  position: "absolute",
+                  top: -6,
+                  right: 22,
+                  width: 12,
+                  height: 12,
+                  backgroundColor: COLORS.cardSolid,
+                  borderTopWidth: 1,
+                  borderLeftWidth: 1,
+                  borderColor: COLORS.panelBorder,
+                  transform: [{ rotate: "45deg" }],
+                }} />
+
+                {hasExtensionLines && (
+                  <LayerCheckboxRow
+                    label="Extension"
+                    checked={layerVisibility?.extension !== false}
+                    onPress={() => toggleLayerFlag("extension")}
+                    colors={COLORS}
+                  />
+                )}
+                <LayerCheckboxRow
+                  label="Rover"
+                  checked={showRoverMarker}
+                  onPress={() => toggleLayerFlag("rover")}
+                  colors={COLORS}
+                />
+                {hasControlPoints && (
+                  <LayerCheckboxRow
+                    label="Control Points"
+                    checked={layerVisibility?.controlPoints === true}
+                    onPress={toggleControlPoints}
+                    colors={COLORS}
+                  />
+                )}
+
+                <View style={{ height: 1, backgroundColor: COLORS.panelBorder, marginVertical: 4, marginHorizontal: 6 }} />
+
                 <Pressable
-                  style={({ pressed }) => [styles.focusToolBtnGrouped, pressed && styles.focusToolBtnPressed]}
-                  onPress={() => setShowLayersMenu((v) => !v)}
-                  accessibilityLabel="Layers"
+                  style={({ pressed }) => [
+                    { padding: 10, borderRadius: 8, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+                    pressed && { backgroundColor: COLORS.surfaceSolid },
+                  ]}
+                  onPress={() => setShowLayersPlanSubmenu((v) => !v)}
                 >
-                  <Layers color={COLORS.accentBrand} size={18} strokeWidth={2.2} />
-                  <Text style={styles.focusToolLabel}>Layers</Text>
+                  <Text style={{ color: COLORS.textMain, fontSize: 13, fontWeight: "600" }}>Plan</Text>
+                  <ChevronRight
+                    color={COLORS.textMuted}
+                    size={16}
+                    style={{ transform: [{ rotate: showLayersPlanSubmenu ? "90deg" : "0deg" }] }}
+                  />
                 </Pressable>
-                {showLayersMenu && (
-                  <View style={{
-                    position: "absolute",
-                    top: "100%",
-                    marginTop: 14,
-                    right: 0,
-                    backgroundColor: COLORS.cardSolid,
-                    borderRadius: 12,
-                    padding: 6,
-                    minWidth: 200,
-                    borderWidth: 1,
-                    borderColor: COLORS.panelBorder,
-                    shadowColor: "#000",
-                    shadowOffset: { width: 0, height: 8 },
-                    shadowOpacity: 0.5,
-                    shadowRadius: 24,
-                    elevation: 10,
-                    zIndex: 100,
-                  }}>
-                    {/* Top Pointer Triangle */}
-                    <View style={{
-                      position: "absolute",
-                      top: -6,
-                      right: 22,
-                      width: 12,
-                      height: 12,
-                      backgroundColor: COLORS.cardSolid,
-                      borderTopWidth: 1,
-                      borderLeftWidth: 1,
-                      borderColor: COLORS.panelBorder,
-                      transform: [{ rotate: "45deg" }],
-                    }} />
 
-                    {hasExtensionLines && (
-                      <LayerCheckboxRow
-                        label="Extension"
-                        checked={layerVisibility?.extension !== false}
-                        onPress={() => toggleLayerFlag("extension")}
-                        colors={COLORS}
-                      />
-                    )}
-                    <LayerCheckboxRow
-                      label="Rover"
-                      checked={showRoverMarker}
-                      onPress={() => toggleLayerFlag("rover")}
-                      colors={COLORS}
-                    />
-
-                    <View style={{ height: 1, backgroundColor: COLORS.panelBorder, marginVertical: 4, marginHorizontal: 6 }} />
-
-                    <Pressable
-                      style={({ pressed }) => [
-                        { padding: 10, borderRadius: 8, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-                        pressed && { backgroundColor: COLORS.surfaceSolid },
-                      ]}
-                      onPress={() => setShowLayersPlanSubmenu((v) => !v)}
-                    >
-                      <Text style={{ color: COLORS.textMain, fontSize: 13, fontWeight: "600" }}>Plan</Text>
-                      <ChevronRight
-                        color={COLORS.textMuted}
-                        size={16}
-                        style={{ transform: [{ rotate: showLayersPlanSubmenu ? "90deg" : "0deg" }] }}
-                      />
-                    </Pressable>
-
-                    {showLayersPlanSubmenu && (
-                      <View style={{ paddingLeft: 10 }}>
-                        {availableSegmentKinds.length === 0 ? (
-                          <Text style={{ color: COLORS.textMuted, fontSize: 12, padding: 10 }}>No plan loaded</Text>
-                        ) : (
-                          availableSegmentKinds.map((kind) => (
-                            <LayerCheckboxRow
-                              key={kind}
-                              label={kind.charAt(0).toUpperCase() + kind.slice(1)}
-                              checked={layerVisibility?.segmentTypes?.[kind] !== false}
-                              onPress={() => toggleSegmentKind(kind)}
-                              colors={COLORS}
-                            />
-                          ))
-                        )}
-                      </View>
+                {showLayersPlanSubmenu && (
+                  <View style={{ paddingLeft: 10 }}>
+                    {availableSegmentKinds.length === 0 ? (
+                      <Text style={{ color: COLORS.textMuted, fontSize: 12, padding: 10 }}>No plan loaded</Text>
+                    ) : (
+                      availableSegmentKinds.map((kind) => (
+                        <LayerCheckboxRow
+                          key={kind}
+                          label={kind.charAt(0).toUpperCase() + kind.slice(1)}
+                          checked={layerVisibility?.segmentTypes?.[kind] !== false}
+                          onPress={() => toggleSegmentKind(kind)}
+                          colors={COLORS}
+                        />
+                      ))
                     )}
                   </View>
                 )}
               </View>
-            </>
-          )}
+            )}
+          </View>
         </View>
       </AnimatedReanimated.View>
     );

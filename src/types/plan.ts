@@ -88,6 +88,29 @@ export interface ImportedPlan {
   source?: "imported" | "generated" | "builtin";
 }
 
+/**
+ * One ORIGINAL surveyed shot from an imported survey CSV, before any backend
+ * fitting moved it. Supplied by GET /api/path/{name}/preview `control_points`.
+ *
+ * Deliberately NOT derived from PlanPoint.mustHit: once the backend fits arcs,
+ * mustHit marks the FITTED arc endpoints (2 for an 8-shot curve), not the
+ * measurements. These are the measurements.
+ */
+export interface SurveyControlPoint {
+  /** Local NED north, same frame as PlanPoint.x. */
+  north: number;
+  /** Local NED east, same frame as PlanPoint.y. */
+  east: number;
+  /** Source WGS84 latitude; null for a grid-only (Northing/Easting) export. */
+  lat: number | null;
+  /** Source WGS84 longitude; null for a grid-only export. */
+  lon: number | null;
+  /** Survey point Name — the surveyor's label for this shot. */
+  name: string | null;
+  /** Survey Code — feature / line id, groups shots ("College Road", "L_1"). */
+  code: string | null;
+}
+
 export interface LayerVisibility {
   boundary: boolean;
   marking: boolean;
@@ -96,6 +119,12 @@ export interface LayerVisibility {
   extension: boolean;
   /** Whether the rover marker itself is shown. Defaults to visible when omitted. */
   rover?: boolean;
+  /**
+   * Whether the surveyed control points (PlanPoint.mustHit vertices — the true rows
+   * of an imported survey CSV, before densification) are drawn as dots on the map.
+   * Opt-IN: absent/undefined means hidden, unlike the other flags which default visible.
+   */
+  controlPoints?: boolean;
   /**
    * Per-geometry-type visibility for plan segments (keyed by normalizeCurveEntityType,
    * e.g. "line" | "arc" | "circle"). A type missing from the map is treated as visible —
