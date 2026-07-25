@@ -190,15 +190,32 @@ export function PathOrderAndSprayStep({
     });
   };
 
+  // Why the Load button is unavailable, or null when it is ready. Mirrors the
+  // checks in handleLoadToController so the button and the handler can never
+  // disagree — they previously did: the handler skipped the alignment gate for a
+  // non-DXF source but the button did not, leaving a CSV greyed out with no
+  // reason shown.
+  const loadBlockedReason = ((): string | null => {
+    const target = selectedPathName || importedPlan?.fileName;
+    if (!apiBaseUrl || !target) return "No path selected.";
+    if (target.toLowerCase().endsWith(".dxf")) {
+      return !verifiedAlignmentRequest && !isGeographicDxf
+        ? "Complete the Align DXF step first."
+        : null;
+    }
+    // A survey CSV needs a geographic anchor. Without one the backend stages it
+    // as LOCAL_NED against the EKF origin and the rover paints in the wrong
+    // place with no error, so refuse rather than let it through.
+    if (!isGeographicDxf) {
+      return "This CSV has no lat/lon anchor (grid-only export), so it cannot be placed on the ground.";
+    }
+    return null;
+  })();
+
   const handleLoadToController = async () => {
     const targetPath = selectedPathName || importedPlan?.fileName;
-    if (!apiBaseUrl || !targetPath) {
-      Alert.alert("Error", "No path selected to load.");
-      return;
-    }
-    const isDxfPath = targetPath?.toLowerCase().endsWith(".dxf");
-    if (!verifiedAlignmentRequest && !isGeographicDxf && isDxfPath) {
-      Alert.alert("Missing Alignment", "Please complete the alignment step before loading.");
+    if (loadBlockedReason || !apiBaseUrl || !targetPath) {
+      Alert.alert("Cannot load", loadBlockedReason ?? "No path selected to load.");
       return;
     }
 
@@ -310,9 +327,22 @@ export function PathOrderAndSprayStep({
         />
       </View>
 
+      {loadBlockedReason ? (
+        <Text
+          style={{
+            color: FIELDS_COLORS.textDim,
+            fontSize: 12,
+            marginBottom: 8,
+            textAlign: "center",
+          }}
+        >
+          {loadBlockedReason}
+        </Text>
+      ) : null}
+
       <TouchableOpacity
         onPress={handleLoadToController}
-        disabled={isLoading || missionActionBusy || (!verifiedAlignmentRequest && !isGeographicDxf)}
+            disabled={isLoading || missionActionBusy || loadBlockedReason != null}
         activeOpacity={0.8}
         style={{
           height: 52,
@@ -321,7 +351,7 @@ export function PathOrderAndSprayStep({
           alignItems: "center",
           justifyContent: "center",
           backgroundColor:
-            isLoading || missionActionBusy || (!verifiedAlignmentRequest && !isGeographicDxf)
+            isLoading || missionActionBusy || loadBlockedReason != null
               ? FIELDS_COLORS.textDim
               : "#7c3aed",
           elevation: 4,
