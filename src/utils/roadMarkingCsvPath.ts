@@ -57,7 +57,7 @@ const DEFAULTS = {
   outlierResidualFactor: 8,
 } as const;
 
-type Circle = { cn: number; ce: number; r: number };
+export type Circle = { cn: number; ce: number; r: number };
 
 /** Generalized algebraic fit: circle when |a| is meaningful; line when a≈0 / huge R. */
 export type GeneralizedFit =
@@ -129,6 +129,81 @@ export function ensureOpenPath(points: RoadMarkingNedPoint[]): RoadMarkingNedPoi
   return points.slice();
 }
 
+export type RoadMarkingGroupKey = string | number | undefined;
+
+const JUMP_SPLIT_MIN_M = 5;
+const JUMP_SPLIT_SPACING_MULTIPLE = 20;
+
+function splitByGroupKey(
+  points: RoadMarkingNedPoint[],
+  groupKeys: RoadMarkingGroupKey[] | undefined
+): RoadMarkingNedPoint[][] {
+  if (!groupKeys) return [points.slice()];
+  const groups: RoadMarkingNedPoint[][] = [];
+  let cur: RoadMarkingNedPoint[] = [];
+  let prevKey: RoadMarkingGroupKey;
+  let started = false;
+  for (let i = 0; i < points.length; i++) {
+    const key = groupKeys[i];
+    if (started && key !== prevKey) {
+      groups.push(cur);
+      cur = [];
+    }
+    cur.push(points[i]);
+    prevKey = key;
+    started = true;
+  }
+  if (cur.length > 0) groups.push(cur);
+  return groups;
+}
+
+/** Split wherever a jump is far larger than the group's own typical point spacing. */
+function splitByJumpDistance(points: RoadMarkingNedPoint[]): RoadMarkingNedPoint[][] {
+  if (points.length < 3) return [points];
+  const diffs: number[] = [];
+  for (let i = 1; i < points.length; i++) diffs.push(dist(points[i - 1], points[i]));
+  const sorted = diffs.slice().sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)] || 0.5;
+  const threshold = Math.max(JUMP_SPLIT_MIN_M, JUMP_SPLIT_SPACING_MULTIPLE * median);
+  const groups: RoadMarkingNedPoint[][] = [[points[0]]];
+  for (let i = 1; i < points.length; i++) {
+    if (dist(points[i - 1], points[i]) > threshold) groups.push([]);
+    groups[groups.length - 1].push(points[i]);
+  }
+  return groups;
+}
+
+/**
+ * Split a point sequence into independent open paths. Never reorders points — only splits
+ * the existing sequence. Two signals decide a boundary, applied in order:
+ *
+ *  1. An explicit per-point group key (e.g. a CSV "feature"/"road" column, passed via
+ *     `groupKeys`, same length/order as `points`) — any change in key starts a new group.
+ *     Rows sharing a key are never bridged with rows from a different key, however close.
+ *  2. Within each key-group (or across the whole sequence when no keys are given at all),
+ *     a jump far larger than that group's own typical point spacing also starts a new
+ *     group. This catches multiple unrelated features bundled in one CSV with no name
+ *     column, and a real GPS dropout mid-survey — showing two separate paths with a gap is
+ *     the safe failure mode, not a fabricated straight line bridging missing data.
+ *
+ * Known limitation: two genuinely unrelated paths that happen to end/start close together
+ * (below the jump threshold) with no group key will still be bridged. A real name/feature
+ * column always resolves this; there is no reliable way to detect it from geometry alone
+ * without risking false splits on legitimate dense data.
+ */
+export function splitIntoOpenPathGroups(
+  points: RoadMarkingNedPoint[],
+  groupKeys?: RoadMarkingGroupKey[]
+): RoadMarkingNedPoint[][] {
+  if (points.length === 0) return [];
+  const byKey = splitByGroupKey(points, groupKeys);
+  const out: RoadMarkingNedPoint[][] = [];
+  for (const group of byKey) {
+    out.push(...splitByJumpDistance(group));
+  }
+  return out.filter((g) => g.length > 0);
+}
+
 /** Max distance from points to the infinite line through first→last. */
 function maxLineResidual(points: RoadMarkingNedPoint[]): number {
   if (points.length < 2) return 0;
@@ -160,6 +235,32 @@ function pointLineResidual(
   if (len < 1e-9) return dist(a, p);
   const ap = sub(p, a);
   return Math.abs(ab.north * ap.east - ab.east * ap.north) / len;
+}
+
+const ADAPTIVE_TOLERANCE_MIN_M = 0.05;
+const ADAPTIVE_TOLERANCE_MAX_M = 1.5;
+const ADAPTIVE_TOLERANCE_MULTIPLE = 2.5;
+
+/**
+ * Derive a fit tolerance from this path's own measured noise instead of assuming a fixed
+ * value. A 3-point chord residual is dominated by point-to-point noise, not true curvature
+ * (which only shows up over longer spans), so the 90th percentile of that residual across
+ * the whole path is a clean noise-floor estimate. Real survey files range from a few cm
+ * (RTK) to tens of cm (consumer/vehicle GPS); a single hardcoded tolerance either
+ * over-fragments clean data or fails to fit noisier real data at all.
+ */
+export function estimateAdaptiveTolerance(points: RoadMarkingNedPoint[]): number {
+  if (points.length < 3) return DEFAULTS.fitToleranceM;
+  const residuals: number[] = [];
+  for (let i = 1; i < points.length - 1; i++) {
+    residuals.push(pointLineResidual(points[i], points[i - 1], points[i + 1]));
+  }
+  residuals.sort((a, b) => a - b);
+  const p90 = residuals[Math.floor(residuals.length * 0.9)] ?? DEFAULTS.fitToleranceM;
+  return Math.min(
+    ADAPTIVE_TOLERANCE_MAX_M,
+    Math.max(ADAPTIVE_TOLERANCE_MIN_M, ADAPTIVE_TOLERANCE_MULTIPLE * p90)
+  );
 }
 
 /**
@@ -410,6 +511,42 @@ function maxCircleResidual(points: RoadMarkingNedPoint[], circle: Circle): numbe
     max = Math.max(max, d);
   }
   return max;
+}
+
+const WHOLE_LOOP_MIN_POINTS = 8;
+const WHOLE_LOOP_GAP_MIN_M = 0.15;
+const WHOLE_LOOP_GAP_FRACTION = 0.05;
+
+/**
+ * Fast path for a near-closed loop (roundabout, small track): fit ONE circle to the whole
+ * group instead of letting the greedy segmenter piece it together from many short arcs
+ * that each only locally pass tolerance — a real closed loop can fragment into a dozen
+ * tiny arcs even though a single circle fits the whole thing comfortably. Only accepted
+ * when every point in the group is within `tol` of that one fitted circle, so a genuinely
+ * non-circular closed shape (oval, irregular boundary) safely falls through to normal
+ * segmentation instead of being forced into a wrong circle.
+ */
+export function tryWholeLoopFit(points: RoadMarkingNedPoint[], tol: number): Circle | null {
+  if (points.length < WHOLE_LOOP_MIN_POINTS) return null;
+  let centerNorth = 0;
+  let centerEast = 0;
+  for (const p of points) {
+    centerNorth += p.north;
+    centerEast += p.east;
+  }
+  centerNorth /= points.length;
+  centerEast /= points.length;
+  let roughRadius = 0;
+  for (const p of points) {
+    roughRadius = Math.max(roughRadius, Math.hypot(p.north - centerNorth, p.east - centerEast));
+  }
+  const gap = dist(points[0], points[points.length - 1]);
+  if (gap > Math.max(WHOLE_LOOP_GAP_MIN_M, WHOLE_LOOP_GAP_FRACTION * roughRadius)) return null;
+
+  const fit = fitCircleHyper(points);
+  if (!fit) return null;
+  if (maxCircleResidual(points, fit) > tol) return null;
+  return fit;
 }
 
 /**
@@ -695,6 +832,136 @@ export function segmentIntoPrimitives(
   return prims;
 }
 
+/**
+ * Split-and-merge cleanup: collapse adjacent same-kind primitives when their union still
+ * fits within tolerance. The greedy left-to-right pass in `segmentIntoPrimitives` can
+ * fragment one true arc (or one true straight run) into several neighbors whenever a local
+ * window's residual transiently exceeds tolerance partway through — merging repairs that
+ * without re-flattening real corners (only same-kind neighbors are ever candidates).
+ *
+ * Line-line merges use the same strict residual check `segmentIntoPrimitives` itself uses
+ * for line classification (`fitsLine`) — NOT `fitLineOrCircle`'s "line" return value, which
+ * is also its defensive fallback whenever a circle fit fails to satisfy tolerance. Trusting
+ * that fallback here would merge two lines straight across a real corner between them.
+ */
+export function mergeAdjacentPrimitives(
+  points: RoadMarkingNedPoint[],
+  prims: PathPrimitive[],
+  tol: number,
+  minArcPoints: number,
+  maxArcRadiusM: number
+): PathPrimitive[] {
+  let cur = prims.slice();
+  let changed = true;
+  let guard = 0;
+  while (changed && cur.length > 1 && guard++ < prims.length + 5) {
+    changed = false;
+    const next: PathPrimitive[] = [];
+    let i = 0;
+    while (i < cur.length) {
+      if (i < cur.length - 1 && cur[i].kind === cur[i + 1].kind) {
+        const union = points.slice(cur[i].i0, cur[i + 1].i1 + 1);
+        let merged: PathPrimitive | null = null;
+        if (cur[i].kind === "line") {
+          if (fitsLine(union, tol)) {
+            merged = { kind: "line", i0: cur[i].i0, i1: cur[i + 1].i1 };
+          }
+        } else {
+          const fit = fitLineOrCircle(union, tol, minArcPoints, maxArcRadiusM);
+          if (fit.kind === "circle") {
+            merged = { kind: "arc", i0: cur[i].i0, i1: cur[i + 1].i1, circle: fit.circle };
+          }
+        }
+        if (merged) {
+          next.push(merged);
+          i += 2;
+          changed = true;
+          continue;
+        }
+      }
+      next.push(cur[i]);
+      i++;
+    }
+    cur = next;
+  }
+  return cur;
+}
+
+/**
+ * Reclassify an 'arc' primitive as 'line' when its own sagitta (max deviation from the
+ * straight chord between its endpoints, chord²/8r) is already within tolerance — i.e. a
+ * straight line between its endpoints represents it just as well, so calling it an arc adds
+ * a misleading (often very large, e.g. hundreds of metres) radius for no visual benefit.
+ *
+ * This targets a specific failure mode of the greedy window growth in
+ * `segmentIntoPrimitives`: `fitLineOrCircle`'s straight-chord residual check compares every
+ * point to the chord between the CURRENT window's two endpoints. When that window boundary
+ * lands mid-transition (partway into a real corner rather than fully past it), points on
+ * the straight portion can read as deviating from that particular chord even though the
+ * data before the corner is genuinely straight — and a large-radius circle then satisfies
+ * tolerance too, winning by virtue of its extra degree of freedom, not real curvature.
+ *
+ * Never reclassifies a genuinely visible curve: a real arc's sagitta exceeds tolerance by
+ * construction (that is why a straight line could not already represent it).
+ */
+export function dropNegligibleArcs(
+  points: RoadMarkingNedPoint[],
+  prims: PathPrimitive[],
+  tol: number
+): PathPrimitive[] {
+  return prims.map((p) => {
+    if (p.kind !== "arc") return p;
+    const chord = dist(points[p.i0], points[p.i1]);
+    if (chord < 1e-6) return p;
+    const sagitta = (chord * chord) / (8 * p.circle.r);
+    if (sagitta <= tol) return { kind: "line", i0: p.i0, i1: p.i1 };
+    return p;
+  });
+}
+
+function primitiveNeighborTurnDeg(
+  points: RoadMarkingNedPoint[],
+  a: PathPrimitive,
+  b: PathPrimitive
+): number | null {
+  const uIn = tangentInAtEnd(points, a);
+  const uOut = tangentOutAtStart(points, b);
+  if (!uIn || !uOut) return null;
+  const cross = uIn.north * uOut.east - uIn.east * uOut.north;
+  const dot = uIn.north * uOut.north + uIn.east * uOut.east;
+  return Math.abs((Math.atan2(cross, dot) * 180) / Math.PI);
+}
+
+/**
+ * Reclassify a short 'arc' primitive to 'line' when BOTH its neighbors turn sharply away
+ * from it — i.e. it is really just the corner transition between two other runs, not a
+ * genuine road-scale curve feature. A genuine curve has smooth tangent continuity at its
+ * own boundaries by construction (that continuity is what made it classify as one arc), so
+ * this only ever fires on a short arc "spike" flanked by real corners on both sides.
+ *
+ * Two independent joint fillets straddling that short arc each compute their trim budget
+ * from the arc's FULL length without knowing the sibling joint on the other end also
+ * claims a share of it — for a short, tightly-sandwiched arc this can produce conflicting
+ * trims and a mis-parameterized (even backtracking) tessellated sample. Collapsing it to
+ * one line lets the existing single-joint fillet mechanism round the whole transition in
+ * one already-well-tested pass instead.
+ */
+export function absorbSandwichedCornerArcs(
+  points: RoadMarkingNedPoint[],
+  prims: PathPrimitive[],
+  sharpCornerDeg: number
+): PathPrimitive[] {
+  if (prims.length < 3) return prims;
+  return prims.map((p, idx) => {
+    if (p.kind !== "arc" || idx === 0 || idx === prims.length - 1) return p;
+    const turnIn = primitiveNeighborTurnDeg(points, prims[idx - 1], p);
+    const turnOut = primitiveNeighborTurnDeg(points, p, prims[idx + 1]);
+    if (turnIn == null || turnOut == null) return p;
+    if (turnIn < sharpCornerDeg || turnOut < sharpCornerDeg) return p;
+    return { kind: "line", i0: p.i0, i1: p.i1 };
+  });
+}
+
 /** Unit tangent arriving at the end of a primitive (direction of travel). */
 function tangentInAtEnd(points: RoadMarkingNedPoint[], prim: PathPrimitive): RoadMarkingNedPoint | null {
   if (prim.kind === "line") {
@@ -766,7 +1033,11 @@ export function tessellatePrimitivesWithJointFillets(
       | "maxFilletRadiusM"
       | "sampleSpacingM"
     >
-  >
+  > &
+    // Optional: enables the data-aware fillet radius below (a line-line joint prefers a
+    // radius the raw points actually support over the pure tangent/segment-length
+    // heuristic). Omitting these keeps the original heuristic-only behavior.
+    Partial<Pick<typeof DEFAULTS, "minArcPoints" | "fitToleranceM">>
 ): RoadMarkingNedPoint[] {
   if (prims.length === 0) return points.slice();
   if (prims.length === 1) {
@@ -824,6 +1095,36 @@ export function tessellatePrimitivesWithJointFillets(
       options.maxFilletRadiusM,
       options.filletRadiusFraction * Math.min(lenPrev, lenNext)
     );
+
+    // Data-aware radius: when neither neighbor is already a fitted arc, prefer a corner
+    // radius the raw survey points actually support over the pure tangent/segment-length
+    // heuristic above, which has no relationship to the real curvature and can visibly
+    // pull the path away from where the source data placed the corner. Only ever shrinks
+    // r (never grows it), so this can only make the fillet MORE faithful to the data, never
+    // less conservative than the existing heuristic.
+    if (
+      prev.kind === "line" &&
+      next.kind === "line" &&
+      options.minArcPoints != null &&
+      options.fitToleranceM != null
+    ) {
+      const jointIdx = prev.i1;
+      const windowStart = Math.max(0, jointIdx - options.minArcPoints);
+      const windowEnd = Math.min(points.length - 1, jointIdx + options.minArcPoints);
+      if (windowEnd - windowStart + 1 >= options.minArcPoints * 2) {
+        const window = points.slice(windowStart, windowEnd + 1);
+        const localFit = fitCircleHyper(window);
+        if (
+          localFit &&
+          localFit.r >= 0.05 &&
+          localFit.r < r &&
+          maxCircleResidual(window, localFit) <= options.fitToleranceM
+        ) {
+          r = localFit.r;
+        }
+      }
+    }
+
     const turnRad = (turn * Math.PI) / 180;
     let offset = r * Math.tan(turnRad / 2);
     if (offset > budget && turnRad > 1e-6) {
@@ -887,7 +1188,21 @@ export function tessellatePrimitivesWithJointFillets(
       const midA = angleOf(mid, prim.circle);
       const { a0: aa, a1: ab } = unwrapAngles(aStart, aEnd, midA);
       if (Math.abs(ab - aa) * prim.circle.r >= 0.02) {
-        pushSamples(sampleArc(prim.circle, aa, ab, options.sampleSpacingM));
+        const arcSamples = sampleArc(prim.circle, aa, ab, options.sampleSpacingM);
+        // Anchor a boundary exactly to `start`/`end` (the raw survey vertex, or the
+        // fillet's own tangent point) ONLY when a neighboring primitive/fillet shares
+        // that same boundary — i.e. never at i===0's start or the last primitive's
+        // end, which are termini of the whole open path with nothing to match, where
+        // the fitted circle's own smooth angle+radius reconstruction is preferred.
+        // At a genuine internal joint, the Hyper fit only approximates the data
+        // (residual up to fitToleranceM), so that reconstruction can land a few cm
+        // sideways of the exact point the neighboring primitive/fillet uses for the
+        // SAME joint — visible as a small sideways notch right at the seam (see
+        // docs/csv-road-marking-workflow.md). Interior samples keep the fitted-circle
+        // interpolation either way.
+        if (i > 0) arcSamples[0] = start;
+        if (i < prims.length - 1) arcSamples[arcSamples.length - 1] = end;
+        pushSamples(arcSamples);
       }
     }
 
@@ -922,22 +1237,37 @@ export function segmentAndTessellate(
   if (points.length < 2) return points.slice();
   if (points.length === 2) return sampleLine(points[0], points[1], options.sampleSpacingM);
 
-  const prims = segmentIntoPrimitives(points, {
+  let prims = segmentIntoPrimitives(points, {
     fitToleranceM: options.fitToleranceM,
     minArcPoints: options.minArcPoints,
     maxArcRadiusM: options.maxArcRadiusM,
   });
+  // Repair fragmentation from the greedy left-to-right pass (one true arc/line split into
+  // several neighbors because a local window transiently missed tolerance partway through).
+  prims = mergeAdjacentPrimitives(points, prims, options.fitToleranceM, options.minArcPoints, options.maxArcRadiusM);
+  // Undo large-radius false-arc artifacts from window boundaries landing mid-transition,
+  // then merge once more — a reclassified line can now legitimately join a straight
+  // neighbor it couldn't join as an arc.
+  prims = dropNegligibleArcs(points, prims, options.fitToleranceM);
+  prims = mergeAdjacentPrimitives(points, prims, options.fitToleranceM, options.minArcPoints, options.maxArcRadiusM);
+  // Undo short arcs sandwiched between two real corners (conflicting joint-fillet trims);
+  // merge once more in case that also opens up a new same-kind neighbor merge.
+  prims = absorbSandwichedCornerArcs(points, prims, options.sharpCornerDeg);
+  prims = mergeAdjacentPrimitives(points, prims, options.fitToleranceM, options.minArcPoints, options.maxArcRadiusM);
   return tessellatePrimitivesWithJointFillets(points, prims, {
     sharpCornerDeg: options.sharpCornerDeg,
     filletRadiusFraction: options.filletRadiusFraction,
     maxFilletRadiusM: options.maxFilletRadiusM,
     sampleSpacingM: options.sampleSpacingM,
+    minArcPoints: options.minArcPoints,
+    fitToleranceM: options.fitToleranceM,
   });
 }
 
 /**
  * Full production pipeline:
- * open → spike reject → collinear simplify → segment (Hyper) → joint fillets → open.
+ * open → spike reject → S-jog dampen → [whole-loop fit | segment (Hyper) + merge] →
+ * joint fillets → open.
  */
 export function buildRoadMarkingPreviewPoints(
   points: RoadMarkingNedPoint[],
@@ -948,33 +1278,56 @@ export function buildRoadMarkingPreviewPoints(
   pts = ensureOpenPath(pts);
   if (pts.length < 2) return pts;
 
-  pts = rejectPathSpikes(
-    pts,
-    opts.fitToleranceM,
-    opts.outlierPathChordRatio,
-    opts.outlierResidualFactor
-  );
+  // Derive tolerance from this path's own measured noise unless the caller pinned one
+  // explicitly. A single fixed tolerance either over-fragments clean/dense data or fails
+  // to fit noisier real GPS survey data at all (see docs/csv-road-marking-workflow.md).
+  const fitToleranceM = options.fitToleranceM ?? estimateAdaptiveTolerance(pts);
+
+  pts = rejectPathSpikes(pts, fitToleranceM, opts.outlierPathChordRatio, opts.outlierResidualFactor);
   pts = ensureOpenPath(pts);
 
   // Collapse short opposite-turn weaves (S-jogs) that max-angle checks miss.
   pts = dampenOppositeJogs(pts, Math.max(opts.sharpCornerDeg * 0.65, 6), 3.5);
-  pts = ensureOpenPath(pts);
-
-  // Light simplify: keep structure for corners/curves; collapse dense straight GPS.
-  pts = simplifyCollinear(pts, opts.fitToleranceM * 0.75);
   pts = dedupeNearPoints(pts, 0.02);
   pts = ensureOpenPath(pts);
   if (pts.length < 2) return pts;
 
-  pts = segmentAndTessellate(pts, {
-    fitToleranceM: opts.fitToleranceM,
-    sampleSpacingM: opts.sampleSpacingM,
-    minArcPoints: opts.minArcPoints,
-    maxArcRadiusM: opts.maxArcRadiusM,
-    sharpCornerDeg: opts.sharpCornerDeg,
-    filletRadiusFraction: opts.filletRadiusFraction,
-    maxFilletRadiusM: opts.maxFilletRadiusM,
-  });
+  // NOTE: a Douglas-Peucker-style collinear simplify used to run here before
+  // classification. It deleted the point density segmentIntoPrimitives needs to satisfy
+  // minArcPoints, so real curves collapsed into a raw jagged polyline of trivial 2-point
+  // line primitives instead of being recognized as arcs — segmentIntoPrimitives already
+  // performs the equivalent simplification as a side effect of correct classification, so
+  // a second blind decimation pass ahead of it only starves it of support (see
+  // docs/csv-road-marking-workflow.md).
+
+  // Whole-path single-circle fast path for a near-closed loop (roundabout, small track):
+  // avoids fragmenting one true circle into many short arcs. Falls through to normal
+  // segmentation for anything that isn't actually close to one circle.
+  const loopFit = tryWholeLoopFit(pts, fitToleranceM);
+  if (loopFit) {
+    pts = tessellatePrimitivesWithJointFillets(
+      pts,
+      [{ kind: "arc", i0: 0, i1: pts.length - 1, circle: loopFit }],
+      {
+        sharpCornerDeg: opts.sharpCornerDeg,
+        filletRadiusFraction: opts.filletRadiusFraction,
+        maxFilletRadiusM: opts.maxFilletRadiusM,
+        sampleSpacingM: opts.sampleSpacingM,
+        minArcPoints: opts.minArcPoints,
+        fitToleranceM,
+      }
+    );
+  } else {
+    pts = segmentAndTessellate(pts, {
+      fitToleranceM,
+      sampleSpacingM: opts.sampleSpacingM,
+      minArcPoints: opts.minArcPoints,
+      maxArcRadiusM: opts.maxArcRadiusM,
+      sharpCornerDeg: opts.sharpCornerDeg,
+      filletRadiusFraction: opts.filletRadiusFraction,
+      maxFilletRadiusM: opts.maxFilletRadiusM,
+    });
+  }
   pts = ensureOpenPath(pts);
   return pts;
 }

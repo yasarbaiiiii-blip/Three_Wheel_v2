@@ -121,6 +121,98 @@ describe("localCsvPointsToPlanLines", () => {
     expect(lines[0].from.x).toBeCloseTo(r.points[0].north_m, 1);
     expect(lines[0].from.y).toBeCloseTo(r.points[0].east_m, 1);
   });
+
+  it("splits into one PlanLine per feature when the CSV has a grouping column (real bug regression)", () => {
+    // Mirrors roundabout_coordinates.csv: two named features in one file, no header for
+    // north/east — the parser must never bridge them with a straight teleport line.
+    const rows = ["feature,north,east"];
+    for (let i = 0; i < 10; i++) rows.push(`West circle,${i * 0.5},${0}`);
+    for (let i = 0; i < 10; i++) rows.push(`East circle,${30 + i * 0.5},${30}`);
+    const r = parseLocalPointCsv(rows.join("\n"));
+    expect(r.points[0].group).toBe("West circle");
+    expect(r.points[15].group).toBe("East circle");
+
+    const lines = localCsvPointsToPlanLines(r.points);
+    expect(lines).toHaveLength(2);
+    expect(lines[0].id).toBe("local-csv-path");
+    expect(lines[1].id).toBe("local-csv-path-2");
+    expect(lines[0].label).toContain("West circle");
+    expect(lines[1].label).toContain("East circle");
+    expect(lines[0].entity?.geometry?.road_marking).toBe(true);
+    expect(lines[1].entity?.geometry?.road_marking).toBe(true);
+
+    // No cross-feature bridge: every consecutive sample within a line stays close.
+    for (const line of lines) {
+      const pts = line.entity?.preview_points ?? [];
+      for (let i = 1; i < pts.length; i++) {
+        const d = Math.hypot(pts[i].north - pts[i - 1].north, pts[i].east - pts[i - 1].east);
+        expect(d).toBeLessThan(2);
+      }
+    }
+  });
+
+  it("splits via jump-distance fallback when no grouping column exists", () => {
+    const rows = ["north,east"];
+    for (let i = 0; i < 10; i++) rows.push(`${i * 0.5},0`);
+    for (let i = 0; i < 10; i++) rows.push(`${40 + i * 0.5},40`);
+    const r = parseLocalPointCsv(rows.join("\n"));
+    expect(r.points.every((p) => p.group === undefined)).toBe(true);
+
+    const lines = localCsvPointsToPlanLines(r.points);
+    expect(lines).toHaveLength(2);
+    expect(lines[0].id).toBe("local-csv-path");
+    expect(lines[1].id).toBe("local-csv-path-2");
+  });
+
+  it("keeps a single PlanLine for one continuous feature even with a grouping column present", () => {
+    const rows = ["road,north,east"];
+    for (let i = 0; i < 15; i++) rows.push(`Main St,${i * 0.5},0`);
+    const r = parseLocalPointCsv(rows.join("\n"));
+    const lines = localCsvPointsToPlanLines(r.points);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].id).toBe("local-csv-path");
+    expect(lines[0].label).toContain("Main St");
+  });
+
+  it("ignores a 'Name' column with a unique value per row (real bug regression: RTK survey point-ID collision)", () => {
+    // Mirrors curve_6_points.csv (Emlid Reach RS3 export): a "Name" column holding a
+    // unique per-point ID, not a shared feature label. Must not split into 1-point groups
+    // and silently drop every line.
+    const rows = ["Name,lat,lon"];
+    const ids = [6, 7, 8, 9, 10, 11, 12, 14, 15, 16];
+    for (let i = 0; i < ids.length; i++) rows.push(`${ids[i]},13.0${i},80.0${i}`);
+    const r = parseLocalPointCsv(rows.join("\n"));
+    expect(r.points.every((p) => p.group === undefined)).toBe(true);
+
+    const lines = localCsvPointsToPlanLines(r.points);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].entity?.preview_points?.length ?? 0).toBeGreaterThanOrEqual(2);
+  });
+
+  it("ignores a recognized grouping column when its values are unique per row (cardinality guard)", () => {
+    // Even a genuinely-aliased column (e.g. "road") must not drive grouping if it doesn't
+    // actually repeat — protects against the same class of collision for any alias, not
+    // just the "name" case above.
+    const rows = ["road,north,east"];
+    for (let i = 0; i < 10; i++) rows.push(`segment-${i},${i * 0.5},0`);
+    const r = parseLocalPointCsv(rows.join("\n"));
+    expect(r.points.every((p) => p.group === undefined)).toBe(true);
+
+    const lines = localCsvPointsToPlanLines(r.points);
+    expect(lines).toHaveLength(1);
+  });
+
+  it("still groups a recognized column that repeats across many rows", () => {
+    const rows = ["road,north,east"];
+    for (let i = 0; i < 10; i++) rows.push(`Main St,${i * 0.5},0`);
+    for (let i = 0; i < 10; i++) rows.push(`Side St,${20 + i * 0.5},20`);
+    const r = parseLocalPointCsv(rows.join("\n"));
+    expect(r.points[0].group).toBe("Main St");
+    expect(r.points[15].group).toBe("Side St");
+
+    const lines = localCsvPointsToPlanLines(r.points);
+    expect(lines).toHaveLength(2);
+  });
 });
 
 describe("localCsvToMapPins", () => {

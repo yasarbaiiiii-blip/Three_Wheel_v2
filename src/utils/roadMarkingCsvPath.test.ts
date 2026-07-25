@@ -12,7 +12,21 @@ import {
   rejectPathSpikes,
   segmentIntoPrimitives,
   turningAngleDeg,
+  estimateAdaptiveTolerance,
+  tryWholeLoopFit,
+  mergeAdjacentPrimitives,
+  dropNegligibleArcs,
+  absorbSandwichedCornerArcs,
+  splitIntoOpenPathGroups,
+  tessellatePrimitivesWithJointFillets,
+  type RoadMarkingNedPoint,
+  type PathPrimitive,
 } from "./roadMarkingCsvPath";
+
+/** Deterministic pseudo-noise so fixtures are reproducible without Math.random. */
+function detNoise(i: number, mag: number): number {
+  return (Math.sin(i * 12.9898) * 43758.5453 % 1) * mag;
+}
 
 describe("ensureOpenPath", () => {
   it("drops last point when path would form a closed ring", () => {
@@ -396,6 +410,315 @@ describe("dampenOppositeJogs", () => {
     expect(maxOppositeTurnPairDeg(out, 3)).toBeLessThan(rawPair * 0.85);
     // L corner near east=14 still present.
     expect(out.some((p) => Math.abs(p.east - 14) < 0.01)).toBe(true);
+  });
+});
+
+describe("estimateAdaptiveTolerance", () => {
+  it("stays near the historical default for a clean, low-noise line", () => {
+    const clean = Array.from({ length: 30 }, (_, i) => ({ north: i * 0.5, east: 0 }));
+    const tol = estimateAdaptiveTolerance(clean);
+    expect(tol).toBeGreaterThanOrEqual(0.05);
+    expect(tol).toBeLessThan(0.1);
+  });
+
+  it("relaxes well above the historical default for heavily noisy data", () => {
+    const noisy = Array.from({ length: 60 }, (_, i) => ({
+      north: i * 0.5 + detNoise(i, 0.25),
+      east: detNoise(i + 100, 0.25),
+    }));
+    const tol = estimateAdaptiveTolerance(noisy);
+    expect(tol).toBeGreaterThan(0.15);
+  });
+
+  it("stays within the documented clamp range regardless of input", () => {
+    const veryNoisy = Array.from({ length: 40 }, (_, i) => ({
+      north: i * 0.3 + detNoise(i, 5),
+      east: detNoise(i + 7, 5),
+    }));
+    const tol = estimateAdaptiveTolerance(veryNoisy);
+    expect(tol).toBeGreaterThanOrEqual(0.05);
+    expect(tol).toBeLessThanOrEqual(1.5);
+  });
+});
+
+describe("tryWholeLoopFit", () => {
+  function noisyCircle(r: number, n: number, noiseMag: number, closeGapM = 0.1): RoadMarkingNedPoint[] {
+    const pts: RoadMarkingNedPoint[] = [];
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * 2 * Math.PI;
+      pts.push({
+        north: r * Math.sin(a) + detNoise(i, noiseMag),
+        east: r * Math.cos(a) + detNoise(i + 500, noiseMag),
+      });
+    }
+    // Force a small, realistic near-closure gap instead of an exact mathematical close.
+    pts.push({ north: pts[0].north + closeGapM, east: pts[0].east });
+    return pts;
+  }
+
+  it("fits one circle to a near-closed noisy loop (roundabout-scale)", () => {
+    const loop = noisyCircle(11.5, 140, 0.03);
+    const fit = tryWholeLoopFit(loop, 0.1);
+    expect(fit).not.toBeNull();
+    expect(fit!.r).toBeCloseTo(11.5, 0);
+  });
+
+  it("returns null when the path does not actually close", () => {
+    const open = Array.from({ length: 30 }, (_, i) => ({ north: i * 0.5, east: 0 }));
+    expect(tryWholeLoopFit(open, 0.1)).toBeNull();
+  });
+
+  it("returns null for a closed but non-circular shape (square)", () => {
+    const square: RoadMarkingNedPoint[] = [];
+    for (let i = 0; i <= 8; i++) square.push({ north: 0, east: i * 1.25 });
+    for (let i = 1; i <= 8; i++) square.push({ north: i * 1.25, east: 10 });
+    for (let i = 1; i <= 8; i++) square.push({ north: 10, east: 10 - i * 1.25 });
+    for (let i = 1; i < 8; i++) square.push({ north: 10 - i * 1.25, east: 0 });
+    square.push({ north: 0.05, east: 0 });
+    expect(tryWholeLoopFit(square, 0.1)).toBeNull();
+  });
+});
+
+describe("mergeAdjacentPrimitives", () => {
+  it("merges fragmented adjacent arcs of the same circle into one", () => {
+    const r = 11.5;
+    const pts: RoadMarkingNedPoint[] = Array.from({ length: 40 }, (_, i) => {
+      const a = (i / 39) * (Math.PI / 2);
+      return { north: r * Math.sin(a), east: r * Math.cos(a) };
+    });
+    // Simulate the greedy segmenter having fragmented one true arc into three pieces.
+    const fragmented = [
+      { kind: "line" as const, i0: 0, i1: 10 },
+      { kind: "arc" as const, i0: 10, i1: 25, circle: fitCircleHyper(pts.slice(10, 26))! },
+      { kind: "arc" as const, i0: 25, i1: 39, circle: fitCircleHyper(pts.slice(25))! },
+    ];
+    const merged = mergeAdjacentPrimitives(pts, fragmented, 0.1, 4, 5000);
+    const arcCount = merged.filter((p) => p.kind === "arc").length;
+    expect(arcCount).toBeLessThanOrEqual(2);
+  });
+
+  it("never merges two lines straight across a real corner (regression)", () => {
+    // A genuine 80-degree corner with zero curve data at the vertex — merging must not
+    // bridge prims[0] and prims[1] into one line spanning the whole thing.
+    const pts: RoadMarkingNedPoint[] = [
+      { north: 0, east: 0 },
+      { north: 10, east: 0 },
+      { north: 20, east: 0 },
+      { north: 30, east: 0 },
+      { north: 35.21, east: 5.21 },
+      { north: 40.42, east: 10.42 },
+    ];
+    const prims = [
+      { kind: "line" as const, i0: 0, i1: 3 },
+      { kind: "line" as const, i0: 3, i1: 5 },
+    ];
+    const merged = mergeAdjacentPrimitives(pts, prims, 0.12, 4, 5000);
+    expect(merged.length).toBe(2);
+  });
+});
+
+describe("dropNegligibleArcs", () => {
+  it("reclassifies a huge-radius, negligible-sagitta arc as a line", () => {
+    const pts: RoadMarkingNedPoint[] = [
+      { north: 0, east: 0 },
+      { north: 5, east: 0 },
+      { north: 10, east: 0.15 },
+    ];
+    const fit = fitCircleHyper(pts)!;
+    const prims = [{ kind: "arc" as const, i0: 0, i1: 2, circle: fit }];
+    const result = dropNegligibleArcs(pts, prims, 0.12);
+    expect(result[0].kind).toBe("line");
+  });
+
+  it("leaves a genuinely visible arc (large sagitta) classified as arc", () => {
+    const r = 12;
+    const pts: RoadMarkingNedPoint[] = Array.from({ length: 10 }, (_, i) => {
+      const a = (i / 9) * (Math.PI / 2);
+      return { north: r * Math.sin(a), east: r * Math.cos(a) };
+    });
+    const fit = fitCircleHyper(pts)!;
+    const prims = [{ kind: "arc" as const, i0: 0, i1: 9, circle: fit }];
+    const result = dropNegligibleArcs(pts, prims, 0.1);
+    expect(result[0].kind).toBe("arc");
+  });
+});
+
+describe("absorbSandwichedCornerArcs", () => {
+  it("reclassifies a short arc flanked by two sharp turns (regression: S-jog remnant)", () => {
+    // Exact point sequence that reproduces the original bug: after dampenOppositeJogs
+    // collapses an S-weave down to one transition point, segmentIntoPrimitives correctly
+    // fits a genuine small-radius (r≈1.81) arc across indices 16-21 — but that arc is
+    // sandwiched between two real corners and only 2.5m long, so its two joint fillets
+    // (each independently budgeted against its full length) conflicted and produced a
+    // backtracking tessellated sample.
+    const pts: RoadMarkingNedPoint[] = [
+      { north: 0, east: 0 }, { north: 0, east: 0.6 }, { north: 0, east: 1.2 }, { north: 0, east: 1.8 },
+      { north: 0, east: 2.4 }, { north: 0, east: 3 }, { north: 0, east: 3.6 }, { north: 0, east: 4.2 },
+      { north: 0, east: 4.8 }, { north: 0, east: 5.4 }, { north: 0, east: 6 }, { north: 0, east: 6.6 },
+      { north: 0, east: 7.2 }, { north: 0, east: 7.8 }, { north: 0, east: 8.4 }, { north: 0, east: 9 },
+      { north: 0, east: 9.6 },
+      { north: 0.4, east: 10.3 },
+      { north: 0.6, east: 10.4 }, { north: 1.2, east: 10.4 }, { north: 1.8, east: 10.4 },
+      { north: 2.4, east: 10.4 }, { north: 3, east: 10.4 }, { north: 3.6, east: 10.4 },
+      { north: 4.2, east: 10.4 }, { north: 4.8, east: 10.4 }, { north: 5.4, east: 10.4 },
+      { north: 6, east: 10.4 }, { north: 6.6, east: 10.4 }, { north: 7.2, east: 10.4 },
+      { north: 7.8, east: 10.4 }, { north: 8.4, east: 10.4 }, { north: 9, east: 10.4 },
+      { north: 9.6, east: 10.4 },
+    ];
+    const smallArcFit = fitCircleHyper(pts.slice(16, 22))!;
+    const prims = [
+      { kind: "line" as const, i0: 0, i1: 16 },
+      { kind: "arc" as const, i0: 16, i1: 21, circle: smallArcFit },
+      { kind: "line" as const, i0: 21, i1: 33 },
+    ];
+    const result = absorbSandwichedCornerArcs(pts, prims, 12);
+    expect(result[1].kind).toBe("line");
+  });
+
+  it("does not touch a genuine road curve with smooth tangent continuity at its boundaries", () => {
+    const r = 20;
+    const before: RoadMarkingNedPoint[] = Array.from({ length: 6 }, (_, i) => ({ north: -6 + i, east: 0 }));
+    const arcPts: RoadMarkingNedPoint[] = Array.from({ length: 12 }, (_, i) => {
+      const a = (i / 11) * (Math.PI / 4);
+      return { north: r * Math.sin(a), east: r - r * Math.cos(a) };
+    });
+    const afterStart = arcPts[arcPts.length - 1];
+    const afterHeading = Math.atan2(afterStart.east - arcPts[arcPts.length - 2].east, afterStart.north - arcPts[arcPts.length - 2].north);
+    const after: RoadMarkingNedPoint[] = Array.from({ length: 6 }, (_, i) => ({
+      north: afterStart.north + (i + 1) * Math.cos(afterHeading),
+      east: afterStart.east + (i + 1) * Math.sin(afterHeading),
+    }));
+    const pts = [...before, ...arcPts, ...after];
+    const fit = fitCircleHyper(arcPts)!;
+    const prims = [
+      { kind: "line" as const, i0: 0, i1: 5 },
+      { kind: "arc" as const, i0: 5, i1: 16, circle: fit },
+      { kind: "line" as const, i0: 16, i1: 21 },
+    ];
+    const result = absorbSandwichedCornerArcs(pts, prims, 12);
+    expect(result[1].kind).toBe("arc");
+  });
+});
+
+describe("splitIntoOpenPathGroups", () => {
+  it("splits on an explicit group-key change even when points are close together", () => {
+    const pts: RoadMarkingNedPoint[] = [
+      { north: 0, east: 0 },
+      { north: 1, east: 0 },
+      { north: 2, east: 0 },
+      { north: 2.5, east: 0 },
+      { north: 3, east: 0 },
+    ];
+    const keys = ["A", "A", "A", "B", "B"];
+    const groups = splitIntoOpenPathGroups(pts, keys);
+    expect(groups.length).toBe(2);
+    expect(groups[0].length).toBe(3);
+    expect(groups[1].length).toBe(2);
+  });
+
+  it("splits on an abnormal jump when no group keys are given (real bug regression)", () => {
+    const westCircle = Array.from({ length: 50 }, (_, i) => ({
+      north: 11.5 * Math.sin((i / 50) * 2 * Math.PI),
+      east: 11.5 * Math.cos((i / 50) * 2 * Math.PI),
+    }));
+    const eastCircle = Array.from({ length: 50 }, (_, i) => ({
+      north: 30 + 9 * Math.sin((i / 50) * 2 * Math.PI),
+      east: 30 + 9 * Math.cos((i / 50) * 2 * Math.PI),
+    }));
+    const groups = splitIntoOpenPathGroups([...westCircle, ...eastCircle]);
+    expect(groups.length).toBe(2);
+  });
+
+  it("does not split within one group when spacing is uniform", () => {
+    const pts = Array.from({ length: 40 }, (_, i) => ({ north: i * 0.5, east: 0 }));
+    const groups = splitIntoOpenPathGroups(pts);
+    expect(groups.length).toBe(1);
+    expect(groups[0].length).toBe(40);
+  });
+
+  it("documents a known limitation: two unrelated paths whose ends are close together get bridged", () => {
+    const pathA = Array.from({ length: 20 }, (_, i) => ({ north: i * 0.5, east: 0 }));
+    const pathB = Array.from({ length: 20 }, (_, i) => ({ north: 10 + i * 0.5, east: 1.5 }));
+    const groups = splitIntoOpenPathGroups([...pathA, ...pathB]);
+    // Not the ideal outcome — a real feature/road column is what actually resolves this.
+    // This test exists so a future change to the jump-distance heuristic notices the effect.
+    expect(groups.length).toBe(1);
+  });
+});
+
+describe("buildRoadMarkingPreviewPoints — noisy roundabout regression", () => {
+  it("represents a realistically-noisy closed loop as smooth arcs, not a jagged raw polyline", () => {
+    // Mirrors the real-world bug: ~11.5m radius, ~0.5m point spacing, a few cm of noise —
+    // this is the exact shape that used to degenerate into 44 primitives / 0 arcs before
+    // the fix (simplifyCollinear pre-pass + fixed 8cm tolerance).
+    const r = 11.5;
+    const n = 145;
+    const loop: RoadMarkingNedPoint[] = [];
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * 2 * Math.PI;
+      loop.push({
+        north: r * Math.sin(a) + detNoise(i, 0.035),
+        east: r * Math.cos(a) + detNoise(i + 900, 0.035),
+      });
+    }
+    loop.push({ north: loop[0].north + 0.1, east: loop[0].east });
+
+    const out = buildRoadMarkingPreviewPoints(loop);
+    expect(out.length).toBeGreaterThan(10);
+    expect(maxTurningAngleDeg(out)).toBeLessThan(20);
+
+    let sharpJoints = 0;
+    for (let i = 1; i < out.length - 1; i++) {
+      const a = out[i - 1], b = out[i], c = out[i + 1];
+      const v1 = { north: b.north - a.north, east: b.east - a.east };
+      const v2 = { north: c.north - b.north, east: c.east - b.east };
+      const cross = v1.north * v2.east - v1.east * v2.north;
+      const dot = v1.north * v2.north + v1.east * v2.east;
+      const ang = Math.abs((Math.atan2(cross, dot) * 180) / Math.PI);
+      if (ang > 5) sharpJoints++;
+    }
+    expect(sharpJoints).toBe(0);
+  });
+});
+
+describe("tessellatePrimitivesWithJointFillets — arc/line joint continuity (real bug regression)", () => {
+  it("does not show a spurious sharp turn when the arc's fitted circle doesn't pass exactly through the shared raw joint point", () => {
+    // Mirrors roads_coordinates.csv (Haddows Road): a long, gently-curving, large-radius
+    // ("nearly straight") arc primitive is immediately followed by a line primitive, joined
+    // without a fillet because the real turn is well under sharpCornerDeg. A Hyper fit only
+    // approximates its window (residual up to fitToleranceM), so the raw point AT the joint
+    // is not exactly ON the fitted circle — here by 3cm, a typical real-world residual. The
+    // line primitive starts at that exact raw point. Before the fix, the arc side
+    // reconstructed its own endpoint from angle+radius on the fitted circle instead of
+    // reusing the raw point, so the two sides disagreed by ~3cm sideways — read as a sharp
+    // corner (verified against the real file: max turning angle dropped from 90° to 11°, and
+    // every >=12° turn vanished, after this fix).
+    const circle = { cn: 0, ce: -100, r: 100 };
+    const points: RoadMarkingNedPoint[] = [
+      { north: 0, east: 0 }, // exactly on the circle
+      { north: 4.998, east: -0.125 }, // exactly on the circle
+      { north: 9.983, east: -0.47 }, // raw joint: ~3cm off the circle (fit residual)
+      { north: 10.978, east: -0.57 },
+      { north: 11.973, east: -0.669 },
+    ];
+    const prims: PathPrimitive[] = [
+      { kind: "arc", i0: 0, i1: 2, circle },
+      { kind: "line", i0: 2, i1: 4 },
+    ];
+
+    const out = tessellatePrimitivesWithJointFillets(points, prims, {
+      sharpCornerDeg: 12,
+      filletRadiusFraction: 0.4,
+      maxFilletRadiusM: 8,
+      sampleSpacingM: 0.35,
+    });
+
+    expect(maxTurningAngleDeg(out)).toBeLessThan(15);
+
+    // The arc's last emitted sample and the line's first emitted sample must be the same
+    // point (the raw joint), not two ~3cm-apart reconstructions.
+    const jointIdx = out.findIndex((p) => distApprox(p, points[2]) < 0.001);
+    expect(jointIdx).toBeGreaterThanOrEqual(0);
   });
 });
 

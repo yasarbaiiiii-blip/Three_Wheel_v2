@@ -10,7 +10,7 @@
 
 import { projectGpsToLocalMeters } from "./visualAlignment";
 import { splitCsvCells } from "./refPointsCsv";
-import { buildRoadMarkingPreviewPoints } from "./roadMarkingCsvPath";
+import { buildRoadMarkingPreviewPoints, splitIntoOpenPathGroups } from "./roadMarkingCsvPath";
 import type { PlanLine } from "../types/plan";
 
 /** Soft cap for map pin markers (polyline still uses full point set). */
@@ -23,6 +23,36 @@ const NORTH_ALIASES = new Set(["north", "north_m", "northing"]);
 const EAST_ALIASES = new Set(["east", "east_m", "easting"]);
 const DWELL_ALIASES = new Set(["dwell_s", "dwell", "dwell_sec"]);
 const MARK_ALIASES = new Set(["mark", "is_mark", "spray"]);
+/**
+ * Optional grouping column: multiple independent paths (roundabouts, separate roads) are
+ * routinely bundled in one survey export. Without this, every row is treated as one
+ * continuous path and the row where one feature ends and the next begins gets bridged with
+ * a straight line across the real-world gap between them (see
+ * docs/csv-road-marking-workflow.md).
+ *
+ * Deliberately does NOT include "name" — raw RTK/GNSS survey exports (Emlid Reach, Trimble,
+ * Leica, …) routinely have a "Name"/"Point Name" column holding a UNIQUE ID per point, not
+ * a shared feature label. Matching on it would split every single point into its own
+ * one-point "path" (no line, since a line needs ≥2 points) and silently drop every line —
+ * exactly what a real curve_6_points.csv-style file exposed. `hasLowCardinalityGrouping`
+ * below is a second, column-name-independent guard against the same class of collision for
+ * any of the aliases here.
+ */
+const GROUP_ALIASES = new Set(["feature", "road", "track", "segment", "route", "path"]);
+
+/**
+ * A real feature/road grouping column has a handful of distinct values shared across many
+ * rows (e.g. 2 features across 288 points). A per-point ID column (whatever it's called)
+ * has close to one distinct value per row. Require an average of at least 2 points per
+ * distinct value before trusting a detected column as real grouping — otherwise every group
+ * degenerates to size 1, produces no line at all, and silently drops the whole path.
+ */
+function hasLowCardinalityGrouping(groups: (string | undefined)[]): boolean {
+  const values = groups.filter((g): g is string => g != null);
+  if (values.length < 2) return false;
+  const distinct = new Set(values).size;
+  return distinct * 2 <= values.length;
+}
 
 export type LocalPointCsvKind = "gps" | "ned";
 
@@ -35,6 +65,8 @@ export type LocalPointCsvPoint = {
   /** Present when source row was GPS. */
   lat?: number;
   lon?: number;
+  /** Present when the CSV had a feature/road/name-style grouping column. */
+  group?: string;
 };
 
 export type LocalPointCsvResult = {
@@ -98,6 +130,7 @@ type ColMap = {
   eastIdx?: number;
   dwellIdx?: number;
   markIdx?: number;
+  groupIdx?: number;
 };
 
 function resolveHeader(cells: string[]): ColMap | null {
@@ -110,12 +143,14 @@ function resolveHeader(cells: string[]): ColMap | null {
   if (latIdx >= 0 && lonIdx >= 0) {
     const dwellIdx = find(DWELL_ALIASES);
     const markIdx = find(MARK_ALIASES);
+    const groupIdx = find(GROUP_ALIASES);
     return {
       kind: "gps",
       latIdx,
       lonIdx,
       dwellIdx: dwellIdx >= 0 ? dwellIdx : undefined,
       markIdx: markIdx >= 0 ? markIdx : undefined,
+      groupIdx: groupIdx >= 0 ? groupIdx : undefined,
     };
   }
 
@@ -124,12 +159,14 @@ function resolveHeader(cells: string[]): ColMap | null {
   if (northIdx >= 0 && eastIdx >= 0) {
     const dwellIdx = find(DWELL_ALIASES);
     const markIdx = find(MARK_ALIASES);
+    const groupIdx = find(GROUP_ALIASES);
     return {
       kind: "ned",
       northIdx,
       eastIdx,
       dwellIdx: dwellIdx >= 0 ? dwellIdx : undefined,
       markIdx: markIdx >= 0 ? markIdx : undefined,
+      groupIdx: groupIdx >= 0 ? groupIdx : undefined,
     };
   }
 
@@ -186,7 +223,7 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
   }
 
   const warnings: string[] = [];
-  const rawGps: { lat: number; lon: number; mark: boolean; dwell_s: number | null; source_index: number }[] = [];
+  const rawGps: { lat: number; lon: number; mark: boolean; dwell_s: number | null; source_index: number; group?: string }[] = [];
   const rawNed: LocalPointCsvPoint[] = [];
 
   for (let i = dataStart; i < lines.length; i++) {
@@ -195,6 +232,11 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
     if (cells.every((c) => c === "")) continue;
 
     try {
+      const group =
+        colMap.groupIdx != null && cells[colMap.groupIdx] != null && cells[colMap.groupIdx].trim() !== ""
+          ? cells[colMap.groupIdx].trim()
+          : undefined;
+
       if (colMap.kind === "gps") {
         const lat = Number(cells[colMap.latIdx!]);
         const lon = Number(cells[colMap.lonIdx!]);
@@ -210,7 +252,7 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
             : true;
         const dwell_s =
           colMap.dwellIdx != null ? parseOptionalDwell(cells[colMap.dwellIdx], rowNum) : null;
-        rawGps.push({ lat, lon, mark, dwell_s, source_index: rowNum });
+        rawGps.push({ lat, lon, mark, dwell_s, source_index: rowNum, group });
       } else {
         const north = Number(cells[colMap.northIdx!]);
         const east = Number(cells[colMap.eastIdx!]);
@@ -229,6 +271,7 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
           mark,
           dwell_s,
           source_index: rowNum,
+          group,
         });
       }
     } catch (e) {
@@ -248,6 +291,7 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
       );
     }
     const anchor = { lat: rawGps[0].lat, lon: rawGps[0].lon };
+    const groupingValid = hasLowCardinalityGrouping(rawGps.map((row) => row.group));
     const points: LocalPointCsvPoint[] = rawGps.map((row) => {
       const { north, east } = projectGpsToLocalMeters(row.lat, row.lon, anchor.lat, anchor.lon);
       return {
@@ -258,6 +302,7 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
         source_index: row.source_index,
         lat: row.lat,
         lon: row.lon,
+        group: groupingValid ? row.group : undefined,
       };
     });
     return {
@@ -279,11 +324,14 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
     );
   }
 
+  const nedGroupingValid = hasLowCardinalityGrouping(rawNed.map((row) => row.group));
+  const nedPoints = nedGroupingValid ? rawNed : rawNed.map((row) => ({ ...row, group: undefined }));
+
   return {
     kind: "ned",
     fileName,
-    num_points: rawNed.length,
-    points: rawNed,
+    num_points: nedPoints.length,
+    points: nedPoints,
     anchor: null,
     point_source_frame: "LOCAL_NED",
     warnings,
@@ -303,21 +351,32 @@ export function sampleEvenly<T>(items: T[], maxCount: number): T[] {
   return out;
 }
 
-/**
- * One connected OPEN road-marking path for Mapbox preview.
- *
- * Survey points are refined into straights + circular-arc curves only
- * (Hyper fit, segment-then geometric joint fillets; never a closed ring).
- * Pin markers still use the raw CSV points via `localCsvToMapPins`.
- */
-export function localCsvPointsToPlanLines(points: LocalPointCsvPoint[]): PlanLine[] {
-  if (points.length === 0) return [];
+type RawNedPoint = { north: number; east: number };
 
-  const rawNed = points.map((p) => ({
-    north: p.north_m,
-    east: p.east_m,
-  }));
+function planLineIdForGroup(pathIndex: number): string {
+  // pathIndex 1 keeps the exact legacy id — MapViewNative and App.tsx both special-case
+  // the literal string "local-csv-path" (in addition to the general road_marking flag), and
+  // App.tsx's setSelectedLineId(previewLines[0]?.id) selects whichever line is first.
+  return pathIndex === 1 ? "local-csv-path" : `local-csv-path-${pathIndex}`;
+}
+
+function planLineLabelForGroup(pathIndex: number, groupCount: number, groupLabel: string | undefined, pointCount: number): string {
+  if (groupLabel) return `${groupLabel} (${pointCount} pts)`;
+  return groupCount > 1 ? `CSV path ${pathIndex} (${pointCount} pts)` : `CSV path (${pointCount} pts)`;
+}
+
+/** Build one open road-marking PlanLine for a single already-split group of points. */
+function buildPlanLineForGroup(
+  rawNed: RawNedPoint[],
+  sourcePointCount: number,
+  pathIndex: number,
+  groupCount: number,
+  groupLabel: string | undefined
+): PlanLine | null {
+  const id = planLineIdForGroup(pathIndex);
+  const label = planLineLabelForGroup(pathIndex, groupCount, groupLabel, sourcePointCount);
   const preview_points = buildRoadMarkingPreviewPoints(rawNed);
+
   if (preview_points.length < 2) {
     // Degenerate after open/dedupe — fall back to raw open chain (still not a polygon).
     const fallback =
@@ -327,50 +386,19 @@ export function localCsvPointsToPlanLines(points: LocalPointCsvPoint[]): PlanLin
           ? rawNed.slice(0, -1)
           : rawNed
         : rawNed;
-    if (fallback.length < 2) return [];
+    if (fallback.length < 2) return null;
     const first = fallback[0];
     const last = fallback[fallback.length - 1];
-    return [
-      {
-        id: "local-csv-path",
-        label: `CSV path (${points.length} pts)`,
-        layer: "marking",
-        from: { id: 1, x: first.north, y: first.east },
-        to: { id: 2, x: last.north, y: last.east },
-        width: 0.1,
-        is_mark: true,
-        entity: {
-          entity_id: "local-csv-path",
-          entity_type: "LWPOLYLINE",
-          layer: "MARK",
-          color: 7,
-          is_mark: true,
-          length_m: 0,
-          geometry: {
-            closed: false,
-            road_marking: true,
-            vertexCount: fallback.length,
-          },
-          preview_points: fallback,
-        },
-      },
-    ];
-  }
-
-  const first = preview_points[0];
-  const last = preview_points[preview_points.length - 1];
-
-  return [
-    {
-      id: "local-csv-path",
-      label: `CSV path (${points.length} pts)`,
+    return {
+      id,
+      label,
       layer: "marking",
       from: { id: 1, x: first.north, y: first.east },
       to: { id: 2, x: last.north, y: last.east },
       width: 0.1,
       is_mark: true,
       entity: {
-        entity_id: "local-csv-path",
+        entity_id: id,
         entity_type: "LWPOLYLINE",
         layer: "MARK",
         color: 7,
@@ -378,15 +406,80 @@ export function localCsvPointsToPlanLines(points: LocalPointCsvPoint[]): PlanLin
         length_m: 0,
         geometry: {
           closed: false,
-          /** Road-marking preview: open stroke only (never a polygon ring). */
           road_marking: true,
-          vertexCount: preview_points.length,
-          source_vertex_count: points.length,
+          vertexCount: fallback.length,
         },
-        preview_points,
+        preview_points: fallback,
       },
+    };
+  }
+
+  const first = preview_points[0];
+  const last = preview_points[preview_points.length - 1];
+
+  return {
+    id,
+    label,
+    layer: "marking",
+    from: { id: 1, x: first.north, y: first.east },
+    to: { id: 2, x: last.north, y: last.east },
+    width: 0.1,
+    is_mark: true,
+    entity: {
+      entity_id: id,
+      entity_type: "LWPOLYLINE",
+      layer: "MARK",
+      color: 7,
+      is_mark: true,
+      length_m: 0,
+      geometry: {
+        closed: false,
+        /** Road-marking preview: open stroke only (never a polygon ring). */
+        road_marking: true,
+        vertexCount: preview_points.length,
+        source_vertex_count: sourcePointCount,
+      },
+      preview_points,
     },
-  ];
+  };
+}
+
+/**
+ * One or more connected OPEN road-marking paths for Mapbox preview — one per detected
+ * feature/road (see `splitIntoOpenPathGroups`: an explicit "feature"/"road"-style CSV
+ * column, or an abnormally large jump when no such column exists, both start a new path so
+ * unrelated features are never bridged with a straight line across the real-world gap
+ * between them).
+ *
+ * Survey points are refined into straights + circular-arc curves only
+ * (Hyper fit, segment-then geometric joint fillets; never a closed ring).
+ * Pin markers still use the raw CSV points via `localCsvToMapPins`.
+ */
+export function localCsvPointsToPlanLines(points: LocalPointCsvPoint[]): PlanLine[] {
+  if (points.length === 0) return [];
+
+  const rawNed: RawNedPoint[] = points.map((p) => ({
+    north: p.north_m,
+    east: p.east_m,
+  }));
+  const groupKeys = points.some((p) => p.group != null) ? points.map((p) => p.group) : undefined;
+  const groups = splitIntoOpenPathGroups(rawNed, groupKeys);
+
+  const lines: PlanLine[] = [];
+  let cursor = 0;
+  let pathIndex = 0;
+  for (const group of groups) {
+    const groupSourcePoints = points.slice(cursor, cursor + group.length);
+    cursor += group.length;
+    if (group.length === 0) continue;
+    pathIndex++;
+    const groupLabel = groupSourcePoints.every((p) => p.group && p.group === groupSourcePoints[0].group)
+      ? groupSourcePoints[0].group
+      : undefined;
+    const line = buildPlanLineForGroup(group, group.length, pathIndex, groups.length, groupLabel);
+    if (line) lines.push(line);
+  }
+  return lines;
 }
 
 /**
