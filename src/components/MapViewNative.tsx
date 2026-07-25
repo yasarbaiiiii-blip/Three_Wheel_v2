@@ -783,6 +783,91 @@ export function MapViewNative(props: MapViewProps) {
     );
   }, [lines, controlPoints, originSig, mode]);
 
+  // NOTE: this must stay ABOVE startDirectionFC, which reads placedItemsGeo
+  // inside its `mode === "templates"` branch. A useMemo callback runs during
+  // render at its call site, so with the declaration below that branch the
+  // read hit the const's temporal dead zone: entering Move/Rotate Plan or
+  // Visual Alignment with no drag in progress (previewItemsGeo null, so `??`
+  // does not short-circuit) threw "Cannot access 'placedItemsGeo' before
+  // initialization" and took the map render down with it.
+  // ── Placed items (Templates): lines + bounding boxes ──
+  // Circle/arc entities are intentionally NOT special-cased here — they flow through the same
+  // getPlanLineRenderPoints() tessellation + per-point transformVisualDxfPoint() path as every
+  // other shape (matches planLinesFC's static Fields preview). A native Mapbox CircleLayer
+  // ("true circle", zoom-interpolated from a meterRadius property) was tried twice here — once
+  // for all placed-item circles, once restricted to only the non-dragging steady state — and
+  // both times reproduced the same visible shrink. Whatever the underlying cause turns out to
+  // be, plain tessellated polyline points are what has actually been confirmed shrink-free, so
+  // that's what both the steady state and the live drag preview use — do not reintroduce
+  // CircleLayer for placed-item circles without a way to actually verify the fix on-device.
+  const placedItemsGeo = useMemo(() => {
+    if (mode !== "templates" || !placedItems || placedItems.length === 0 || !projectionOrigin) {
+      return { lines: featureCollection([]), boxes: featureCollection([]) };
+    }
+    const lineFeatures: GeoJSON.Feature[] = [];
+    const boxFeatures: GeoJSON.Feature[] = [];
+
+    for (const item of placedItems) {
+      const selected = selectedItemIds?.includes(item.id) ?? false;
+      // Item lines via the shared visual transform (north/east → GPS).
+      for (const l of item.lines) {
+        const renderPoints = getPlanLineRenderPoints(l, true);
+        if (renderPoints.length >= 2) {
+          const coords: Coord[] = renderPoints.map((pt) => {
+            const tp = transformVisualDxfPoint(pt.north, pt.east, item);
+            const gps = projectPlanNorthEastToGps(tp.north, tp.east, projectionOrigin);
+            return toMapboxCoord(gps.lat, gps.lon);
+          });
+          lineFeatures.push(lineFeature(coords, { itemId: item.id, selected }));
+        } else {
+          const fromP = transformVisualDxfPoint(l.from.x, l.from.y, item);
+          const toP = transformVisualDxfPoint(l.to.x, l.to.y, item);
+          const fromGps = projectPlanNorthEastToGps(fromP.north, fromP.east, projectionOrigin);
+          const toGps = projectPlanNorthEastToGps(toP.north, toP.east, projectionOrigin);
+          lineFeatures.push(
+            lineFeature(
+              [toMapboxCoord(fromGps.lat, fromGps.lon), toMapboxCoord(toGps.lat, toGps.lon)],
+              { itemId: item.id, selected }
+            )
+          );
+        }
+      }
+      // OBB from design-space line bbox (absolute DXF coords), then sticker transform.
+      // Do not assume geometry is centred at design origin — that shifted the cyan
+      // frame away from the plan on Move/Rotate enter for real DXF uploads.
+      const obb = designObbFromLines(item.lines);
+      const halfN = (obb.height > 0 ? obb.height : item.height) / 2;
+      const halfE = (obb.width > 0 ? obb.width : item.width) / 2;
+      const cN = obb.height > 0 || obb.width > 0 ? obb.designCenterNorth : 0;
+      const cE = obb.height > 0 || obb.width > 0 ? obb.designCenterEast : 0;
+      const cornersDesign = [
+        { n: cN - halfN, e: cE - halfE },
+        { n: cN - halfN, e: cE + halfE },
+        { n: cN + halfN, e: cE + halfE },
+        { n: cN + halfN, e: cE - halfE },
+      ];
+      // transformVisualDxfPoint already applies item.scaleNorth/scaleEast when set.
+      const ring: Coord[] = cornersDesign.map((c) => {
+        const tp = transformVisualDxfPoint(c.n, c.e, item);
+        const gps = projectPlanNorthEastToGps(tp.north, tp.east, projectionOrigin);
+        return toMapboxCoord(gps.lat, gps.lon);
+      });
+      ring.push(ring[0]); // close the polygon ring
+      boxFeatures.push({
+        type: "Feature",
+        properties: { itemId: item.id, selected },
+        geometry: { type: "Polygon", coordinates: [ring] },
+      });
+    }
+
+    return {
+      lines: featureCollection(lineFeatures),
+      boxes: featureCollection(boxFeatures),
+    };
+    // placedItemsSig (not placedItems) is the dependency — see its definition above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, placedItemsSig, selectedItemIds, originSig]);
+
   // ── Rover start pin: exact first vertex of the start travel segment.
   // Uses the same GPS projection as the drawn plan stroke so the red pin sits on
   // the real path start (not a different line and not a screen-space offset).
@@ -1246,83 +1331,6 @@ export function MapViewNative(props: MapViewProps) {
     originSig,
   ]);
 
-  // ── Placed items (Templates): lines + bounding boxes ──
-  // Circle/arc entities are intentionally NOT special-cased here — they flow through the same
-  // getPlanLineRenderPoints() tessellation + per-point transformVisualDxfPoint() path as every
-  // other shape (matches planLinesFC's static Fields preview). A native Mapbox CircleLayer
-  // ("true circle", zoom-interpolated from a meterRadius property) was tried twice here — once
-  // for all placed-item circles, once restricted to only the non-dragging steady state — and
-  // both times reproduced the same visible shrink. Whatever the underlying cause turns out to
-  // be, plain tessellated polyline points are what has actually been confirmed shrink-free, so
-  // that's what both the steady state and the live drag preview use — do not reintroduce
-  // CircleLayer for placed-item circles without a way to actually verify the fix on-device.
-  const placedItemsGeo = useMemo(() => {
-    if (mode !== "templates" || !placedItems || placedItems.length === 0 || !projectionOrigin) {
-      return { lines: featureCollection([]), boxes: featureCollection([]) };
-    }
-    const lineFeatures: GeoJSON.Feature[] = [];
-    const boxFeatures: GeoJSON.Feature[] = [];
-
-    for (const item of placedItems) {
-      const selected = selectedItemIds?.includes(item.id) ?? false;
-      // Item lines via the shared visual transform (north/east → GPS).
-      for (const l of item.lines) {
-        const renderPoints = getPlanLineRenderPoints(l, true);
-        if (renderPoints.length >= 2) {
-          const coords: Coord[] = renderPoints.map((pt) => {
-            const tp = transformVisualDxfPoint(pt.north, pt.east, item);
-            const gps = projectPlanNorthEastToGps(tp.north, tp.east, projectionOrigin);
-            return toMapboxCoord(gps.lat, gps.lon);
-          });
-          lineFeatures.push(lineFeature(coords, { itemId: item.id, selected }));
-        } else {
-          const fromP = transformVisualDxfPoint(l.from.x, l.from.y, item);
-          const toP = transformVisualDxfPoint(l.to.x, l.to.y, item);
-          const fromGps = projectPlanNorthEastToGps(fromP.north, fromP.east, projectionOrigin);
-          const toGps = projectPlanNorthEastToGps(toP.north, toP.east, projectionOrigin);
-          lineFeatures.push(
-            lineFeature(
-              [toMapboxCoord(fromGps.lat, fromGps.lon), toMapboxCoord(toGps.lat, toGps.lon)],
-              { itemId: item.id, selected }
-            )
-          );
-        }
-      }
-      // OBB from design-space line bbox (absolute DXF coords), then sticker transform.
-      // Do not assume geometry is centred at design origin — that shifted the cyan
-      // frame away from the plan on Move/Rotate enter for real DXF uploads.
-      const obb = designObbFromLines(item.lines);
-      const halfN = (obb.height > 0 ? obb.height : item.height) / 2;
-      const halfE = (obb.width > 0 ? obb.width : item.width) / 2;
-      const cN = obb.height > 0 || obb.width > 0 ? obb.designCenterNorth : 0;
-      const cE = obb.height > 0 || obb.width > 0 ? obb.designCenterEast : 0;
-      const cornersDesign = [
-        { n: cN - halfN, e: cE - halfE },
-        { n: cN - halfN, e: cE + halfE },
-        { n: cN + halfN, e: cE + halfE },
-        { n: cN + halfN, e: cE - halfE },
-      ];
-      // transformVisualDxfPoint already applies item.scaleNorth/scaleEast when set.
-      const ring: Coord[] = cornersDesign.map((c) => {
-        const tp = transformVisualDxfPoint(c.n, c.e, item);
-        const gps = projectPlanNorthEastToGps(tp.north, tp.east, projectionOrigin);
-        return toMapboxCoord(gps.lat, gps.lon);
-      });
-      ring.push(ring[0]); // close the polygon ring
-      boxFeatures.push({
-        type: "Feature",
-        properties: { itemId: item.id, selected },
-        geometry: { type: "Polygon", coordinates: [ring] },
-      });
-    }
-
-    return {
-      lines: featureCollection(lineFeatures),
-      boxes: featureCollection(boxFeatures),
-    };
-    // placedItemsSig (not placedItems) is the dependency — see its definition above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, placedItemsSig, selectedItemIds, originSig]);
 
   // ── Boundary box (Templates): outer + indent + control points ──
   const boundaryGeo = useMemo(() => {
