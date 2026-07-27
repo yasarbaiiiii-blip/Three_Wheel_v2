@@ -7,6 +7,32 @@ import { SMOKE_TEST_MAPBOX, SMOKE_TEST_CENTER } from "./src/config/featureFlags"
 // Apply the Mapbox public access token once, before any map component mounts.
 initMapbox();
 
+// Release APK: log fatal JS errors instead of a silent process kill with no UI.
+// Does not catch native SIGSEGV, but catches handler/render throws that otherwise
+// look like "app closed when websocket connected".
+try {
+  const g = globalThis as typeof globalThis & {
+    ErrorUtils?: {
+      getGlobalHandler?: () => (error: Error, isFatal?: boolean) => void;
+      setGlobalHandler?: (handler: (error: Error, isFatal?: boolean) => void) => void;
+    };
+  };
+  const EU = g.ErrorUtils;
+  if (EU?.getGlobalHandler && EU?.setGlobalHandler) {
+    const prev = EU.getGlobalHandler();
+    EU.setGlobalHandler((error, isFatal) => {
+      console.error("[JS_FATAL]", isFatal, error?.message ?? error, error?.stack);
+      try {
+        prev?.(error, isFatal);
+      } catch {
+        /* ignore */
+      }
+    });
+  }
+} catch {
+  /* ignore */
+}
+
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // Lazy-loaded: none of these are needed for the initial "connection" screen
@@ -546,6 +572,11 @@ const MENU_ITEMS: Array<{ key: Page; label: string; icon: React.ReactNode }> = [
 
 function waitForSocketConnect(socket: Socket, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
+    // Already connected (fast path / reuse) — resolve without waiting forever.
+    if (socket.connected) {
+      resolve();
+      return;
+    }
     const onConnect = () => {
       cleanup();
       resolve();
@@ -1617,102 +1648,112 @@ export default function App() {
       });
 
       nextSocket.on("telemetry", (rawData: any) => {
-        let data = rawData;
-        if (typeof rawData === "string") {
-          try {
-            data = JSON.parse(rawData);
-          } catch (e) {
-            console.error("[SOCKET] Failed to parse telemetry JSON:", e);
+        // Never let a bad packet force-close a release APK (uncaught JS → process kill).
+        try {
+          let data = rawData;
+          if (typeof rawData === "string") {
+            try {
+              data = JSON.parse(rawData);
+            } catch (e) {
+              console.error("[SOCKET] Failed to parse telemetry JSON:", e);
+              return;
+            }
+          }
+          if (!data || typeof data !== "object") {
+            console.warn("[SOCKET] Invalid telemetry format:", data);
             return;
           }
-        }
-        if (!data || typeof data !== "object") {
-          console.warn("[SOCKET] Invalid telemetry format:", data);
-          return;
-        }
 
-        // Normalize common ROS/backend field aliases so state updates even if backend uses long-form property names
-        if (data.lat == null && (data.latitude != null || data.gps_lat != null || data.global_lat != null)) {
-          data.lat = data.latitude ?? data.gps_lat ?? data.global_lat;
-        }
-        if (data.lon == null && (data.longitude != null || data.gps_lon != null || data.global_lon != null)) {
-          data.lon = data.longitude ?? data.gps_lon ?? data.global_lon;
-        }
-        if (data.alt == null && (data.altitude != null || data.gps_alt != null)) {
-          data.alt = data.altitude ?? data.gps_alt;
-        }
-        if (data.heading_ned_deg == null && data.heading != null) {
-          data.heading_ned_deg = data.heading;
-        }
-
-        virtualJoystickRef.current.reconcileTelemetry(data);
-
-        setTelemetrySnapshot((prev) => {
-          if (!prev) return data;
-          // Optimize updates: only set state if keys have actually changed.
-          // Continuous, sensor-noisy fields use a small deadband so GPS/IMU
-          // jitter doesn't force a re-render every packet. Safety-relevant
-          // and discrete-state fields (armed, mode, rpp_state, gps_fix,
-          // joystick_*) always use exact equality — never masked by a
-          // threshold, so an armed/disarmed or state change is never delayed.
-          if (
-            withinDeadband(prev.pos_n, data.pos_n, POSITION_DEADBAND_M) &&
-            withinDeadband(prev.pos_e, data.pos_e, POSITION_DEADBAND_M) &&
-            withinDeadband(prev.lat, data.lat, GPS_DEADBAND_DEG) &&
-            withinDeadband(prev.lon, data.lon, GPS_DEADBAND_DEG) &&
-            withinDeadband(prev.heading_ned_deg, data.heading_ned_deg, HEADING_DEADBAND_DEG) &&
-            withinDeadband(prev.xtrack_m, data.xtrack_m, DISTANCE_DEADBAND_M) &&
-            withinDeadband(prev.heading_err_deg, data.heading_err_deg, HEADING_DEADBAND_DEG) &&
-            withinDeadband(prev.dist_to_goal_m, data.dist_to_goal_m, DISTANCE_DEADBAND_M) &&
-            withinDeadband(prev.speed_m_s, data.speed_m_s, SPEED_DEADBAND_MPS) &&
-            withinDeadband(prev.measured_speed_m_s, data.measured_speed_m_s, SPEED_DEADBAND_MPS) &&
-            withinDeadband(prev.along_track_speed_mps, data.along_track_speed_mps, SPEED_DEADBAND_MPS) &&
-            withinDeadband(prev.cross_track_speed_mps, data.cross_track_speed_mps, SPEED_DEADBAND_MPS) &&
-            prev.rpp_state === data.rpp_state &&
-            prev.rpp_state_name === data.rpp_state_name &&
-            prev.armed === data.armed &&
-            prev.mode === data.mode &&
-            prev.battery_pct === data.battery_pct &&
-            prev.gps_fix === data.gps_fix &&
-            prev.gps_fix_name === data.gps_fix_name &&
-            prev.gps_sat === data.gps_sat &&
-            prev.hrms === data.hrms &&
-            prev.vrms === data.vrms &&
-            prev.joystick_state === data.joystick_state &&
-            prev.joystick_active === data.joystick_active &&
-            prev.control_owner === data.control_owner &&
-            prev.joystick_last_valid_cmd_age_ms === data.joystick_last_valid_cmd_age_ms
-          ) {
-            return prev;
+          // Normalize common ROS/backend field aliases so state updates even if backend uses long-form property names
+          if (data.lat == null && (data.latitude != null || data.gps_lat != null || data.global_lat != null)) {
+            data.lat = data.latitude ?? data.gps_lat ?? data.global_lat;
           }
-          return { ...prev, ...data };
-        });
-
-        setSystemHealth((prev) => {
-          const next = {
-            ros_node: true, // We are receiving socket packets, so ROS is running
-            fcu_connected: data.connected ?? false,
-            armed: data.armed ?? false,
-            mode: data.mode ?? "UNKNOWN",
-            rpp_state: data.rpp_state,
-            mission_state: prev?.mission_state || "UNKNOWN",
-          };
-          if (
-            prev &&
-            prev.ros_node === next.ros_node &&
-            prev.fcu_connected === next.fcu_connected &&
-            prev.armed === next.armed &&
-            prev.mode === next.mode &&
-            prev.rpp_state === next.rpp_state &&
-            prev.mission_state === next.mission_state
-          ) {
-            return prev;
+          if (data.lon == null && (data.longitude != null || data.gps_lon != null || data.global_lon != null)) {
+            data.lon = data.longitude ?? data.gps_lon ?? data.global_lon;
           }
-          return next;
-        });
+          if (data.alt == null && (data.altitude != null || data.gps_alt != null)) {
+            data.alt = data.altitude ?? data.gps_alt;
+          }
+          if (data.heading_ned_deg == null && data.heading != null) {
+            data.heading_ned_deg = data.heading;
+          }
+
+          try {
+            virtualJoystickRef.current?.reconcileTelemetry?.(data);
+          } catch (vjErr) {
+            console.warn("[SOCKET] reconcileTelemetry failed:", vjErr);
+          }
+
+          setTelemetrySnapshot((prev) => {
+            if (!prev) return data;
+            // Optimize updates: only set state if keys have actually changed.
+            // Continuous, sensor-noisy fields use a small deadband so GPS/IMU
+            // jitter doesn't force a re-render every packet. Safety-relevant
+            // and discrete-state fields (armed, mode, rpp_state, gps_fix,
+            // joystick_*) always use exact equality — never masked by a
+            // threshold, so an armed/disarmed or state change is never delayed.
+            if (
+              withinDeadband(prev.pos_n, data.pos_n, POSITION_DEADBAND_M) &&
+              withinDeadband(prev.pos_e, data.pos_e, POSITION_DEADBAND_M) &&
+              withinDeadband(prev.lat, data.lat, GPS_DEADBAND_DEG) &&
+              withinDeadband(prev.lon, data.lon, GPS_DEADBAND_DEG) &&
+              withinDeadband(prev.heading_ned_deg, data.heading_ned_deg, HEADING_DEADBAND_DEG) &&
+              withinDeadband(prev.xtrack_m, data.xtrack_m, DISTANCE_DEADBAND_M) &&
+              withinDeadband(prev.heading_err_deg, data.heading_err_deg, HEADING_DEADBAND_DEG) &&
+              withinDeadband(prev.dist_to_goal_m, data.dist_to_goal_m, DISTANCE_DEADBAND_M) &&
+              withinDeadband(prev.speed_m_s, data.speed_m_s, SPEED_DEADBAND_MPS) &&
+              withinDeadband(prev.measured_speed_m_s, data.measured_speed_m_s, SPEED_DEADBAND_MPS) &&
+              withinDeadband(prev.along_track_speed_mps, data.along_track_speed_mps, SPEED_DEADBAND_MPS) &&
+              withinDeadband(prev.cross_track_speed_mps, data.cross_track_speed_mps, SPEED_DEADBAND_MPS) &&
+              prev.rpp_state === data.rpp_state &&
+              prev.rpp_state_name === data.rpp_state_name &&
+              prev.armed === data.armed &&
+              prev.mode === data.mode &&
+              prev.battery_pct === data.battery_pct &&
+              prev.gps_fix === data.gps_fix &&
+              prev.gps_fix_name === data.gps_fix_name &&
+              prev.gps_sat === data.gps_sat &&
+              prev.hrms === data.hrms &&
+              prev.vrms === data.vrms &&
+              prev.joystick_state === data.joystick_state &&
+              prev.joystick_active === data.joystick_active &&
+              prev.control_owner === data.control_owner &&
+              prev.joystick_last_valid_cmd_age_ms === data.joystick_last_valid_cmd_age_ms
+            ) {
+              return prev;
+            }
+            return { ...prev, ...data };
+          });
+
+          setSystemHealth((prev) => {
+            const next = {
+              ros_node: true, // We are receiving socket packets, so ROS is running
+              fcu_connected: data.connected ?? false,
+              armed: data.armed ?? false,
+              mode: data.mode ?? "UNKNOWN",
+              rpp_state: data.rpp_state,
+              mission_state: prev?.mission_state || "UNKNOWN",
+            };
+            if (
+              prev &&
+              prev.ros_node === next.ros_node &&
+              prev.fcu_connected === next.fcu_connected &&
+              prev.armed === next.armed &&
+              prev.mode === next.mode &&
+              prev.rpp_state === next.rpp_state &&
+              prev.mission_state === next.mission_state
+            ) {
+              return prev;
+            }
+            return next;
+          });
+        } catch (err) {
+          console.error("[SOCKET] telemetry handler crash suppressed:", err);
+        }
       });
 
       nextSocket.on("mission_status", (rawData: any) => {
+        try {
         let data = rawData;
         if (typeof rawData === "string") {
           try {
@@ -1748,6 +1789,9 @@ export default function App() {
           });
           void refreshMissionIdentity();
         }
+        } catch (err) {
+          console.error("[SOCKET] mission_status handler crash suppressed:", err);
+        }
       });
 
       pendingSocketRef.current = null;
@@ -1756,8 +1800,12 @@ export default function App() {
       setSelectedWs(target);
       setManualHost(target);
       setBackendPinned(true);
-      setPage("home");
-      setMenuOpen(true);
+      // Defer home navigation one tick so connect UI settles before Mapbox mounts
+      // (avoids release-only race: socket up + map native init on same frame).
+      requestAnimationFrame(() => {
+        setPage("home");
+        setMenuOpen(true);
+      });
       logAction("WS_CONNECTED", { apiBaseUrl: target });
     } catch (error) {
       nextSocket?.disconnect();

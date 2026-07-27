@@ -387,14 +387,41 @@ export function MapViewNative(props: MapViewProps) {
   const cameraRef = useRef<Camera>(null);
   const mapViewRef = useRef<RNMapboxMapView>(null);
   const hasAutoCenteredRef = useRef(false);
+  /** Native map style finished loading — setCamera before this can SIGSEGV on some devices. */
+  const mapLoadedRef = useRef(false);
   // Live camera bearing (0 = north-up), tracked so heading-indicator markers can
   // counter-rotate against it — otherwise a marker's screen-fixed rotation only
   // shows the correct facing direction at bearing 0, and visibly drifts out of
   // alignment with the map's own content the moment the user rotates the camera.
   const [cameraBearing, setCameraBearing] = useState(0);
-  const handleCameraChanged = useCallback((state: { properties: { heading: number } }) => {
-    setCameraBearing(state.properties.heading ?? 0);
+  const handleCameraChanged = useCallback((state: { properties?: { heading?: number } } | null | undefined) => {
+    // Release builds: Mapbox sometimes delivers incomplete camera events; never throw.
+    try {
+      const heading = state?.properties?.heading;
+      setCameraBearing(typeof heading === "number" && Number.isFinite(heading) ? heading : 0);
+    } catch (err) {
+      console.warn("[MapViewNative] onCameraChanged ignored:", err);
+    }
   }, []);
+  const safeSetCamera = useCallback((opts: Record<string, unknown>) => {
+    if (!mapLoadedRef.current) return;
+    try {
+      cameraRef.current?.setCamera(opts as never);
+    } catch (err) {
+      console.warn("[MapViewNative] setCamera failed:", err);
+    }
+  }, []);
+  const safeFitBounds = useCallback(
+    (sw: [number, number], ne: [number, number], padding: number, duration: number) => {
+      if (!mapLoadedRef.current) return;
+      try {
+        cameraRef.current?.fitBounds(sw, ne, padding, duration);
+      } catch (err) {
+        console.warn("[MapViewNative] fitBounds failed:", err);
+      }
+    },
+    []
+  );
   // Track the last trigger value we acted on, so recenter/fit fire exactly once
   // per button press and never on telemetry/geometry changes.
   const lastRecenterRoverRef = useRef(0);
@@ -2448,8 +2475,8 @@ export function MapViewNative(props: MapViewProps) {
     if (!Number.isFinite(minLon) || !Number.isFinite(minLat) ||
         !Number.isFinite(maxLon) || !Number.isFinite(maxLat)) return;
     // fitBounds(sw, ne, padding, duration) — sw = [minLon, minLat], ne = [maxLon, maxLat]
-    cameraRef.current?.fitBounds([minLon, minLat], [maxLon, maxLat], 40, 400);
-  }, [collectFitCoords]);
+    safeFitBounds([minLon, minLat], [maxLon, maxLat], 40, 400);
+  }, [collectFitCoords, safeFitBounds]);
 
   // Recenter on rover — STRICTLY one-shot per button press (parity with legacy).
   // `roverGeo.center` is intentionally NOT a dependency: if it were, this effect
@@ -2460,7 +2487,7 @@ export function MapViewNative(props: MapViewProps) {
     if (recenterRoverTrigger === lastRecenterRoverRef.current) return;
     lastRecenterRoverRef.current = recenterRoverTrigger;
     if (roverGeo.center) {
-      cameraRef.current?.setCamera({ centerCoordinate: roverGeo.center, animationDuration: 300 });
+      safeSetCamera({ centerCoordinate: roverGeo.center, animationDuration: 300 });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recenterRoverTrigger, visible]);
@@ -2481,7 +2508,7 @@ export function MapViewNative(props: MapViewProps) {
     if (!visible || !resetNorthTrigger || resetNorthTrigger <= 0) return;
     if (resetNorthTrigger === lastResetNorthRef.current) return;
     lastResetNorthRef.current = resetNorthTrigger;
-    cameraRef.current?.setCamera({
+    safeSetCamera({
       heading: 0,
       animationDuration: 300,
     });
@@ -2489,10 +2516,12 @@ export function MapViewNative(props: MapViewProps) {
   }, [resetNorthTrigger, visible]);
 
   // Initial autocenter: prefer rover, else fit plan (parity with legacy).
+  // Wait until the native map reports style loaded — early setCamera is a common
+  // release-only hard crash after websocket connect mounts the home map.
   useEffect(() => {
-    if (!visible || hasAutoCenteredRef.current) return;
+    if (!visible || hasAutoCenteredRef.current || !mapLoadedRef.current) return;
     if (roverGeo.center) {
-      cameraRef.current?.setCamera({
+      safeSetCamera({
         centerCoordinate: roverGeo.center,
         zoomLevel: 19,
         animationDuration: 0,
@@ -2502,7 +2531,7 @@ export function MapViewNative(props: MapViewProps) {
       fitToPlan();
       hasAutoCenteredRef.current = true;
     }
-  }, [visible, roverGeo.center, collectFitCoords, fitToPlan]);
+  }, [visible, roverGeo.center, collectFitCoords, fitToPlan, safeSetCamera]);
 
   // Re-fit whenever the selected alignment ref points GROW (a tap-add or a bulk CSV
   // import) — CSV-imported points in particular may sit outside the plan's own line
@@ -2836,6 +2865,23 @@ export function MapViewNative(props: MapViewProps) {
         styleURL={props.styleURL ?? MAPBOX_STYLE_URL}
         onPress={handleMapPress as (f: GeoJSON.Feature) => void}
         onCameraChanged={handleCameraChanged}
+        onDidFinishLoadingMap={() => {
+          mapLoadedRef.current = true;
+          // Retry one-shot autocenter now that native map is ready.
+          if (!hasAutoCenteredRef.current) {
+            if (roverGeo.center) {
+              safeSetCamera({
+                centerCoordinate: roverGeo.center,
+                zoomLevel: 19,
+                animationDuration: 0,
+              });
+              hasAutoCenteredRef.current = true;
+            } else if (collectFitCoords().length > 0) {
+              fitToPlan();
+              hasAutoCenteredRef.current = true;
+            }
+          }
+        }}
         scaleBarEnabled={false}
         logoEnabled={false}
         attributionEnabled={false}
@@ -2846,9 +2892,16 @@ export function MapViewNative(props: MapViewProps) {
         pitchEnabled={!manualDrawingEnabled}
         rotateEnabled={!manualDrawingEnabled}
       >
-        <Camera 
-          ref={cameraRef} 
-          defaultSettings={roverGeo.center ? { centerCoordinate: roverGeo.center, zoomLevel: 19 } : undefined} 
+        <Camera
+          ref={cameraRef}
+          defaultSettings={
+            roverGeo.center &&
+            Array.isArray(roverGeo.center) &&
+            Number.isFinite(roverGeo.center[0]) &&
+            Number.isFinite(roverGeo.center[1])
+              ? { centerCoordinate: roverGeo.center, zoomLevel: 19 }
+              : undefined
+          }
         />
 
         {/* ── Plan lines (Fields) ── */}
