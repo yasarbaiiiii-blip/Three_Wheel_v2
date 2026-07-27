@@ -45,7 +45,9 @@ export type RoadMarkingPathOptions = {
   outlierResidualFactor?: number;
 };
 
-const DEFAULTS = {
+// Not `as const`: callers and internal helpers pass runtime `number`s (adaptive
+// tolerance, overrides). Literal types would make every option assignment fail tsc.
+const DEFAULTS: Required<RoadMarkingPathOptions> = {
   fitToleranceM: 0.08,
   sharpCornerDeg: 12,
   filletRadiusFraction: 0.4,
@@ -55,7 +57,7 @@ const DEFAULTS = {
   maxArcRadiusM: 5000,
   outlierPathChordRatio: 2.5,
   outlierResidualFactor: 8,
-} as const;
+};
 
 export type Circle = { cn: number; ce: number; r: number };
 
@@ -241,25 +243,62 @@ const ADAPTIVE_TOLERANCE_MIN_M = 0.05;
 const ADAPTIVE_TOLERANCE_MAX_M = 1.5;
 const ADAPTIVE_TOLERANCE_MULTIPLE = 2.5;
 
+/** 90th percentile of a sample set, or `fallback` when empty. */
+function percentile90(values: number[], fallback: number): number {
+  if (values.length === 0) return fallback;
+  const sorted = values.slice().sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length * 0.9)] ?? fallback;
+}
+
+/** p90 of |offset of p[i] from the chord p[i-k] → p[i+k]| across the path. */
+function chordResidualP90(points: RoadMarkingNedPoint[], k: number, fallback: number): number {
+  const residuals: number[] = [];
+  for (let i = k; i < points.length - k; i++) {
+    residuals.push(pointLineResidual(points[i], points[i - k], points[i + k]));
+  }
+  return percentile90(residuals, fallback);
+}
+
 /**
- * Derive a fit tolerance from this path's own measured noise instead of assuming a fixed
- * value. A 3-point chord residual is dominated by point-to-point noise, not true curvature
- * (which only shows up over longer spans), so the 90th percentile of that residual across
- * the whole path is a clean noise-floor estimate. Real survey files range from a few cm
- * (RTK) to tens of cm (consumer/vehicle GPS); a single hardcoded tolerance either
- * over-fragments clean data or fails to fit noisier real data at all.
+ * Estimate this path's own measurement noise, so the fit tolerance adapts to the survey
+ * instead of assuming one. Real files range from a few cm (RTK) to tens of cm (consumer /
+ * vehicle GPS), and a single fixed tolerance either over-fragments clean data or fails to
+ * fit noisy data at all.
+ *
+ * A chord residual mixes TWO things: measurement noise, and the real curvature of the path.
+ * Measuring at one window size cannot tell them apart, and that is not a theoretical
+ * concern — it silently destroyed geometry. The residual of a curve sampled every `d`
+ * metres carries a sagitta of `d²/8R`, so on a SPARSE survey the residual is mostly
+ * curvature: a 23 m roundabout shot with 40 points instead of 146 estimated its "noise" at
+ * 0.41 m instead of 0.07 m, the segmenter then swallowed the whole ring into a couple of
+ * primitives, and the preview rendered a 1.8 m stub of a 23 m circle with no warning.
+ *
+ * The two terms separate by how they SCALE with the window. Doubling the window leaves the
+ * noise term unchanged (the chord-midpoint residual of white noise has variance 1.5σ²
+ * regardless of k) while quadrupling the curvature term (sagitta ∝ chord²). So with
+ *
+ *     r₁ = noise + c,    r₂ = noise + 4c
+ *
+ * both are recoverable: `c = (r₂ - r₁)/3` and `noise = r₁ - c`. A straight or densely
+ * sampled path has r₂ ≈ r₁, which yields c ≈ 0 and reproduces the old single-window
+ * estimate — so this only changes files that were being mis-measured.
  */
 export function estimateAdaptiveTolerance(points: RoadMarkingNedPoint[]): number {
   if (points.length < 3) return DEFAULTS.fitToleranceM;
-  const residuals: number[] = [];
-  for (let i = 1; i < points.length - 1; i++) {
-    residuals.push(pointLineResidual(points[i], points[i - 1], points[i + 1]));
-  }
-  residuals.sort((a, b) => a - b);
-  const p90 = residuals[Math.floor(residuals.length * 0.9)] ?? DEFAULTS.fitToleranceM;
+
+  const r1 = chordResidualP90(points, 1, DEFAULTS.fitToleranceM);
+  // Needs 5 points for a k=2 window. Below that, fall back to the single-window estimate:
+  // too short to measure a scaling law, and too short to hide much curvature either.
+  const r2 = points.length >= 5 ? chordResidualP90(points, 2, r1) : r1;
+
+  // Curvature grows with the window, noise does not. A negative slope means no measurable
+  // curvature at this scale, so attribute everything to noise.
+  const curvature = Math.max(0, (r2 - r1) / 3);
+  const noise = Math.max(0, r1 - curvature);
+
   return Math.min(
     ADAPTIVE_TOLERANCE_MAX_M,
-    Math.max(ADAPTIVE_TOLERANCE_MIN_M, ADAPTIVE_TOLERANCE_MULTIPLE * p90)
+    Math.max(ADAPTIVE_TOLERANCE_MIN_M, ADAPTIVE_TOLERANCE_MULTIPLE * noise)
   );
 }
 
@@ -516,15 +555,81 @@ function maxCircleResidual(points: RoadMarkingNedPoint[], circle: Circle): numbe
 const WHOLE_LOOP_MIN_POINTS = 8;
 const WHOLE_LOOP_GAP_MIN_M = 0.15;
 const WHOLE_LOOP_GAP_FRACTION = 0.05;
+/**
+ * A loop cannot close tighter than its own sampling: shoot a ring every 0.3 m and the first
+ * and last shot are ~0.3 m apart no matter how perfectly closed the real feature is. Judging
+ * that gap against a fixed distance therefore rejects coarsely-surveyed loops for being
+ * coarsely surveyed. Allowing one and a half sample steps keeps genuinely open paths out
+ * (their ends are metres apart, not one step).
+ */
+const WHOLE_LOOP_GAP_SPACING_MULTIPLE = 1.5;
+
+/**
+ * Output-integrity check (see `coversSourceExtent`). A refined path must keep at least this
+ * fraction of the surveyed extent on every axis longer than the floor. Deliberately loose:
+ * legitimate refinement trims a few centimetres at the termini, catastrophic failure loses
+ * most of the path, and there is nothing in between worth flagging here.
+ */
+const EXTENT_CHECK_MIN_RATIO = 0.9;
+/** Axes shorter than this are ignored — a straight run has no extent across its width. */
+const EXTENT_CHECK_MIN_AXIS_M = 0.5;
+
+/**
+ * Target ceiling on preview vertices for one path. Sits well above what any road-scale
+ * survey produces at the default spacing (the 1.1 km College Road run lands near 4k), so it
+ * only engages on surveys large enough for arc-length pacing to run away.
+ *
+ * A TARGET, not a hard bound: the spacing is derived from the surveyed chord polygon, which
+ * underestimates the length of the arcs fitted through it (by ~0.1 % on a 40-point ring,
+ * more on coarser input). Overshoot is a fraction of a percent — enough to bound the
+ * pathological case, not enough to be worth an exact second pass.
+ */
+const PREVIEW_SAMPLE_TARGET = 8000;
+
+/** Total length along a polyline, in metres. */
+function polylineLengthM(points: RoadMarkingNedPoint[]): number {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) total += dist(points[i - 1], points[i]);
+  return total;
+}
+
+/** Median distance between consecutive points — this survey's own sampling step. */
+function medianSpacing(points: RoadMarkingNedPoint[]): number {
+  if (points.length < 2) return 0;
+  const steps: number[] = [];
+  for (let i = 1; i < points.length; i++) steps.push(dist(points[i - 1], points[i]));
+  steps.sort((a, b) => a - b);
+  return steps[Math.floor(steps.length / 2)] ?? 0;
+}
+
+/**
+ * How far a fitted primitive may sit from the surveyed points it replaces.
+ *
+ * This is a different quantity from the noise tolerance and must not be conflated with it.
+ * The noise floor answers "how precisely was this measured"; this answers "how much paint
+ * error is acceptable when we replace the operator's samples with a smooth primitive". The
+ * rover draws the same distinction (`rms_m` vs `MAX_ARC_DEVIATION_M`) and picks the same
+ * 15 cm, so the tablet and the rover agree on what is fittable.
+ *
+ * Concretely: a surveyed roundabout is never a perfect circle. The real Egmore rings sit
+ * ~11-13 cm off their best-fit circle — well beyond RTK noise, but well inside the paint
+ * budget. Judging them against the noise floor rejected the circle and shattered the ring
+ * into faceted arcs; judging them against this budget keeps them round.
+ */
+const MAX_FIT_DEVIATION_M = 0.15;
 
 /**
  * Fast path for a near-closed loop (roundabout, small track): fit ONE circle to the whole
  * group instead of letting the greedy segmenter piece it together from many short arcs
  * that each only locally pass tolerance — a real closed loop can fragment into a dozen
- * tiny arcs even though a single circle fits the whole thing comfortably. Only accepted
- * when every point in the group is within `tol` of that one fitted circle, so a genuinely
- * non-circular closed shape (oval, irregular boundary) safely falls through to normal
- * segmentation instead of being forced into a wrong circle.
+ * tiny arcs even though a single circle fits the whole thing comfortably.
+ *
+ * Accepted when every point sits within the larger of the survey's own noise floor and the
+ * fit-deviation budget, so a genuinely non-circular closed shape (an oval, an irregular
+ * boundary) still falls through to normal segmentation instead of being forced into a wrong
+ * circle. Comparing a MAX over every point against a PER-POINT noise floor — as this used
+ * to — is an apples-to-oranges test that gets stricter the more points a loop has, which is
+ * backwards.
  */
 export function tryWholeLoopFit(points: RoadMarkingNedPoint[], tol: number): Circle | null {
   if (points.length < WHOLE_LOOP_MIN_POINTS) return null;
@@ -541,11 +646,16 @@ export function tryWholeLoopFit(points: RoadMarkingNedPoint[], tol: number): Cir
     roughRadius = Math.max(roughRadius, Math.hypot(p.north - centerNorth, p.east - centerEast));
   }
   const gap = dist(points[0], points[points.length - 1]);
-  if (gap > Math.max(WHOLE_LOOP_GAP_MIN_M, WHOLE_LOOP_GAP_FRACTION * roughRadius)) return null;
+  const gapLimit = Math.max(
+    WHOLE_LOOP_GAP_MIN_M,
+    WHOLE_LOOP_GAP_FRACTION * roughRadius,
+    WHOLE_LOOP_GAP_SPACING_MULTIPLE * medianSpacing(points)
+  );
+  if (gap > gapLimit) return null;
 
   const fit = fitCircleHyper(points);
   if (!fit) return null;
-  if (maxCircleResidual(points, fit) > tol) return null;
+  if (maxCircleResidual(points, fit) > Math.max(tol, MAX_FIT_DEVIATION_M)) return null;
   return fit;
 }
 
@@ -1397,6 +1507,16 @@ export function buildRoadMarkingPreviewPoints(
   // Whole-path single-circle fast path for a near-closed loop (roundabout, small track):
   // avoids fragmenting one true circle into many short arcs. Falls through to normal
   // segmentation for anything that isn't actually close to one circle.
+  const source = pts;
+
+  // Sampling is paced by arc length, so output size grows with the SIZE of the survey, not
+  // its complexity: a 40-point ring of 1 km radius asks for ~18k preview vertices — one map
+  // line heavy enough to hurt a tablet, for no visible gain at that scale. Stretch the
+  // spacing just enough to stay under the cap. Road-scale files never reach it and are
+  // byte-for-byte unchanged; the per-step angular cap still governs how round curves look.
+  const sourceLengthM = polylineLengthM(pts);
+  const sampleSpacingM = Math.max(opts.sampleSpacingM, sourceLengthM / PREVIEW_SAMPLE_TARGET);
+
   const loopFit = tryWholeLoopFit(pts, fitToleranceM);
   if (loopFit) {
     pts = tessellatePrimitivesWithJointFillets(
@@ -1406,7 +1526,7 @@ export function buildRoadMarkingPreviewPoints(
         sharpCornerDeg: opts.sharpCornerDeg,
         filletRadiusFraction: opts.filletRadiusFraction,
         maxFilletRadiusM: opts.maxFilletRadiusM,
-        sampleSpacingM: opts.sampleSpacingM,
+        sampleSpacingM,
         minArcPoints: opts.minArcPoints,
         fitToleranceM,
       }
@@ -1414,7 +1534,7 @@ export function buildRoadMarkingPreviewPoints(
   } else {
     pts = segmentAndTessellate(pts, {
       fitToleranceM,
-      sampleSpacingM: opts.sampleSpacingM,
+      sampleSpacingM,
       minArcPoints: opts.minArcPoints,
       maxArcRadiusM: opts.maxArcRadiusM,
       sharpCornerDeg: opts.sharpCornerDeg,
@@ -1423,7 +1543,56 @@ export function buildRoadMarkingPreviewPoints(
     });
   }
   pts = ensureOpenPath(pts);
+
+  // Last line of defence: never hand back a refinement that lost the path.
+  //
+  // Refinement is an approximation pipeline with several stages that can each, on some
+  // unforeseen input, decide the whole path is one degenerate primitive. When that happened
+  // it happened SILENTLY — a 23 m surveyed roundabout rendered as a 1.8 m stub, with no
+  // error and no warning, which is the worst way for geometry to fail. The individual causes
+  // are fixed, but the class is not closable by fixing causes one at a time, so verify the
+  // OUTPUT against the input it claims to represent and fall back to the raw surveyed
+  // polyline when it does not cover it. A raw jagged path is a visibly worse preview; a
+  // silently truncated one is a wrong mission.
+  if (!coversSourceExtent(source, pts)) return source;
   return pts;
+}
+
+/**
+ * Does `refined` still span the same ground as `source`?
+ *
+ * Compared on bounding-box extent per axis rather than point count or length: a refinement
+ * legitimately changes both (an arc replaces its chords, fillets add samples), but it can
+ * never legitimately shrink the ground the path covers. The tolerance is generous — this is
+ * a catastrophe detector, not a quality gate — and axes shorter than the fit tolerance are
+ * skipped, since a straight run has no meaningful extent across its own width.
+ */
+function coversSourceExtent(
+  source: RoadMarkingNedPoint[],
+  refined: RoadMarkingNedPoint[]
+): boolean {
+  if (source.length < 2) return true;
+  if (refined.length < 2) return false;
+
+  const extent = (pts: RoadMarkingNedPoint[]) => {
+    let minN = Infinity;
+    let maxN = -Infinity;
+    let minE = Infinity;
+    let maxE = -Infinity;
+    for (const p of pts) {
+      if (p.north < minN) minN = p.north;
+      if (p.north > maxN) maxN = p.north;
+      if (p.east < minE) minE = p.east;
+      if (p.east > maxE) maxE = p.east;
+    }
+    return { n: maxN - minN, e: maxE - minE };
+  };
+
+  const src = extent(source);
+  const ref = extent(refined);
+  const floor = Math.max(EXTENT_CHECK_MIN_AXIS_M, 0);
+  const axisOk = (s: number, r: number) => s <= floor || r >= s * EXTENT_CHECK_MIN_RATIO;
+  return axisOk(src.n, ref.n) && axisOk(src.e, ref.e);
 }
 
 /** Max |turning angle| along the path (degrees). 0 for <3 points. */

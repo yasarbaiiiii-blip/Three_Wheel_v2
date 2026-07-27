@@ -174,6 +174,7 @@ import {
 import {
   buildVisualAlignmentRefPoints,
   computeLineBoundingBox,
+  projectGpsToLocalMeters,
   transformVisualDxfPoint,
 } from "./src/utils/visualAlignment";
 import {
@@ -184,14 +185,15 @@ import { computeBestSimilarityFit } from "./src/utils/similarityRefPointSnap";
 import {
   anchorToAlignedRefPoints,
   pointMissionPointsToPlanLines,
+  sprayRunsToPlanLines,
   stagedMissionMatchesId,
-  waypointsToPlanLines,
 } from "./src/utils/stagedMissionHydration";
 import {
   buildCsvTransitLines,
   localCsvPointsToPlanLines,
   type LocalPointCsvResult,
 } from "./src/utils/localPointCsv";
+import { sanitizeUploadFileName } from "./src/utils/surveyCsvExport";
 import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
 import { rehydrateAlignedPlanLines } from "./src/utils/rehydrateAlignedPlan";
 import type { AutoOriginReference, MapGeometryFrame } from "./src/types/autoOrigin";
@@ -237,24 +239,6 @@ function evaluateStagedStartGate(
     loaded: loadedPathInspection,
     alignmentVerified: stagedWorkflow.alignment === "verified",
   });
-}
-
-function projectGpsToLocalMeters(
-  lat: number,
-  lon: number,
-  originLat: number,
-  originLon: number
-) {
-  const EARTH_RADIUS = 6378137.0;
-  const latRad = (lat * Math.PI) / 180;
-  const lonRad = (lon * Math.PI) / 180;
-  const originLatRad = (originLat * Math.PI) / 180;
-  const originLonRad = (originLon * Math.PI) / 180;
-
-  const north = (latRad - originLatRad) * EARTH_RADIUS;
-  const east = (lonRad - originLonRad) * EARTH_RADIUS * Math.cos(originLatRad);
-
-  return { north, east };
 }
 
 function getPlanStartPoint(lines: PlanLine[]) {
@@ -1350,7 +1334,9 @@ export default function App() {
           const stagedRes = await pathApi.getStagedMission(apiBaseUrl, missionId);
           if (stagedRes.ok) {
             const stagedArtifact = (await stagedRes.json()) as pathApi.StagedMissionResponse;
-            let hydratedLines = waypointsToPlanLines(
+            // One stroke per MARK/TRANSIT run — dense planner tessellation is never collinear,
+            // so waypointsToPlanLines would explode a curve into hundreds of two-point segments.
+            let hydratedLines = sprayRunsToPlanLines(
               stagedArtifact.waypoints ?? [],
               stagedArtifact.spray_flags ?? []
             );
@@ -2747,7 +2733,9 @@ export default function App() {
           setStagedMissionInspection(stagedArtifact);
         }
 
-        let hydratedLines = waypointsToPlanLines(
+        // One stroke per continuous spray run (not collinear two-point segments). Required for
+        // dense CSV road-marking plans; also correct for DXF after the planner has tessellated.
+        let hydratedLines = sprayRunsToPlanLines(
           stagedArtifact.waypoints ?? [],
           stagedArtifact.spray_flags ?? []
         );
@@ -2839,7 +2827,8 @@ export default function App() {
 
   /**
    * Local CSV (Select File) — parse result already computed on-device.
-   * Draws points on the map; never uploads or stages to the rover.
+   * Draws the on-device preview only; upload / plan-and-stage / load live in
+   * CsvStageAndLoadPanel (Step 3 "Send to Rover & Load").
    */
   function handleLocalCsvParsed(data: LocalPointCsvResult) {
     setLocalCsvPreview(data);
@@ -2896,11 +2885,22 @@ export default function App() {
   }
 
   function handleClearLocalCsv() {
+    // Best-effort: drop a CSV previously written into the rover missions dir by
+    // "Send to Rover". 404 is fine if it was never uploaded or already deleted.
+    const uploadedName = localCsvPreview
+      ? sanitizeUploadFileName(localCsvPreview.fileName)
+      : null;
+    if (apiBaseUrl && uploadedName) {
+      void pathApi.deletePath(apiBaseUrl, uploadedName).catch(() => {});
+    }
     setLocalCsvPreview(null);
     setLines((prev) => prev.filter((l) => l.layer === "virtual_boundary"));
     setSelectedLineId(null);
     setAlignedRefPoints([]);
     setVerifiedAlignmentRequest(null);
+    setStagedPlanResult(null);
+    setStagedMissionInspection(null);
+    setStagedMissionId(null);
   }
 
   async function startLoadedMission() {
@@ -2965,6 +2965,23 @@ export default function App() {
       console.warn("[START] Re-fetch failed, using cached workflow state:", reconcileErr);
     }
 
+    const isCsvMissionEarly =
+      localCsvPreview != null ||
+      importedPlan.fileType === "csv" ||
+      !!importedPlan.fileName?.toLowerCase().endsWith(".csv");
+    // Phase 5: never allow path_name fall-through for CSV (including force-start).
+    if (
+      isCsvMissionEarly &&
+      effectiveStagedWorkflow.staged !== "verified"
+    ) {
+      setWorkflowStep("started", "failed");
+      const msg =
+        "This CSV mission is not staged and verified. Send/plan the trajectory and load it before starting — a filename start cannot place a surveyed CSV correctly.";
+      Alert.alert("Start blocked", msg);
+      showToast("Start blocked", msg, "error");
+      return;
+    }
+
     let forceStart = false;
     const gateResult = evaluateStagedStartGate(effectiveStagedWorkflow, effectiveLoadedInspection, stagedMissionId);
 
@@ -3015,11 +3032,17 @@ export default function App() {
     setMissionActionBusy(true);
     try {
       showToast(missionRunning ? "Stop" : "Start", missionRunning ? "Stopping mission..." : "Starting mission...", "info");
+      const isCsvMission =
+        localCsvPreview != null ||
+        importedPlan.fileType === "csv" ||
+        !!importedPlan.fileName?.toLowerCase().endsWith(".csv");
       const startPayload = buildMissionStartPayload({
         stagedMissionId,
         stagedVerified: isStagedStart,
         fileName: importedPlan.fileName,
         autoOrigin,
+        // Phase 5: CSV has no meaningful path_name reload — refuse the fallback.
+        requireStagedMission: isCsvMission,
       });
       const res = await missionApi.startMission(apiBaseUrl, startPayload);
       if (!res.ok) {
@@ -3374,6 +3397,22 @@ export default function App() {
         const error = new Error(errMsg) as Error & { status?: number };
         error.status = res.status;
         throw error;
+      }
+
+      // Also remove the uploaded survey CSV from the rover missions dir so files
+      // do not accumulate across Send-to-Rover cycles. Best-effort: ignore 404.
+      const uploadedCsv =
+        localCsvPreview != null
+          ? sanitizeUploadFileName(localCsvPreview.fileName)
+          : selectedPathName && /\.csv$/i.test(selectedPathName)
+            ? selectedPathName
+            : null;
+      if (uploadedCsv) {
+        try {
+          await pathApi.deletePath(apiBaseUrl, uploadedCsv);
+        } catch {
+          // Network blip after mission clear succeeded — not fatal.
+        }
       }
 
       setImportedPlan(null);

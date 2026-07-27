@@ -3,10 +3,32 @@ import {
   buildCsvTransitLines,
   localCsvPointsToPlanLines,
   localCsvToMapPins,
+  metresPerDegree,
   parseLocalPointCsv,
+  projectGpsToLocalMetersEllipsoid,
   sampleEvenly,
 } from "./localPointCsv";
-import { projectPlanNorthEastToGps } from "./mapGeometryProjection";
+describe("metresPerDegree / ellipsoid projection", () => {
+  it("matches WGS84 meridional scale (not sphere) near Chennai latitude", () => {
+    // Sphere uses a for north → ~0.62 % long at 13°. Ellipsoid north must be shorter.
+    const { mPerDegNorth, mPerDegEast } = metresPerDegree(13.07);
+    const sphereNorth = 6378137.0 * (Math.PI / 180);
+    expect(mPerDegNorth).toBeLessThan(sphereNorth);
+    expect(mPerDegNorth / sphereNorth).toBeCloseTo(1 / 1.00622, 3);
+    expect(mPerDegEast).toBeGreaterThan(100_000);
+    expect(mPerDegEast).toBeLessThan(sphereNorth);
+  });
+
+  it("shared GPS→NED is ellipsoidal (alias + canonical agree)", () => {
+    const originLat = 13.07;
+    const originLon = 80.26;
+    const lat = originLat + 0.001;
+    const ell = projectGpsToLocalMetersEllipsoid(lat, originLon, originLat, originLon);
+    const sphereNorth = 0.001 * 6378137.0 * (Math.PI / 180);
+    expect(ell.north).toBeLessThan(sphereNorth);
+    expect(ell.north / sphereNorth).toBeCloseTo(1 / 1.00622, 3);
+  });
+});
 
 describe("parseLocalPointCsv", () => {
   it("parses lat,lon GPS header and anchors at first row", () => {
@@ -19,6 +41,9 @@ describe("parseLocalPointCsv", () => {
     expect(r.points[0].east_m).toBeCloseTo(0, 6);
     expect(r.points[1].north_m).toBeGreaterThan(100);
     expect(Math.abs(r.points[1].east_m)).toBeLessThan(1);
+    // Ellipsoid scale at anchor, not sphere
+    const expected = projectGpsToLocalMetersEllipsoid(13.001, 80.0, 13.0, 80.0);
+    expect(r.points[1].north_m).toBeCloseTo(expected.north, 6);
   });
 
   it("accepts latitude/longitude aliases in any order", () => {
@@ -91,21 +116,29 @@ describe("parseLocalPointCsv", () => {
     expect(r.num_points).toBe(1);
   });
 
-  it("round-trips GPS lat/lon through NED projection (map path)", () => {
+  it("round-trips GPS lat/lon through ellipsoidal NED (rover scale)", () => {
+    // Preview NED uses ellipsoid metres-per-degree. Inverse with the same scale
+    // must recover lat/lon; the shared spherical map helper does not (and pins
+    // still draw from source lat/lon, so map markers are unaffected).
     const text = ["lat,lon", "13.07208106,80.26195346", "13.08,80.27"].join("\n");
     const r = parseLocalPointCsv(text);
-    const origin = {
-      frame: "ALIGNED_DESIGN" as const,
-      originLat: r.anchor!.lat,
-      originLon: r.anchor!.lon,
-      originDxfNorth: 0,
-      originDxfEast: 0,
-    };
+    const { mPerDegNorth, mPerDegEast } = metresPerDegree(r.anchor!.lat);
     for (const p of r.points) {
-      const gps = projectPlanNorthEastToGps(p.north_m, p.east_m, origin);
-      expect(gps.lat).toBeCloseTo(p.lat!, 8);
-      expect(gps.lon).toBeCloseTo(p.lon!, 8);
+      const lat = r.anchor!.lat + p.north_m / mPerDegNorth;
+      const lon = r.anchor!.lon + p.east_m / mPerDegEast;
+      expect(lat).toBeCloseTo(p.lat!, 8);
+      expect(lon).toBeCloseTo(p.lon!, 8);
     }
+  });
+
+  it("map pins keep source lat/lon (not re-projected through NED)", () => {
+    const text = ["lat,lon", "13.07208106,80.26195346", "13.08,80.27"].join("\n");
+    const r = parseLocalPointCsv(text);
+    const pins = localCsvToMapPins(r);
+    expect(pins[0].lat).toBe(13.07208106);
+    expect(pins[0].lon).toBe(80.26195346);
+    expect(pins[1].lat).toBe(13.08);
+    expect(pins[1].lon).toBe(80.27);
   });
 });
 
@@ -285,6 +318,24 @@ describe("buildCsvTransitLines", () => {
       },
     ];
     expect(buildCsvTransitLines(lines)).toHaveLength(0);
+  });
+});
+
+describe("survey quality warnings (Phase 6)", () => {
+  it("warns on non-FIX, single-epoch, and high HRMS without blocking parse", () => {
+    const text = [
+      "lat,lon,solution status,samples,horizontal rms,pdop",
+      "13.0,80.0,FIX,10,0.01,1.2",
+      "13.001,80.0,FLOAT,1,0.12,2.5",
+    ].join("\n");
+    const r = parseLocalPointCsv(text, "quality.csv");
+    expect(r.num_points).toBe(2);
+    expect(r.points[1].fix_status).toMatch(/FLOAT/i);
+    expect(r.points[1].samples).toBe(1);
+    expect(r.warnings.some((w) => /FIX/i.test(w))).toBe(true);
+    expect(r.warnings.some((w) => /epoch|sample/i.test(w))).toBe(true);
+    expect(r.warnings.some((w) => /RMS/i.test(w))).toBe(true);
+    expect(r.warnings.some((w) => /PDOP/i.test(w))).toBe(true);
   });
 });
 

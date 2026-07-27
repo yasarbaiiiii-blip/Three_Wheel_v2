@@ -116,6 +116,100 @@ export function pointMissionPointsToPlanLines(
   }));
 }
 
+/** Below this the two points are the same place — no bridging point needed. */
+const RUN_JOIN_TOL_M = 1e-9;
+
+function runPolylineLengthM(points: LocalPoint[]): number {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) total += distance(points[i - 1], points[i]);
+  return total;
+}
+
+/**
+ * Planned waypoints → ONE PlanLine per continuous painted (or transit) run, carrying the
+ * run's whole polyline in `entity.preview_points`.
+ *
+ * Distinct from `waypointsToPlanLines`, which emits a line per *collinear* stretch. That is
+ * the right shape for a mission the operator inspects segment by segment, but a surveyed
+ * road arrives from the planner tessellated at ~10 cm with about half a degree of turn per
+ * step — never collinear — so a 70 m curve becomes ~700 two-point lines. Grouping by spray
+ * state instead keeps the map at one stroke per path and the Path Order list at one row per
+ * path, which is what the CSV preview already showed before staging.
+ *
+ * Each run reaches one point into the next so the strokes visibly join: the planner emits
+ * the shared junction point twice (its de-duplication only collapses coincident points that
+ * agree on spray state), but a connector whose first point merely sits close would
+ * otherwise leave a visible gap.
+ */
+export function sprayRunsToPlanLines(
+  waypoints: unknown[],
+  sprayFlags: unknown[] = []
+): PlanLine[] {
+  const rawPoints = Array.isArray(waypoints) ? waypoints : [];
+  const rawFlags = Array.isArray(sprayFlags) ? sprayFlags : [];
+
+  const pts: { point: LocalPoint; spray: boolean }[] = [];
+  for (let i = 0; i < rawPoints.length; i++) {
+    const north = coerceFiniteNumber((rawPoints[i] as number[])?.[0]);
+    const east = coerceFiniteNumber((rawPoints[i] as number[])?.[1]);
+    if (north == null || east == null) continue;
+    pts.push({ point: { north, east }, spray: rawFlags[i] !== false });
+  }
+  if (pts.length < 2) return [];
+
+  const runs: { spray: boolean; points: LocalPoint[] }[] = [];
+  for (const entry of pts) {
+    const current = runs[runs.length - 1];
+    if (current && current.spray === entry.spray) current.points.push(entry.point);
+    else runs.push({ spray: entry.spray, points: [entry.point] });
+  }
+
+  const lines: PlanLine[] = [];
+  let markCount = 0;
+  let transitCount = 0;
+
+  runs.forEach((run, index) => {
+    const polyline = run.points.slice();
+    const next = runs[index + 1];
+    if (next?.points.length) {
+      const bridge = next.points[0];
+      if (distance(polyline[polyline.length - 1], bridge) > RUN_JOIN_TOL_M) polyline.push(bridge);
+    }
+    if (polyline.length < 2) return;
+
+    const lengthM = runPolylineLengthM(polyline);
+    const first = polyline[0];
+    const last = polyline[polyline.length - 1];
+    const ordinal = run.spray ? (markCount += 1) : (transitCount += 1);
+    const id = run.spray ? `rover-path-${ordinal}` : `rover-transit-${ordinal}`;
+    const previewPoints = polyline.map((p) => ({ north: p.north, east: p.east }));
+
+    lines.push({
+      id,
+      label: `${run.spray ? "Path" : "Transit"} ${ordinal} (${lengthM.toFixed(1)} m)`,
+      layer: run.spray ? "marking" : "transit",
+      ...(run.spray ? { is_mark: true } : { segmentRole: "none" as const }),
+      from: { id: index * 2 + 1, x: first.north, y: first.east },
+      to: { id: index * 2 + 2, x: last.north, y: last.east },
+      width: 0.1,
+      entity: {
+        entity_id: id,
+        entity_type: run.spray ? "LWPOLYLINE" : "TRANSIT",
+        layer: run.spray ? "MARK" : "TRANSIT",
+        color: run.spray ? 7 : 0,
+        is_mark: run.spray,
+        length_m: lengthM,
+        geometry: run.spray
+          ? { closed: false, road_marking: true, vertexCount: previewPoints.length }
+          : {},
+        preview_points: previewPoints,
+      },
+    });
+  });
+
+  return lines;
+}
+
 export function waypointsToPlanLines(
   waypoints: unknown[],
   sprayFlags: unknown[] = []

@@ -134,22 +134,56 @@ export function evaluateMissionStartGate(args: {
   };
 }
 
+/**
+ * Build the /api/mission/start body.
+ *
+ * Phase 5: for app-planned CSV trajectory missions there is no disk file to re-load.
+ * Passing `requireStagedMission: true` (CSV flow) refuses the path_name fallback and
+ * throws so the caller never discards surveyed placement by re-staging from filename.
+ */
 export function buildMissionStartPayload(args: {
   stagedMissionId: string | null;
   stagedVerified: boolean;
   fileName: string;
   autoOrigin: boolean;
+  /**
+   * When true, start is only allowed with a verified staged mission_id.
+   * Use for CSV / plan-trajectory missions (no meaningful path_name reload).
+   */
+  requireStagedMission?: boolean;
 }): StartMissionPayload {
   const missionId = normalizedId(args.stagedMissionId);
   if (args.stagedVerified) {
     if (!missionId) throw new Error("Verified staged start requires a mission ID.");
     return { mission_id: missionId, auto_origin: false };
   }
+  if (args.requireStagedMission) {
+    throw new Error(
+      "CSV mission is not staged-verified. Plan & stage the trajectory and load it " +
+        "to the controller before starting — filename start would discard surveyed placement."
+    );
+  }
   return {
     path_name: args.fileName,
     mission_file: "",
     auto_origin: args.autoOrigin,
   };
+}
+
+/**
+ * Phase 5 gate helper: CSV trajectory missions must not fall through to path_name start.
+ * Returns a block message, or null when start may proceed via the normal staged gate.
+ */
+export function csvMissionStartBlockMessage(args: {
+  isCsvMission: boolean;
+  stagedVerified: boolean;
+}): string | null {
+  if (!args.isCsvMission) return null;
+  if (args.stagedVerified) return null;
+  return (
+    "This CSV mission is not staged and verified. Send/plan the trajectory and load it " +
+    "before starting — a filename start cannot place a surveyed CSV correctly."
+  );
 }
 
 export function classifyMissionError(status: number, detail: string): MissionContractError {

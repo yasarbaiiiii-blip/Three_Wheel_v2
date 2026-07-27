@@ -55,7 +55,10 @@ MapViewNative
   • closedRing forced off for road_marking
 ```
 
-**Backend:** Fields CSV Select File does **not** call parse-point / upload / path preview. Related `pathApi` helpers are deprecated for this flow.
+**Backend (parse/preview):** Fields CSV Select File does **not** call parse-point / upload / path preview while previewing. Related `pathApi` helpers stay deprecated for this flow.
+
+**Backend (send to rover):** everything above is a local *preview*. Committing it to the
+controller is a separate, explicit step — see §3.8.
 
 ---
 
@@ -110,8 +113,11 @@ Preview pipeline (per group, after §3.5 splits the raw points):
 1. **Dedupe** near-duplicate points, **`ensureOpenPath`** (first≈last → drop last, **never a
    closed polygon ring**)
 2. **`estimateAdaptiveTolerance`** — derive the line/arc fit tolerance from this path's own
-   measured point-to-point noise (90th percentile of 3-point chord residual, ×2.5, clamped
-   to 0.05–1.5 m) instead of a single fixed value, unless the caller pins one explicitly
+   measured noise instead of a single fixed value, unless the caller pins one explicitly.
+   Chord residuals are measured at **two window sizes** and the noise separated from the
+   curvature by how each scales (`c = (r₂ − r₁)/3`, `noise = r₁ − c`), ×2.5, clamped to
+   0.05–1.5 m. A single window cannot tell the two apart and silently discarded real
+   geometry on sparsely-sampled surveys — see §3.9
 3. **`rejectPathSpikes`**, **`dampenOppositeJogs`** — outlier/GPS-spike rejection and
    short S-jog collapsing
 4. **`tryWholeLoopFit`** — fast path for a near-closed loop (roundabout, small track): fit
@@ -256,8 +262,116 @@ and the Path Order list's transit row all already key off that tag generically.
 ### 3.6 Fields UI (`FieldsPage.tsx`)
 
 - `isLocalCsvFlow` adjusts Align-centric DXF assumptions where appropriate
-- Summary: point count, GPS/NED, frame, anchor, pin sample note
-- Map: **refined path** + **gold pins**
+- Step 3 is **"Send to Rover"** (`CsvStageAndLoadPanel`) — see §3.8
+- Summary: point count, path count, GPS/NED, frame, anchor, pin sample note
+- Map: **refined path** + **gold pins**, replaced by the rover's planned geometry once staged
+
+### 3.9 Preview robustness — working on ANY file, not just dense road surveys
+
+The preview never hardcoded anything file-specific, but it was *implicitly* calibrated to
+densely-sampled road-scale surveys and degraded silently outside that regime. Four fixes,
+each measured:
+
+**1. The tolerance confused noise with curvature.** `estimateAdaptiveTolerance` measured one
+chord residual per point, which mixes measurement noise and the real bend of the path. On a
+sparse survey the residual is mostly curvature (sagitta ≈ `d²/8R`), so the "noise" estimate
+inflated, the segmenter treated real geometry as noise, and the path collapsed:
+
+| 23 m ring | tolerance | preview |
+|---|---|---|
+| 146 points | 0.075 | 23.0 × 23.1 m ✅ |
+| 60 points | 0.210 | **1.2 × 0.1 m** ❌ |
+| 40 points | 0.408 | **1.8 × 0.15 m** ❌ |
+| r = 50 m, 40 points | 1.500 (clamped) | **7.8 m of a 100 m ring** ❌ |
+
+The two terms separate by how they scale with the window: doubling it leaves noise unchanged
+and quadruples curvature, so measuring at k = 1 and k = 2 recovers both
+(`c = (r₂ − r₁)/3`, `noise = r₁ − c`). Dense and straight paths have `r₂ ≈ r₁` and reproduce
+the old estimate exactly, so only mis-measured files change.
+
+**2. The whole-loop test compared the wrong quantities.** It rejected unless every point sat
+within the *noise floor* of the fitted circle — a max over N points judged against a
+per-point value, which gets stricter the more points a loop has. A surveyed ring is never a
+perfect circle (the real Egmore rings sit 11–13 cm off theirs), so correcting the projection
+in Phase 3 pushed both past the threshold and the roundabout preview went 1.73° → 6.25°.
+Now judged against `MAX_FIT_DEVIATION_M` (15 cm — the same budget, and the same number, the
+rover uses for `MAX_ARC_DEVIATION_M`). Genuinely non-circular shapes still fall through.
+
+**3. The loop gap test punished coarse surveys.** A ring shot every 1.8 m has ends ~1.8 m
+apart however perfectly closed it is, so a fixed 15 cm gap limit rejected it, and the
+fallback path cannot tessellate a near-full circle from its endpoint angles. The limit now
+also scales with the survey's own median sample step.
+
+**4. Nothing verified the output.** All of the above failed *silently*. The pipeline now
+checks the refined path still covers the surveyed bounding box (≥ 90 % per axis) and returns
+the raw polyline if it does not. A jagged preview is visibly worse; a truncated one is a
+wrong mission. Plus a `PREVIEW_SAMPLE_TARGET` (8000) so arc-length pacing cannot ask for
+~18k vertices on a kilometre-scale survey.
+
+Result across rings from r = 0.5 m to r = 200 m at 20–146 points: extent retained 97–100 %,
+max step turn ≤ 3°. The three real files are unchanged where they were already correct, the
+roundabout is restored to 1.74° / 1.78°, and **the exported CSV is byte-identical** — these
+are preview-only fixes and the rover receives exactly what it did before.
+
+Remaining scale assumptions (general thresholds, not file-specific): `JUMP_SPLIT_MIN_M = 5`
+and `WHOLE_LOOP_GAP_MIN_M = 0.15` assume a road/vehicle-scale ground survey.
+
+### 3.8 Send to Rover (`surveyCsvExport.ts`, `csvMissionStaging.ts`, `CsvStageAndLoadPanel.tsx`)
+
+The rover plans a CSV mission from a file in its own missions dir; there is no endpoint that
+accepts a waypoint array for a line mission. So the handoff is: re-emit the parse as a
+canonical survey CSV, upload it, let the rover plan it, and redraw the map from the rover's
+answer before committing.
+
+```
+CsvStageAndLoadPanel  ("Send to Rover & Load")
+  • buildSurveyCsvExport(localCsvPreview)     → Name,Code,Latitude,Longitude
+  • POST /api/path/upload                     (cache file on native, Blob on web)
+  • POST /api/path/{name}/plan-and-stage      { optimize: true, include_waypoints: true,
+                                                line_spacing?: 0.1|0.15 for large surveys }
+  • GET  /api/path/staged/{mission_id}
+  • setLines(sprayRunsToPlanLines(plan.merged_waypoints, plan.spray_flags))   ← rover truth
+  • App.loadMissionOnBackend(mission_id)      → load-to-controller + verify
+      + re-hydrate map with sprayRunsToPlanLines (not collinear splitter)
+      + navigate Home
+```
+
+**Why re-emit instead of uploading the operator's file.** The rover's survey parser
+(`path_engine/parsers/survey_csv.py`) is stricter and differently spelled than ours:
+
+| | Our parse | Rover parse | Effect of re-emitting |
+|---|---|---|---|
+| Header | headerless `lat,lon` accepted | needs a NAMED coordinate pair | headerless files stop being read as metres |
+| Grouping | `feature`/`road`/`track`/… + jump distance | `Code`/`Description`/… | `Code` now carries OUR grouping |
+| Order | file order | numeric `Name` within a code | `Name` now carries OUR order |
+
+Coordinates are written **straight from the source rows**, never from `north_m`/`east_m`.
+On-device preview metres use **ellipsoidal** `metresPerDegree` (rover `georef` parity);
+export still sends degrees so the rover projects itself and `analyze_mission.py` §8 can
+re-read Latitude/Longitude as ground truth. The shared map helper
+`projectGpsToLocalMeters` remains spherical for guide CSV / visual alignment.
+
+**`optimize` must stay true.** It is not a routing preference: the explicit transit-connector
+pass is gated behind path extensions (off for CSV), so the route optimiser is the *only* pass
+that inserts dead-head legs. Measured on the real files:
+
+| File | `optimize:false` | `optimize:true` |
+|---|---|---|
+| `roads_coordinates.csv` | runs `[MARK 44292, TRANSIT 1]`, max step turn **101.7°** | `[MARK 15864, TRANSIT 4267, MARK 28428]`, **42.2°** |
+| `roundabout_coordinates.csv` | `[MARK 2853, TRANSIT 1]`, **167.0°** | `[MARK 1447, TRANSIT 174, MARK 1406]`, **0.3°** |
+
+With it off the separate paths merge into one continuous sprayed run — the rover would paint
+straight across the 642 m gap between Haddows Road and College Road. Reordering is safe
+because the map is redrawn from the planner's own waypoints before anything is committed.
+
+`origin_gps` is deliberately **not** sent: a lat/lon survey CSV carries its own geographic
+origin, which the planner turns into `GPS_SURVEYED` placement. A north/east CSV has no
+georeference and correctly stages as `LOCAL_NED` (the panel says so).
+
+`sprayRunsToPlanLines` (not the existing `waypointsToPlanLines`) hydrates the confirmation
+map: the planner tessellates at ~10 cm with ~0.5° of turn per step, so the collinear splitter
+would turn one 70 m curve into ~700 two-point lines. Grouping by spray state keeps it at one
+stroke per path.
 
 ### 3.7 Map display (`MapViewNative.tsx`)
 
@@ -280,6 +394,12 @@ and the Path Order list's transit row all already key off that tag generically.
 | `src/utils/localPointCsv.test.ts` | Parse / pin / plan tests |
 | `src/utils/roadMarkingCsvPath.ts` | Open path, fillets, line/arc tessellation |
 | `src/utils/roadMarkingCsvPath.test.ts` | Geometry tests |
+| `src/utils/surveyCsvExport.ts` | Canonical survey CSV the rover's parser reads (§3.8) |
+| `src/utils/surveyCsvExport.test.ts` | Header / Code / Name / precision tests |
+| `src/utils/csvMissionStaging.ts` | upload → plan-and-stage → inspect chain |
+| `src/utils/csvMissionStaging.test.ts` | Step ordering and failure-surface tests |
+| `src/utils/stagedMissionHydration.ts` | `sprayRunsToPlanLines` — one stroke per spray run |
+| `src/components/fields/panels/CsvStageAndLoadPanel.tsx` | Step 3 "Send to Rover" UI |
 | `App.tsx` | `handleLocalCsvParsed`, state, Fields props |
 | `src/screens/FieldsPage.tsx` | Pins always on; local CSV UI |
 | `src/components/fields/panels/UploadAndPreviewStep.tsx` | Local file read + parse |
@@ -308,13 +428,15 @@ DXF import / plan-import modules were **not** redesigned for this work.
 ## 6. Automated verification
 
 ```bash
-npx vitest run src/utils/localPointCsv.test.ts src/utils/roadMarkingCsvPath.test.ts
+npx vitest run src/utils/localPointCsv.test.ts src/utils/roadMarkingCsvPath.test.ts \
+  src/utils/surveyCsvExport.test.ts src/utils/csvMissionStaging.test.ts \
+  src/utils/stagedMissionHydration.sprayRuns.test.ts
 ```
 
 | Result | Count |
 |--------|--------|
-| Test files | 2 |
-| Tests | 68 (parse, pins, open path, fillets, arcs, plan tags, grouping, adaptive tolerance, whole-loop fit, merge/reclassify passes, arc/line joint continuity, transit connectors, arc angular resolution, sub-sharpCornerDeg joint fillet floor) |
+| Test files | 5 |
+| Tests | 130 (parse, pins, open path, fillets, arcs, plan tags, grouping, adaptive tolerance, whole-loop fit, merge/reclassify passes, arc/line joint continuity, transit connectors, arc angular resolution, sub-sharpCornerDeg joint fillet floor, preview robustness across arbitrary files, survey-CSV export, staging chain, spray-run hydration) |
 
 Expected: all tests pass (exit code 0).
 
@@ -330,10 +452,29 @@ Coverage includes:
 - Grouping column → multiple PlanLines, no cross-feature bridge (§3.5)
 - Jump-distance fallback grouping with no grouping column
 - Adaptive tolerance: stays near the historical default on clean data, relaxes on noisy data, clamp bounds respected
+- **Robustness across arbitrary files** (see §3.9): tolerance separates noise from curvature; whole-loop fit judged against the fit budget and tolerant of coarse sampling; preview extent retained ≥ 90 % and max turn ≤ 4° across rings from r = 0.5 m to r = 200 m at 20–146 points; sampling bounded on a 1 km-radius survey
 - Whole-loop circle fast path: fits a noisy near-closed loop, rejects non-circular closed shapes and open paths
 - `mergeAdjacentPrimitives` repairs fragmentation without ever bridging a real corner
 - `dropNegligibleArcs` / `absorbSandwichedCornerArcs` regression tests for the two latent classification bugs the removed `simplifyCollinear` pass used to mask
 - End-to-end regression against a realistically-noisy synthetic roundabout (mirrors the real `roundabout_coordinates.csv` bug): 0 visible facets, max turning angle < 20°
+- Survey-CSV export: named header emitted, ORIGINAL lat/lon written (never projected metres), `Name` increasing, `Code` per drawn path, feature labels preserved and de-duplicated across a jump split, commas stripped, filename sanitised, 8-dp precision kept
+- Staging chain: step order, plan body invariants (`optimize:true`, no `origin_gps`), adaptive `line_spacing` for large surveys, and each failure surface (upload reject, planner 422, missing mission id, staged read-back 404, network throw, empty error body)
+- Ellipsoidal GPS projection for CSV parse (shorter north than sphere at ~13° lat)
+- Spray-run hydration: one line per run, full polyline preserved, polyline length, junction continuity, independent mark/transit numbering, invalid-point rejection
+
+**Cross-checked against the real rover code** (`D:\projects\Three_Wheel_V2_Backend`), not just
+mocks — the generated files for all three CSVs were fed to the actual
+`survey_csv.read_survey_csv` and `PathEngine.plan_file`:
+
+| File | Rover-parsed segments | Points |
+|---|---|---|
+| `curve_6_points.csv` | `csv:path_1` | 8 (2 re-stationed shots collapsed) |
+| `roads_coordinates.csv` | `csv:Haddows Road`, `csv:College Road` | 844 / 1631 |
+| `roundabout_coordinates.csv` | `csv:Egmore Roundabout - West circle`, `… - East circle` | 146 / 142 |
+
+Identical segmentation, point counts, `geo_origin` and names to parsing the operator's raw
+file — i.e. the normalisation is lossless where the rover could already read the file, and
+corrective where it could not.
 
 ---
 
@@ -429,8 +570,11 @@ Roundabout B,24.720050,46.680050
 | Path-terminus reconstruction | The very first/last sample of the whole tessellated path (open-path end, or either end of a single whole-loop-fit arc) is the fitted circle's own angle+radius reconstruction, not the raw survey point — by design, so it stays smooth/on-circle with its neighbors — so it can differ from the raw endpoint by up to `fitToleranceM`. Internal joints between two primitives do not have this gap (fixed; see §3.4) |
 | Very short primitive flanked by a large-radius arc and a real corner | One documented edge case in `roads_coordinates.csv` (College Road): a ~0.5 m primitive sandwiched between a very-large-radius ("nearly straight") arc transition and a real corner still shows a ~10° kink after the §3.4 smoothing-floor fixes — the two adjacent joints' fillets interact in a way the per-joint budget model doesn't fully resolve. Down from 94.8° (unfixed) / 10.9° (notch fix only); not chased further via a new primitive-merging pass given the narrow, single-location scope |
 | Pin cap | Max 1000 gold markers; full path still drawn |
-| NED CSV | No lat/lon → not absolute Earth placement like GPS |
-| Preview vs mission | Refined path is for **preview**; full mission stage to rover is separate product work |
+| NED CSV | No lat/lon → not absolute Earth placement like GPS; stages as `LOCAL_NED` and is placed relative to where the rover stands (the Send-to-Rover panel warns) |
+| Preview vs driven geometry | The on-device refined path is an **approximation** of what the rover will drive. The rover re-plans with its own fitter (Kåsa, fixed 2.5 cm tolerance, 15 cm max deviation) where ours uses Hyper with a per-file adaptive tolerance, and it tessellates denser. Map is redrawn from the plan (`sprayRunsToPlanLines`) before and after load. GPS→NED preview scale is ellipsoidal (Phase 3 scoped); fitter parity is still Phase 2 |
+| Rover-side corner handling | CSV Send posts `line-config` with `fillet_corners_m: 0` (surveyed corners kept sharp — marking-spec default). Preview still fillets for map cosmetics. Backend arc fit now uses Hyper + adaptive tolerance + 3° angular sample cap (Phase 2) |
+| `mark` column | When any row is `mark=false`, export writes a `Mark` column; the rover parser splits into MARK/TRANSIT runs. Files without the column stay all-MARK |
+| Uploaded files accumulate | Each send writes `<name>.csv` into the rover's missions dir (re-sending the same file overwrites). **Clear Plan / Clear local CSV** best-effort `DELETE /api/path/{filename}` for that survey name; other leftover uploads are not swept |
 | Metro/network | Device must reach packager (subnet/USB/tunnel) — unrelated to CSV logic |
 | Grouping false-negative | Two genuinely unrelated paths with no grouping column whose ends happen to land close together (below the jump-distance threshold) still get bridged into one path — a real feature/road column always resolves this; there's no reliable geometry-only way to detect it without risking false splits on legitimate dense data |
 | Grouping column name collisions | Only `feature`/`road`/`track`/`segment`/`route`/`path` are recognized, and only when their values actually repeat (avg ≥ 2 rows/value) — a raw survey export's unique-per-point `Name`/`Point Name`/`ID`-style column is correctly never treated as a feature grouping. If a future export format uses one of the recognized alias words for a per-point ID instead, the cardinality guard still catches it, but an unrecognized alias word used as a genuine multi-feature grouping column would not be detected |

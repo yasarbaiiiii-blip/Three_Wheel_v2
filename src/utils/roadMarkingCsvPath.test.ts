@@ -874,3 +874,136 @@ function fitCircleBuggyA1(
   );
   return Number.isFinite(r) && r > 0.05 ? r : null;
 }
+
+// ── Robustness: the preview must survive ANY file, not just dense road surveys ──────────
+//
+// Every case below was measured failing before the fixes these lock in. The failure mode
+// was silent: no error, no warning, just a preview that no longer described the survey.
+
+/** Ring of `n` points, radius `r`, with deterministic noise. Not closed (last ≠ first). */
+function ringPoints(r: number, n: number, noiseM = 0): RoadMarkingNedPoint[] {
+  return Array.from({ length: n }, (_, i) => {
+    const a = (i / n) * 2 * Math.PI;
+    return {
+      north: r * Math.sin(a) + detNoise(i, noiseM),
+      east: r * Math.cos(a) + detNoise(i + 500, noiseM),
+    };
+  });
+}
+
+function extentOf(points: RoadMarkingNedPoint[]): { n: number; e: number } {
+  const n = points.map((p) => p.north);
+  const e = points.map((p) => p.east);
+  return { n: Math.max(...n) - Math.min(...n), e: Math.max(...e) - Math.min(...e) };
+}
+
+/** Fraction of the source bounding box the refined path still covers, worst axis. */
+function extentRetained(src: RoadMarkingNedPoint[], out: RoadMarkingNedPoint[]): number {
+  const a = extentOf(src);
+  const b = extentOf(out);
+  return Math.min(a.n > 0 ? b.n / a.n : 1, a.e > 0 ? b.e / a.e : 1);
+}
+
+describe("estimateAdaptiveTolerance — noise vs curvature", () => {
+  it("does not mistake sparse sampling of a curve for measurement noise", () => {
+    // Same 11.5 m ring, same (zero) noise, only the sampling density differs. A residual
+    // measured at one window size scales with spacing², so the sparse ring used to report
+    // ~8x the tolerance of the dense one and its geometry was then discarded as noise.
+    const dense = estimateAdaptiveTolerance(ringPoints(11.5, 146));
+    const sparse = estimateAdaptiveTolerance(ringPoints(11.5, 40));
+    expect(sparse).toBeLessThan(dense * 2);
+  });
+
+  it("still reports a genuinely noisy survey as noisy", () => {
+    const clean = estimateAdaptiveTolerance(ringPoints(11.5, 146, 0.005));
+    const noisy = estimateAdaptiveTolerance(ringPoints(11.5, 146, 0.4));
+    expect(noisy).toBeGreaterThan(clean);
+  });
+
+  it("stays within the documented clamp for any input", () => {
+    for (const pts of [ringPoints(0.5, 40), ringPoints(500, 40, 2), ringPoints(11.5, 9, 0.01)]) {
+      const tol = estimateAdaptiveTolerance(pts);
+      expect(tol).toBeGreaterThanOrEqual(0.05);
+      expect(tol).toBeLessThanOrEqual(1.5);
+    }
+  });
+});
+
+describe("tryWholeLoopFit — judged against the fit budget, not the noise floor", () => {
+  it("accepts a real ring that deviates more than survey noise but within paint tolerance", () => {
+    // A surveyed roundabout is never a perfect circle; the real Egmore rings sit ~11-13 cm
+    // off their best-fit circle. Judged against the noise floor they were rejected and the
+    // ring shattered into faceted arcs.
+    const ring = ringPoints(11.5, 146).map((p, i) => ({
+      north: p.north * (i % 2 === 0 ? 1.009 : 1),
+      east: p.east,
+    }));
+    expect(tryWholeLoopFit(ring, 0.02)).not.toBeNull();
+  });
+
+  it("still refuses a shape that is genuinely not a circle", () => {
+    const oval = ringPoints(11.5, 146).map((p) => ({ north: p.north * 1.6, east: p.east }));
+    expect(tryWholeLoopFit(oval, 0.05)).toBeNull();
+  });
+
+  it("does not reject a loop for being coarsely surveyed", () => {
+    // Ends of a ring shot every ~1.8 m are ~1.8 m apart however perfectly closed it is.
+    expect(tryWholeLoopFit(ringPoints(11.5, 40), 0.06)).not.toBeNull();
+  });
+
+  it("still refuses an open path whose ends are genuinely far apart", () => {
+    const arc = Array.from({ length: 40 }, (_, i) => {
+      const a = (i / 39) * Math.PI; // half circle — ends 23 m apart
+      return { north: 11.5 * Math.sin(a), east: 11.5 * Math.cos(a) };
+    });
+    expect(tryWholeLoopFit(arc, 0.06)).toBeNull();
+  });
+});
+
+describe("preview integrity — geometry is never silently lost", () => {
+  const cases: [string, RoadMarkingNedPoint[]][] = [
+    ["ring r=2 n=40", ringPoints(2, 40, 0.02)],
+    ["ring r=11.5 n=20", ringPoints(11.5, 20, 0.02)],
+    ["ring r=11.5 n=40", ringPoints(11.5, 40, 0.02)],
+    ["ring r=11.5 n=60", ringPoints(11.5, 60, 0.02)],
+    ["ring r=11.5 n=146", ringPoints(11.5, 146, 0.02)],
+    ["ring r=50 n=40", ringPoints(50, 40, 0.02)],
+    ["ring r=0.5 n=40", ringPoints(0.5, 40, 0.005)],
+    ["ring r=200 n=40", ringPoints(200, 40, 0.05)],
+  ];
+
+  it.each(cases)("keeps the surveyed extent: %s", (_label, pts) => {
+    // Before the fix, a 23 m ring shot with 40 points rendered as a 1.8 m stub (8 %).
+    expect(extentRetained(pts, buildRoadMarkingPreviewPoints(pts))).toBeGreaterThan(0.9);
+  });
+
+  it.each(cases)("renders without visible facets: %s", (_label, pts) => {
+    expect(maxTurningAngleDeg(buildRoadMarkingPreviewPoints(pts))).toBeLessThanOrEqual(4);
+  });
+
+  it("keeps the extent of an open path too", () => {
+    const sCurve = Array.from({ length: 120 }, (_, i) => {
+      const t = (i / 119) * 2 * Math.PI;
+      return { north: 5 * t, east: 10 * Math.sin(t) + detNoise(i, 0.02) };
+    });
+    expect(extentRetained(sCurve, buildRoadMarkingPreviewPoints(sCurve))).toBeGreaterThan(0.9);
+  });
+});
+
+describe("preview sampling stays bounded", () => {
+  it("does not explode on a very large survey", () => {
+    // Arc-length pacing alone would ask for ~18k vertices on a 1 km-radius ring. The
+    // 8000 target is derived from the chord polygon, so allow the documented small
+    // overshoot rather than asserting a bound the implementation does not claim.
+    const huge = ringPoints(1000, 40);
+    expect(buildRoadMarkingPreviewPoints(huge).length).toBeLessThan(8400);
+  });
+
+  it("leaves road-scale files at the default spacing", () => {
+    // A 23 m ring is nowhere near the cap, so its sampling must be untouched.
+    const ring = ringPoints(11.5, 146, 0.02);
+    const out = buildRoadMarkingPreviewPoints(ring);
+    expect(out.length).toBeGreaterThan(150);
+    expect(out.length).toBeLessThan(400);
+  });
+});

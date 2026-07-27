@@ -23,7 +23,29 @@ export type VisualAlignmentTransform = {
   scaleEast?: number;
 };
 
-const EARTH_RADIUS = 6378137.0;
+// WGS84 — match rover path_engine/parsers/georef.py (metres_per_degree).
+// Previously used spherical a for both axes (~0.6 % long on north at Chennai lat).
+const WGS84_A = 6378137.0;
+const WGS84_F = 1.0 / 298.257223563;
+const WGS84_E2 = WGS84_F * (2.0 - WGS84_F);
+
+/** (north, east) metres per degree at lat0 on the WGS84 ellipsoid. */
+export function metresPerDegreeShared(lat0Deg: number): {
+  mPerDegNorth: number;
+  mPerDegEast: number;
+} {
+  const lat0 = (lat0Deg * Math.PI) / 180;
+  const s = Math.sin(lat0);
+  const w2 = 1.0 - WGS84_E2 * s * s;
+  const w = Math.sqrt(w2);
+  const mMeridional = (WGS84_A * (1.0 - WGS84_E2)) / (w2 * w);
+  const nPrimeVertical = WGS84_A / w;
+  const perRad = Math.PI / 180;
+  return {
+    mPerDegNorth: mMeridional * perRad,
+    mPerDegEast: nPrimeVertical * perRad * Math.cos(lat0),
+  };
+}
 
 /** Rotate + translate a DXF point into local north/east metres (latchedOrigin frame). */
 export function transformVisualDxfPoint(
@@ -50,11 +72,11 @@ export function projectLocalMetersToGps(
   originLat: number,
   originLon: number
 ): { lat: number; lon: number } {
-  const originLatRad = (originLat * Math.PI) / 180;
-  const lat = originLat + (north / EARTH_RADIUS) * (180 / Math.PI);
-  const lon =
-    originLon + (east / (EARTH_RADIUS * Math.cos(originLatRad))) * (180 / Math.PI);
-  return { lat, lon };
+  const { mPerDegNorth, mPerDegEast } = metresPerDegreeShared(originLat);
+  return {
+    lat: originLat + north / mPerDegNorth,
+    lon: originLon + east / mPerDegEast,
+  };
 }
 
 export function projectGpsToLocalMeters(
@@ -63,11 +85,11 @@ export function projectGpsToLocalMeters(
   originLat: number,
   originLon: number
 ): { north: number; east: number } {
-  const originLatRad = (originLat * Math.PI) / 180;
-  const north = (lat - originLat) * (EARTH_RADIUS * Math.PI) / 180;
-  const east =
-    (lon - originLon) * (EARTH_RADIUS * Math.cos(originLatRad) * Math.PI) / 180;
-  return { north, east };
+  const { mPerDegNorth, mPerDegEast } = metresPerDegreeShared(originLat);
+  return {
+    north: (lat - originLat) * mPerDegNorth,
+    east: (lon - originLon) * mPerDegEast,
+  };
 }
 
 export type VisualAlignmentRefPoint = {

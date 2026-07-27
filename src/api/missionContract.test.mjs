@@ -50,6 +50,33 @@ test("legacy start preserves filename behavior", () => {
   );
 });
 
+test("CSV trajectory start without staged verification never falls through to path_name", () => {
+  assert.throws(
+    () =>
+      buildMissionStartPayload({
+        stagedMissionId: null,
+        stagedVerified: false,
+        fileName: "roads.csv",
+        autoOrigin: false,
+        requireStagedMission: true,
+      }),
+    /not staged-verified|filename start/i
+  );
+});
+
+test("CSV staged-verified start still uses mission_id", () => {
+  assert.deepEqual(
+    buildMissionStartPayload({
+      stagedMissionId: "stg_csv_1",
+      stagedVerified: true,
+      fileName: "roads.csv",
+      autoOrigin: true,
+      requireStagedMission: true,
+    }),
+    { mission_id: "stg_csv_1", auto_origin: false }
+  );
+});
+
 test("loaded ID mismatch blocks staged start", () => {
   const gate = evaluateMissionStartGate({
     stagedVerified: true,

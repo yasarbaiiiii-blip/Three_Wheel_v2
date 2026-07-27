@@ -35,3 +35,17 @@ export const SMOKE_TEST_MAPBOX = false;
 
 /** Real field coordinate for the smoke test, [longitude, latitude]. */
 export const SMOKE_TEST_CENTER: [number, number] = [77.5946, 12.9716]; // Bangalore
+
+/**
+ * CSV mission planner routing (CSV_APP_PLANNED_TRAJECTORY_PLAN Phase 8).
+ *
+ * - `"rover"` (DEFAULT until plan-trajectory is bench-signed): today's flow —
+ *   survey CSV upload → plan-and-stage with optimize:true.
+ * - `"app"`: offline geometry via buildTrajectory → POST /api/path/plan-trajectory
+ *   → verify run_echo before Load.
+ *
+ * Flip to `"app"` only after backend asks 1–4 and Phase 7 differential check.
+ * `"rover"` restores the file path with no other code changes.
+ */
+export type CsvPlannerMode = "app" | "rover";
+export const CSV_PLANNER: CsvPlannerMode = "rover";

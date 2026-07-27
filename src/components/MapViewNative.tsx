@@ -744,8 +744,11 @@ export function MapViewNative(props: MapViewProps) {
 
       // During drag, stick to the live preview polyline that matches this start line
       // index so the pin tracks the finger-moved plan.
+      // Only `previewItemsGeo` here — `placedItemsGeo` is declared later in this
+      // component (temporal dead zone / TS2448). Off-drag we fall through to
+      // transformVisualDxfPoint from sticker pose, which is the committed truth.
       const startLineIdx = sticker.lines.findIndex((l) => l.id === startLine.id);
-      const liveLines = (previewItemsGeo ?? placedItemsGeo)?.lines?.features ?? [];
+      const liveLines = previewItemsGeo?.lines?.features ?? [];
       const liveFeat =
         startLineIdx >= 0 &&
         liveLines[startLineIdx]?.geometry?.type === "LineString" &&
@@ -824,7 +827,7 @@ export function MapViewNative(props: MapViewProps) {
         planEast,
       }),
     ]);
-  }, [lines, originSig, mode, projectionOrigin, placedItems, placedItemsGeo, previewItemsGeo]);
+  }, [lines, originSig, mode, projectionOrigin, placedItems, previewItemsGeo]);
 
   // ── Multi-Point pickable vertex anchors (shown only while guide-point mode is on) ──
   // Clickable dots on path endpoints / corners so operators do not need a perfect path hit.

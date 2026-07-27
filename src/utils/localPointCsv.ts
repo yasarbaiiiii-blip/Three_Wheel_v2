@@ -6,15 +6,33 @@
  *
  * GPS header rules match guide/ref CSV (`parseGuidePointsCsv`) so the same file
  * lands at the same map position in both Upload plan and Import guide CSV.
+ *
+ * Local metres for GPS rows use the shared WGS84 ellipsoidal projection
+ * (`visualAlignment.projectGpsToLocalMeters` / rover `georef.metres_per_degree`).
  */
 
-import { projectGpsToLocalMeters } from "./visualAlignment";
+import { metresPerDegreeShared, projectGpsToLocalMeters } from "./visualAlignment";
 import { splitCsvCells } from "./refPointsCsv";
 import { buildRoadMarkingPreviewPoints, splitIntoOpenPathGroups } from "./roadMarkingCsvPath";
 import type { PlanLine } from "../types/plan";
 
 /** Soft cap for map pin markers (polyline still uses full point set). */
 export const LOCAL_CSV_MAX_MAP_PINS = 1000;
+
+/** Re-export of shared WGS84 metres-per-degree (rover georef parity). */
+export function metresPerDegree(lat0Deg: number): { mPerDegNorth: number; mPerDegEast: number } {
+  return metresPerDegreeShared(lat0Deg);
+}
+
+/** Alias of shared ellipsoidal GPS→NED (kept for tests that imported this name). */
+export function projectGpsToLocalMetersEllipsoid(
+  lat: number,
+  lon: number,
+  originLat: number,
+  originLon: number
+): { north: number; east: number } {
+  return projectGpsToLocalMeters(lat, lon, originLat, originLon);
+}
 
 const LAT_ALIASES = new Set(["lat", "latitude"]);
 const LON_ALIASES = new Set(["lon", "lng", "long", "longitude"]);
@@ -23,6 +41,14 @@ const NORTH_ALIASES = new Set(["north", "north_m", "northing"]);
 const EAST_ALIASES = new Set(["east", "east_m", "easting"]);
 const DWELL_ALIASES = new Set(["dwell_s", "dwell", "dwell_sec"]);
 const MARK_ALIASES = new Set(["mark", "is_mark", "spray"]);
+/** Survey quality columns (Phase 6) — aliases match rover survey CSV reader. */
+const FIX_ALIASES = new Set(["solution status", "solution", "fix", "fix type", "quality"]);
+const SAMPLES_ALIASES = new Set(["samples", "epochs"]);
+const HRMS_ALIASES = new Set(["lateral rms", "horizontal rms", "hrms"]);
+const PDOP_ALIASES = new Set(["pdop"]);
+
+/** Operator threshold for horizontal RMS warning (metres). */
+export const SURVEY_HRMS_WARN_M = 0.05;
 /**
  * Optional grouping column: multiple independent paths (roundabouts, separate roads) are
  * routinely bundled in one survey export. Without this, every row is treated as one
@@ -67,6 +93,11 @@ export type LocalPointCsvPoint = {
   lon?: number;
   /** Present when the CSV had a feature/road/name-style grouping column. */
   group?: string;
+  /** Optional survey quality (Phase 6) — warn only, never block. */
+  fix_status?: string;
+  samples?: number;
+  hrms_m?: number;
+  pdop?: number;
 };
 
 export type LocalPointCsvResult = {
@@ -131,7 +162,27 @@ type ColMap = {
   dwellIdx?: number;
   markIdx?: number;
   groupIdx?: number;
+  fixIdx?: number;
+  samplesIdx?: number;
+  hrmsIdx?: number;
+  pdopIdx?: number;
 };
+
+function qualityIndices(find: (aliases: Set<string>) => number): Pick<
+  ColMap,
+  "fixIdx" | "samplesIdx" | "hrmsIdx" | "pdopIdx"
+> {
+  const fixIdx = find(FIX_ALIASES);
+  const samplesIdx = find(SAMPLES_ALIASES);
+  const hrmsIdx = find(HRMS_ALIASES);
+  const pdopIdx = find(PDOP_ALIASES);
+  return {
+    fixIdx: fixIdx >= 0 ? fixIdx : undefined,
+    samplesIdx: samplesIdx >= 0 ? samplesIdx : undefined,
+    hrmsIdx: hrmsIdx >= 0 ? hrmsIdx : undefined,
+    pdopIdx: pdopIdx >= 0 ? pdopIdx : undefined,
+  };
+}
 
 function resolveHeader(cells: string[]): ColMap | null {
   const lower = cells.map((c) => c.trim().toLowerCase());
@@ -151,6 +202,7 @@ function resolveHeader(cells: string[]): ColMap | null {
       dwellIdx: dwellIdx >= 0 ? dwellIdx : undefined,
       markIdx: markIdx >= 0 ? markIdx : undefined,
       groupIdx: groupIdx >= 0 ? groupIdx : undefined,
+      ...qualityIndices(find),
     };
   }
 
@@ -167,10 +219,86 @@ function resolveHeader(cells: string[]): ColMap | null {
       dwellIdx: dwellIdx >= 0 ? dwellIdx : undefined,
       markIdx: markIdx >= 0 ? markIdx : undefined,
       groupIdx: groupIdx >= 0 ? groupIdx : undefined,
+      ...qualityIndices(find),
     };
   }
 
   return null;
+}
+
+function readOptionalQuality(
+  cells: string[],
+  colMap: ColMap
+): Pick<LocalPointCsvPoint, "fix_status" | "samples" | "hrms_m" | "pdop"> {
+  const out: Pick<LocalPointCsvPoint, "fix_status" | "samples" | "hrms_m" | "pdop"> = {};
+  if (colMap.fixIdx != null && cells[colMap.fixIdx] != null && cells[colMap.fixIdx].trim() !== "") {
+    out.fix_status = cells[colMap.fixIdx].trim();
+  }
+  if (colMap.samplesIdx != null && cells[colMap.samplesIdx] != null && cells[colMap.samplesIdx].trim() !== "") {
+    const n = Number(cells[colMap.samplesIdx]);
+    if (Number.isFinite(n)) out.samples = n;
+  }
+  if (colMap.hrmsIdx != null && cells[colMap.hrmsIdx] != null && cells[colMap.hrmsIdx].trim() !== "") {
+    const n = Number(cells[colMap.hrmsIdx]);
+    if (Number.isFinite(n)) out.hrms_m = n;
+  }
+  if (colMap.pdopIdx != null && cells[colMap.pdopIdx] != null && cells[colMap.pdopIdx].trim() !== "") {
+    const n = Number(cells[colMap.pdopIdx]);
+    if (Number.isFinite(n)) out.pdop = n;
+  }
+  return out;
+}
+
+/**
+ * Survey quality warnings (Phase 6). Warn only — matches rover behaviour; never blocks parse.
+ */
+export function collectSurveyQualityWarnings(
+  points: LocalPointCsvPoint[],
+  hrmsWarnM: number = SURVEY_HRMS_WARN_M
+): string[] {
+  const warnings: string[] = [];
+  let nonFix = 0;
+  let singleEpoch = 0;
+  let highHrms = 0;
+  let worstHrms = 0;
+  let maxPdop: number | null = null;
+
+  for (const p of points) {
+    if (p.fix_status != null) {
+      const s = p.fix_status.trim().toUpperCase();
+      if (s !== "FIX" && s !== "4" && s !== "RTK_FIXED" && s !== "RTK FIXED") {
+        nonFix += 1;
+      }
+    }
+    if (p.samples != null && p.samples <= 1) singleEpoch += 1;
+    if (p.hrms_m != null && p.hrms_m > hrmsWarnM) {
+      highHrms += 1;
+      worstHrms = Math.max(worstHrms, p.hrms_m);
+    }
+    if (p.pdop != null && Number.isFinite(p.pdop)) {
+      maxPdop = maxPdop == null ? p.pdop : Math.max(maxPdop, p.pdop);
+    }
+  }
+
+  if (nonFix > 0) {
+    warnings.push(
+      `${nonFix} survey point${nonFix === 1 ? "" : "s"} without FIX solution — position may be less reliable.`
+    );
+  }
+  if (singleEpoch > 0) {
+    warnings.push(
+      `${singleEpoch} point${singleEpoch === 1 ? "" : "s"} with ≤1 average sample/epoch — consider re-averaging.`
+    );
+  }
+  if (highHrms > 0) {
+    warnings.push(
+      `${highHrms} point${highHrms === 1 ? "" : "s"} with horizontal RMS > ${hrmsWarnM} m (worst ${worstHrms.toFixed(3)} m).`
+    );
+  }
+  if (maxPdop != null) {
+    warnings.push(`Survey PDOP (max): ${maxPdop.toFixed(2)}.`);
+  }
+  return warnings;
 }
 
 /**
@@ -223,7 +351,18 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
   }
 
   const warnings: string[] = [];
-  const rawGps: { lat: number; lon: number; mark: boolean; dwell_s: number | null; source_index: number; group?: string }[] = [];
+  const rawGps: {
+    lat: number;
+    lon: number;
+    mark: boolean;
+    dwell_s: number | null;
+    source_index: number;
+    group?: string;
+    fix_status?: string;
+    samples?: number;
+    hrms_m?: number;
+    pdop?: number;
+  }[] = [];
   const rawNed: LocalPointCsvPoint[] = [];
 
   for (let i = dataStart; i < lines.length; i++) {
@@ -236,6 +375,7 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
         colMap.groupIdx != null && cells[colMap.groupIdx] != null && cells[colMap.groupIdx].trim() !== ""
           ? cells[colMap.groupIdx].trim()
           : undefined;
+      const quality = readOptionalQuality(cells, colMap);
 
       if (colMap.kind === "gps") {
         const lat = Number(cells[colMap.latIdx!]);
@@ -252,7 +392,7 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
             : true;
         const dwell_s =
           colMap.dwellIdx != null ? parseOptionalDwell(cells[colMap.dwellIdx], rowNum) : null;
-        rawGps.push({ lat, lon, mark, dwell_s, source_index: rowNum, group });
+        rawGps.push({ lat, lon, mark, dwell_s, source_index: rowNum, group, ...quality });
       } else {
         const north = Number(cells[colMap.northIdx!]);
         const east = Number(cells[colMap.eastIdx!]);
@@ -272,6 +412,7 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
           dwell_s,
           source_index: rowNum,
           group,
+          ...quality,
         });
       }
     } catch (e) {
@@ -303,8 +444,13 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
         lat: row.lat,
         lon: row.lon,
         group: groupingValid ? row.group : undefined,
+        fix_status: row.fix_status,
+        samples: row.samples,
+        hrms_m: row.hrms_m,
+        pdop: row.pdop,
       };
     });
+    warnings.push(...collectSurveyQualityWarnings(points));
     return {
       kind: "gps",
       fileName,
@@ -326,6 +472,7 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
 
   const nedGroupingValid = hasLowCardinalityGrouping(rawNed.map((row) => row.group));
   const nedPoints = nedGroupingValid ? rawNed : rawNed.map((row) => ({ ...row, group: undefined }));
+  warnings.push(...collectSurveyQualityWarnings(nedPoints));
 
   return {
     kind: "ned",

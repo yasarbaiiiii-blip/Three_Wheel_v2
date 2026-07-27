@@ -306,6 +306,26 @@ export function deletePath(apiBaseUrl: string, pathName: string): Promise<Respon
   });
 }
 
+export type SurveyLineConfig = {
+  fillet_corners_m?: number;
+  fit_arcs_max_dev_m?: number | null;
+};
+
+export function saveLineConfig(
+  apiBaseUrl: string,
+  pathName: string,
+  config: SurveyLineConfig
+): Promise<Response> {
+  return postJson(apiBaseUrl, `/api/path/${encodeURIComponent(pathName)}/line-config`, config);
+}
+
+export function getLineConfig(apiBaseUrl: string, pathName: string): Promise<Response> {
+  return fetch(apiUrl(apiBaseUrl, `/api/path/${encodeURIComponent(pathName)}/line-config`), {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+}
+
 export type { DxfEntitiesResponse };
 
 /** Step-by-step result for the Load to Controller orchestrator */

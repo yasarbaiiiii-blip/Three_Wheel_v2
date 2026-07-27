@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PlanLine } from "../types/plan";
 import type { AutoOriginReference } from "../types/autoOrigin";
+import { projectLocalMetersToGps } from "./visualAlignment";
 import {
   buildPlanManipulationAnchor,
   projectPlanLineToGpsSegments,
@@ -325,10 +326,11 @@ function projectLatLonForOffset(
   northM: number,
   eastM: number
 ): [number, number] {
-  // Mirrors projectLocalMetersToGps() in visualAlignment.ts (same EARTH_RADIUS).
-  const EARTH_RADIUS = 6378137.0;
-  const originLatRad = (origin.originLat * Math.PI) / 180;
-  const lat = origin.originLat + (northM / EARTH_RADIUS) * (180 / Math.PI);
-  const lon = origin.originLon + (eastM / (EARTH_RADIUS * Math.cos(originLatRad))) * (180 / Math.PI);
+  // Delegates to the SAME helper production uses. This used to re-implement the formula
+  // inline, which silently became a different projection the day the shared helper moved
+  // from a sphere to the WGS84 ellipsoid — the test then asserted the old model and failed
+  // by ~1.1 cm on a correct implementation. A test that duplicates the thing it is checking
+  // cannot detect a change in it, so don't reintroduce the copy.
+  const { lat, lon } = projectLocalMetersToGps(northM, eastM, origin.originLat, origin.originLon);
   return [lat, lon];
 }

@@ -6,6 +6,7 @@ import Slider from "@react-native-community/slider";
 import { generateRoadSignLines, ROAD_SIGN_LABELS, type RoadSignType } from "../../../utils/roadSignTemplates";
 import { generateTextLines, type FontStyle } from "../../../utils/characterTemplates";
 import { linesToDxf } from "../../../utils/dxfGenerator";
+import { placeTemplateLinesInCsvFrame } from "../../../utils/csvTemplatePlacement";
 import type { PlanLine } from "../../../types/plan";
 import { FIELDS_COLORS } from "../fieldsTheme";
 import { RoadSignThumbnail } from "../RoadSignThumbnail";
@@ -29,6 +30,13 @@ type TemplatePanelProps = {
   onToggleShowSnapPoints?: (enabled: boolean) => void;
   telemetryPosN?: number | null;
   telemetryPosE?: number | null;
+  /**
+   * CSV mission flow: add templates locally (no parse-dxf). Lines are converted to
+   * CSV NED convention before the callback. DXF / Templates page keeps the default.
+   */
+  placementMode?: "dxf" | "csvLocal";
+  /** Required when placementMode is csvLocal. */
+  onAddLocalTemplateLines?: (lines: PlanLine[]) => void;
 };
 
 export function TemplatePanel(props: TemplatePanelProps) {
@@ -69,7 +77,6 @@ export function TemplatePanel(props: TemplatePanelProps) {
   }, [charactersEnabled, previewText, fontStyle, selectedSign, parsedSize]);
 
   const handleParse = async () => {
-    if (!apiBaseUrl) return;
     if (previewLines.length === 0) {
       Alert.alert("Empty Template", "No valid template to generate.");
       return;
@@ -78,6 +85,34 @@ export function TemplatePanel(props: TemplatePanelProps) {
     const title = charactersEnabled
       ? `Text_${previewText || "Empty"}_${parsedSize}m`
       : `Road_Sign_${ROAD_SIGN_LABELS[selectedSign].replace(/\s+/g, "_")}_${parsedSize}m`;
+
+    // CSV mission: place locally in NED CSV frame — never leave the CSV flow via parse-dxf.
+    if (props.placementMode === "csvLocal") {
+      if (!props.onAddLocalTemplateLines) {
+        Alert.alert("Error", "CSV template placement is not wired.");
+        return;
+      }
+      setIsParsing(true);
+      try {
+        const placed = placeTemplateLinesInCsvFrame(previewLines, {
+          roverNorth: boundaryMode ? 0 : (props.telemetryPosN ?? 0),
+          roverEast: boundaryMode ? 0 : (props.telemetryPosE ?? 0),
+          offsetEast: boundaryMode ? 0 : 2.0,
+          offsetNorth: 0,
+          idPrefix: `csv-tpl-${Date.now().toString(36)}`,
+          labelPrefix: title,
+        });
+        props.onAddLocalTemplateLines(placed);
+        Alert.alert("Added", `${placed.length} template stroke(s) added to the CSV mission.`);
+      } catch (err: any) {
+        Alert.alert("Error", err?.message || "Failed to place template on CSV mission.");
+      } finally {
+        setIsParsing(false);
+      }
+      return;
+    }
+
+    if (!apiBaseUrl) return;
 
     setIsParsing(true);
     try {

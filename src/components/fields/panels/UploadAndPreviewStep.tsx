@@ -32,12 +32,15 @@ type UploadAndPreviewStepProps = {
   onClearLocalCsv?: () => void;
   /**
    * Lets the operator import a guide-points CSV once the plan preview is up
-   * (same parser as Align step).
+   * (same parser as Align step). Hidden for mission-path CSV uploads — those
+   * already carry survey geometry; guide CSV is only for DXF multi-point align.
    */
   onImportRefPointsCsv?: () => void;
   isImportingRefPointsCsv?: boolean;
   /** When set, the guide-CSV button shows this file name instead of a generic label. */
   guideCsvFileName?: string | null;
+  /** When true, hide "Import guide CSV" (mission survey CSV already loaded). */
+  hideGuideCsvImport?: boolean;
 };
 
 const MAX_IMPORT_ATTEMPTS = 3;
@@ -155,6 +158,7 @@ export function UploadAndPreviewStep({
   onImportRefPointsCsv,
   isImportingRefPointsCsv = false,
   guideCsvFileName = null,
+  hideGuideCsvImport = false,
 }: UploadAndPreviewStepProps) {
   const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -611,8 +615,8 @@ export function UploadAndPreviewStep({
             </Text>
           </Pressable>
 
-          {/* Guide-points CSV — label becomes the uploaded file name after import */}
-          {onImportRefPointsCsv ? (
+          {/* Guide-points CSV — DXF/waypoints only; hide for mission survey CSV */}
+          {onImportRefPointsCsv && !hideGuideCsvImport && !localCsvSummary ? (
             <Pressable
               onPress={onImportRefPointsCsv}
               disabled={protectedResident || isImportingRefPointsCsv}
