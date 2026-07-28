@@ -13,8 +13,15 @@
 
 import { metresPerDegreeShared, projectGpsToLocalMeters } from "./visualAlignment";
 import { splitCsvCells } from "./refPointsCsv";
-import { buildRoadMarkingPreviewPoints, splitIntoOpenPathGroups } from "./roadMarkingCsvPath";
+import {
+  buildRoadMarkingFittedPath,
+  polylineLengthM,
+  splitIntoOpenPathGroups,
+} from "./roadMarkingCsvPath";
 import type { PlanLine } from "../types/plan";
+
+/** NED metres larger than this are almost certainly projected CRS, not local site metres. */
+export const PROJECTED_COORD_BLOCK_M = 10_000;
 
 /** Soft cap for map pin markers (polyline still uses full point set). */
 export const LOCAL_CSV_MAX_MAP_PINS = 1000;
@@ -133,8 +140,79 @@ function nonEmptyLines(text: string): string[] {
 
 function looksNumeric(cell: string): boolean {
   if (!cell.trim()) return false;
-  const n = Number(cell);
+  const n = Number(cell.replace(",", "."));
   return Number.isFinite(n);
+}
+
+/** Detect `,` / `;` / tab from the first non-empty line (European Excel often uses `;`). */
+export function detectCsvDelimiter(line: string): "," | ";" | "\t" {
+  let inQuotes = false;
+  let commas = 0;
+  let semis = 0;
+  let tabs = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        i++;
+        continue;
+      }
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (inQuotes) continue;
+    if (ch === ",") commas += 1;
+    else if (ch === ";") semis += 1;
+    else if (ch === "\t") tabs += 1;
+  }
+  if (tabs > commas && tabs > semis) return "\t";
+  if (semis > commas) return ";";
+  return ",";
+}
+
+/** Split one CSV line with the given delimiter (quoted fields supported). */
+export function splitDelimitedCells(line: string, delimiter: "," | ";" | "\t" = ","): string[] {
+  if (delimiter === ",") return splitCsvCells(line);
+  const cells: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        current += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === delimiter) {
+      cells.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  cells.push(current);
+  // Decimal-comma: when delimiter is `;`, numeric cells may use `,` as decimal.
+  return cells.map((cell) => {
+    const t = cell.trim();
+    if (delimiter === ";" && /^-?\d+,\d+$/.test(t)) return t.replace(",", ".");
+    return t;
+  });
+}
+
+function parseFiniteNumber(raw: string, rowNum: number, label: string): number {
+  const n = Number(String(raw).trim().replace(",", "."));
+  if (!Number.isFinite(n)) {
+    throw new Error(`Row ${rowNum}: ${label} must be numeric`);
+  }
+  return n;
 }
 
 function parseMark(raw: string, rowNum: number): boolean {
@@ -324,6 +402,83 @@ function headerlessGpsMap(firstRow: string[]): ColMap | null {
 }
 
 /**
+ * Pick a robust GPS anchor: median of the densest spatial cluster, not blindly row 1
+ * (a garbage first row used to throw every real point thousands of km away).
+ */
+function robustGpsAnchor(
+  rows: { lat: number; lon: number }[]
+): { lat: number; lon: number; outlierCount: number } {
+  if (rows.length === 1) return { lat: rows[0].lat, lon: rows[0].lon, outlierCount: 0 };
+  // Score each candidate by how many points lie within ~2 km (approx deg).
+  const radiusDeg = 2 / 111; // ~2 km
+  let bestIdx = 0;
+  let bestCount = 0;
+  for (let i = 0; i < rows.length; i++) {
+    let c = 0;
+    for (let j = 0; j < rows.length; j++) {
+      const dlat = rows[i].lat - rows[j].lat;
+      const dlon = rows[i].lon - rows[j].lon;
+      if (dlat * dlat + dlon * dlon <= radiusDeg * radiusDeg) c += 1;
+    }
+    if (c > bestCount) {
+      bestCount = c;
+      bestIdx = i;
+    }
+  }
+  const cluster = rows.filter((r) => {
+    const dlat = r.lat - rows[bestIdx].lat;
+    const dlon = r.lon - rows[bestIdx].lon;
+    return dlat * dlat + dlon * dlon <= radiusDeg * radiusDeg;
+  });
+  const lats = cluster.map((r) => r.lat).sort((a, b) => a - b);
+  const lons = cluster.map((r) => r.lon).sort((a, b) => a - b);
+  const mid = Math.floor(cluster.length / 2);
+  return {
+    lat: lats[mid],
+    lon: lons[mid],
+    outlierCount: rows.length - cluster.length,
+  };
+}
+
+/** Row-order sanity: source polyline vs nearest-neighbour tour (large ratio ⇒ jumbled order). */
+function rowOrderSanityWarning(points: { north_m: number; east_m: number }[]): string | null {
+  if (points.length < 6) return null;
+  let pathLen = 0;
+  for (let i = 1; i < points.length; i++) {
+    pathLen += Math.hypot(
+      points[i].north_m - points[i - 1].north_m,
+      points[i].east_m - points[i - 1].east_m
+    );
+  }
+  // Greedy NN tour length from first point (cheap upper-bound proxy for "drive order").
+  const remaining = new Set(Array.from({ length: points.length }, (_, i) => i));
+  let cur = 0;
+  remaining.delete(0);
+  let nnLen = 0;
+  while (remaining.size > 0) {
+    let best = -1;
+    let bestD = Infinity;
+    for (const j of remaining) {
+      const d = Math.hypot(points[j].north_m - points[cur].north_m, points[j].east_m - points[cur].east_m);
+      if (d < bestD) {
+        bestD = d;
+        best = j;
+      }
+    }
+    nnLen += bestD;
+    remaining.delete(best);
+    cur = best;
+  }
+  if (nnLen > 1e-6 && pathLen > 2.5 * nnLen) {
+    return (
+      `Row order looks jumbled: file-order path is ${(pathLen / nnLen).toFixed(1)}× a nearest-neighbour tour. ` +
+      `Check point order before painting (order is never auto-rewritten).`
+    );
+  }
+  return null;
+}
+
+/**
  * Parse a point CSV entirely on-device.
  * @throws Error with a human-readable message when the file cannot be used.
  */
@@ -333,9 +488,11 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
     throw new Error("The CSV file is empty.");
   }
 
-  const firstCells = splitCsvCells(lines[0]);
+  const delimiter = detectCsvDelimiter(lines[0]);
+  const firstCells = splitDelimitedCells(lines[0], delimiter);
   let colMap = resolveHeader(firstCells);
   let dataStart = 0;
+  let headerless = false;
 
   if (colMap) {
     dataStart = 1;
@@ -344,13 +501,19 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
     if (!colMap) {
       throw new Error(
         "Unrecognized CSV. Expected lat/lon (or latitude/longitude) columns " +
-          "(same as guide CSV), north/east headers, or headerless lat,lon rows."
+          "(same as guide CSV), north/east headers, or headerless lat,lon rows. " +
+          "Also accepts semicolon- or tab-delimited exports."
       );
     }
     dataStart = 0;
+    headerless = true;
   }
 
   const warnings: string[] = [];
+  if (delimiter !== ",") {
+    warnings.push(`Detected ${delimiter === "\t" ? "tab" : "semicolon"}-delimited CSV.`);
+  }
+
   const rawGps: {
     lat: number;
     lon: number;
@@ -367,7 +530,7 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
 
   for (let i = dataStart; i < lines.length; i++) {
     const rowNum = i + 1;
-    const cells = splitCsvCells(lines[i]);
+    const cells = splitDelimitedCells(lines[i], delimiter);
     if (cells.every((c) => c === "")) continue;
 
     try {
@@ -378,11 +541,8 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
       const quality = readOptionalQuality(cells, colMap);
 
       if (colMap.kind === "gps") {
-        const lat = Number(cells[colMap.latIdx!]);
-        const lon = Number(cells[colMap.lonIdx!]);
-        if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-          throw new Error(`Row ${rowNum}: latitude/longitude must be numeric`);
-        }
+        const lat = parseFiniteNumber(cells[colMap.latIdx!] ?? "", rowNum, "latitude");
+        const lon = parseFiniteNumber(cells[colMap.lonIdx!] ?? "", rowNum, "longitude");
         if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
           throw new Error(`Row ${rowNum}: latitude/longitude out of range`);
         }
@@ -394,11 +554,8 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
           colMap.dwellIdx != null ? parseOptionalDwell(cells[colMap.dwellIdx], rowNum) : null;
         rawGps.push({ lat, lon, mark, dwell_s, source_index: rowNum, group, ...quality });
       } else {
-        const north = Number(cells[colMap.northIdx!]);
-        const east = Number(cells[colMap.eastIdx!]);
-        if (!Number.isFinite(north) || !Number.isFinite(east)) {
-          throw new Error(`Row ${rowNum}: north/east must be numeric`);
-        }
+        const north = parseFiniteNumber(cells[colMap.northIdx!] ?? "", rowNum, "north");
+        const east = parseFiniteNumber(cells[colMap.eastIdx!] ?? "", rowNum, "east");
         const mark =
           colMap.markIdx != null && cells[colMap.markIdx] != null
             ? parseMark(cells[colMap.markIdx], rowNum)
@@ -431,7 +588,63 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
           : "No valid GPS points found in the CSV."
       );
     }
-    const anchor = { lat: rawGps[0].lat, lon: rawGps[0].lon };
+
+    // Headerless near Null Island with tiny "lat/lon" that are really local metres.
+    if (headerless) {
+      const maxAbs = Math.max(...rawGps.flatMap((r) => [Math.abs(r.lat), Math.abs(r.lon)]));
+      const spanLat = Math.max(...rawGps.map((r) => r.lat)) - Math.min(...rawGps.map((r) => r.lat));
+      const spanLon = Math.max(...rawGps.map((r) => r.lon)) - Math.min(...rawGps.map((r) => r.lon));
+      if (maxAbs < 1 && (spanLat > 0.01 || spanLon > 0.01)) {
+        // ~1 km+ span near 0,0 from values that look like metres misread as degrees.
+        const approxM = Math.hypot(spanLat * 111_000, spanLon * 111_000);
+        warnings.push(
+          `Headerless file read as lat/lon near 0°N 0°E (~${approxM.toFixed(0)} m across). ` +
+            `If these are local metres, add a north,east header — do not paint until confirmed.`
+        );
+      } else {
+        warnings.push(
+          `Headerless CSV interpreted as lat/lon (${rawGps.length} points near ${rawGps[0].lat.toFixed(4)}°, ${rawGps[0].lon.toFixed(4)}°). Confirm this is correct.`
+        );
+      }
+    }
+
+    // Lat/lon swap heuristic: if swapping both columns lands every row in-range and
+    // shrinks the geographic span dramatically when current span is absurd, warn.
+    {
+      const spanLat = Math.max(...rawGps.map((r) => r.lat)) - Math.min(...rawGps.map((r) => r.lat));
+      const spanLon = Math.max(...rawGps.map((r) => r.lon)) - Math.min(...rawGps.map((r) => r.lon));
+      const swappedOk = rawGps.every(
+        (r) => r.lon >= -90 && r.lon <= 90 && r.lat >= -180 && r.lat <= 180
+      );
+      // Typical swap: lon in lat column (~80) and lat in lon (~13) still both "in range".
+      if (swappedOk && spanLat > 5 && spanLon < 2) {
+        warnings.push(
+          "Latitude span is very large compared to longitude — columns may be swapped (lon,lat). Verify before painting."
+        );
+      }
+    }
+
+    // Prefer first-row origin (historical / rover parity) unless row 1 is an outlier
+    // relative to the densest cluster — then re-anchor so one garbage row cannot
+    // throw the whole survey thousands of km away.
+    const cluster = robustGpsAnchor(rawGps);
+    const first = rawGps[0];
+    const firstIsOutlier = (() => {
+      const dlat = first.lat - cluster.lat;
+      const dlon = first.lon - cluster.lon;
+      const radiusDeg = 2 / 111;
+      return dlat * dlat + dlon * dlon > radiusDeg * radiusDeg;
+    })();
+    const anchor = firstIsOutlier
+      ? { lat: cluster.lat, lon: cluster.lon }
+      : { lat: first.lat, lon: first.lon };
+    if (firstIsOutlier || cluster.outlierCount > 0) {
+      warnings.push(
+        firstIsOutlier
+          ? `First GPS row is far from the main cluster — origin set to cluster median (${cluster.outlierCount} outlier row(s)).`
+          : `${cluster.outlierCount} GPS row(s) lie far from the main cluster (origin remains first in-cluster row).`
+      );
+    }
     const groupingValid = hasLowCardinalityGrouping(rawGps.map((row) => row.group));
     const points: LocalPointCsvPoint[] = rawGps.map((row) => {
       const { north, east } = projectGpsToLocalMeters(row.lat, row.lon, anchor.lat, anchor.lon);
@@ -451,6 +664,8 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
       };
     });
     warnings.push(...collectSurveyQualityWarnings(points));
+    const orderWarn = rowOrderSanityWarning(points);
+    if (orderWarn) warnings.push(orderWarn);
     return {
       kind: "gps",
       fileName,
@@ -470,9 +685,20 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
     );
   }
 
+  // Block silent UTM/state-plane values parsed as local site metres.
+  const maxAbsNed = Math.max(...rawNed.flatMap((p) => [Math.abs(p.north_m), Math.abs(p.east_m)]));
+  if (maxAbsNed > PROJECTED_COORD_BLOCK_M) {
+    throw new Error(
+      `Coordinates look like a projected CRS (values up to ${maxAbsNed.toFixed(0)} m), not local site metres. ` +
+        `Export lat/lon, or subtract a site origin so north/east are local metres within ~${PROJECTED_COORD_BLOCK_M / 1000} km of zero.`
+    );
+  }
+
   const nedGroupingValid = hasLowCardinalityGrouping(rawNed.map((row) => row.group));
   const nedPoints = nedGroupingValid ? rawNed : rawNed.map((row) => ({ ...row, group: undefined }));
   warnings.push(...collectSurveyQualityWarnings(nedPoints));
+  const orderWarn = rowOrderSanityWarning(nedPoints);
+  if (orderWarn) warnings.push(orderWarn);
 
   return {
     kind: "ned",
@@ -512,6 +738,10 @@ function planLineLabelForGroup(pathIndex: number, groupCount: number, groupLabel
   return groupCount > 1 ? `CSV path ${pathIndex} (${pointCount} pts)` : `CSV path (${pointCount} pts)`;
 }
 
+function measurePreviewLengthM(pts: { north: number; east: number }[]): number {
+  return polylineLengthM(pts);
+}
+
 /** Build one open road-marking PlanLine for a single already-split group of points. */
 function buildPlanLineForGroup(
   rawNed: RawNedPoint[],
@@ -522,10 +752,11 @@ function buildPlanLineForGroup(
 ): PlanLine | null {
   const id = planLineIdForGroup(pathIndex);
   const label = planLineLabelForGroup(pathIndex, groupCount, groupLabel, sourcePointCount);
-  const preview_points = buildRoadMarkingPreviewPoints(rawNed);
+  const fitted = buildRoadMarkingFittedPath(rawNed);
+  const preview_points = fitted.samples;
 
   if (preview_points.length < 2) {
-    // Degenerate after open/dedupe — fall back to raw open chain (still not a polygon).
+    // Degenerate after open/dedupe — emit open chain only when nothing else is possible.
     const fallback =
       rawNed.length >= 2
         ? rawNed[0].north === rawNed[rawNed.length - 1].north &&
@@ -536,6 +767,7 @@ function buildPlanLineForGroup(
     if (fallback.length < 2) return null;
     const first = fallback[0];
     const last = fallback[fallback.length - 1];
+    const length_m = measurePreviewLengthM(fallback);
     return {
       id,
       label,
@@ -550,11 +782,14 @@ function buildPlanLineForGroup(
         layer: "MARK",
         color: 7,
         is_mark: true,
-        length_m: 0,
+        length_m,
         geometry: {
           closed: false,
           road_marking: true,
           vertexCount: fallback.length,
+          fit_mode: "degenerate",
+          paintable: false,
+          fit_warnings: ["Path degenerated to raw vertices after cleanup.", ...fitted.warnings],
         },
         preview_points: fallback,
       },
@@ -563,6 +798,7 @@ function buildPlanLineForGroup(
 
   const first = preview_points[0];
   const last = preview_points[preview_points.length - 1];
+  const length_m = measurePreviewLengthM(preview_points);
 
   return {
     id,
@@ -578,13 +814,18 @@ function buildPlanLineForGroup(
       layer: "MARK",
       color: 7,
       is_mark: true,
-      length_m: 0,
+      length_m,
       geometry: {
         closed: false,
         /** Road-marking preview: open stroke only (never a polygon ring). */
         road_marking: true,
         vertexCount: preview_points.length,
         source_vertex_count: sourcePointCount,
+        fit_mode: fitted.mode,
+        paintable: fitted.paintable,
+        fit_warnings: fitted.warnings,
+        max_joint_turn_deg: fitted.quality.maxJointTurnDeg,
+        length_ratio: fitted.quality.lengthRatio,
       },
       preview_points,
     },

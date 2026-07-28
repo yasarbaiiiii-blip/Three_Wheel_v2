@@ -12,6 +12,7 @@ import DraggableFlatList, { RenderItemParams, ScaleDecorator } from "react-nativ
 import { GripVertical } from "lucide-react-native";
 
 import type { PlanLine } from "../../../types/plan";
+import { getLineFitMeta } from "../../../utils/csvGeometryReadiness";
 import {
   buildCsvTransitPreviews,
   buildOrderedTrajectory,
@@ -23,6 +24,7 @@ import {
   type CsvPathOrderEntry,
   type CsvTransitPreview,
 } from "../../../utils/csvPathOrder";
+import { CsvWarningsPanel } from "../CsvWarningsPanel";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 const DEFAULT_SPEEDS = { markSpeedMs: 0.35, travelSpeedMs: 0.5 };
@@ -153,6 +155,15 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
     () => buildCsvTransitPreviews(markLines, order),
     [markLines, order]
   );
+  const fitMetas = useMemo(() => markLines.map(getLineFitMeta), [markLines]);
+  const nonPaintable = useMemo(() => fitMetas.filter((m) => !m.paintable), [fitMetas]);
+  const fitAdvisory = useMemo(
+    () =>
+      fitMetas.flatMap((m) =>
+        m.warnings.map((w) => `${m.label}: ${w}`)
+      ),
+    [fitMetas]
+  );
 
   useEffect(() => {
     onOrderChangeRef.current?.(painted, order);
@@ -228,6 +239,17 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
           (threshold 120°).
         </Text>
       ))}
+
+      <CsvWarningsPanel
+        title="Path geometry"
+        critical={nonPaintable.map(
+          (m) =>
+            `"${m.label}" non-paintable — Skip before Send` +
+            (m.warnings[0] ? ` (${m.warnings[0]})` : "")
+        )}
+        advisory={fitAdvisory.filter((w) => !nonPaintable.some((m) => w.startsWith(m.label)))}
+        defaultExpanded={nonPaintable.length > 0}
+      />
 
       {/* Fixed height so virtualization works; must stay outside parent ScrollView. */}
       <View
@@ -317,6 +339,8 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
             }
 
             const paint = item.entry.paint !== false;
+            const fit = getLineFitMeta(item.line);
+            const blocked = !fit.paintable;
             return (
               <ScaleDecorator>
                 <Pressable
@@ -332,9 +356,13 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
                     minHeight: 48,
                     backgroundColor: isActive
                       ? FIELDS_COLORS.accentMuted
-                      : FIELDS_COLORS.surfaceSolid,
+                      : blocked
+                        ? FIELDS_COLORS.dangerMuted
+                        : FIELDS_COLORS.surfaceSolid,
                     borderBottomWidth: 1,
-                    borderBottomColor: FIELDS_COLORS.panelBorder,
+                    borderBottomColor: blocked
+                      ? FIELDS_COLORS.dangerBorder
+                      : FIELDS_COLORS.panelBorder,
                     opacity: paint ? 1 : 0.55,
                   }}
                 >
@@ -342,23 +370,28 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
                   <View style={{ flex: 1, minWidth: 0 }}>
                     <Text
                       style={{
-                        color: FIELDS_COLORS.textMain,
+                        color: blocked ? FIELDS_COLORS.danger : FIELDS_COLORS.textMain,
                         fontSize: 13,
                         fontWeight: "700",
                       }}
                       numberOfLines={1}
                     >
                       {item.line.label}
+                      {blocked ? " · non-paintable" : fit.warnings.length > 0 ? " · warn" : ""}
                     </Text>
                     <Text
                       style={{
-                        color: FIELDS_COLORS.textDim,
+                        color: blocked ? FIELDS_COLORS.warning : FIELDS_COLORS.textDim,
                         fontSize: 11,
                         marginTop: 2,
                       }}
-                      numberOfLines={1}
+                      numberOfLines={2}
                     >
-                      {item.line.entity?.entity_type ?? item.line.layer}
+                      {blocked
+                        ? fit.warnings[0] ?? "Geometry failed validation — Skip before Send"
+                        : fit.warnings[0]
+                          ? fit.warnings[0]
+                          : item.line.entity?.entity_type ?? item.line.layer}
                     </Text>
                   </View>
                   <View

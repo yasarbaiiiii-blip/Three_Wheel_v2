@@ -149,7 +149,22 @@ export function getLineLengthM(line: PlanLine): number | null {
     }
   }
   const entityLength = coerceFiniteNumber(line.entity?.length_m);
-  if (entityLength != null) return entityLength;
+  // Treat 0 as "unset": CSV builders historically hard-coded length_m: 0, and a
+  // true zero-length path is not a useful selection label. Prefer measured geometry.
+  if (entityLength != null && entityLength > 0) return entityLength;
+
+  const preview = line.entity?.preview_points;
+  if (preview && preview.length >= 2) {
+    let total = 0;
+    for (let i = 1; i < preview.length; i++) {
+      total += Math.hypot(
+        preview[i].north - preview[i - 1].north,
+        preview[i].east - preview[i - 1].east
+      );
+    }
+    if (Number.isFinite(total) && total > 0) return total;
+  }
+
   return coerceFiniteNumber(Math.hypot(line.to.x - line.from.x, line.to.y - line.from.y));
 }
 

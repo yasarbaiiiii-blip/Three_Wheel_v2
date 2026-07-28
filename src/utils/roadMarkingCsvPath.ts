@@ -59,6 +59,43 @@ const DEFAULTS: Required<RoadMarkingPathOptions> = {
   outlierResidualFactor: 8,
 };
 
+/**
+ * Production geometry policy (CSV road-marking).
+ *
+ * R_MIN_ROVER_M: kinematic floor for fillet arcs. Conservative default for a
+ * three-wheel paint platform; override via RoadMarkingPathOptions later if needed.
+ * CORNER_TOLERANCE_M: max acceptable corner cut (paint budget) — matches MAX_FIT_DEVIATION_M.
+ */
+export const R_MIN_ROVER_M = 0.5;
+export const CORNER_TOLERANCE_M = 0.15;
+/** Classify as sparse waypoints when point count is at or below this. */
+export const SPARSE_MAX_POINTS = 15;
+/** Classify as dense only when point count is at least this. */
+export const DENSE_MIN_POINTS = 20;
+export const SPARSE_MIN_MEDIAN_SPACING_M = 2.0;
+export const DENSE_MAX_MEDIAN_SPACING_M = 1.5;
+/** P1 operator bound: max bare turning angle on tessellated samples (deg). */
+export const MAX_BARE_TURN_DEG = 8;
+/** Hard reversal guard (deg). */
+export const MAX_INTERIOR_TURN_DEG = 120;
+
+export type PointSequenceClass = "dense-survey" | "sparse-waypoints";
+
+export type FittedPathResult = {
+  samples: RoadMarkingNedPoint[];
+  mode: "dense-fit" | "waypoint-fillet" | "degraded-fillet";
+  warnings: string[];
+  /** False when geometry cannot be made paintable (e.g. undrivable corners, validation fail). */
+  paintable: boolean;
+  quality: {
+    class: PointSequenceClass;
+    toleranceM: number;
+    maxJointTurnDeg: number;
+    lengthRatio: number;
+    maxSourceDeviationM: number;
+  };
+};
+
 export type Circle = { cn: number; ce: number; r: number };
 
 /** Generalized algebraic fit: circle when |a| is meaningful; line when a≈0 / huge R. */
@@ -587,19 +624,277 @@ const EXTENT_CHECK_MIN_AXIS_M = 0.5;
 const PREVIEW_SAMPLE_TARGET = 8000;
 
 /** Total length along a polyline, in metres. */
-function polylineLengthM(points: RoadMarkingNedPoint[]): number {
+export function polylineLengthM(points: RoadMarkingNedPoint[]): number {
   let total = 0;
   for (let i = 1; i < points.length; i++) total += dist(points[i - 1], points[i]);
   return total;
 }
 
 /** Median distance between consecutive points — this survey's own sampling step. */
-function medianSpacing(points: RoadMarkingNedPoint[]): number {
+export function medianSpacing(points: RoadMarkingNedPoint[]): number {
   if (points.length < 2) return 0;
   const steps: number[] = [];
   for (let i = 1; i < points.length; i++) steps.push(dist(points[i - 1], points[i]));
   steps.sort((a, b) => a - b);
   return steps[Math.floor(steps.length / 2)] ?? 0;
+}
+
+/** Axis-aligned path extent (max of north/east spans), metres. */
+export function pathExtentM(points: RoadMarkingNedPoint[]): number {
+  if (points.length === 0) return 0;
+  let minN = Infinity;
+  let maxN = -Infinity;
+  let minE = Infinity;
+  let maxE = -Infinity;
+  for (const p of points) {
+    if (p.north < minN) minN = p.north;
+    if (p.north > maxN) maxN = p.north;
+    if (p.east < minE) minE = p.east;
+    if (p.east > maxE) maxE = p.east;
+  }
+  return Math.max(maxN - minN, maxE - minE);
+}
+
+/**
+ * Classify survey density before refining.
+ * Ambiguous files default to sparse-waypoints (preserves design vertices).
+ */
+export function classifyPointSequence(
+  points: RoadMarkingNedPoint[]
+): { class: PointSequenceClass; warning?: string } {
+  const n = points.length;
+  if (n < 3) return { class: "sparse-waypoints" };
+  const med = medianSpacing(points);
+  const extent = pathExtentM(points);
+
+  if (n <= SPARSE_MAX_POINTS || med >= SPARSE_MIN_MEDIAN_SPACING_M) {
+    return { class: "sparse-waypoints" };
+  }
+  if (
+    n >= DENSE_MIN_POINTS &&
+    med <= DENSE_MAX_MEDIAN_SPACING_M &&
+    (extent <= 1e-6 || med < extent * 0.25)
+  ) {
+    return { class: "dense-survey" };
+  }
+  return {
+    class: "sparse-waypoints",
+    warning:
+      "Path classification near the dense/sparse boundary — treating vertices as design waypoints.",
+  };
+}
+
+/** Max distance from any source vertex to the nearest sample on the fitted path. */
+export function maxSourceDeviationM(
+  source: RoadMarkingNedPoint[],
+  fitted: RoadMarkingNedPoint[]
+): number {
+  if (source.length === 0 || fitted.length < 2) return 0;
+  let maxD = 0;
+  for (const s of source) {
+    let best = Infinity;
+    for (let i = 0; i < fitted.length - 1; i++) {
+      const a = fitted[i];
+      const b = fitted[i + 1];
+      const abN = b.north - a.north;
+      const abE = b.east - a.east;
+      const len2 = abN * abN + abE * abE;
+      let t = 0;
+      if (len2 > 1e-18) {
+        t = ((s.north - a.north) * abN + (s.east - a.east) * abE) / len2;
+        t = Math.max(0, Math.min(1, t));
+      }
+      const pn = a.north + abN * t;
+      const pe = a.east + abE * t;
+      const d = Math.hypot(s.north - pn, s.east - pe);
+      if (d < best) best = d;
+    }
+    if (best > maxD) maxD = best;
+  }
+  return maxD;
+}
+
+function angularCoverageOk(points: RoadMarkingNedPoint[], circle: Circle, minCoverageDeg = 300): boolean {
+  if (points.length < 3) return false;
+  const angles = points
+    .map((p) => Math.atan2(p.north - circle.cn, p.east - circle.ce))
+    .sort((a, b) => a - b);
+  let maxGap = 0;
+  for (let i = 1; i < angles.length; i++) {
+    maxGap = Math.max(maxGap, angles[i] - angles[i - 1]);
+  }
+  // Wrap-around gap
+  maxGap = Math.max(maxGap, angles[0] + 2 * Math.PI - angles[angles.length - 1]);
+  const maxGapDeg = (maxGap * 180) / Math.PI;
+  return maxGapDeg <= 360 - minCoverageDeg + 1e-6;
+}
+
+function isMonotoneAngularProgression(points: RoadMarkingNedPoint[], circle: Circle): boolean {
+  if (points.length < 3) return true;
+  let prev = Math.atan2(points[0].north - circle.cn, points[0].east - circle.ce);
+  let unwrapped = prev;
+  const series: number[] = [unwrapped];
+  for (let i = 1; i < points.length; i++) {
+    let a = Math.atan2(points[i].north - circle.cn, points[i].east - circle.ce);
+    let delta = a - prev;
+    while (delta > Math.PI) delta -= 2 * Math.PI;
+    while (delta < -Math.PI) delta += 2 * Math.PI;
+    unwrapped += delta;
+    series.push(unwrapped);
+    prev = a;
+  }
+  // Overall direction
+  const total = series[series.length - 1] - series[0];
+  if (Math.abs(total) < 1e-3) return false;
+  const dir = total >= 0 ? 1 : -1;
+  let reversals = 0;
+  for (let i = 1; i < series.length; i++) {
+    const step = series[i] - series[i - 1];
+    if (step * dir < -0.15) reversals += 1; // ~8.6° against the flow
+  }
+  // Allow a couple of local wobbles; reject zig-zag / out-and-back.
+  return reversals <= Math.max(1, Math.floor(points.length * 0.08));
+}
+
+/**
+ * Fillet radius at a waypoint corner from paint budget + leg budget + rover floor.
+ * Returns null when no geometric fillet is possible.
+ */
+export function waypointCornerRadiusM(
+  turnDeg: number,
+  legInM: number,
+  legOutM: number,
+  opts?: { rMinM?: number; cornerTolM?: number; maxFilletM?: number }
+): { r: number; missM: number; overBudget: boolean; undrivable: boolean } | null {
+  const rMin = opts?.rMinM ?? R_MIN_ROVER_M;
+  const D = opts?.cornerTolM ?? CORNER_TOLERANCE_M;
+  const maxF = opts?.maxFilletM ?? DEFAULTS.maxFilletRadiusM;
+  const absTurn = Math.abs(turnDeg);
+  if (absTurn < MIN_VISIBLE_TURN_DEG || absTurn > 179) return null;
+  const half = (absTurn * Math.PI) / 180 / 2;
+  const tanHalf = Math.tan(half);
+  const secHalf = 1 / Math.cos(half);
+  if (!(tanHalf > 1e-9) || !(secHalf > 1)) return null;
+
+  const paintCeil = D / (secHalf - 1);
+  const legCeil = (0.45 * Math.min(legInM, legOutM)) / tanHalf;
+  const hardCeil = Math.min(paintCeil, legCeil, maxF);
+  if (!(hardCeil >= 0.05)) return null;
+
+  let r: number;
+  let overBudget = false;
+  let undrivable = false;
+  if (hardCeil >= rMin) {
+    // Largest radius within paint+leg budget (smooth) — still ≥ rMin.
+    r = hardCeil;
+  } else {
+    // Kinematics want more cut than the paint budget allows.
+    const legOnly = Math.min(legCeil, maxF);
+    if (legOnly >= rMin) {
+      r = rMin;
+      overBudget = true;
+    } else if (legOnly >= 0.05) {
+      r = legOnly;
+      overBudget = true;
+      undrivable = true;
+    } else {
+      return null;
+    }
+  }
+  const missM = r * (secHalf - 1);
+  return { r, missM, overBudget: overBudget || missM > D + 1e-9, undrivable };
+}
+
+/**
+ * Sparse-waypoint pipeline: preserve every vertex, straight legs + geometric fillets only.
+ * Never estimates noise, never deletes points, never invents arcs from data.
+ */
+export function buildWaypointFilletPath(
+  points: RoadMarkingNedPoint[],
+  options: RoadMarkingPathOptions = {}
+): { samples: RoadMarkingNedPoint[]; warnings: string[]; paintable: boolean } {
+  const opts = { ...DEFAULTS, ...options };
+  const warnings: string[] = [];
+  let pts = dedupeNearPoints(points, 0.02);
+  pts = ensureOpenPath(pts);
+  if (pts.length < 2) return { samples: pts, warnings, paintable: false };
+  if (pts.length === 2) {
+    return {
+      samples: sampleLine(pts[0], pts[1], opts.sampleSpacingM),
+      warnings,
+      paintable: true,
+    };
+  }
+
+  const out: RoadMarkingNedPoint[] = [pts[0]];
+  let paintable = true;
+
+  for (let i = 1; i < pts.length - 1; i++) {
+    const prev = pts[i - 1];
+    const cur = pts[i];
+    const next = pts[i + 1];
+    const turn = Math.abs(turningAngleDeg(prev, cur, next));
+    if (turn < MIN_VISIBLE_TURN_DEG) {
+      out.push(cur);
+      continue;
+    }
+
+    const dPrev = dist(prev, cur);
+    const dNext = dist(cur, next);
+    const radiusInfo = waypointCornerRadiusM(turn, dPrev, dNext, {
+      rMinM: R_MIN_ROVER_M,
+      cornerTolM: CORNER_TOLERANCE_M,
+      maxFilletM: opts.maxFilletRadiusM,
+    });
+
+    if (!radiusInfo) {
+      out.push(cur);
+      warnings.push(
+        `Corner at vertex ${i + 1}: too tight for a circular fillet — left sharp (turn ${turn.toFixed(1)}°).`
+      );
+      paintable = false;
+      continue;
+    }
+
+    if (radiusInfo.overBudget) {
+      warnings.push(
+        `Corner at vertex ${i + 1}: miss ${radiusInfo.missM.toFixed(3)} m exceeds paint budget ${CORNER_TOLERANCE_M} m (r=${radiusInfo.r.toFixed(3)} m).`
+      );
+    }
+    if (radiusInfo.undrivable) {
+      warnings.push(
+        `Corner at vertex ${i + 1}: radius ${radiusInfo.r.toFixed(3)} m is below rover minimum ${R_MIN_ROVER_M} m.`
+      );
+      paintable = false;
+    }
+
+    const uIn = unit(sub(cur, prev));
+    const uOut = unit(sub(next, cur));
+    if (!uIn || !uOut) {
+      out.push(cur);
+      continue;
+    }
+    const fillet = geometricFilletFromTangents(cur, uIn, uOut, radiusInfo.r, opts.sampleSpacingM);
+    if (!fillet) {
+      out.push(cur);
+      warnings.push(`Corner at vertex ${i + 1}: fillet construction failed.`);
+      paintable = false;
+      continue;
+    }
+    for (let k = 0; k < fillet.samples.length; k++) {
+      const p = fillet.samples[k];
+      if (k === 0 && dist(out[out.length - 1], p) < 0.02) continue;
+      out.push(p);
+    }
+  }
+
+  out.push(pts[pts.length - 1]);
+  // I1: hard-anchor free termini to source vertices.
+  if (out.length >= 2) {
+    out[0] = { ...pts[0] };
+    out[out.length - 1] = { ...pts[pts.length - 1] };
+  }
+  return { samples: dedupeNearPoints(out, TESSELLATION_DEDUPE_M), warnings, paintable };
 }
 
 /**
@@ -656,6 +951,18 @@ export function tryWholeLoopFit(points: RoadMarkingNedPoint[], tol: number): Cir
   const fit = fitCircleHyper(points);
   if (!fit) return null;
   if (maxCircleResidual(points, fit) > Math.max(tol, MAX_FIT_DEVIATION_M)) return null;
+
+  // Physical bounds — without these a zig-zag or out-and-back over ~40 m can accept
+  // an r = hundreds-of-metres circle and tessellate as kilometres of paint.
+  if (fit.r > DEFAULTS.maxArcRadiusM) return null;
+  const extent = pathExtentM(points);
+  if (extent > 1e-6 && fit.r > 2 * extent) return null;
+  if (!angularCoverageOk(points, fit, 300)) return null;
+  if (!isMonotoneAngularProgression(points, fit)) return null;
+  const srcLen = polylineLengthM(points);
+  const loopLen = 2 * Math.PI * fit.r;
+  if (srcLen > 1e-6 && (loopLen < 0.8 * srcLen || loopLen > 1.25 * srcLen)) return null;
+
   return fit;
 }
 
@@ -684,6 +991,11 @@ export function fitLineOrCircle(
   const circle = fitCircleHyper(points);
   if (!circle) return { kind: "line" };
   if (circle.r > maxArcRadiusM) return { kind: "line" };
+  // Fabricated huge-R arcs through a tiny window (nearly collinear) — not genuine
+  // curvature. κ must stay large enough for real arcs sampled in short segmenter
+  // windows (a r=12 m quarter-circle window of a few metres is legitimate).
+  const windowSpan = pathExtentM(points);
+  if (windowSpan > 1e-6 && circle.r > 25 * windowSpan) return { kind: "line" };
   if (maxCircleResidual(points, circle) > tol) return { kind: "line" };
 
   // Extra guard: if arc subtends a tiny angle, Hyper still has high variance —
@@ -1228,7 +1540,17 @@ export function tessellatePrimitivesWithJointFillets(
     const a1 = angleOf(points[p.i1], p.circle);
     const midA = angleOf(mid, p.circle);
     const { a0: aa, a1: ab } = unwrapAngles(a0, a1, midA);
-    return sampleArc(p.circle, aa, ab, options.sampleSpacingM);
+    const arcSamples = sampleArc(p.circle, aa, ab, options.sampleSpacingM);
+    // I1: free termini of a single open arc — anchor to the raw survey vertices.
+    // (Closed whole-loop fits have first≈last and are exempt from strict I1.)
+    if (arcSamples.length >= 2) {
+      const gapEnds = dist(points[p.i0], points[p.i1]);
+      if (gapEnds > 0.05) {
+        blendArcBoundary(arcSamples, 0, points[p.i0]);
+        blendArcBoundary(arcSamples, arcSamples.length - 1, points[p.i1]);
+      }
+    }
+    return arcSamples;
   }
 
   // Precompute fillet at each joint i (between prims[i] and prims[i+1]).
@@ -1390,22 +1712,25 @@ export function tessellatePrimitivesWithJointFillets(
       const { a0: aa, a1: ab } = unwrapAngles(aStart, aEnd, midA);
       if (Math.abs(ab - aa) * prim.circle.r >= 0.02) {
         const arcSamples = sampleArc(prim.circle, aa, ab, options.sampleSpacingM);
-        // Anchor a boundary to `start`/`end` (the raw survey vertex, or the fillet's own
-        // tangent point) ONLY when a neighboring primitive/fillet shares that same
-        // boundary — i.e. never at i===0's start or the last primitive's end, which are
-        // termini of the whole open path with nothing to match, where the fitted circle's
-        // own smooth angle+radius reconstruction is preferred. At a genuine internal
-        // joint, the Hyper fit only approximates the data (residual up to fitToleranceM),
-        // so that reconstruction can land a few cm sideways of the exact point the
-        // neighboring primitive/fillet uses for the SAME joint — a hard single-sample
-        // snap there would fix the position gap but dump the whole correction into one
-        // segment, still reading as a small kink (confirmed on the real roads_coordinates
-        // fixture: a snap-only version left a 5-10° kink at exactly this seam). Instead
-        // taper the correction across `BOUNDARY_BLEND_SAMPLES` samples, so no single
-        // segment absorbs more than a fraction of the fit residual. Samples beyond the
-        // blend window keep the pure fitted-circle interpolation.
-        if (i > 0) blendArcBoundary(arcSamples, 0, start);
-        if (i < prims.length - 1) blendArcBoundary(arcSamples, arcSamples.length - 1, end);
+        // Anchor boundaries with a tapered blend (blendArcBoundary):
+        // - Internal seams (i>0 / i<last): required so neighboring primitives share one
+        //   point without dumping the full Hyper residual into a single segment (snap-only
+        //   left a 5–10° kink on roads_coordinates).
+        // - Free termini (i===0 start / last end): also required for I1 endpoint anchoring.
+        //   There is no neighboring geometry to kink against at a free end, so anchoring
+        //   the fitted reconstruction onto the raw survey vertex costs nothing and keeps
+        //   the path pinned to the pins. Use the source vertex, not only the local start/
+        //   end which may already be a fillet tangent.
+        if (i > 0) {
+          blendArcBoundary(arcSamples, 0, start);
+        } else {
+          blendArcBoundary(arcSamples, 0, points[prim.i0]);
+        }
+        if (i < prims.length - 1) {
+          blendArcBoundary(arcSamples, arcSamples.length - 1, end);
+        } else {
+          blendArcBoundary(arcSamples, arcSamples.length - 1, points[prim.i1]);
+        }
         pushSamples(arcSamples);
       }
     }
@@ -1469,51 +1794,92 @@ export function segmentAndTessellate(
 }
 
 /**
- * Full production pipeline:
- * open → spike reject → S-jog dampen → [whole-loop fit | segment (Hyper) + merge] →
- * joint fillets → open.
+ * Two-sided extent + length + turn + fidelity gate. Replaces one-sided coversSourceExtent
+ * (which accepted kilometre-scale rings from metre-scale surveys).
  */
-export function buildRoadMarkingPreviewPoints(
+export function validateFittedPath(
+  source: RoadMarkingNedPoint[],
+  fitted: RoadMarkingNedPoint[],
+  opts?: { maxDeviationM?: number; waypointMode?: boolean }
+): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  if (source.length < 2) return { ok: true, reasons };
+  if (fitted.length < 2) return { ok: false, reasons: ["fitted path has fewer than 2 points"] };
+
+  const extent = (pts: RoadMarkingNedPoint[]) => {
+    let minN = Infinity;
+    let maxN = -Infinity;
+    let minE = Infinity;
+    let maxE = -Infinity;
+    for (const p of pts) {
+      if (p.north < minN) minN = p.north;
+      if (p.north > maxN) maxN = p.north;
+      if (p.east < minE) minE = p.east;
+      if (p.east > maxE) maxE = p.east;
+    }
+    return { n: maxN - minN, e: maxE - minE };
+  };
+  const src = extent(source);
+  const ref = extent(fitted);
+  const floor = Math.max(EXTENT_CHECK_MIN_AXIS_M, 0);
+  const axisBothWays = (s: number, r: number, axis: string) => {
+    if (s <= floor) return;
+    if (r < s * 0.9) reasons.push(`${axis} extent collapsed (${r.toFixed(2)} < 0.9×${s.toFixed(2)})`);
+    if (r > s * 1.15) reasons.push(`${axis} extent exploded (${r.toFixed(2)} > 1.15×${s.toFixed(2)})`);
+  };
+  axisBothWays(src.n, ref.n, "north");
+  axisBothWays(src.e, ref.e, "east");
+
+  const srcLen = polylineLengthM(source);
+  const fitLen = polylineLengthM(fitted);
+  if (srcLen > 1e-6) {
+    const ratio = fitLen / srcLen;
+    if (ratio < 0.75 || ratio > 1.25) {
+      reasons.push(`length ratio ${ratio.toFixed(3)} outside [0.75, 1.25]`);
+    }
+  }
+
+  const maxTurn = maxTurningAngleDeg(fitted);
+  if (maxTurn > MAX_INTERIOR_TURN_DEG) {
+    reasons.push(`interior turn ${maxTurn.toFixed(1)}° exceeds ${MAX_INTERIOR_TURN_DEG}°`);
+  }
+
+  // I1 endpoint anchoring (open paths).
+  const endGap = dist(source[0], source[source.length - 1]);
+  if (endGap > 0.05) {
+    const d0 = dist(fitted[0], source[0]);
+    const d1 = dist(fitted[fitted.length - 1], source[source.length - 1]);
+    if (d0 > 0.01) reasons.push(`start endpoint drift ${d0.toFixed(3)} m`);
+    if (d1 > 0.01) reasons.push(`end endpoint drift ${d1.toFixed(3)} m`);
+  }
+
+  const maxDev = maxSourceDeviationM(source, fitted);
+  const devBudget = opts?.maxDeviationM ?? (opts?.waypointMode ? CORNER_TOLERANCE_M * 3 : MAX_FIT_DEVIATION_M);
+  // Waypoint mode: corner cut is intentional up to ~r*(sec-1); allow more.
+  if (!opts?.waypointMode && maxDev > devBudget) {
+    reasons.push(`max source deviation ${maxDev.toFixed(3)} m > ${devBudget} m`);
+  }
+
+  return { ok: reasons.length === 0, reasons };
+}
+
+function runDensePipeline(
   points: RoadMarkingNedPoint[],
-  options: RoadMarkingPathOptions = {}
-): RoadMarkingNedPoint[] {
-  const opts = { ...DEFAULTS, ...options };
-  let pts = dedupeNearPoints(points, 0.02);
-  pts = ensureOpenPath(pts);
-  if (pts.length < 2) return pts;
-
-  // Derive tolerance from this path's own measured noise unless the caller pinned one
-  // explicitly. A single fixed tolerance either over-fragments clean/dense data or fails
-  // to fit noisier real GPS survey data at all (see docs/csv-road-marking-workflow.md).
-  const fitToleranceM = options.fitToleranceM ?? estimateAdaptiveTolerance(pts);
-
+  opts: Required<RoadMarkingPathOptions>,
+  fitToleranceM: number
+): { samples: RoadMarkingNedPoint[]; cleanedSource: RoadMarkingNedPoint[] } {
+  let pts = points.slice();
   pts = rejectPathSpikes(pts, fitToleranceM, opts.outlierPathChordRatio, opts.outlierResidualFactor);
   pts = ensureOpenPath(pts);
-
-  // Collapse short opposite-turn weaves (S-jogs) that max-angle checks miss.
   pts = dampenOppositeJogs(pts, Math.max(opts.sharpCornerDeg * 0.65, 6), 3.5);
   pts = dedupeNearPoints(pts, 0.02);
   pts = ensureOpenPath(pts);
-  if (pts.length < 2) return pts;
+  if (pts.length < 2) return { samples: pts, cleanedSource: pts };
 
-  // NOTE: a Douglas-Peucker-style collinear simplify used to run here before
-  // classification. It deleted the point density segmentIntoPrimitives needs to satisfy
-  // minArcPoints, so real curves collapsed into a raw jagged polyline of trivial 2-point
-  // line primitives instead of being recognized as arcs — segmentIntoPrimitives already
-  // performs the equivalent simplification as a side effect of correct classification, so
-  // a second blind decimation pass ahead of it only starves it of support (see
-  // docs/csv-road-marking-workflow.md).
+  // Validate fidelity against the cleaned survey (after deliberate spike/jog removal),
+  // not the raw input — otherwise dampenOppositeJogs always "fails" max-deviation.
+  const cleanedSource = pts.slice();
 
-  // Whole-path single-circle fast path for a near-closed loop (roundabout, small track):
-  // avoids fragmenting one true circle into many short arcs. Falls through to normal
-  // segmentation for anything that isn't actually close to one circle.
-  const source = pts;
-
-  // Sampling is paced by arc length, so output size grows with the SIZE of the survey, not
-  // its complexity: a 40-point ring of 1 km radius asks for ~18k preview vertices — one map
-  // line heavy enough to hurt a tablet, for no visible gain at that scale. Stretch the
-  // spacing just enough to stay under the cap. Road-scale files never reach it and are
-  // byte-for-byte unchanged; the per-step angular cap still governs how round curves look.
   const sourceLengthM = polylineLengthM(pts);
   const sampleSpacingM = Math.max(opts.sampleSpacingM, sourceLengthM / PREVIEW_SAMPLE_TARGET);
 
@@ -1544,56 +1910,177 @@ export function buildRoadMarkingPreviewPoints(
   }
   pts = ensureOpenPath(pts);
 
-  // Last line of defence: never hand back a refinement that lost the path.
-  //
-  // Refinement is an approximation pipeline with several stages that can each, on some
-  // unforeseen input, decide the whole path is one degenerate primitive. When that happened
-  // it happened SILENTLY — a 23 m surveyed roundabout rendered as a 1.8 m stub, with no
-  // error and no warning, which is the worst way for geometry to fail. The individual causes
-  // are fixed, but the class is not closable by fixing causes one at a time, so verify the
-  // OUTPUT against the input it claims to represent and fall back to the raw surveyed
-  // polyline when it does not cover it. A raw jagged path is a visibly worse preview; a
-  // silently truncated one is a wrong mission.
-  if (!coversSourceExtent(source, pts)) return source;
-  return pts;
+  // I1 hard snap of free termini for open dense paths.
+  if (pts.length >= 2 && cleanedSource.length >= 2) {
+    const open = dist(cleanedSource[0], cleanedSource[cleanedSource.length - 1]) > 0.05;
+    if (open) {
+      pts[0] = { ...cleanedSource[0] };
+      pts[pts.length - 1] = { ...cleanedSource[cleanedSource.length - 1] };
+    }
+  }
+  return { samples: pts, cleanedSource };
 }
 
 /**
- * Does `refined` still span the same ground as `source`?
+ * Full production pipeline with classification, validation, and never-raw fallback.
  *
- * Compared on bounding-box extent per axis rather than point count or length: a refinement
- * legitimately changes both (an arc replaces its chords, fillets add samples), but it can
- * never legitimately shrink the ground the path covers. The tolerance is generous — this is
- * a catastrophe detector, not a quality gate — and axes shorter than the fit tolerance are
- * skipped, since a straight run has no meaningful extent across its own width.
+ * Dense: spike reject → S-jog dampen → [whole-loop | segment+fillet] → validate.
+ * Sparse: waypoint straights + geometric fillets only.
+ * On validation failure: degrade to waypoint-fillet (never return the raw polyline).
  */
-function coversSourceExtent(
-  source: RoadMarkingNedPoint[],
-  refined: RoadMarkingNedPoint[]
-): boolean {
-  if (source.length < 2) return true;
-  if (refined.length < 2) return false;
+export function buildRoadMarkingFittedPath(
+  points: RoadMarkingNedPoint[],
+  options: RoadMarkingPathOptions = {}
+): FittedPathResult {
+  const opts = { ...DEFAULTS, ...options };
+  const warnings: string[] = [];
+  let pts = dedupeNearPoints(points, 0.02);
+  pts = ensureOpenPath(pts);
+  if (pts.length < 2) {
+    return {
+      samples: pts,
+      mode: "waypoint-fillet",
+      warnings: ["Path has fewer than 2 points after cleanup."],
+      paintable: false,
+      quality: {
+        class: "sparse-waypoints",
+        toleranceM: opts.fitToleranceM,
+        maxJointTurnDeg: 0,
+        lengthRatio: 1,
+        maxSourceDeviationM: 0,
+      },
+    };
+  }
 
-  const extent = (pts: RoadMarkingNedPoint[]) => {
-    let minN = Infinity;
-    let maxN = -Infinity;
-    let minE = Infinity;
-    let maxE = -Infinity;
-    for (const p of pts) {
-      if (p.north < minN) minN = p.north;
-      if (p.north > maxN) maxN = p.north;
-      if (p.east < minE) minE = p.east;
-      if (p.east > maxE) maxE = p.east;
+  const classification = classifyPointSequence(pts);
+  if (classification.warning) warnings.push(classification.warning);
+  const source = pts;
+  const srcLen = polylineLengthM(source);
+
+  // Explicit fitTolerance from caller ⇒ dense pipeline (tests / advanced callers).
+  const forceDense = options.fitToleranceM != null;
+
+  if (classification.class === "sparse-waypoints" && !forceDense) {
+    const wp = buildWaypointFilletPath(source, options);
+    warnings.push(...wp.warnings);
+    const v = validateFittedPath(source, wp.samples, { waypointMode: true });
+    if (!v.ok) {
+      warnings.push(`Waypoint path validation: ${v.reasons.join("; ")}`);
     }
-    return { n: maxN - minN, e: maxE - minE };
-  };
+    const fitLen = polylineLengthM(wp.samples);
+    return {
+      samples: wp.samples,
+      mode: "waypoint-fillet",
+      warnings,
+      paintable: wp.paintable && v.ok,
+      quality: {
+        class: "sparse-waypoints",
+        toleranceM: CORNER_TOLERANCE_M,
+        maxJointTurnDeg: maxTurningAngleDeg(wp.samples),
+        lengthRatio: srcLen > 1e-9 ? fitLen / srcLen : 1,
+        maxSourceDeviationM: maxSourceDeviationM(source, wp.samples),
+      },
+    };
+  }
 
-  const src = extent(source);
-  const ref = extent(refined);
-  const floor = Math.max(EXTENT_CHECK_MIN_AXIS_M, 0);
-  const axisOk = (s: number, r: number) => s <= floor || r >= s * EXTENT_CHECK_MIN_RATIO;
-  return axisOk(src.n, ref.n) && axisOk(src.e, ref.e);
+  // Dense survey path
+  const fitToleranceM = options.fitToleranceM ?? estimateAdaptiveTolerance(pts);
+  // Clamp noise estimate so it cannot saturate and swallow real corners.
+  // When the caller pins fitToleranceM, honor it (tests / advanced overrides).
+  const med = medianSpacing(pts);
+  const shortestLeg = (() => {
+    let m = Infinity;
+    for (let i = 1; i < pts.length; i++) m = Math.min(m, dist(pts[i - 1], pts[i]));
+    return Number.isFinite(m) ? m : med;
+  })();
+  const clampedTol =
+    options.fitToleranceM != null
+      ? fitToleranceM
+      : Math.min(
+          fitToleranceM,
+          ADAPTIVE_TOLERANCE_MAX_M,
+          Math.max(ADAPTIVE_TOLERANCE_MIN_M, Math.min(med * 1.0, shortestLeg * 0.35))
+        );
+
+  const dense = runDensePipeline(pts, opts, clampedTol);
+  let fitted = dense.samples;
+  let mode: FittedPathResult["mode"] = "dense-fit";
+  let paintable = true;
+
+  // Extent/length against original source; deviation against cleaned (post-spike/jog).
+  let validation = validateFittedPath(dense.cleanedSource, fitted, {
+    maxDeviationM: Math.max(MAX_FIT_DEVIATION_M * 2, clampedTol * 4),
+  });
+  // Also reject catastrophic extent explosion vs the original survey envelope.
+  const extentVsOriginal = validateFittedPath(source, fitted, {
+    maxDeviationM: 1e9, // skip deviation vs raw (jogs intentionally removed)
+  });
+  if (!extentVsOriginal.ok && extentVsOriginal.reasons.some((r) => /explod|collapsed|length ratio/i.test(r))) {
+    validation = {
+      ok: false,
+      reasons: [...validation.reasons, ...extentVsOriginal.reasons],
+    };
+  }
+
+  if (!validation.ok) {
+    warnings.push(`Dense fit rejected (${validation.reasons.join("; ")}); falling back to waypoint fillets.`);
+    const wp = buildWaypointFilletPath(dense.cleanedSource, options);
+    warnings.push(...wp.warnings);
+    fitted = wp.samples;
+    mode = "degraded-fillet";
+    paintable = wp.paintable;
+    validation = validateFittedPath(dense.cleanedSource, fitted, { waypointMode: true });
+    if (!validation.ok) {
+      warnings.push(`Fallback validation failed: ${validation.reasons.join("; ")}. Path marked non-paintable.`);
+      paintable = false;
+      // Last resort: still emit fillet samples — never silent raw polyline.
+      if (fitted.length < 2 && dense.cleanedSource.length >= 2) {
+        fitted = sampleLine(
+          dense.cleanedSource[0],
+          dense.cleanedSource[dense.cleanedSource.length - 1],
+          opts.sampleSpacingM
+        );
+        paintable = false;
+      }
+    }
+  }
+
+  // Soft P1: high bare turn is a warning, not always a hard fail (dense roads can be ~7–8°).
+  const maxTurn = maxTurningAngleDeg(fitted);
+  if (maxTurn > MAX_BARE_TURN_DEG) {
+    warnings.push(
+      `Path has a max turning angle of ${maxTurn.toFixed(1)}° (target ≤ ${MAX_BARE_TURN_DEG}°).`
+    );
+  }
+
+  const fitLen = polylineLengthM(fitted);
+  return {
+    samples: fitted,
+    mode,
+    warnings,
+    paintable,
+    quality: {
+      class: "dense-survey",
+      toleranceM: clampedTol,
+      maxJointTurnDeg: maxTurn,
+      lengthRatio: srcLen > 1e-9 ? fitLen / srcLen : 1,
+      maxSourceDeviationM: maxSourceDeviationM(source, fitted),
+    },
+  };
 }
+
+/**
+ * Full production pipeline (sample points only — backward compatible).
+ * Prefer `buildRoadMarkingFittedPath` when warnings / paintable status are needed.
+ */
+export function buildRoadMarkingPreviewPoints(
+  points: RoadMarkingNedPoint[],
+  options: RoadMarkingPathOptions = {}
+): RoadMarkingNedPoint[] {
+  return buildRoadMarkingFittedPath(points, options).samples;
+}
+
+
 
 /** Max |turning angle| along the path (degrees). 0 for <3 points. */
 export function maxTurningAngleDeg(points: RoadMarkingNedPoint[]): number {

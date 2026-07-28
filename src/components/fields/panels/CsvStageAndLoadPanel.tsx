@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Platform, Text, TouchableOpacity, View } from "react-native";
 import { Check, Circle } from "lucide-react-native";
 
@@ -12,6 +12,7 @@ import {
   uploadAndStageCsvMission,
   type CsvStageStep,
 } from "../../../utils/csvMissionStaging";
+import { evaluateCsvSendReadiness } from "../../../utils/csvGeometryReadiness";
 import {
   buildOrderedTrajectory,
   defaultPathOrder,
@@ -23,6 +24,7 @@ import type { LocalPointCsvResult } from "../../../utils/localPointCsv";
 import { sanitizePlanLines } from "../../../utils/pathWorkflow";
 import { hydrateStagedMissionForMap } from "../../../utils/stagedMissionHydration";
 import { buildSurveyCsvExport, type SurveyCsvExport } from "../../../utils/surveyCsvExport";
+import { CsvWarningsPanel } from "../CsvWarningsPanel";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 type CsvStageAndLoadPanelProps = {
@@ -107,6 +109,10 @@ export function CsvStageAndLoadPanel({
   const [staged, setStaged] = useState<{ missionId: string; plan: pathApi.PathPlanResponse } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadBlocked, setLoadBlocked] = useState(false);
+  /** Operator accepted remaining non-paintable painted paths (they are still refused in buildTrajectory). */
+  const [geometryAcknowledged, setGeometryAcknowledged] = useState(false);
+  /** Operator confirmed critical parse-frame warnings. */
+  const [parseAcknowledged, setParseAcknowledged] = useState(false);
 
   const exported = useMemo(() => buildSurveyCsvExport(localCsvPreview), [localCsvPreview]);
   const useAppPlanner = CSV_PLANNER === "app";
@@ -116,6 +122,12 @@ export function CsvStageAndLoadPanel({
     () => pathOrder ?? defaultPathOrder(markLines),
     [pathOrder, markLines]
   );
+
+  // New file / geometry → re-require acknowledgement.
+  useEffect(() => {
+    setGeometryAcknowledged(false);
+    setParseAcknowledged(false);
+  }, [localCsvPreview.fileName, localCsvPreview.num_points, markLines.length]);
 
   const groundTruthSource = useMemo(
     () =>
@@ -128,6 +140,29 @@ export function CsvStageAndLoadPanel({
           lon: p.lon as number,
         })),
     [localCsvPreview.points]
+  );
+
+  const readiness = useMemo(
+    () =>
+      evaluateCsvSendReadiness({
+        lines,
+        pathOrder: order,
+        parseWarnings: localCsvPreview.warnings,
+        geometryAcknowledged,
+        parseAcknowledged,
+        requireGpsAnchor: useAppPlanner,
+        hasGpsAnchor: localCsvPreview.kind === "gps" && localCsvPreview.anchor != null,
+      }),
+    [
+      lines,
+      order,
+      localCsvPreview.warnings,
+      localCsvPreview.kind,
+      localCsvPreview.anchor,
+      geometryAcknowledged,
+      parseAcknowledged,
+      useAppPlanner,
+    ]
   );
 
   const appTrajectory = useMemo(() => {
@@ -144,10 +179,12 @@ export function CsvStageAndLoadPanel({
     [order, markLines]
   );
 
+  const readinessBlocksSend = !readiness.canSend;
   const disabled =
     busy ||
     missionActionBusy ||
     !apiBaseUrl ||
+    readinessBlocksSend ||
     (useAppPlanner
       ? (appTrajectory?.runs.length ?? 0) < 1 ||
         (localCsvPreview.kind === "gps" && !localCsvPreview.anchor)
@@ -210,6 +247,14 @@ export function CsvStageAndLoadPanel({
   const handleSendAppPlanned = async () => {
     if (!apiBaseUrl) {
       Alert.alert("Not connected", "Connect to the rover before sending the path.");
+      return;
+    }
+    if (!readiness.canSend) {
+      Alert.alert(
+        "Send blocked",
+        [...readiness.hardBlocks, ...readiness.needsAck].slice(0, 6).join("\n\n") ||
+          "Resolve geometry or parse warnings before sending."
+      );
       return;
     }
     if (!localCsvPreview.anchor) {
@@ -276,6 +321,14 @@ export function CsvStageAndLoadPanel({
   const handleSendRoverPlanned = async () => {
     if (!apiBaseUrl) {
       Alert.alert("Not connected", "Connect to the rover before sending the path.");
+      return;
+    }
+    if (!readiness.canSend) {
+      Alert.alert(
+        "Send blocked",
+        [...readiness.hardBlocks, ...readiness.needsAck].slice(0, 6).join("\n\n") ||
+          "Resolve geometry or parse warnings before sending."
+      );
       return;
     }
     setBusy(true);
@@ -412,13 +465,124 @@ export function CsvStageAndLoadPanel({
         </View>
       </View>
 
-      {localCsvPreview.warnings.length > 0 ? (
-        <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}>
-          {localCsvPreview.warnings.slice(0, 4).join("\n")}
-          {localCsvPreview.warnings.length > 4
-            ? `\n…+${localCsvPreview.warnings.length - 4} more`
-            : ""}
-        </Text>
+      <CsvWarningsPanel
+        title="Parse & frame"
+        critical={readiness.criticalParseWarnings}
+        advisory={localCsvPreview.warnings.filter(
+          (w) => !readiness.criticalParseWarnings.includes(w)
+        )}
+      />
+
+      <CsvWarningsPanel
+        title="Geometry (fit)"
+        critical={readiness.nonPaintablePainted.map(
+          (m) =>
+            `"${m.label}" is non-paintable` +
+            (m.warnings[0] ? ` — ${m.warnings[0]}` : "")
+        )}
+        advisory={readiness.advisory}
+      />
+
+      {readiness.hardBlocks.length > 0 ? (
+        <View
+          style={{
+            borderRadius: 10,
+            borderWidth: 1,
+            borderColor: FIELDS_COLORS.dangerBorder,
+            backgroundColor: FIELDS_COLORS.dangerMuted,
+            padding: 10,
+            gap: 4,
+          }}
+        >
+          <Text style={{ color: FIELDS_COLORS.danger, fontSize: 12, fontWeight: "700" }}>
+            Send blocked
+          </Text>
+          {readiness.hardBlocks.map((b, i) => (
+            <Text key={i} style={{ color: FIELDS_COLORS.danger, fontSize: 11, lineHeight: 15 }}>
+              • {b}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+
+      {readiness.needsAck.length > 0 ? (
+        <View
+          style={{
+            borderRadius: 10,
+            borderWidth: 1,
+            borderColor: FIELDS_COLORS.warningBorder,
+            backgroundColor: FIELDS_COLORS.warningMuted,
+            padding: 10,
+            gap: 8,
+          }}
+        >
+          <Text style={{ color: FIELDS_COLORS.warning, fontSize: 12, fontWeight: "700" }}>
+            Acknowledgement required before Send
+          </Text>
+          {readiness.needsAck.slice(0, 6).map((b, i) => (
+            <Text key={i} style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}>
+              • {b}
+            </Text>
+          ))}
+          <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, lineHeight: 14 }}>
+            Non-paintable paths are never included in the trajectory. Prefer Skip in Path Order.
+            Acknowledgement only unlocks Send for the remaining paintable paths.
+          </Text>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+            {readiness.needsGeometryAck ? (
+              <TouchableOpacity
+                onPress={() => setGeometryAcknowledged(true)}
+                style={{
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  borderRadius: 8,
+                  backgroundColor: FIELDS_COLORS.iconWarning,
+                  borderWidth: 1,
+                  borderColor: FIELDS_COLORS.warningBorder,
+                }}
+              >
+                <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, fontWeight: "700" }}>
+                  Acknowledge geometry
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+            {readiness.needsParseAck ? (
+              <TouchableOpacity
+                onPress={() => setParseAcknowledged(true)}
+                style={{
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  borderRadius: 8,
+                  backgroundColor: FIELDS_COLORS.iconWarning,
+                  borderWidth: 1,
+                  borderColor: FIELDS_COLORS.warningBorder,
+                }}
+              >
+                <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, fontWeight: "700" }}>
+                  Confirm parse / frame
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+            {readiness.needsGeometryAck || readiness.needsParseAck ? (
+              <TouchableOpacity
+                onPress={() => {
+                  if (readiness.needsGeometryAck) setGeometryAcknowledged(true);
+                  if (readiness.needsParseAck) setParseAcknowledged(true);
+                }}
+                style={{
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  borderRadius: 8,
+                  backgroundColor: FIELDS_COLORS.warning,
+                }}
+              >
+                <Text style={{ color: FIELDS_COLORS.accentText, fontSize: 11, fontWeight: "800" }}>
+                  Acknowledge all
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        </View>
       ) : null}
 
       {localCsvPreview.kind === "ned" ? (
@@ -452,9 +616,11 @@ export function CsvStageAndLoadPanel({
         <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800", letterSpacing: 0.2 }}>
           {busy
             ? (stepLabel ?? "Working…")
-            : useAppPlanner
-              ? "Verify Trajectory & Load"
-              : "Verify & Load to Rover"}
+            : readinessBlocksSend
+              ? "Resolve warnings to Send"
+              : useAppPlanner
+                ? "Verify Trajectory & Load"
+                : "Verify & Load to Rover"}
         </Text>
       </TouchableOpacity>
 
@@ -465,6 +631,11 @@ export function CsvStageAndLoadPanel({
       ) : paintedCount < 1 ? (
         <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11 }}>
           Paint at least one path above before loading.
+        </Text>
+      ) : readinessBlocksSend ? (
+        <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}>
+          Send stays disabled until hard blocks are cleared and any required acknowledgements are
+          made. Non-paintable geometry is never included in the trajectory.
         </Text>
       ) : null}
 

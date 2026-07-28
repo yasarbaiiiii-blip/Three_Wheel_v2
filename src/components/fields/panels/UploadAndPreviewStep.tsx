@@ -6,7 +6,9 @@ import { Upload, X } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
 import type { ImportedPlan } from "../../../types/plan";
+import { partitionParseWarnings } from "../../../utils/csvGeometryReadiness";
 import { parseLocalPointCsv, type LocalPointCsvResult } from "../../../utils/localPointCsv";
+import { CsvWarningsPanel } from "../CsvWarningsPanel";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 type UploadAndPreviewStepProps = {
@@ -169,6 +171,7 @@ export function UploadAndPreviewStep({
     num_points: number;
     kind: string;
     frame: string;
+    warnings: string[];
   } | null>(null);
 
   // Extension state (inline, no modal)
@@ -252,13 +255,22 @@ export function UploadAndPreviewStep({
           num_points: parsed.num_points,
           kind: parsed.kind,
           frame: parsed.point_source_frame,
+          warnings: parsed.warnings.slice(0, 12),
         });
         setPreviewData(null);
         setPickedFile(null);
         setImportError(null);
 
         if (parsed.warnings.length > 0) {
-          console.warn("[import][csv] row warnings:", parsed.warnings);
+          console.warn("[import][csv] warnings:", parsed.warnings);
+          // Loud operator-visible signal for silent-and-wrong frame cases.
+          const critical = parsed.warnings.filter(
+            (w) =>
+              /projected|jumbled|swapped|Headerless|Null Island|do not paint|confirm/i.test(w)
+          );
+          if (critical.length > 0) {
+            Alert.alert("CSV needs review", critical.slice(0, 4).join("\n\n"));
+          }
         }
       } catch (err) {
         console.log("Error importing CSV locally:", err);
@@ -571,10 +583,25 @@ export function UploadAndPreviewStep({
                 {targetPathName}
               </Text>
               {localCsvSummary ? (
-                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-                  {localCsvSummary.num_points} points · local {localCsvSummary.kind.toUpperCase()} ·{" "}
-                  {localCsvSummary.frame}
-                </Text>
+                <View style={{ gap: 6, marginTop: 2 }}>
+                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11 }}>
+                    {localCsvSummary.num_points} points · local {localCsvSummary.kind.toUpperCase()} ·{" "}
+                    {localCsvSummary.frame}
+                  </Text>
+                  {localCsvSummary.warnings.length > 0
+                    ? (() => {
+                        const parts = partitionParseWarnings(localCsvSummary.warnings);
+                        return (
+                          <CsvWarningsPanel
+                            title="Import warnings"
+                            critical={parts.critical}
+                            advisory={parts.advisory}
+                            defaultExpanded={parts.critical.length > 0}
+                          />
+                        );
+                      })()
+                    : null}
+                </View>
               ) : previewData ? (
                 <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
                   {previewData.num_points ?? "?"} points · {previewData.frame ?? "DXF"}

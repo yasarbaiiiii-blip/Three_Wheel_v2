@@ -66,6 +66,31 @@ describe("getLineLengthM", () => {
   it("falls back to segment hypot for transit without entity length", () => {
     expect(getLineLengthM(makeTransit("t1", 4))).toBe(4);
   });
+
+  it("treats length_m 0 as unset and measures preview_points instead", () => {
+    const line: PlanLine = {
+      id: "csv-zero",
+      label: "CSV",
+      layer: "marking",
+      from: { id: 1, x: 0, y: 0 },
+      to: { id: 2, x: 3, y: 0 },
+      width: 0.1,
+      entity: {
+        entity_id: "e",
+        entity_type: "LWPOLYLINE",
+        layer: "MARK",
+        color: 7,
+        is_mark: true,
+        length_m: 0,
+        geometry: { road_marking: true },
+        preview_points: [
+          { north: 0, east: 0 },
+          { north: 0, east: 3 },
+        ],
+      },
+    };
+    expect(getLineLengthM(line)).toBeCloseTo(3, 5);
+  });
 });
 
 describe("groupExtensionLinesForList", () => {

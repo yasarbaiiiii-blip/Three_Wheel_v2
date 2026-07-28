@@ -91,12 +91,16 @@ export function isSegmentKindVisible(line: PlanLine, segmentTypes?: Record<strin
 export function isCircleLikeLine(line: PlanLine): boolean {
   // See isCurveEntity — extension stubs must not draw as the parent circle.
   if (line.layer === "extension") return false;
+  // CSV road-marking paths must never be re-inferred as synthetic 360° rings —
+  // map and rover both consume entity.preview_points (see getPlanLineRenderPoints).
+  if (line.entity?.geometry?.road_marking === true) return false;
   const entityType = normalizeCurveEntityType(line.entity?.entity_type);
   if (entityType === "circle") return true;
   if (entityType === "arc") return false;
   const points = line.entity?.preview_points ?? [];
   if (points.length < 8) return false;
-  return inferCurveGeometryFromPreviewPoints(points, "circle") != null;
+  // Pass the real entity type (not the literal "circle") so isClosedPointRing runs.
+  return inferCurveGeometryFromPreviewPoints(points, entityType || "lwpolyline") != null;
 }
 
 function readGeometryFields(geom: Record<string, unknown>) {
@@ -125,7 +129,23 @@ function isClosedPointRing(points: DxfPoint[], radius: number): boolean {
   const first = points[0];
   const last = points[points.length - 1];
   const gap = Math.hypot(first.north - last.north, first.east - last.east);
-  return gap <= Math.max(radius * 0.2, 0.05);
+  if (gap <= Math.max(radius * 0.2, 0.05)) return true;
+
+  // Coarse closed rings often omit a duplicate closing vertex. Accept when samples
+  // wrap the centre (largest angular gap ≤ 60° ⇒ coverage ≥ 300°).
+  let cN = 0;
+  let cE = 0;
+  for (const p of points) {
+    cN += p.north;
+    cE += p.east;
+  }
+  cN /= points.length;
+  cE /= points.length;
+  const angs = points.map((p) => Math.atan2(p.north - cN, p.east - cE)).sort((a, b) => a - b);
+  let maxGap = 0;
+  for (let i = 1; i < angs.length; i++) maxGap = Math.max(maxGap, angs[i] - angs[i - 1]);
+  maxGap = Math.max(maxGap, angs[0] + 2 * Math.PI - angs[angs.length - 1]);
+  return maxGap <= (60 * Math.PI) / 180;
 }
 
 function fitCircleFromPoints(points: DxfPoint[]): CurveGeometry | null {
@@ -144,10 +164,11 @@ function fitCircleFromPoints(points: DxfPoint[]): CurveGeometry | null {
   const radius = radii.reduce((sum, value) => sum + value, 0) / radii.length;
   if (!Number.isFinite(radius) || radius <= 0) return null;
 
-  const variance =
-    radii.reduce((sum, value) => sum + (value - radius) ** 2, 0) / radii.length;
-  const coefficientOfVariation = Math.sqrt(variance) / radius;
-  if (coefficientOfVariation > 0.15) return null;
+  // Metre residual (not CV): CV 0.15 accepts dense square rings as "circles".
+  let maxResidual = 0;
+  for (const r of radii) maxResidual = Math.max(maxResidual, Math.abs(r - radius));
+  const residualBudget = Math.max(0.05, radius * 0.03);
+  if (maxResidual > residualBudget) return null;
 
   return { centerNorth, centerEast, radius, startAngle: 0, endAngle: FULL_CIRCLE_SWEEP };
 }
@@ -161,16 +182,17 @@ export function inferCurveGeometryFromPreviewPoints(
   if (!fitted) return null;
 
   const normalizedType = normalizeCurveEntityType(entityType);
-  if (normalizedType === "circle" || isClosedPointRing(points, fitted.radius)) {
+  // Explicit circle entity type, or a closed ring that actually wraps the centre.
+  if (normalizedType === "circle") {
+    return fitted;
+  }
+  if (isClosedPointRing(points, fitted.radius)) {
     return fitted;
   }
 
   if (normalizedType === "arc") return null;
 
-  if (points.length >= 8) {
-    return fitted;
-  }
-
+  // Open polylines (including dense surveys) must not become 360° rings.
   return null;
 }
 
@@ -420,6 +442,12 @@ export function sampleCurveEntityPoints(
 
 /** Points used for map/GPS projection — native curve samples when available. */
 export function getPlanLineRenderPoints(line: PlanLine, mapMode = false): DxfPoint[] {
+  // CSV road-marking: map and rover share entity.preview_points only — never re-fit.
+  if (line.entity?.geometry?.road_marking === true) {
+    const previewRm = line.entity?.preview_points;
+    if (previewRm && previewRm.length >= 2) return previewRm;
+  }
+
   // Extension pre/aft segments always use their own polyline (never parent circle/arc samples).
   if (line.layer !== "extension" && (isCurveEntity(line) || isCircleLikeLine(line))) {
     const sampled = sampleCurveEntityPoints(line, CURVE_SAMPLE_STEPS, mapMode);

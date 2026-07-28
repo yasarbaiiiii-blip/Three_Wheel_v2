@@ -406,6 +406,24 @@ export function buildTrajectory(
       continue;
     }
 
+    // Geometry layer: refuse paths marked non-paintable (undrivable / validation failed).
+    // Operator must Skip them in Path Order; Send UI blocks until they do or acknowledge
+    // (ack only allows other paintable paths through — these are still refused here).
+    if (line.entity?.geometry?.paintable === false) {
+      const fitNotes = Array.isArray(line.entity?.geometry?.fit_warnings)
+        ? (line.entity.geometry.fit_warnings as unknown[])
+            .filter((w): w is string => typeof w === "string")
+            .slice(0, 2)
+            .join("; ")
+        : "";
+      warnings.push(
+        `Refused non-paintable path "${line.label ?? line.id}"` +
+          (fitNotes ? ` (${fitNotes})` : "") +
+          ". Skip it in Path Order or fix the survey geometry."
+      );
+      continue;
+    }
+
     const points = planLineToNedPolyline(line);
     if (!points) {
       warnings.push(`Skipped line "${line.label ?? line.id}": fewer than 2 valid NED points.`);
