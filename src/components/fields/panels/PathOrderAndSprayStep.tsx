@@ -127,8 +127,8 @@ export function PathOrderAndSprayStep({
   const [reorderedLines, setReorderedLines] = useState<PlanLine[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [loadStep, setLoadStep] = useState<pathApi.LoadToControllerStep | null>(null);
-  // Transit legs live under a single collapsible "Transit" dropdown (not flat-listed).
-  const [transitDropdownExpanded, setTransitDropdownExpanded] = useState(false);
+  // Transit legs under collapsible "Transit" — expanded by default so legs are visible.
+  const [transitDropdownExpanded, setTransitDropdownExpanded] = useState(true);
 
   // Primary paths only — drag/reorder + spray
   const primaryLines = useMemo(() => lines.filter(isPrimaryEditableLine), [lines]);

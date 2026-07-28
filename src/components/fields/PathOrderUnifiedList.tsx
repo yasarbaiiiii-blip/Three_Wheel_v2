@@ -101,7 +101,7 @@ export function PathOrderUnifiedList({
       nestedScrollEnabled
       showsVerticalScrollIndicator
       keyboardShouldPersistTaps="handled"
-      activationDistance={12}
+      activationDistance={8}
       removeClippedSubviews={false}
       windowSize={8}
       maxToRenderPerBatch={14}
@@ -122,6 +122,7 @@ export function PathOrderUnifiedList({
             <ScaleDecorator>
               <Pressable
                 onLongPress={drag}
+                delayLongPress={180}
                 onPress={() => onPressPrimary(item.line)}
                 disabled={isActive}
                 style={{

@@ -41,6 +41,7 @@ export function DraggableReorderList({
       // Keep clipped subviews mounted: removeClippedSubviews=true is known to
       // break scroll/layout behavior on Reanimated-driven draggable lists.
       removeClippedSubviews={false}
+      activationDistance={8}
       windowSize={5}
       maxToRenderPerBatch={10}
       initialNumToRender={8}
@@ -49,6 +50,7 @@ export function DraggableReorderList({
         <ScaleDecorator>
           <Pressable
             onLongPress={drag}
+            delayLongPress={180}
             onPress={() => onPressItem?.(item)}
             disabled={isActive}
             style={{

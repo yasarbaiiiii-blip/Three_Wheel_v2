@@ -24,7 +24,10 @@ import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPrevi
 import { useFieldsWorkflow } from "../hooks/useFieldsWorkflow";
 import { parseGuidePointsCsv } from "../utils/refPointsCsv";
 import { designObbFromLines } from "../utils/planResizeHandles";
-import type { CsvPathOrderEntry } from "../utils/csvPathOrder";
+import {
+  applyCsvOrderToPlanLines,
+  type CsvPathOrderEntry,
+} from "../utils/csvPathOrder";
 import { buildCsvTransitLines } from "../utils/localPointCsv";
 import {
   localCsvToMapPins,
@@ -973,13 +976,14 @@ export function FieldsPage(props: FieldsPageProps) {
           >
             {renderFieldsSteps("csvUpload")}
           </ScrollView>
+          {/* Path order list (VirtualizedList) + Verify & Load — outside ScrollView. */}
           {renderFieldsSteps("csvPathOrder")}
           <ScrollView
-            style={{ flex: 1, minHeight: 0 }}
-            contentContainerStyle={{ gap: 8, paddingBottom: 20 }}
+            style={{ flexGrow: 0, flexShrink: 1, maxHeight: isSectionOpen("templates") ? 360 : undefined }}
+            contentContainerStyle={{ gap: 8, paddingBottom: 12 }}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
-            showsVerticalScrollIndicator
+            showsVerticalScrollIndicator={isSectionOpen("templates")}
           >
             {renderFieldsSteps("csvScroll")}
           </ScrollView>
@@ -1009,13 +1013,15 @@ export function FieldsPage(props: FieldsPageProps) {
    * Slice the step tree so CSV Path Order (VirtualizedList) is never a ScrollView child.
    * - csvUpload / csvPathOrder / csvScroll: Mission CSV sections
    * - dxf: full DXF accordion column
+   *
+   * CSV path order + verify/load are one combined section (paths, paint, transit, load).
    */
   function renderFieldsSteps(slice: "csvUpload" | "csvPathOrder" | "csvScroll" | "dxf") {
     const showUpload = slice === "csvUpload" || slice === "dxf";
     const showCsvPathOrder = slice === "csvPathOrder";
     const showTemplatesOrBbox = slice === "csvScroll" || slice === "dxf";
-    const showCsvSend = slice === "csvScroll";
     const showDxfOnly = slice === "dxf";
+    const activeCsvForSend = activeCsvPreview;
 
     return (
       <>
@@ -1057,7 +1063,7 @@ export function FieldsPage(props: FieldsPageProps) {
                 onLocalCsvParsed?.(data);
                 setShowMapInteraction(true);
                 setCsvPathOrder(null);
-                // After CSV load: collapse Upload, open Path Order + Send.
+                // After CSV load: collapse Upload, open combined Path Order & Load.
                 setShowTemplates(false);
                 setActiveStep("upload");
                 setOpenSections((prev) => ({
@@ -1065,7 +1071,7 @@ export function FieldsPage(props: FieldsPageProps) {
                   upload: false,
                   pathOrder: true,
                   templates: false,
-                  send: true,
+                  send: false,
                 }));
               }}
               onClearLocalCsv={() => {
@@ -1081,29 +1087,80 @@ export function FieldsPage(props: FieldsPageProps) {
           </FieldsStepCard>
           ) : null}
 
-          {/* Mission CSV Path Order — click header to expand/collapse (list is fixed-height). */}
-          {showCsvPathOrder ? (
+          {/* Mission CSV: paths + paint + transit + Verify & Load in one section. */}
+          {showCsvPathOrder && activeCsvForSend ? (
             <FieldsStepCard
               stepNumber={2}
-              title="Path Order & Paint"
+              title="Path Order & Load"
               status={
-                stagedWorkflow.staged === "verified" || stagedWorkflow.loaded === "verified"
+                stagedWorkflow.loaded === "verified" || stagedWorkflow.staged === "verified"
                   ? "done"
                   : "active"
               }
               expanded={isSectionOpen("pathOrder")}
               onToggle={() => toggleSection("pathOrder")}
+              fillAvailable={isSectionOpen("pathOrder")}
             >
-              <CsvPathOrderStep
-                lines={lines}
-                onOrderChange={(_painted, fullOrder) => {
-                  setCsvPathOrder(fullOrder);
-                }}
-              />
+              <View style={{ flex: 1, minHeight: 0, gap: 14 }}>
+                <CsvPathOrderStep
+                  lines={lines}
+                  onOrderChange={(_painted, fullOrder) => {
+                    setCsvPathOrder((prev) => {
+                      const same =
+                        prev != null &&
+                        prev.length === fullOrder.length &&
+                        prev.every(
+                          (e, i) =>
+                            e.lineId === fullOrder[i]?.lineId && e.paint === fullOrder[i]?.paint
+                        );
+                      return same ? prev : fullOrder;
+                    });
+                    // Rebuild map transit: end of path N → start of path N+1 in new order.
+                    setLines((prev) => applyCsvOrderToPlanLines(prev, fullOrder));
+                  }}
+                />
+                <View
+                  style={{
+                    borderTopWidth: 1,
+                    borderTopColor: FIELDS_COLORS.panelBorder,
+                    paddingTop: 12,
+                    flexShrink: 0,
+                  }}
+                >
+                  <CsvStageAndLoadPanel
+                    apiBaseUrl={apiBaseUrl}
+                    localCsvPreview={activeCsvForSend}
+                    mapPinCount={localCsvMapPins?.length ?? null}
+                    lines={lines}
+                    pathOrder={csvPathOrder}
+                    setLines={setLines}
+                    onSelectLine={onSelectLine}
+                    setStagedMissionId={setStagedMissionId}
+                    setStagedPlanResult={setStagedPlanResult}
+                    setStagedMissionInspection={setStagedMissionInspection}
+                    setAlignedRefPoints={setAlignedRefPoints}
+                    onWorkflowStep={onWorkflowStep}
+                    onLoadSelectedPath={onLoadSelectedPath}
+                    missionActionBusy={missionActionBusy}
+                  />
+                </View>
+              </View>
+            </FieldsStepCard>
+          ) : showCsvPathOrder ? (
+            <FieldsStepCard
+              stepNumber={2}
+              title="Path Order & Load"
+              status="pending"
+              expanded={isSectionOpen("pathOrder")}
+              onToggle={() => toggleSection("pathOrder")}
+            >
+              <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, lineHeight: 16 }}>
+                Load a survey CSV first, then order paths, review transit, and verify & load.
+              </Text>
             </FieldsStepCard>
           ) : null}
 
-          {/* Step: Bounding Box (DXF only) + Templates (both). */}
+          {/* Step: Bounding Box (DXF only) + Templates (both). CSV templates optional after load. */}
           {showTemplatesOrBbox ? (
           <FieldsStepCard
             stepNumber={isLocalCsvFlow ? 3 : 2}
@@ -1231,40 +1288,6 @@ export function FieldsPage(props: FieldsPageProps) {
               </View>
             </View>
           </FieldsStepCard>
-          ) : null}
-
-          {/* Mission CSV: Plan & stage / Send (after order + optional templates). */}
-          {showCsvSend && activeCsvPreview ? (
-            <FieldsStepCard
-              stepNumber={4}
-              title="Send to Rover"
-              status={
-                stagedWorkflow.loaded === "verified" || stagedWorkflow.staged === "verified"
-                  ? "done"
-                  : "active"
-              }
-              expanded={isSectionOpen("send")}
-              onToggle={() => toggleSection("send")}
-              scrollableBody
-              bodyMaxHeight={420}
-            >
-              <CsvStageAndLoadPanel
-                apiBaseUrl={apiBaseUrl}
-                localCsvPreview={activeCsvPreview}
-                mapPinCount={localCsvMapPins?.length ?? null}
-                lines={lines}
-                pathOrder={csvPathOrder}
-                setLines={setLines}
-                onSelectLine={onSelectLine}
-                setStagedMissionId={setStagedMissionId}
-                setStagedPlanResult={setStagedPlanResult}
-                setStagedMissionInspection={setStagedMissionInspection}
-                setAlignedRefPoints={setAlignedRefPoints}
-                onWorkflowStep={onWorkflowStep}
-                onLoadSelectedPath={onLoadSelectedPath}
-                missionActionBusy={missionActionBusy}
-              />
-            </FieldsStepCard>
           ) : null}
 
           {/* Align DXF — DXF only */}

@@ -11,6 +11,8 @@ import {
   type BuildTrajectoryOpts,
   type TrajectoryRun,
 } from "./csvTrajectory";
+import { buildCsvTransitLines } from "./localPointCsv";
+import { sanitizePlanLines } from "./pathWorkflow";
 
 /** Operator turns sharper than this (deg) between consecutive painted runs trigger a warning. */
 export const REVERSAL_HEADING_THRESHOLD_DEG = 120;
@@ -171,6 +173,96 @@ export function setPathPaint(
   paint: boolean
 ): CsvPathOrderEntry[] {
   return order.map((e) => (e.lineId === lineId ? { ...e, paint } : e));
+}
+
+/**
+ * Preview transit leg between two consecutive painted paths (end of A → start of B).
+ * Matches map geometry from {@link buildCsvTransitLines}.
+ */
+export type CsvTransitPreview = {
+  id: string;
+  fromLineId: string;
+  toLineId: string;
+  fromLabel: string;
+  toLabel: string;
+  lengthM: number;
+};
+
+/** Build operator-facing transit previews for consecutive painted paths in order. */
+export function buildCsvTransitPreviews(
+  allLines: PlanLine[],
+  order: CsvPathOrderEntry[]
+): CsvTransitPreview[] {
+  const painted = resolveOrderedPaintedLines(allLines, order);
+  const transitLines = buildCsvTransitLines(painted);
+  const previews: CsvTransitPreview[] = [];
+  // buildCsvTransitLines skips tiny gaps, so index against consecutive painted pairs
+  // by matching endpoints rather than assuming 1:1 with painted.length - 1.
+  let paintedPair = 0;
+  for (let i = 0; i < painted.length - 1; i++) {
+    const from = painted[i];
+    const to = painted[i + 1];
+    const fromPt = from.to;
+    const toPt = to.from;
+    if (
+      fromPt == null ||
+      toPt == null ||
+      !Number.isFinite(fromPt.x) ||
+      !Number.isFinite(fromPt.y) ||
+      !Number.isFinite(toPt.x) ||
+      !Number.isFinite(toPt.y)
+    ) {
+      continue;
+    }
+    const lengthM = Math.hypot(toPt.x - fromPt.x, toPt.y - fromPt.y);
+    if (lengthM < 0.02) continue;
+    const matching = transitLines[paintedPair];
+    paintedPair += 1;
+    previews.push({
+      id: matching?.id ?? `csv-transit-preview-${i}`,
+      fromLineId: from.id,
+      toLineId: to.id,
+      fromLabel: from.label,
+      toLabel: to.label,
+      lengthM: matching?.entity?.length_m ?? lengthM,
+    });
+  }
+  return previews;
+}
+
+/**
+ * Apply operator path order to plan lines: marks follow order, transit connectors
+ * are rebuilt from consecutive *painted* paths (end of N → start of N+1).
+ * Non-mark / non-transit layers (virtual box, etc.) are preserved.
+ */
+export function applyCsvOrderToPlanLines(
+  allLines: PlanLine[],
+  order: CsvPathOrderEntry[]
+): PlanLine[] {
+  const marks = selectMarkPlanLines(allLines);
+  const byId = new Map(marks.map((m) => [m.id, m]));
+  const orderedMarks: PlanLine[] = [];
+  const seen = new Set<string>();
+  for (const entry of order) {
+    const line = byId.get(entry.lineId);
+    if (line && !seen.has(line.id)) {
+      orderedMarks.push(line);
+      seen.add(line.id);
+    }
+  }
+  for (const line of marks) {
+    if (!seen.has(line.id)) {
+      orderedMarks.push(line);
+      seen.add(line.id);
+    }
+  }
+
+  const painted = resolveOrderedPaintedLines(orderedMarks, order);
+  const transit = buildCsvTransitLines(painted);
+  const others = allLines.filter(
+    (l) => l.layer !== "transit" && !marks.some((m) => m.id === l.id)
+  );
+  return sanitizePlanLines([...orderedMarks, ...transit, ...others]);
 }
 
 /**

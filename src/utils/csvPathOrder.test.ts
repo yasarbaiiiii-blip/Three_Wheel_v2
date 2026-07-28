@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import type { PlanLine } from "../types/plan";
 import {
   absHeadingChangeDeg,
+  applyCsvOrderToPlanLines,
+  buildCsvTransitPreviews,
   buildOrderedTrajectory,
   defaultPathOrder,
   detectReversalWarnings,
@@ -185,5 +187,31 @@ describe("order / paint / trajectory", () => {
     ]);
     expect(runs).toHaveLength(3);
     expect(runs[1].kind).toBe("travel");
+  });
+
+  it("applyCsvOrderToPlanLines rebuilds transit end→start after reorder", () => {
+    // A ends at (10,0); C starts at (20,40) — after A→C→B, first transit is A→C.
+    let order = defaultPathOrder([a, b, c]);
+    order = reorderPathOrder(order, 2, 1); // A, C, B
+    const next = applyCsvOrderToPlanLines([a, b, c], order);
+    const marks = next.filter((l) => l.layer === "marking");
+    const transit = next.filter((l) => l.layer === "transit");
+    expect(marks.map((l) => l.id)).toEqual(["a", "c", "b"]);
+    expect(transit.length).toBeGreaterThanOrEqual(1);
+    // First transit: end of A (10,0) → start of C (20,40)
+    expect(transit[0].from.x).toBeCloseTo(10, 5);
+    expect(transit[0].from.y).toBeCloseTo(0, 5);
+    expect(transit[0].to.x).toBeCloseTo(20, 5);
+    expect(transit[0].to.y).toBeCloseTo(40, 5);
+  });
+
+  it("buildCsvTransitPreviews follows painted order labels", () => {
+    let order = defaultPathOrder([a, b, c]);
+    order = reorderPathOrder(order, 0, 2); // B, C, A
+    const previews = buildCsvTransitPreviews([a, b, c], order);
+    expect(previews.map((p) => `${p.fromLabel}->${p.toLabel}`)).toEqual([
+      "B->C",
+      "C->A",
+    ]);
   });
 });

@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Platform, Text, TouchableOpacity, View } from "react-native";
+import { Check, Circle } from "lucide-react-native";
 
 import type * as pathApi from "../../../api/pathApi";
 import { CSV_PLANNER } from "../../../config/featureFlags";
@@ -69,10 +70,20 @@ async function buildUploadFormData(exported: SurveyCsvExport): Promise<FormData>
   return formData;
 }
 
+type VerifyPhase = "idle" | "plan" | "verify" | "load" | "done" | "failed";
+
+function phaseFromStep(step: CsvStageStep | "loadMission" | null, busy: boolean, done: boolean): VerifyPhase {
+  if (done) return "done";
+  if (!busy || step == null) return "idle";
+  if (step === "loadMission") return "load";
+  if (step === "verifyEcho" || step === "inspect") return "verify";
+  return "plan";
+}
+
 /**
- * CSV Send/Load panel.
+ * CSV Verify & Load panel (Send to Rover).
  *
- * - `CSV_PLANNER === "rover"` (default): survey CSV upload → plan-and-stage (today).
+ * - `CSV_PLANNER === "rover"` (default): survey CSV upload → plan-and-stage → load.
  * - `CSV_PLANNER === "app"`: buildTrajectory → plan-trajectory → verify run_echo → load.
  */
 export function CsvStageAndLoadPanel({
@@ -128,6 +139,11 @@ export function CsvStageAndLoadPanel({
     });
   }, [useAppPlanner, markLines, order, groundTruthSource]);
 
+  const paintedCount = useMemo(
+    () => order.filter((e) => e.paint !== false && markLines.some((m) => m.id === e.lineId)).length,
+    [order, markLines]
+  );
+
   const disabled =
     busy ||
     missionActionBusy ||
@@ -135,7 +151,7 @@ export function CsvStageAndLoadPanel({
     (useAppPlanner
       ? (appTrajectory?.runs.length ?? 0) < 1 ||
         (localCsvPreview.kind === "gps" && !localCsvPreview.anchor)
-      : exported.numPoints < 2);
+      : exported.numPoints < 2 || paintedCount < 1);
 
   const stepLabel =
     step === "loadMission"
@@ -143,6 +159,8 @@ export function CsvStageAndLoadPanel({
       : step
         ? CSV_STAGE_STEP_LABELS[step]
         : null;
+
+  const phase = phaseFromStep(step, busy, staged != null && !loadBlocked && !error);
 
   const applyStagedSuccess = async (
     result: {
@@ -301,36 +319,104 @@ export function CsvStageAndLoadPanel({
 
   const warnings = staged?.plan.warnings?.filter((w): w is string => typeof w === "string") ?? [];
 
+  const verifySteps = useAppPlanner
+    ? [
+        { key: "plan", label: "Plan trajectory" },
+        { key: "verify", label: "Verify run echo" },
+        { key: "load", label: "Load to controller" },
+      ]
+    : [
+        { key: "plan", label: "Upload & plan" },
+        { key: "verify", label: "Stage mission" },
+        { key: "load", label: "Load to controller" },
+      ];
+
+  const phaseRank: Record<VerifyPhase, number> = {
+    idle: 0,
+    plan: 1,
+    verify: 2,
+    load: 3,
+    done: 4,
+    failed: 0,
+  };
+
   return (
     <View style={{ gap: 12 }}>
-      <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
-        {localCsvPreview.num_points} point{localCsvPreview.num_points === 1 ? "" : "s"} ·{" "}
-        {exported.numPaths} path{exported.numPaths === 1 ? "" : "s"} ·{" "}
-        {localCsvPreview.kind === "gps" ? "GPS survey" : "local NED metres"}
-        {"\n"}
-        Frame: {localCsvPreview.point_source_frame}
-        {localCsvPreview.kind === "gps" && localCsvPreview.anchor
-          ? `\nPreview anchor: ${localCsvPreview.anchor.lat.toFixed(6)}, ${localCsvPreview.anchor.lon.toFixed(6)}`
-          : ""}
-        {mapPinCount != null && mapPinCount < localCsvPreview.num_points
-          ? `\nMap shows ${mapPinCount} pins (sampled) + full path line.`
-          : ""}
-        {useAppPlanner && appTrajectory
-          ? `\nApp planner: ${appTrajectory.totals.markRunCount} mark / ${appTrajectory.totals.travelRunCount} travel · paint ${appTrajectory.totals.markLengthM.toFixed(1)} m · travel ${appTrajectory.totals.travelLengthM.toFixed(1)} m`
-          : ""}
-      </Text>
+      <View
+        style={{
+          borderRadius: 12,
+          borderWidth: 1,
+          borderColor: FIELDS_COLORS.panelBorder,
+          backgroundColor: FIELDS_COLORS.surfaceSolid,
+          padding: 12,
+          gap: 8,
+        }}
+      >
+        <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>
+          Verify & Load
+        </Text>
+        <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, lineHeight: 16 }}>
+          {localCsvPreview.num_points} pts · {exported.numPaths} path
+          {exported.numPaths === 1 ? "" : "s"} · {paintedCount} painted ·{" "}
+          {localCsvPreview.kind === "gps" ? "GPS survey" : "local NED"}
+          {useAppPlanner && appTrajectory
+            ? ` · paint ${appTrajectory.totals.markLengthM.toFixed(1)} m · transit ${appTrajectory.totals.travelLengthM.toFixed(1)} m`
+            : ""}
+        </Text>
+        {mapPinCount != null && mapPinCount < localCsvPreview.num_points ? (
+          <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10 }}>
+            Map shows {mapPinCount} pins (sampled) + full path line.
+          </Text>
+        ) : null}
 
-      <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, lineHeight: 16 }}>
-        {useAppPlanner
-          ? "Sends the app-built trajectory (order, paint, travel legs) to the rover for densify & stage. Load is blocked if run_echo does not match."
-          : `Sends as ${exported.fileName}. The rover plans the route — it may reorder or reverse paths and adds the transit legs between them — and the map is redrawn from that planned geometry before anything is loaded.`}
-      </Text>
+        {/* Verification checklist */}
+        <View style={{ gap: 6, marginTop: 4 }}>
+          {verifySteps.map((s, i) => {
+            const rank = phaseRank[phase];
+            const stepRank = i + 1;
+            const done = rank > stepRank || phase === "done";
+            const active = busy && rank === stepRank;
+            return (
+              <View
+                key={s.key}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 8,
+                }}
+              >
+                {done ? (
+                  <Check size={14} color={FIELDS_COLORS.success} strokeWidth={3} />
+                ) : active ? (
+                  <ActivityIndicator size="small" color={FIELDS_COLORS.accentBrand} />
+                ) : (
+                  <Circle size={12} color={FIELDS_COLORS.textDim} strokeWidth={2} />
+                )}
+                <Text
+                  style={{
+                    color: done
+                      ? FIELDS_COLORS.success
+                      : active
+                        ? FIELDS_COLORS.accentBrand
+                        : FIELDS_COLORS.textDim,
+                    fontSize: 12,
+                    fontWeight: active || done ? "700" : "500",
+                  }}
+                >
+                  {s.label}
+                  {active && stepLabel ? ` — ${stepLabel}` : ""}
+                </Text>
+              </View>
+            );
+          })}
+        </View>
+      </View>
 
       {localCsvPreview.warnings.length > 0 ? (
         <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}>
-          {localCsvPreview.warnings.slice(0, 6).join("\n")}
-          {localCsvPreview.warnings.length > 6
-            ? `\n…+${localCsvPreview.warnings.length - 6} more`
+          {localCsvPreview.warnings.slice(0, 4).join("\n")}
+          {localCsvPreview.warnings.length > 4
+            ? `\n…+${localCsvPreview.warnings.length - 4} more`
             : ""}
         </Text>
       ) : null}
@@ -338,8 +424,8 @@ export function CsvStageAndLoadPanel({
       {localCsvPreview.kind === "ned" ? (
         <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}>
           {useAppPlanner
-            ? 'No latitude/longitude in this file — app-planned trajectory needs origin_gps. Use a GPS survey CSV or set CSV_PLANNER to "rover".'
-            : "No latitude/longitude in this file — the mission stages in the rover's local frame (LOCAL_NED) and is placed relative to where the rover stands, not at a surveyed ground position."}
+            ? 'No latitude/longitude — app planner needs origin_gps. Use a GPS survey CSV or set CSV_PLANNER to "rover".'
+            : "No latitude/longitude — mission stages in the rover's local frame (LOCAL_NED)."}
         </Text>
       ) : null}
 
@@ -348,28 +434,37 @@ export function CsvStageAndLoadPanel({
         disabled={disabled}
         activeOpacity={0.8}
         style={{
-          height: 48,
+          height: 50,
           borderRadius: 12,
           alignItems: "center",
           justifyContent: "center",
           flexDirection: "row",
           gap: 8,
           backgroundColor: disabled ? FIELDS_COLORS.textDim : "#7c3aed",
+          elevation: 3,
+          shadowColor: "#7c3aed",
+          shadowOffset: { width: 0, height: 2 },
+          shadowOpacity: 0.28,
+          shadowRadius: 4,
         }}
       >
         {busy ? <ActivityIndicator size="small" color="#fff" /> : null}
-        <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>
+        <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800", letterSpacing: 0.2 }}>
           {busy
             ? (stepLabel ?? "Working…")
             : useAppPlanner
-              ? "Plan Trajectory & Load"
-              : "Send to Rover & Load"}
+              ? "Verify Trajectory & Load"
+              : "Verify & Load to Rover"}
         </Text>
       </TouchableOpacity>
 
       {!apiBaseUrl ? (
         <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11 }}>
-          Connect to the rover to enable sending.
+          Connect to the rover to enable verification and load.
+        </Text>
+      ) : paintedCount < 1 ? (
+        <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11 }}>
+          Paint at least one path above before loading.
         </Text>
       ) : null}
 
@@ -389,13 +484,13 @@ export function CsvStageAndLoadPanel({
           style={{
             borderRadius: 10,
             borderWidth: 1,
-            borderColor: FIELDS_COLORS.panelBorder,
-            backgroundColor: FIELDS_COLORS.surfaceSolid,
+            borderColor: FIELDS_COLORS.successBorder,
+            backgroundColor: FIELDS_COLORS.successMuted,
             padding: 10,
             gap: 4,
           }}
         >
-          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
+          <Text style={{ color: FIELDS_COLORS.success, fontSize: 12, fontWeight: "700" }}>
             Staged {staged.missionId}
           </Text>
           <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, lineHeight: 16 }}>
