@@ -116,6 +116,57 @@ export function pointMissionPointsToPlanLines(
   }));
 }
 
+/**
+ * Single map hydration for a staged mission: geometry + origin together.
+ *
+ * Call sites must never set lines and alignedRefPoints independently — that was the
+ * Send-to-Rover frame desync (panel updated lines from plan.merged_waypoints without
+ * the staged anchor). One artifact in → consistent triple out, or null when nothing
+ * is drawable.
+ *
+ * LOCAL_NED / missing anchor: `alignedRefPoints` is [] (explicit parity with prior
+ * `anchorToAlignedRefPoints(null)` behaviour at load/recovery).
+ */
+export type StagedMissionHydrationInput = {
+  waypoints?: unknown[] | null;
+  spray_flags?: unknown[] | null;
+  point_mission_points?: PointMissionPointLike[] | null;
+  anchor?: Record<string, unknown> | null;
+};
+
+export type StagedMissionMapHydration = {
+  lines: PlanLine[];
+  alignedRefPoints: StagedAlignedRefPoint[];
+  selectedLineId: string | null;
+};
+
+export function hydrateStagedMissionForMap(
+  artifact: StagedMissionHydrationInput | null | undefined
+): StagedMissionMapHydration | null {
+  if (!artifact) return null;
+
+  let lines = sprayRunsToPlanLines(
+    (artifact.waypoints as unknown[]) ?? [],
+    (artifact.spray_flags as unknown[]) ?? []
+  );
+
+  if (lines.length === 0 && artifact.point_mission_points?.length) {
+    lines = pointMissionPointsToPlanLines(artifact.point_mission_points);
+  }
+
+  if (lines.length === 0) return null;
+
+  // Always derive origin from the same artifact as geometry — never leave the
+  // caller free to pair plan.merged_waypoints with a stale/missing anchor.
+  const alignedRefPoints = anchorToAlignedRefPoints(artifact.anchor ?? null);
+
+  return {
+    lines,
+    alignedRefPoints,
+    selectedLineId: lines[0]?.id ?? null,
+  };
+}
+
 /** Below this the two points are the same place — no bridging point needed. */
 const RUN_JOIN_TOL_M = 1e-9;
 

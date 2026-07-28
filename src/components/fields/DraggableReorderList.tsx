@@ -1,5 +1,5 @@
 import React from "react";
-import { Pressable, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import DraggableFlatList, { RenderItemParams, ScaleDecorator } from "react-native-draggable-flatlist";
 import { GripVertical } from "lucide-react-native";
 
@@ -54,23 +54,31 @@ export function DraggableReorderList({
             style={{
               flexDirection: "row",
               alignItems: "center",
-              padding: 10,
-              gap: 8,
+              paddingHorizontal: 12,
+              paddingVertical: 11,
+              gap: 10,
+              minHeight: 48,
               backgroundColor: isActive
                 ? FIELDS_COLORS.accentMuted
                 : item.id === selectedRowId
                 ? FIELDS_COLORS.accentMuted
-                : FIELDS_COLORS.cardSolid,
-              borderBottomWidth: 1,
+                : FIELDS_COLORS.surfaceSolid,
+              borderBottomWidth: StyleSheet.hairlineWidth,
               borderBottomColor: FIELDS_COLORS.panelBorder,
             }}
           >
-            <GripVertical size={16} color={FIELDS_COLORS.textDim} />
-            <View style={{ flex: 1 }}>
-              <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
+            <GripVertical size={15} color={FIELDS_COLORS.textDim} />
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text
+                style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}
+                numberOfLines={1}
+              >
                 {item.label}
               </Text>
-              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, marginTop: 1 }}>
+              <Text
+                style={{ color: FIELDS_COLORS.textDim, fontSize: 11, marginTop: 2 }}
+                numberOfLines={1}
+              >
                 {item.entity?.entity_type ?? item.layer}
               </Text>
             </View>

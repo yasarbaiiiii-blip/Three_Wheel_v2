@@ -210,8 +210,7 @@ import { computeShapeSnapPoints } from "./src/utils/planShapeSnapPoints";
 import { computeBestSimilarityFit } from "./src/utils/similarityRefPointSnap";
 import {
   anchorToAlignedRefPoints,
-  pointMissionPointsToPlanLines,
-  sprayRunsToPlanLines,
+  hydrateStagedMissionForMap,
   stagedMissionMatchesId,
 } from "./src/utils/stagedMissionHydration";
 import {
@@ -1234,6 +1233,9 @@ export default function App() {
   // Prevents overlapping discovery sweeps from piling up on a slow/lossy link
   // (each full /24 sweep can outlast the 5s refresh interval).
   const scanInFlightRef = useRef(false);
+  // Invalidates in-flight discovery when Connect starts (or a newer scan begins)
+  // so late setWsStatus("ready") / setSelectedWs cannot clobber "connected".
+  const discoveryScanGenerationRef = useRef(0);
   const connectInFlightRef = useRef(false);
   const pendingSocketRef = useRef<Socket | null>(null);
   const wsStatusRef = useRef(wsStatus);
@@ -1365,19 +1367,12 @@ export default function App() {
           const stagedRes = await pathApi.getStagedMission(apiBaseUrl, missionId);
           if (stagedRes.ok) {
             const stagedArtifact = (await stagedRes.json()) as pathApi.StagedMissionResponse;
-            // One stroke per MARK/TRANSIT run — dense planner tessellation is never collinear,
-            // so waypointsToPlanLines would explode a curve into hundreds of two-point segments.
-            let hydratedLines = sprayRunsToPlanLines(
-              stagedArtifact.waypoints ?? [],
-              stagedArtifact.spray_flags ?? []
-            );
-            if (hydratedLines.length === 0 && stagedArtifact.point_mission_points?.length) {
-              hydratedLines = pointMissionPointsToPlanLines(stagedArtifact.point_mission_points);
-            }
-            if (hydratedLines.length > 0) {
-              setAlignedRefPoints(anchorToAlignedRefPoints(stagedArtifact.anchor));
-              setLines(sanitizePlanLines(hydratedLines));
-              setSelectedLineId(hydratedLines[0]?.id ?? null);
+            // Geometry + origin from one hydrator — never set lines without the staged anchor.
+            const hydrated = hydrateStagedMissionForMap(stagedArtifact);
+            if (hydrated) {
+              setAlignedRefPoints(hydrated.alignedRefPoints);
+              setLines(sanitizePlanLines(hydrated.lines));
+              setSelectedLineId(hydrated.selectedLineId);
             } else {
               console.warn(`[RECOVERY] Staged mission ${missionId} had no drawable waypoints.`);
             }
@@ -1596,6 +1591,8 @@ export default function App() {
     }
 
     connectInFlightRef.current = true;
+    // Drop any in-flight discovery results — they must not reset wsStatus after connect.
+    discoveryScanGenerationRef.current += 1;
     logAction("WS_CONNECT", { selectedWs: target, reuseSession: canReuse && !passwordEntered });
     setWsStatus("connecting");
     setWsError("");
@@ -1918,10 +1915,26 @@ export default function App() {
       return;
     }
 
+    // Generation tag: Connect (and a newer scan) bumps this so late setState is a no-op.
+    const scanGeneration = ++discoveryScanGenerationRef.current;
+    const discoveryStillOwnsUi = () => {
+      if (discoveryScanGenerationRef.current !== scanGeneration) return false;
+      if (connectInFlightRef.current) return false;
+      const status = wsStatusRef.current;
+      if (status === "connecting" || status === "connected") return false;
+      return true;
+    };
+
     const currentSelectedWs = selectedWsRef.current;
     const currentManualHost = manualHostRef.current;
     const isPinned = backendPinnedRef.current;
-    logAction("DISCOVERY_SCAN_START", { manualHost: currentManualHost, selectedWs: currentSelectedWs, backendPinned: isPinned });
+    logAction("DISCOVERY_SCAN_START", {
+      manualHost: currentManualHost,
+      selectedWs: currentSelectedWs,
+      backendPinned: isPinned,
+      scanGeneration,
+    });
+    if (!discoveryStillOwnsUi()) return;
     setWsStatus("scanning");
     setWsError("");
 
@@ -1933,6 +1946,10 @@ export default function App() {
     let manualHostReachable = false;
     if (knownTarget) {
       manualHostReachable = await probeHostReachable(knownTarget, 2500, 2);
+    }
+    if (!discoveryStillOwnsUi()) {
+      logAction("DISCOVERY_SCAN_ABORTED", { phase: "after_known_probe", scanGeneration });
+      return;
     }
     if (manualHostReachable && knownTarget) {
       const entry = parseHost(knownTarget);
@@ -1965,6 +1982,10 @@ export default function App() {
       }
     } catch (err) {
       logAction("DISCOVERY_DEVICE_IP_FAILED", { error: err instanceof Error ? err.message : String(err) });
+    }
+    if (!discoveryStillOwnsUi()) {
+      logAction("DISCOVERY_SCAN_ABORTED", { phase: "after_device_ip", scanGeneration });
+      return;
     }
     logAction("DISCOVERY_DEVICE_IP", { deviceIp });
 
@@ -2000,6 +2021,11 @@ export default function App() {
           : [];
       })
     ).flat();
+
+    if (!discoveryStillOwnsUi()) {
+      logAction("DISCOVERY_SCAN_ABORTED", { phase: "after_subnet_sweep", scanGeneration });
+      return;
+    }
 
     discovered.sort((a, b) => {
       const aPriority = PRIORITY_BACKEND_IPS.includes(a.host);
@@ -2781,25 +2807,15 @@ export default function App() {
           setStagedMissionInspection(stagedArtifact);
         }
 
-        // One stroke per continuous spray run (not collinear two-point segments). Required for
-        // dense CSV road-marking plans; also correct for DXF after the planner has tessellated.
-        let hydratedLines = sprayRunsToPlanLines(
-          stagedArtifact.waypoints ?? [],
-          stagedArtifact.spray_flags ?? []
-        );
-
-        // GPS point missions have empty waypoints — synthesize map points from point_mission_points
-        if (hydratedLines.length === 0 && stagedArtifact.point_mission_points?.length) {
-          hydratedLines = pointMissionPointsToPlanLines(stagedArtifact.point_mission_points);
-        }
-
-        if (hydratedLines.length === 0) {
+        // Geometry + origin atomically from the staged artifact (same path as recovery + CSV panel).
+        const hydrated = hydrateStagedMissionForMap(stagedArtifact);
+        if (!hydrated) {
           throw new Error(`Staged mission ${missionId} has no drawable waypoints for map preview.`);
         }
 
-        setAlignedRefPoints(anchorToAlignedRefPoints(stagedArtifact.anchor));
-        setLines(sanitizePlanLines(hydratedLines));
-        setSelectedLineId(hydratedLines[0]?.id ?? null);
+        setAlignedRefPoints(hydrated.alignedRefPoints);
+        setLines(sanitizePlanLines(hydrated.lines));
+        setSelectedLineId(hydrated.selectedLineId);
         setVisualAlignmentItem(null);
         setIsVisualAlignmentMode(false);
 

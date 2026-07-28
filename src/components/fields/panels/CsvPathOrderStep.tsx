@@ -21,6 +21,13 @@ import { FIELDS_COLORS } from "../fieldsTheme";
 
 const DEFAULT_SPEEDS = { markSpeedMs: 0.35, travelSpeedMs: 0.5 };
 
+/**
+ * Measured height of one DraggableReorderList row: 10 px padding top and bottom
+ * around a 12 px label over a 10 px subtitle, plus the 1 px divider. Only used to
+ * size the list container — the list itself still lays rows out normally.
+ */
+const PATH_ROW_HEIGHT = 52;
+
 type CsvPathOrderStepProps = {
   lines: PlanLine[];
   /** When order changes, parent may rebuild map transit overlays. */
@@ -101,12 +108,17 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
         </Text>
       ))}
 
+      {/* Fixed height so virtualization works; this list must stay outside any ScrollView.
+          Sized to the rows it actually has (with a floor so short lists still read
+          as a drop target, and a cap so long ones stay scrollable) — a flat 280 px
+          left a single-path CSV sitting above ~240 px of empty box. */}
       <View
         style={{
-          maxHeight: 280,
-          borderRadius: 10,
+          height: Math.min(280, Math.max(96, orderedLines.length * PATH_ROW_HEIGHT + 12)),
+          borderRadius: 12,
           borderWidth: 1,
           borderColor: FIELDS_COLORS.panelBorder,
+          backgroundColor: FIELDS_COLORS.surfaceSolid,
           overflow: "hidden",
         }}
       >
@@ -126,19 +138,29 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
             const paint = entry?.paint !== false;
             const badge = order.findIndex((e) => e.lineId === item.id) + 1;
             return (
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexShrink: 0 }}>
                 <View
                   style={{
-                    minWidth: 22,
-                    height: 22,
-                    borderRadius: 11,
-                    backgroundColor: paint ? FIELDS_COLORS.tealDark : FIELDS_COLORS.panelBorder,
+                    minWidth: 24,
+                    height: 24,
+                    borderRadius: 8,
+                    backgroundColor: paint ? FIELDS_COLORS.accentMuted : FIELDS_COLORS.panelBorder,
+                    borderWidth: 1,
+                    borderColor: paint ? FIELDS_COLORS.accentBorder : FIELDS_COLORS.panelBorder,
                     alignItems: "center",
                     justifyContent: "center",
                     paddingHorizontal: 6,
                   }}
                 >
-                  <Text style={{ color: "#fff", fontSize: 11, fontWeight: "800" }}>{badge}</Text>
+                  <Text
+                    style={{
+                      color: paint ? FIELDS_COLORS.accentBrand : FIELDS_COLORS.textDim,
+                      fontSize: 11,
+                      fontWeight: "800",
+                    }}
+                  >
+                    {badge}
+                  </Text>
                 </View>
                 <Pressable
                   onPress={() => setOrder((prev) => setPathPaint(prev, item.id, !paint))}
@@ -146,10 +168,20 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
                     paddingHorizontal: 10,
                     paddingVertical: 6,
                     borderRadius: 8,
-                    backgroundColor: paint ? "#166534" : FIELDS_COLORS.panelBorder,
+                    minWidth: 52,
+                    alignItems: "center",
+                    backgroundColor: paint ? FIELDS_COLORS.successMuted : FIELDS_COLORS.surfaceSolid,
+                    borderWidth: 1,
+                    borderColor: paint ? FIELDS_COLORS.successBorder : FIELDS_COLORS.panelBorder,
                   }}
                 >
-                  <Text style={{ color: "#fff", fontSize: 10, fontWeight: "700" }}>
+                  <Text
+                    style={{
+                      color: paint ? FIELDS_COLORS.success : FIELDS_COLORS.textMuted,
+                      fontSize: 10,
+                      fontWeight: "700",
+                    }}
+                  >
                     {paint ? "Paint" : "Skip"}
                   </Text>
                 </Pressable>

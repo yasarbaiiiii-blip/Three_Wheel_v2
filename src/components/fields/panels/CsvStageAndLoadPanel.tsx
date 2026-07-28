@@ -20,7 +20,7 @@ import {
 import { buildTrajectory } from "../../../utils/csvTrajectory";
 import type { LocalPointCsvResult } from "../../../utils/localPointCsv";
 import { sanitizePlanLines } from "../../../utils/pathWorkflow";
-import { sprayRunsToPlanLines } from "../../../utils/stagedMissionHydration";
+import { hydrateStagedMissionForMap } from "../../../utils/stagedMissionHydration";
 import { buildSurveyCsvExport, type SurveyCsvExport } from "../../../utils/surveyCsvExport";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
@@ -38,6 +38,10 @@ type CsvStageAndLoadPanelProps = {
   setStagedMissionId: React.Dispatch<React.SetStateAction<string | null>>;
   setStagedPlanResult: React.Dispatch<React.SetStateAction<StagedPlanResultState | null>>;
   setStagedMissionInspection: React.Dispatch<React.SetStateAction<pathApi.StagedMissionResponse | null>>;
+  /** Map projection origin — must be set with staged geometry (never independently). */
+  setAlignedRefPoints?: React.Dispatch<
+    React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>
+  >;
   onWorkflowStep?: (step: StagedWorkflowStep, status: StagedWorkflowStatus) => void;
   /** App's staged-load commit: loads to the controller, verifies, re-hydrates, navigates. */
   onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
@@ -82,6 +86,7 @@ export function CsvStageAndLoadPanel({
   setStagedMissionId,
   setStagedPlanResult,
   setStagedMissionInspection,
+  setAlignedRefPoints,
   onWorkflowStep,
   onLoadSelectedPath,
   missionActionBusy,
@@ -168,15 +173,13 @@ export function CsvStageAndLoadPanel({
     onWorkflowStep?.("staged", "verified");
     onWorkflowStep?.("loaded", "pending");
 
-    const plannedLines = sanitizePlanLines(
-      sprayRunsToPlanLines(
-        (plan.merged_waypoints as unknown[]) ?? [],
-        (plan.spray_flags as unknown[]) ?? []
-      )
-    );
-    if (plannedLines.length > 0) {
-      setLines(plannedLines);
-      onSelectLine(plannedLines[0].id);
+    // Prefer stagedInspection (has anchor + waypoints). PathPlanResponse has no anchor —
+    // hydrating lines from plan alone caused frame desync under numbered pins.
+    const hydrated = hydrateStagedMissionForMap(result.stagedInspection ?? null);
+    if (hydrated) {
+      setAlignedRefPoints?.(hydrated.alignedRefPoints);
+      setLines(sanitizePlanLines(hydrated.lines));
+      onSelectLine(hydrated.selectedLineId);
     }
 
     if (allowLoad) {

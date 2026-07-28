@@ -1,8 +1,8 @@
 import React from "react";
-import { Pressable, ScrollView, Text, View } from "react-native";
-import { ChevronDown, ChevronRight, Check, Circle } from "lucide-react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ChevronDown, ChevronUp, Check } from "lucide-react-native";
 
-import { FIELDS_COLORS } from "./fieldsTheme";
+import { FIELDS_COLORS, FIELDS_LAYOUT } from "./fieldsTheme";
 
 type StepStatus = "pending" | "active" | "done";
 
@@ -14,26 +14,27 @@ type FieldsStepCardProps = {
   onToggle: () => void;
   children?: React.ReactNode;
   disabled?: boolean;
-  /**
-   * When true and expanded, the card flexes to fill the remaining space in its parent
-   * column and its body scrolls internally instead of growing to full content height —
-   * use for steps whose content can get long (many fields/rows). Only safe for steps
-   * whose content has no VirtualizedList/FlatList of its own (nesting one inside this
-   * ScrollView breaks RN's list virtualization) — leave off for those.
-   */
   scrollableBody?: boolean;
-  /**
-   * When true and expanded, the card grows to fill leftover column space (`flex: 1`)
-   * and the body becomes a flex container. Use for steps that own an internal scrolling
-   * list (e.g. Path Order DraggableFlatList) so that list gets a real height budget.
-   */
+  bodyMaxHeight?: number;
   fillAvailable?: boolean;
 };
 
-const stepIndicatorColors = (status: StepStatus) => {
-  if (status === "done") return { bg: FIELDS_COLORS.stepDone, icon: "#fff" };
-  if (status === "active") return { bg: FIELDS_COLORS.stepActive, icon: "#fff" };
-  return { bg: FIELDS_COLORS.stepPending, icon: FIELDS_COLORS.textDim };
+const NODE: Record<StepStatus, { bg: string; fg: string; border: string }> = {
+  done: {
+    bg: FIELDS_COLORS.successMuted,
+    fg: FIELDS_COLORS.success,
+    border: FIELDS_COLORS.successBorder,
+  },
+  active: {
+    bg: FIELDS_COLORS.accentMuted,
+    fg: FIELDS_COLORS.accentBrand,
+    border: FIELDS_COLORS.accentBorder,
+  },
+  pending: {
+    bg: FIELDS_COLORS.surfaceSolid,
+    fg: FIELDS_COLORS.textMuted,
+    border: FIELDS_COLORS.panelBorder,
+  },
 };
 
 export function FieldsStepCard({
@@ -45,104 +46,99 @@ export function FieldsStepCard({
   children,
   disabled = false,
   scrollableBody = false,
+  bodyMaxHeight = 360,
   fillAvailable = false,
 }: FieldsStepCardProps) {
-  const indicator = stepIndicatorColors(status);
+  const node = NODE[status];
   const isScrolling = expanded && scrollableBody;
-  const isFilling = expanded && (scrollableBody || fillAvailable);
+  const isFilling = expanded && fillAvailable;
 
   return (
     <View
-      style={{
-        borderRadius: 14,
-        borderWidth: 1,
-        borderColor: expanded
-          ? status === "done"
-            ? FIELDS_COLORS.successBorder
-            : FIELDS_COLORS.stepActive
-          : FIELDS_COLORS.panelBorder,
-        backgroundColor: FIELDS_COLORS.cardSolid,
-        overflow: "hidden",
-        opacity: disabled ? 0.4 : 1,
-        ...(isFilling ? { flex: 1, minHeight: 0 } : null),
-      }}
+      style={[
+        styles.card,
+        expanded && styles.cardOpen,
+        disabled && styles.cardDisabled,
+        isFilling ? styles.cardFill : null,
+      ]}
     >
+      {/*
+        No `style` prop on the Pressable — deliberately.
+
+        NativeWind applies `cssInterop(Pressable, { className: "style" })`, which
+        takes the style prop over for its className remap. A function style does
+        not survive that, and the header silently lost `flexDirection: "row"`
+        plus all padding, so number/title/chevron stacked into an unpadded
+        column. Layout lives on the plain child View below (registered styles on
+        a View are unaffected), and press feedback comes from android_ripple.
+      */}
       <Pressable
         onPress={disabled ? undefined : onToggle}
-        style={{
-          flexDirection: "row",
-          alignItems: "center",
-          paddingHorizontal: 14,
-          paddingVertical: 12,
-          gap: 10,
-          backgroundColor: expanded ? "rgba(59, 130, 246, 0.08)" : FIELDS_COLORS.cardSolid,
-        }}
+        accessibilityRole="button"
+        accessibilityState={{ expanded, disabled }}
+        accessibilityLabel={`${title}, ${expanded ? "collapse" : "expand"}`}
+        hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+        android_ripple={{ color: "rgba(255,255,255,0.07)" }}
       >
-        {/* Step number / status indicator */}
-        <View
-          style={{
-            width: 26,
-            height: 26,
-            borderRadius: 13,
-            backgroundColor: indicator.bg,
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          {status === "done" ? (
-            <Check size={14} color={indicator.icon} strokeWidth={3} />
-          ) : (
-            <Text
-              style={{
-                color: indicator.icon,
-                fontSize: 12,
-                fontWeight: "900",
-              }}
-            >
-              {stepNumber}
-            </Text>
-          )}
+        <View style={[styles.headerRow, expanded && styles.headerRowOpen]}>
+          {/* Number badge and heading sit on one horizontal line. */}
+          <View
+            style={[
+              styles.node,
+              {
+                backgroundColor: node.bg,
+                borderColor: expanded ? node.border : "transparent",
+              },
+            ]}
+          >
+            {status === "done" ? (
+              <Check size={15} color={node.fg} strokeWidth={3} />
+            ) : (
+              <Text style={[styles.nodeText, { color: node.fg }]}>{stepNumber}</Text>
+            )}
+          </View>
+
+          <Text
+            style={[
+              styles.title,
+              {
+                color: disabled
+                  ? FIELDS_COLORS.textDim
+                  : expanded || status === "active"
+                  ? FIELDS_COLORS.textMain
+                  : FIELDS_COLORS.textMuted,
+              },
+            ]}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+          >
+            {title}
+          </Text>
+
+          <View style={styles.chevronSlot}>
+            {expanded ? (
+              <ChevronUp size={18} color={FIELDS_COLORS.textMuted} strokeWidth={2.2} />
+            ) : (
+              <ChevronDown size={18} color={FIELDS_COLORS.textDim} strokeWidth={2.2} />
+            )}
+          </View>
         </View>
-
-        <Text
-          style={{
-            flex: 1,
-            color: disabled ? FIELDS_COLORS.textDim : FIELDS_COLORS.textMain,
-            fontSize: 14,
-            fontWeight: "800",
-          }}
-        >
-          {title}
-        </Text>
-
-        {expanded ? (
-          <ChevronDown size={16} color={FIELDS_COLORS.textMuted} />
-        ) : (
-          <ChevronRight size={16} color={FIELDS_COLORS.textDim} />
-        )}
       </Pressable>
 
       {expanded ? (
         isScrolling ? (
           <ScrollView
-            style={{ flex: 1, minHeight: 0, borderTopWidth: 1, borderTopColor: FIELDS_COLORS.panelBorder }}
-            contentContainerStyle={{ padding: 14, gap: 12 }}
+            style={[styles.body, isFilling ? styles.bodyFill : { maxHeight: bodyMaxHeight }]}
+            contentContainerStyle={styles.bodyInner}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator
             nestedScrollEnabled
+            bounces
           >
             {children}
           </ScrollView>
         ) : (
-          <View
-            style={{
-              padding: 14,
-              gap: 12,
-              borderTopWidth: 1,
-              borderTopColor: FIELDS_COLORS.panelBorder,
-              ...(fillAvailable && expanded ? { flex: 1, minHeight: 0 } : null),
-            }}
-          >
+          <View style={[styles.body, styles.bodyInner, isFilling ? styles.bodyFill : null]}>
             {children}
           </View>
         )
@@ -150,3 +146,92 @@ export function FieldsStepCard({
     </View>
   );
 }
+
+const NODE_SIZE = 32;
+
+const styles = StyleSheet.create({
+  card: {
+    borderRadius: FIELDS_LAYOUT.cardRadius,
+    backgroundColor: FIELDS_COLORS.cardSolid,
+    borderWidth: 1,
+    borderColor: FIELDS_COLORS.panelBorder,
+    overflow: "hidden",
+  },
+  cardOpen: {
+    borderColor: "rgba(244, 193, 12, 0.35)",
+    backgroundColor: "#1e1e24",
+  },
+  cardDisabled: {
+    opacity: 0.4,
+  },
+  cardFill: {
+    flex: 1,
+    minHeight: 0,
+  },
+  /**
+   * The single header line: [pad][badge][gap][title flex][gap][chevron][pad].
+   * `alignItems: "center"` is what puts the number and the heading on the same
+   * baseline-ish centre line; `height` keeps every collapsed row identical.
+   */
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    width: "100%",
+    height: 56,
+    paddingHorizontal: 16,
+    gap: 13,
+    backgroundColor: "transparent",
+  },
+  headerRowOpen: {
+    backgroundColor: "rgba(255,255,255,0.02)",
+  },
+  node: {
+    width: NODE_SIZE,
+    height: NODE_SIZE,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  nodeText: {
+    fontSize: 14,
+    fontWeight: "800",
+    fontVariant: ["tabular-nums"],
+    lineHeight: 18,
+    textAlign: "center",
+    includeFontPadding: false,
+  },
+  /** Takes the row's leftover width so the chevron stays pinned right. */
+  title: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 15,
+    fontWeight: "700",
+    letterSpacing: -0.15,
+    lineHeight: 20,
+    includeFontPadding: false,
+  },
+  chevronSlot: {
+    width: 24,
+    height: NODE_SIZE,
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  body: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: FIELDS_COLORS.panelBorder,
+    backgroundColor: FIELDS_COLORS.panelSolid,
+  },
+  bodyFill: {
+    flex: 1,
+    minHeight: 0,
+  },
+  bodyInner: {
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 16,
+    gap: 12,
+  },
+});

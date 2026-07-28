@@ -269,6 +269,7 @@ export function FieldsPage(props: FieldsPageProps) {
   /** Align DXF methods: Multi-Point Fit | Visual (1-Point Fit removed). Auto Origin is a separate toggle peer. */
   const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "visual_alignment">("least_squares");
 
+  /** DXF nested Templates sub-panel under Bounding Box (not a top-level step card). */
   const [showTemplates, setShowTemplates] = useState(false);
   /** CSV path order / paint flags from CsvPathOrderStep (Phase 3). */
   const [csvPathOrder, setCsvPathOrder] = useState<CsvPathOrderEntry[] | null>(null);
@@ -340,6 +341,44 @@ export function FieldsPage(props: FieldsPageProps) {
     effectiveLayerVisibility,
   } = useFieldsWorkflow(layerVisibility);
 
+  /**
+   * Independent click-to-expand state for each step card (true dropdowns).
+   * Separate from `activeStep`, which still drives map/align gating.
+   */
+  type PanelSectionKey =
+    | "upload"
+    | "pathOrder"
+    | "templates"
+    | "send"
+    | "boundingBox"
+    | "align"
+    | "orderAndSpray";
+  const [openSections, setOpenSections] = useState<Record<PanelSectionKey, boolean>>({
+    upload: true,
+    pathOrder: true,
+    templates: false,
+    send: true,
+    boundingBox: false,
+    align: false,
+    orderAndSpray: false,
+  });
+  const isSectionOpen = useCallback(
+    (key: PanelSectionKey) => openSections[key] === true,
+    [openSections]
+  );
+  const toggleSection = useCallback(
+    (key: PanelSectionKey, activateStep?: FieldsStepId) => {
+      setOpenSections((prev) => {
+        const opening = !prev[key];
+        if (opening && activateStep) {
+          setActiveStep(activateStep);
+        }
+        return { ...prev, [key]: opening };
+      });
+    },
+    [setActiveStep]
+  );
+
   const protectedResident = isProtectedMissionResident(loadedPathInspection);
 
   const blockProtectedWorkflowMutation = useCallback(
@@ -405,6 +444,12 @@ export function FieldsPage(props: FieldsPageProps) {
       setCsvGuidePointsActive(true);
       setGuideCsvFileName(asset.name || "guide.csv");
       setActiveStep("align");
+      setOpenSections((prev) => ({
+        ...prev,
+        upload: false,
+        align: true,
+        boundingBox: false,
+      }));
 
       if (errors.length > 0) {
         Alert.alert(
@@ -569,8 +614,17 @@ export function FieldsPage(props: FieldsPageProps) {
     }
   };
 
+  /** Legacy helper — prefer toggleSection for card headers (true expand/collapse). */
   const toggleStep = (id: FieldsStepId) => {
-    setActiveStep(activeStep === id ? "upload" : id);
+    const key: PanelSectionKey =
+      id === "boundingBox"
+        ? "boundingBox"
+        : id === "align"
+        ? "align"
+        : id === "orderAndSpray"
+        ? "orderAndSpray"
+        : "upload";
+    toggleSection(key, id);
   };
 
   // Confirm transform handler — bakes the plan's current drag/scale/rotate into `lines`
@@ -874,59 +928,107 @@ export function FieldsPage(props: FieldsPageProps) {
         hasTransform={hasTransform}
       />
 
-      {/* Side panel */}
+      {/* Side panel — UI chrome only; workflow / expand logic unchanged */}
       <View
         style={{
           position: "absolute",
-          right: 16,
-          top: 16,
-          bottom: 16,
+          right: 12,
+          top: 12,
+          bottom: 12,
           width: 360,
           maxWidth: "36%",
           backgroundColor: FIELDS_COLORS.panelSolid,
-          borderRadius: 18,
+          borderRadius: 16,
           borderWidth: 1,
           borderColor: FIELDS_COLORS.panelBorder,
           overflow: "hidden",
-          elevation: 10,
+          elevation: 12,
           shadowColor: "#000",
           shadowOffset: { width: 0, height: 8 },
           shadowOpacity: 0.4,
-          shadowRadius: 16,
+          shadowRadius: 18,
           zIndex: 10,
         }}
       >
         <FieldsClearBar onClear={onClearMission} busy={missionActionBusy} />
-        {/* Mission CSV: scrollable column so Templates + Send to Rover stay reachable.
-            DXF keeps a flex column so Path Order's own list can fillAvailable. */}
+        {/* Mission CSV: Path Order VirtualizedList stays outside ScrollView.
+            Padding/gap only — same section slices as before. */}
         {isLocalCsvFlow ? (
+        <View
+          style={{
+            flex: 1,
+            minHeight: 0,
+            paddingHorizontal: 14,
+            paddingTop: 12,
+            paddingBottom: 16,
+            gap: 8,
+          }}
+        >
+          <ScrollView
+            style={{ flexGrow: 0, flexShrink: 1, maxHeight: isSectionOpen("upload") ? 280 : undefined }}
+            contentContainerStyle={{ gap: 8 }}
+            keyboardShouldPersistTaps="handled"
+            nestedScrollEnabled
+            showsVerticalScrollIndicator={isSectionOpen("upload")}
+          >
+            {renderFieldsSteps("csvUpload")}
+          </ScrollView>
+          {renderFieldsSteps("csvPathOrder")}
+          <ScrollView
+            style={{ flex: 1, minHeight: 0 }}
+            contentContainerStyle={{ gap: 8, paddingBottom: 20 }}
+            keyboardShouldPersistTaps="handled"
+            nestedScrollEnabled
+            showsVerticalScrollIndicator
+          >
+            {renderFieldsSteps("csvScroll")}
+          </ScrollView>
+        </View>
+        ) : (
         <ScrollView
           style={{ flex: 1, minHeight: 0 }}
-          contentContainerStyle={{ padding: 12, gap: 10, paddingBottom: 32 }}
+          contentContainerStyle={{
+            paddingHorizontal: 14,
+            paddingTop: 12,
+            paddingBottom: 20,
+            gap: 8,
+            flexGrow: isSectionOpen("orderAndSpray") ? 1 : undefined,
+          }}
           keyboardShouldPersistTaps="handled"
           nestedScrollEnabled
+          showsVerticalScrollIndicator
         >
-          {renderFieldsSteps()}
+          {renderFieldsSteps("dxf")}
         </ScrollView>
-        ) : (
-        <View style={{ flex: 1, minHeight: 0, padding: 12, gap: 10, paddingBottom: 24 }}>
-          {renderFieldsSteps()}
-        </View>
         )}
       </View>
     </View>
   );
 
-  function renderFieldsSteps() {
+  /**
+   * Slice the step tree so CSV Path Order (VirtualizedList) is never a ScrollView child.
+   * - csvUpload / csvPathOrder / csvScroll: Mission CSV sections
+   * - dxf: full DXF accordion column
+   */
+  function renderFieldsSteps(slice: "csvUpload" | "csvPathOrder" | "csvScroll" | "dxf") {
+    const showUpload = slice === "csvUpload" || slice === "dxf";
+    const showCsvPathOrder = slice === "csvPathOrder";
+    const showTemplatesOrBbox = slice === "csvScroll" || slice === "dxf";
+    const showCsvSend = slice === "csvScroll";
+    const showDxfOnly = slice === "dxf";
+
     return (
       <>
           {/* Step 1: Select file → auto upload/parse → map preview (no manual Parse step) */}
+          {showUpload ? (
           <FieldsStepCard
             stepNumber={1}
             title="Upload"
             status={stepStatus("upload")}
-            expanded={activeStep === "upload"}
-            onToggle={() => toggleStep("upload")}
+            expanded={isSectionOpen("upload")}
+            onToggle={() => toggleSection("upload", "upload")}
+            scrollableBody
+            bodyMaxHeight={320}
           >
             <UploadAndPreviewStep
               apiBaseUrl={apiBaseUrl}
@@ -955,9 +1057,16 @@ export function FieldsPage(props: FieldsPageProps) {
                 onLocalCsvParsed?.(data);
                 setShowMapInteraction(true);
                 setCsvPathOrder(null);
-                // Collapse Upload + Templates so Send to Rover is the obvious next step.
+                // After CSV load: collapse Upload, open Path Order + Send.
                 setShowTemplates(false);
                 setActiveStep("upload");
+                setOpenSections((prev) => ({
+                  ...prev,
+                  upload: false,
+                  pathOrder: true,
+                  templates: false,
+                  send: true,
+                }));
               }}
               onClearLocalCsv={() => {
                 setMissionCsvPreview(null);
@@ -970,15 +1079,20 @@ export function FieldsPage(props: FieldsPageProps) {
               hideGuideCsvImport={isLocalCsvFlow}
             />
           </FieldsStepCard>
+          ) : null}
 
-          {/* Mission CSV: order / paint / reversal check (Phase 3) — before Send. */}
-          {isLocalCsvFlow ? (
+          {/* Mission CSV Path Order — click header to expand/collapse (list is fixed-height). */}
+          {showCsvPathOrder ? (
             <FieldsStepCard
               stepNumber={2}
               title="Path Order & Paint"
-              status="active"
-              expanded={true}
-              onToggle={() => {}}
+              status={
+                stagedWorkflow.staged === "verified" || stagedWorkflow.loaded === "verified"
+                  ? "done"
+                  : "active"
+              }
+              expanded={isSectionOpen("pathOrder")}
+              onToggle={() => toggleSection("pathOrder")}
             >
               <CsvPathOrderStep
                 lines={lines}
@@ -990,24 +1104,27 @@ export function FieldsPage(props: FieldsPageProps) {
           ) : null}
 
           {/* Step: Bounding Box (DXF only) + Templates (both). */}
+          {showTemplatesOrBbox ? (
           <FieldsStepCard
             stepNumber={isLocalCsvFlow ? 3 : 2}
             title={isLocalCsvFlow ? "Templates" : "Bounding Box"}
             status={
               isLocalCsvFlow
-                ? showTemplates
+                ? isSectionOpen("templates")
                   ? "active"
                   : "pending"
                 : stepStatus("boundingBox")
             }
-            expanded={isLocalCsvFlow ? showTemplates : activeStep === "boundingBox"}
+            expanded={isLocalCsvFlow ? isSectionOpen("templates") : isSectionOpen("boundingBox")}
             onToggle={() => {
               if (isLocalCsvFlow) {
-                setShowTemplates((v) => !v);
+                toggleSection("templates");
               } else {
-                toggleStep("boundingBox");
+                toggleSection("boundingBox", "boundingBox");
               }
             }}
+            scrollableBody
+            bodyMaxHeight={380}
           >
             <View style={{ gap: 14 }}>
               {/* Bounding box is for DXF placement only — not used for survey CSV. */}
@@ -1046,7 +1163,7 @@ export function FieldsPage(props: FieldsPageProps) {
                     </Text>
                   </Pressable>
                 ) : null}
-                {showTemplates ? (
+                {isLocalCsvFlow || showTemplates ? (
                   <View
                     style={{
                       borderRadius: 10,
@@ -1066,6 +1183,7 @@ export function FieldsPage(props: FieldsPageProps) {
                           onStartPlanEditing?.();
                         }
                         setActiveStep("align");
+                        setOpenSections((prev) => ({ ...prev, align: true, boundingBox: false }));
                       }}
                       boundaryMode={boundaryMode}
                       onToggleBoundaryMode={handleToggleBoundaryMode}
@@ -1105,17 +1223,18 @@ export function FieldsPage(props: FieldsPageProps) {
                       }
                     />
                   </View>
-                ) : isLocalCsvFlow ? (
+                ) : (
                   <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, lineHeight: 16 }}>
-                    Optional. Tap this step header to open road / field templates.
+                    Optional. Expand Templates under this step for road / field stamps.
                   </Text>
-                ) : null}
+                )}
               </View>
             </View>
           </FieldsStepCard>
+          ) : null}
 
           {/* Mission CSV: Plan & stage / Send (after order + optional templates). */}
-          {isLocalCsvFlow && activeCsvPreview ? (
+          {showCsvSend && activeCsvPreview ? (
             <FieldsStepCard
               stepNumber={4}
               title="Send to Rover"
@@ -1124,8 +1243,10 @@ export function FieldsPage(props: FieldsPageProps) {
                   ? "done"
                   : "active"
               }
-              expanded={true}
-              onToggle={() => {}}
+              expanded={isSectionOpen("send")}
+              onToggle={() => toggleSection("send")}
+              scrollableBody
+              bodyMaxHeight={420}
             >
               <CsvStageAndLoadPanel
                 apiBaseUrl={apiBaseUrl}
@@ -1138,6 +1259,7 @@ export function FieldsPage(props: FieldsPageProps) {
                 setStagedMissionId={setStagedMissionId}
                 setStagedPlanResult={setStagedPlanResult}
                 setStagedMissionInspection={setStagedMissionInspection}
+                setAlignedRefPoints={setAlignedRefPoints}
                 onWorkflowStep={onWorkflowStep}
                 onLoadSelectedPath={onLoadSelectedPath}
                 missionActionBusy={missionActionBusy}
@@ -1146,15 +1268,16 @@ export function FieldsPage(props: FieldsPageProps) {
           ) : null}
 
           {/* Align DXF — DXF only */}
-          {!isLocalCsvFlow && isDxfPath && (
+          {showDxfOnly && isDxfPath && (
           <FieldsStepCard
             stepNumber={3}
             title="Align DXF"
             status={stepStatus("align")}
-            expanded={activeStep === "align"}
-            onToggle={() => toggleStep("align")}
+            expanded={isSectionOpen("align")}
+            onToggle={() => toggleSection("align", "align")}
             disabled={!hasPath}
             scrollableBody
+            bodyMaxHeight={420}
           >
             <AlignDxfPanel
               apiBaseUrl={apiBaseUrl}
@@ -1202,15 +1325,15 @@ export function FieldsPage(props: FieldsPageProps) {
           )}
 
           {/* Path Order & Load — DXF/waypoints only */}
-          {!isLocalCsvFlow && (
+          {showDxfOnly && (
           <FieldsStepCard
             stepNumber={4}
             title="Path Order & Load"
             status={stepStatus("orderAndSpray")}
-            expanded={activeStep === "orderAndSpray"}
-            onToggle={() => toggleStep("orderAndSpray")}
+            expanded={isSectionOpen("orderAndSpray")}
+            onToggle={() => toggleSection("orderAndSpray", "orderAndSpray")}
             disabled={!hasPath}
-            fillAvailable={activeStep === "orderAndSpray"}
+            fillAvailable={isSectionOpen("orderAndSpray")}
           >
             <PathOrderAndSprayStep
               apiBaseUrl={apiBaseUrl}
