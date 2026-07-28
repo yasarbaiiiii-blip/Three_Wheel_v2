@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Platform, Text, TouchableOpacity, View } from "react-native";
-import { Check, Circle } from "lucide-react-native";
 
 import type * as pathApi from "../../../api/pathApi";
 import { CSV_PLANNER } from "../../../config/featureFlags";
@@ -24,7 +23,6 @@ import type { LocalPointCsvResult } from "../../../utils/localPointCsv";
 import { sanitizePlanLines } from "../../../utils/pathWorkflow";
 import { hydrateStagedMissionForMap } from "../../../utils/stagedMissionHydration";
 import { buildSurveyCsvExport, type SurveyCsvExport } from "../../../utils/surveyCsvExport";
-import { CsvWarningsPanel } from "../CsvWarningsPanel";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 type CsvStageAndLoadPanelProps = {
@@ -72,18 +70,8 @@ async function buildUploadFormData(exported: SurveyCsvExport): Promise<FormData>
   return formData;
 }
 
-type VerifyPhase = "idle" | "plan" | "verify" | "load" | "done" | "failed";
-
-function phaseFromStep(step: CsvStageStep | "loadMission" | null, busy: boolean, done: boolean): VerifyPhase {
-  if (done) return "done";
-  if (!busy || step == null) return "idle";
-  if (step === "loadMission") return "load";
-  if (step === "verifyEcho" || step === "inspect") return "verify";
-  return "plan";
-}
-
 /**
- * CSV Verify & Load panel (Send to Rover).
+ * CSV Verify & Load panel (Send to Rover) — minimal: status, block reason, Send.
  *
  * - `CSV_PLANNER === "rover"` (default): survey CSV upload → plan-and-stage → load.
  * - `CSV_PLANNER === "app"`: buildTrajectory → plan-trajectory → verify run_echo → load.
@@ -91,7 +79,7 @@ function phaseFromStep(step: CsvStageStep | "loadMission" | null, busy: boolean,
 export function CsvStageAndLoadPanel({
   apiBaseUrl,
   localCsvPreview,
-  mapPinCount = null,
+  mapPinCount: _mapPinCount = null,
   lines = [],
   pathOrder = null,
   setLines,
@@ -104,6 +92,7 @@ export function CsvStageAndLoadPanel({
   onLoadSelectedPath,
   missionActionBusy,
 }: CsvStageAndLoadPanelProps) {
+  void _mapPinCount;
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState<CsvStageStep | "loadMission" | null>(null);
   const [staged, setStaged] = useState<{ missionId: string; plan: pathApi.PathPlanResponse } | null>(null);
@@ -196,8 +185,6 @@ export function CsvStageAndLoadPanel({
       : step
         ? CSV_STAGE_STEP_LABELS[step]
         : null;
-
-  const phase = phaseFromStep(step, busy, staged != null && !loadBlocked && !error);
 
   const applyStagedSuccess = async (
     result: {
@@ -370,227 +357,65 @@ export function CsvStageAndLoadPanel({
     }
   };
 
-  const warnings = staged?.plan.warnings?.filter((w): w is string => typeof w === "string") ?? [];
-
-  const verifySteps = useAppPlanner
-    ? [
-        { key: "plan", label: "Plan trajectory" },
-        { key: "verify", label: "Verify run echo" },
-        { key: "load", label: "Load to controller" },
-      ]
-    : [
-        { key: "plan", label: "Upload & plan" },
-        { key: "verify", label: "Stage mission" },
-        { key: "load", label: "Load to controller" },
-      ];
-
-  const phaseRank: Record<VerifyPhase, number> = {
-    idle: 0,
-    plan: 1,
-    verify: 2,
-    load: 3,
-    done: 4,
-    failed: 0,
-  };
+  const blockSummary = [
+    ...readiness.hardBlocks,
+    ...readiness.needsAck,
+  ].slice(0, 2);
 
   return (
-    <View style={{ gap: 12 }}>
-      <View
-        style={{
-          borderRadius: 12,
-          borderWidth: 1,
-          borderColor: FIELDS_COLORS.panelBorder,
-          backgroundColor: FIELDS_COLORS.surfaceSolid,
-          padding: 12,
-          gap: 8,
-        }}
-      >
-        <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>
-          Verify & Load
-        </Text>
-        <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, lineHeight: 16 }}>
-          {localCsvPreview.num_points} pts · {exported.numPaths} path
-          {exported.numPaths === 1 ? "" : "s"} · {paintedCount} painted ·{" "}
-          {localCsvPreview.kind === "gps" ? "GPS survey" : "local NED"}
-          {useAppPlanner && appTrajectory
-            ? ` · paint ${appTrajectory.totals.markLengthM.toFixed(1)} m · transit ${appTrajectory.totals.travelLengthM.toFixed(1)} m`
+    <View style={{ gap: 10 }}>
+      {/* Compact status — only when something needs attention or send is running */}
+      {(busy || readinessBlocksSend || error || loadBlocked || staged) && (
+        <Text
+          style={{
+            color: error || loadBlocked || readiness.hardBlocks.length > 0
+              ? FIELDS_COLORS.danger
+              : readinessBlocksSend
+                ? FIELDS_COLORS.warning
+                : staged
+                  ? FIELDS_COLORS.success
+                  : FIELDS_COLORS.textMuted,
+            fontSize: 11,
+            lineHeight: 15,
+          }}
+          numberOfLines={3}
+        >
+          {busy
+            ? stepLabel ?? "Working…"
+            : error
+              ? error
+              : loadBlocked
+                ? "Load blocked — verify failed. Fix and re-send."
+                : staged
+                  ? `Loaded · mark ${metres(nullableNumber(staged.plan.mark_length_m))}`
+                  : blockSummary[0] ?? "Resolve warnings to send"}
+          {!busy && !error && !loadBlocked && !staged && blockSummary[1]
+            ? `\n${blockSummary[1]}`
             : ""}
         </Text>
-        {mapPinCount != null && mapPinCount < localCsvPreview.num_points ? (
-          <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10 }}>
-            Map shows {mapPinCount} pins (sampled) + full path line.
-          </Text>
-        ) : null}
+      )}
 
-        {/* Verification checklist */}
-        <View style={{ gap: 6, marginTop: 4 }}>
-          {verifySteps.map((s, i) => {
-            const rank = phaseRank[phase];
-            const stepRank = i + 1;
-            const done = rank > stepRank || phase === "done";
-            const active = busy && rank === stepRank;
-            return (
-              <View
-                key={s.key}
-                style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  gap: 8,
-                }}
-              >
-                {done ? (
-                  <Check size={14} color={FIELDS_COLORS.success} strokeWidth={3} />
-                ) : active ? (
-                  <ActivityIndicator size="small" color={FIELDS_COLORS.accentBrand} />
-                ) : (
-                  <Circle size={12} color={FIELDS_COLORS.textDim} strokeWidth={2} />
-                )}
-                <Text
-                  style={{
-                    color: done
-                      ? FIELDS_COLORS.success
-                      : active
-                        ? FIELDS_COLORS.accentBrand
-                        : FIELDS_COLORS.textDim,
-                    fontSize: 12,
-                    fontWeight: active || done ? "700" : "500",
-                  }}
-                >
-                  {s.label}
-                  {active && stepLabel ? ` — ${stepLabel}` : ""}
-                </Text>
-              </View>
-            );
-          })}
-        </View>
-      </View>
-
-      <CsvWarningsPanel
-        title="Parse & frame"
-        critical={readiness.criticalParseWarnings}
-        advisory={localCsvPreview.warnings.filter(
-          (w) => !readiness.criticalParseWarnings.includes(w)
-        )}
-      />
-
-      <CsvWarningsPanel
-        title="Geometry (fit)"
-        critical={readiness.nonPaintablePainted.map(
-          (m) =>
-            `"${m.label}" is non-paintable` +
-            (m.warnings[0] ? ` — ${m.warnings[0]}` : "")
-        )}
-        advisory={readiness.advisory}
-      />
-
-      {readiness.hardBlocks.length > 0 ? (
-        <View
-          style={{
-            borderRadius: 10,
-            borderWidth: 1,
-            borderColor: FIELDS_COLORS.dangerBorder,
-            backgroundColor: FIELDS_COLORS.dangerMuted,
-            padding: 10,
-            gap: 4,
+      {/* Single ack when needed */}
+      {readiness.needsAck.length > 0 && !busy ? (
+        <TouchableOpacity
+          onPress={() => {
+            if (readiness.needsGeometryAck) setGeometryAcknowledged(true);
+            if (readiness.needsParseAck) setParseAcknowledged(true);
           }}
-        >
-          <Text style={{ color: FIELDS_COLORS.danger, fontSize: 12, fontWeight: "700" }}>
-            Send blocked
-          </Text>
-          {readiness.hardBlocks.map((b, i) => (
-            <Text key={i} style={{ color: FIELDS_COLORS.danger, fontSize: 11, lineHeight: 15 }}>
-              • {b}
-            </Text>
-          ))}
-        </View>
-      ) : null}
-
-      {readiness.needsAck.length > 0 ? (
-        <View
           style={{
+            height: 40,
             borderRadius: 10,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: FIELDS_COLORS.warningMuted,
             borderWidth: 1,
             borderColor: FIELDS_COLORS.warningBorder,
-            backgroundColor: FIELDS_COLORS.warningMuted,
-            padding: 10,
-            gap: 8,
           }}
         >
           <Text style={{ color: FIELDS_COLORS.warning, fontSize: 12, fontWeight: "700" }}>
-            Acknowledgement required before Send
+            Acknowledge warnings to enable Send
           </Text>
-          {readiness.needsAck.slice(0, 6).map((b, i) => (
-            <Text key={i} style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}>
-              • {b}
-            </Text>
-          ))}
-          <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, lineHeight: 14 }}>
-            Non-paintable paths are never included in the trajectory. Prefer Skip in Path Order.
-            Acknowledgement only unlocks Send for the remaining paintable paths.
-          </Text>
-          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-            {readiness.needsGeometryAck ? (
-              <TouchableOpacity
-                onPress={() => setGeometryAcknowledged(true)}
-                style={{
-                  paddingHorizontal: 12,
-                  paddingVertical: 8,
-                  borderRadius: 8,
-                  backgroundColor: FIELDS_COLORS.iconWarning,
-                  borderWidth: 1,
-                  borderColor: FIELDS_COLORS.warningBorder,
-                }}
-              >
-                <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, fontWeight: "700" }}>
-                  Acknowledge geometry
-                </Text>
-              </TouchableOpacity>
-            ) : null}
-            {readiness.needsParseAck ? (
-              <TouchableOpacity
-                onPress={() => setParseAcknowledged(true)}
-                style={{
-                  paddingHorizontal: 12,
-                  paddingVertical: 8,
-                  borderRadius: 8,
-                  backgroundColor: FIELDS_COLORS.iconWarning,
-                  borderWidth: 1,
-                  borderColor: FIELDS_COLORS.warningBorder,
-                }}
-              >
-                <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, fontWeight: "700" }}>
-                  Confirm parse / frame
-                </Text>
-              </TouchableOpacity>
-            ) : null}
-            {readiness.needsGeometryAck || readiness.needsParseAck ? (
-              <TouchableOpacity
-                onPress={() => {
-                  if (readiness.needsGeometryAck) setGeometryAcknowledged(true);
-                  if (readiness.needsParseAck) setParseAcknowledged(true);
-                }}
-                style={{
-                  paddingHorizontal: 12,
-                  paddingVertical: 8,
-                  borderRadius: 8,
-                  backgroundColor: FIELDS_COLORS.warning,
-                }}
-              >
-                <Text style={{ color: FIELDS_COLORS.accentText, fontSize: 11, fontWeight: "800" }}>
-                  Acknowledge all
-                </Text>
-              </TouchableOpacity>
-            ) : null}
-          </View>
-        </View>
-      ) : null}
-
-      {localCsvPreview.kind === "ned" ? (
-        <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}>
-          {useAppPlanner
-            ? 'No latitude/longitude — app planner needs origin_gps. Use a GPS survey CSV or set CSV_PLANNER to "rover".'
-            : "No latitude/longitude — mission stages in the rover's local frame (LOCAL_NED)."}
-        </Text>
+        </TouchableOpacity>
       ) : null}
 
       <TouchableOpacity
@@ -598,84 +423,28 @@ export function CsvStageAndLoadPanel({
         disabled={disabled}
         activeOpacity={0.8}
         style={{
-          height: 50,
+          height: 48,
           borderRadius: 12,
           alignItems: "center",
           justifyContent: "center",
           flexDirection: "row",
           gap: 8,
           backgroundColor: disabled ? FIELDS_COLORS.textDim : "#7c3aed",
-          elevation: 3,
-          shadowColor: "#7c3aed",
-          shadowOffset: { width: 0, height: 2 },
-          shadowOpacity: 0.28,
-          shadowRadius: 4,
         }}
       >
         {busy ? <ActivityIndicator size="small" color="#fff" /> : null}
-        <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800", letterSpacing: 0.2 }}>
+        <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>
           {busy
             ? (stepLabel ?? "Working…")
-            : readinessBlocksSend
-              ? "Resolve warnings to Send"
-              : useAppPlanner
-                ? "Verify Trajectory & Load"
-                : "Verify & Load to Rover"}
+            : !apiBaseUrl
+              ? "Connect rover to send"
+              : paintedCount < 1
+                ? "Paint a path first"
+                : readinessBlocksSend
+                  ? "Send blocked"
+                  : "Send to Rover"}
         </Text>
       </TouchableOpacity>
-
-      {!apiBaseUrl ? (
-        <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11 }}>
-          Connect to the rover to enable verification and load.
-        </Text>
-      ) : paintedCount < 1 ? (
-        <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11 }}>
-          Paint at least one path above before loading.
-        </Text>
-      ) : readinessBlocksSend ? (
-        <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}>
-          Send stays disabled until hard blocks are cleared and any required acknowledgements are
-          made. Non-paintable geometry is never included in the trajectory.
-        </Text>
-      ) : null}
-
-      {loadBlocked ? (
-        <Text style={{ color: FIELDS_COLORS.danger, fontSize: 11, lineHeight: 16 }}>
-          Load blocked: densified run_echo did not match the trajectory we sent. Fix order/geometry
-          and re-send.
-        </Text>
-      ) : null}
-
-      {error ? (
-        <Text style={{ color: FIELDS_COLORS.danger, fontSize: 11, lineHeight: 16 }}>{error}</Text>
-      ) : null}
-
-      {staged ? (
-        <View
-          style={{
-            borderRadius: 10,
-            borderWidth: 1,
-            borderColor: FIELDS_COLORS.successBorder,
-            backgroundColor: FIELDS_COLORS.successMuted,
-            padding: 10,
-            gap: 4,
-          }}
-        >
-          <Text style={{ color: FIELDS_COLORS.success, fontSize: 12, fontWeight: "700" }}>
-            Staged {staged.missionId}
-          </Text>
-          <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, lineHeight: 16 }}>
-            {staged.plan.num_waypoints ?? "—"} waypoints · mark{" "}
-            {metres(nullableNumber(staged.plan.mark_length_m))} · transit{" "}
-            {metres(nullableNumber(staged.plan.transit_length_m))}
-          </Text>
-          {warnings.map((warning, i) => (
-            <Text key={i} style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}>
-              {warning}
-            </Text>
-          ))}
-        </View>
-      ) : null}
     </View>
   );
 }

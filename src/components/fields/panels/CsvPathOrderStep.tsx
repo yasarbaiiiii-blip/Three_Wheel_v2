@@ -1,9 +1,5 @@
 /**
- * Phase 3 — CSV path order, paint/skip, transit preview, reversal warnings.
- * Sibling of DXF PathOrderAndSprayStep; only rendered under isLocalCsvFlow.
- *
- * Paths are long-press drag-reorderable. Transit legs between consecutive
- * painted paths are listed (non-draggable) and rebuild when order/paint changes.
+ * CSV path order: drag reorder + paint/skip. Minimal UI — details live on the map.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -24,14 +20,13 @@ import {
   type CsvPathOrderEntry,
   type CsvTransitPreview,
 } from "../../../utils/csvPathOrder";
-import { CsvWarningsPanel } from "../CsvWarningsPanel";
+import { getLineLengthM } from "../../../utils/pathWorkflow";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 const DEFAULT_SPEEDS = { markSpeedMs: 0.35, travelSpeedMs: 0.5 };
 
-/** Path row ~52px + optional transit sub-row ~36px. */
-const PATH_ROW_HEIGHT = 52;
-const TRANSIT_ROW_HEIGHT = 36;
+const PATH_ROW_HEIGHT = 48;
+const TRANSIT_ROW_HEIGHT = 28;
 
 type PathRow = {
   kind: "path";
@@ -51,10 +46,6 @@ type ListRow = PathRow | TransitRow;
 
 type CsvPathOrderStepProps = {
   lines: PlanLine[];
-  /**
-   * Fires when order/paint changes. Parent should persist `fullOrder` and rebuild
-   * map transit via applyCsvOrderToPlanLines (end of path N → start of path N+1).
-   */
   onOrderChange?: (orderedPaintedLines: PlanLine[], fullOrder: CsvPathOrderEntry[]) => void;
 };
 
@@ -80,7 +71,6 @@ function buildInterleavedRows(
       entry,
       badge: index + 1,
     });
-    // Only show transit after a painted path that actually has a travel leg to the next painted path.
     if (entry.paint !== false) {
       const transit = transitByFrom.get(line.id);
       if (transit) {
@@ -98,7 +88,6 @@ function buildInterleavedRows(
 
 export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps) {
   const markLines = useMemo(() => selectMarkPlanLines(lines), [lines]);
-  /** Set of mark ids only — order of `lines` must not reset the operator's drag order. */
   const markKey = useMemo(
     () =>
       markLines
@@ -113,7 +102,6 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
   const onOrderChangeRef = useRef(onOrderChange);
   onOrderChangeRef.current = onOrderChange;
 
-  // Re-sync when marks are added/removed (new CSV / template / clear) — keep drag order.
   useEffect(() => {
     setOrder((prev) => {
       const byId = new Map(prev.map((e) => [e.lineId, e]));
@@ -129,7 +117,6 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
           next.push({ lineId: line.id, label: line.label, paint: true });
         }
       }
-      // Skip state update when membership + paint flags unchanged.
       if (
         next.length === prev.length &&
         next.every(
@@ -155,15 +142,6 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
     () => buildCsvTransitPreviews(markLines, order),
     [markLines, order]
   );
-  const fitMetas = useMemo(() => markLines.map(getLineFitMeta), [markLines]);
-  const nonPaintable = useMemo(() => fitMetas.filter((m) => !m.paintable), [fitMetas]);
-  const fitAdvisory = useMemo(
-    () =>
-      fitMetas.flatMap((m) =>
-        m.warnings.map((w) => `${m.label}: ${w}`)
-      ),
-    [fitMetas]
-  );
 
   useEffect(() => {
     onOrderChangeRef.current?.(painted, order);
@@ -184,18 +162,17 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
 
   if (markLines.length === 0) {
     return (
-      <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, lineHeight: 16 }}>
-        No mark paths yet. Load a survey CSV (and optional templates) first.
+      <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11 }}>
+        No paths yet. Load a survey CSV first.
       </Text>
     );
   }
 
-  const pathCount = orderedLines.length;
   const listHeight = Math.min(
-    320,
+    280,
     Math.max(
-      120,
-      pathCount * PATH_ROW_HEIGHT + transitPreviews.length * TRANSIT_ROW_HEIGHT + 16
+      100,
+      orderedLines.length * PATH_ROW_HEIGHT + transitPreviews.length * TRANSIT_ROW_HEIGHT + 8
     )
   );
 
@@ -203,60 +180,30 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
     const idOrder = nextPaths.map((l) => l.id);
     setOrder((prev) => {
       const byId = new Map(prev.map((e) => [e.lineId, e]));
-      return idOrder
-        .map((id) => byId.get(id))
-        .filter((e): e is CsvPathOrderEntry => e != null);
+      return idOrder.map((id) => byId.get(id)).filter((e): e is CsvPathOrderEntry => e != null);
     });
   };
 
   return (
-    <View style={{ gap: 10, flex: 1, minHeight: 0 }}>
-      <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, lineHeight: 16 }}>
-        Hold and drag a path to reorder. Transit legs (end of one path → start of the next)
-        update automatically. Toggle paint to skip a path.
+    <View style={{ gap: 8, flex: 1, minHeight: 0 }}>
+      {/* One-line totals only */}
+      <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
+        Paint {trajectory.totals.markLengthM.toFixed(1)} m
+        {trajectory.totals.travelLengthM > 0.05
+          ? `  ·  Transit ${trajectory.totals.travelLengthM.toFixed(1)} m`
+          : ""}
+        {reversals.length > 0 ? (
+          <Text style={{ color: FIELDS_COLORS.warning, fontWeight: "600" }}>
+            {`  ·  ${reversals.length} reversal${reversals.length === 1 ? "" : "s"}`}
+          </Text>
+        ) : null}
       </Text>
 
-      <View style={{ flexDirection: "row", gap: 12, flexWrap: "wrap" }}>
-        <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
-          Paint {trajectory.totals.markLengthM.toFixed(1)} m
-        </Text>
-        <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "600" }}>
-          Transit {trajectory.totals.travelLengthM.toFixed(1)} m
-        </Text>
-        <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11 }}>
-          {trajectory.totals.markRunCount} path
-          {trajectory.totals.markRunCount === 1 ? "" : "s"} · {trajectory.totals.travelRunCount}{" "}
-          transit
-        </Text>
-      </View>
-
-      {reversals.map((r, i) => (
-        <Text
-          key={`${r.fromIndex}-${r.toIndex}-${i}`}
-          style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}
-        >
-          Reversal warning: {r.fromLabel} → {r.toLabel} turns {r.headingChangeDeg.toFixed(0)}°
-          (threshold 120°).
-        </Text>
-      ))}
-
-      <CsvWarningsPanel
-        title="Path geometry"
-        critical={nonPaintable.map(
-          (m) =>
-            `"${m.label}" non-paintable — Skip before Send` +
-            (m.warnings[0] ? ` (${m.warnings[0]})` : "")
-        )}
-        advisory={fitAdvisory.filter((w) => !nonPaintable.some((m) => w.startsWith(m.label)))}
-        defaultExpanded={nonPaintable.length > 0}
-      />
-
-      {/* Fixed height so virtualization works; must stay outside parent ScrollView. */}
       <View
         style={{
           height: listHeight,
           flexGrow: 1,
-          minHeight: 120,
+          minHeight: 100,
           borderRadius: 12,
           borderWidth: 1,
           borderColor: FIELDS_COLORS.panelBorder,
@@ -268,7 +215,6 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
           data={listRows}
           keyExtractor={(item) => item.id}
           onDragEnd={({ data }) => {
-            // Drag may move transit rows; only path order is authoritative.
             const nextPaths = data
               .filter((r): r is PathRow => r.kind === "path")
               .map((r) => r.line);
@@ -286,52 +232,25 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
           initialNumToRender={14}
           renderItem={({ item, drag, isActive }: RenderItemParams<ListRow>) => {
             if (item.kind === "transit") {
-              const t = item.preview;
               return (
                 <ScaleDecorator>
                   <View
                     style={{
                       flexDirection: "row",
                       alignItems: "center",
-                      paddingLeft: 36,
+                      paddingLeft: 40,
                       paddingRight: 12,
-                      paddingVertical: 8,
-                      gap: 8,
+                      paddingVertical: 4,
                       backgroundColor: FIELDS_COLORS.panelSolid,
                       borderBottomWidth: 1,
                       borderBottomColor: FIELDS_COLORS.panelBorder,
                     }}
                   >
-                    <View
-                      style={{
-                        width: 6,
-                        height: 6,
-                        borderRadius: 3,
-                        backgroundColor: FIELDS_COLORS.textDim,
-                      }}
-                    />
-                    <View style={{ flex: 1, minWidth: 0 }}>
-                      <Text
-                        style={{
-                          color: FIELDS_COLORS.textMuted,
-                          fontSize: 11,
-                          fontWeight: "600",
-                        }}
-                        numberOfLines={1}
-                      >
-                        Transit: {t.fromLabel} → {t.toLabel}
-                      </Text>
-                    </View>
-                    <Text
-                      style={{
-                        color: FIELDS_COLORS.textDim,
-                        fontSize: 11,
-                        fontWeight: "600",
-                        minWidth: 48,
-                        textAlign: "right",
-                      }}
-                    >
-                      {t.lengthM.toFixed(1)} m
+                    <Text style={{ flex: 1, color: FIELDS_COLORS.textDim, fontSize: 10 }}>
+                      transit
+                    </Text>
+                    <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, fontWeight: "600" }}>
+                      {item.preview.lengthM.toFixed(1)} m
                     </Text>
                   </View>
                 </ScaleDecorator>
@@ -339,8 +258,9 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
             }
 
             const paint = item.entry.paint !== false;
-            const fit = getLineFitMeta(item.line);
-            const blocked = !fit.paintable;
+            const blocked = !getLineFitMeta(item.line).paintable;
+            const lengthM = getLineLengthM(item.line);
+
             return (
               <ScaleDecorator>
                 <Pressable
@@ -350,127 +270,85 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
                   style={{
                     flexDirection: "row",
                     alignItems: "center",
-                    paddingHorizontal: 12,
-                    paddingVertical: 11,
-                    gap: 10,
-                    minHeight: 48,
+                    paddingHorizontal: 10,
+                    paddingVertical: 10,
+                    gap: 8,
+                    minHeight: 44,
                     backgroundColor: isActive
                       ? FIELDS_COLORS.accentMuted
                       : blocked
                         ? FIELDS_COLORS.dangerMuted
                         : FIELDS_COLORS.surfaceSolid,
                     borderBottomWidth: 1,
-                    borderBottomColor: blocked
-                      ? FIELDS_COLORS.dangerBorder
-                      : FIELDS_COLORS.panelBorder,
-                    opacity: paint ? 1 : 0.55,
+                    borderBottomColor: FIELDS_COLORS.panelBorder,
+                    opacity: paint ? 1 : 0.5,
                   }}
                 >
-                  <GripVertical size={15} color={FIELDS_COLORS.textDim} />
-                  <View style={{ flex: 1, minWidth: 0 }}>
-                    <Text
-                      style={{
-                        color: blocked ? FIELDS_COLORS.danger : FIELDS_COLORS.textMain,
-                        fontSize: 13,
-                        fontWeight: "700",
-                      }}
-                      numberOfLines={1}
-                    >
-                      {item.line.label}
-                      {blocked ? " · non-paintable" : fit.warnings.length > 0 ? " · warn" : ""}
-                    </Text>
-                    <Text
-                      style={{
-                        color: blocked ? FIELDS_COLORS.warning : FIELDS_COLORS.textDim,
-                        fontSize: 11,
-                        marginTop: 2,
-                      }}
-                      numberOfLines={2}
-                    >
-                      {blocked
-                        ? fit.warnings[0] ?? "Geometry failed validation — Skip before Send"
-                        : fit.warnings[0]
-                          ? fit.warnings[0]
-                          : item.line.entity?.entity_type ?? item.line.layer}
-                    </Text>
-                  </View>
-                  <View
+                  <GripVertical size={14} color={FIELDS_COLORS.textDim} />
+                  <Text
                     style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 8,
-                      flexShrink: 0,
+                      color: paint ? FIELDS_COLORS.accentBrand : FIELDS_COLORS.textDim,
+                      fontSize: 11,
+                      fontWeight: "800",
+                      minWidth: 18,
                     }}
                   >
-                    <View
+                    {item.badge}
+                  </Text>
+                  <Text
+                    style={{
+                      flex: 1,
+                      color: blocked ? FIELDS_COLORS.danger : FIELDS_COLORS.textMain,
+                      fontSize: 13,
+                      fontWeight: "600",
+                    }}
+                    numberOfLines={1}
+                  >
+                    {item.line.label}
+                    {blocked ? " · bad" : ""}
+                  </Text>
+                  {lengthM != null && lengthM > 0 ? (
+                    <Text
                       style={{
-                        minWidth: 24,
-                        height: 24,
-                        borderRadius: 8,
-                        backgroundColor: paint
-                          ? FIELDS_COLORS.accentMuted
-                          : FIELDS_COLORS.panelBorder,
-                        borderWidth: 1,
-                        borderColor: paint
-                          ? FIELDS_COLORS.accentBorder
-                          : FIELDS_COLORS.panelBorder,
-                        alignItems: "center",
-                        justifyContent: "center",
-                        paddingHorizontal: 6,
+                        color: FIELDS_COLORS.textDim,
+                        fontSize: 11,
+                        fontWeight: "600",
+                        minWidth: 44,
+                        textAlign: "right",
                       }}
                     >
-                      <Text
-                        style={{
-                          color: paint ? FIELDS_COLORS.accentBrand : FIELDS_COLORS.textDim,
-                          fontSize: 11,
-                          fontWeight: "800",
-                        }}
-                      >
-                        {item.badge}
-                      </Text>
-                    </View>
-                    <Pressable
-                      onPress={() =>
-                        setOrder((prev) => setPathPaint(prev, item.line.id, !paint))
-                      }
+                      {lengthM.toFixed(1)} m
+                    </Text>
+                  ) : null}
+                  <Pressable
+                    onPress={() => setOrder((prev) => setPathPaint(prev, item.line.id, !paint))}
+                    style={{
+                      paddingHorizontal: 8,
+                      paddingVertical: 5,
+                      borderRadius: 6,
+                      minWidth: 48,
+                      alignItems: "center",
+                      backgroundColor: paint
+                        ? FIELDS_COLORS.successMuted
+                        : FIELDS_COLORS.panelBorder,
+                    }}
+                  >
+                    <Text
                       style={{
-                        paddingHorizontal: 10,
-                        paddingVertical: 6,
-                        borderRadius: 8,
-                        minWidth: 52,
-                        alignItems: "center",
-                        backgroundColor: paint
-                          ? FIELDS_COLORS.successMuted
-                          : FIELDS_COLORS.surfaceSolid,
-                        borderWidth: 1,
-                        borderColor: paint
-                          ? FIELDS_COLORS.successBorder
-                          : FIELDS_COLORS.panelBorder,
+                        color: paint ? FIELDS_COLORS.success : FIELDS_COLORS.textMuted,
+                        fontSize: 10,
+                        fontWeight: "700",
                       }}
                     >
-                      <Text
-                        style={{
-                          color: paint ? FIELDS_COLORS.success : FIELDS_COLORS.textMuted,
-                          fontSize: 10,
-                          fontWeight: "700",
-                        }}
-                      >
-                        {paint ? "Paint" : "Skip"}
-                      </Text>
-                    </Pressable>
-                  </View>
+                      {paint ? "Paint" : "Skip"}
+                    </Text>
+                  </Pressable>
                 </Pressable>
               </ScaleDecorator>
             );
           }}
         />
       </View>
-
-      {transitPreviews.length === 0 && painted.length > 1 ? (
-        <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, lineHeight: 14 }}>
-          Paths touch end-to-end — no separate transit legs needed.
-        </Text>
-      ) : null}
     </View>
   );
 }

@@ -4,7 +4,7 @@ import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform, Moda
 import { GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps, withSpring, withTiming, cancelAnimation, Easing, runOnJS, Keyframe } from "react-native-reanimated";
 import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText, Path, Polyline } from "react-native-svg";
-import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check, Pencil, Undo2, Layers, ChevronRight } from "lucide-react-native";
+import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check, Pencil, Undo2, Layers, ChevronRight, Ruler, Spline } from "lucide-react-native";
 import { ManualJoystick } from "./ManualJoystick";
 import { Compass } from "./Compass";
 import { Navbar } from "./Navbar";
@@ -59,6 +59,15 @@ const COLORS = {
   iconMuted: "#2e2e34",
   pillSecondary: "#35353c",
 };
+
+// Map tool dropdown metrics — popovers get an explicit width so their tile rows
+// never wrap (an absolutely positioned popover has no parent width to size against).
+const MENU_TILE_GAP = 8;
+const MENU_POPOVER_CHROME = 20; // 8px padding + 1px border per side, plus slack
+const MENU_LAYER_TILE_W = 72;
+const MENU_MODE_TILE_W = 150;
+const menuPopoverWidthFor = (count, tileWidth) =>
+  count * tileWidth + Math.max(0, count - 1) * MENU_TILE_GAP + MENU_POPOVER_CHROME;
 
 const iconTintFor = (tone) => {
   if (tone === COLORS.success) return COLORS.iconSuccess;
@@ -135,28 +144,55 @@ const PanelHeader = ({ icon: Icon, title, subtitle, onClose, accent = COLORS.acc
   </View>
 );
 
-const LayerCheckboxRow = ({ label, checked, onPress, colors }) => (
-  <Pressable
-    style={({ pressed }) => [
-      { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 10, borderRadius: 8, gap: 12 },
-      pressed && { backgroundColor: colors.surfaceSolid },
-    ]}
-    onPress={onPress}
-  >
-    <Text numberOfLines={1} style={{ flex: 1, color: colors.textMain, fontSize: 13, fontWeight: "600" }}>{label}</Text>
-    <View
-      style={{
-        width: 18,
-        height: 18,
-        borderRadius: 5,
-        alignItems: "center",
-        justifyContent: "center",
-        borderWidth: 1.5,
-        borderColor: checked ? colors.accentBrand : colors.panelBorder,
-        backgroundColor: checked ? colors.accentBrand : "transparent",
-      }}
-    >
-      {checked ? <Check color="#fff" size={13} strokeWidth={3} /> : null}
+// ── Map tool dropdown building blocks (Mark / Layers popovers) ──
+// NOTE: all visuals live on plain <View>s — style callbacks on <Pressable>
+// (style={({pressed}) => ...}) are dropped in this app's render pipeline.
+const MenuSectionLabel = ({ label, hint }) => (
+  <View style={styles.menuSectionRow}>
+    <Text style={styles.menuSectionLabel}>{label}</Text>
+    {hint ? (
+      <View style={styles.menuSectionHintPill}>
+        <Text style={styles.menuSectionHintText}>{hint}</Text>
+      </View>
+    ) : null}
+  </View>
+);
+
+const MenuModeTile = ({ icon: Icon, label, description, active, onPress }) => (
+  <Pressable onPress={onPress} accessibilityRole="button" accessibilityState={{ selected: !!active }}>
+    <View style={[styles.menuModeTile, active && styles.menuModeTileOn]}>
+      <View style={styles.menuModeTileTop}>
+        <View style={[styles.menuIconChip, active && styles.menuIconChipOn]}>
+          <Icon color={active ? COLORS.accentText : COLORS.textMuted} size={16} strokeWidth={2.3} />
+        </View>
+        {active ? (
+          <View style={styles.menuTileCheck}>
+            <Check color={COLORS.accentText} size={10} strokeWidth={3.6} />
+          </View>
+        ) : null}
+      </View>
+      <Text numberOfLines={1} style={[styles.menuModeTitle, active && styles.menuModeTitleOn]}>{label}</Text>
+      <Text numberOfLines={1} style={styles.menuModeDesc}>{description}</Text>
+    </View>
+  </Pressable>
+);
+
+const MenuLayerTile = ({ icon: Icon, label, checked, onPress }) => (
+  <Pressable onPress={onPress} accessibilityRole="switch" accessibilityState={{ checked: !!checked }}>
+    <View style={[styles.menuLayerTile, checked && styles.menuLayerTileOn]}>
+      <View style={[styles.menuIconChip, styles.menuIconChipSmall, checked && styles.menuIconChipOn]}>
+        <Icon color={checked ? COLORS.accentText : COLORS.textDim} size={15} strokeWidth={2.3} />
+      </View>
+      <Text numberOfLines={1} style={[styles.menuLayerLabel, checked && styles.menuLayerLabelOn]}>{label}</Text>
+    </View>
+  </Pressable>
+);
+
+const MenuSegmentPill = ({ label, checked, onPress }) => (
+  <Pressable onPress={onPress} accessibilityRole="switch" accessibilityState={{ checked: !!checked }}>
+    <View style={[styles.menuSegPill, checked && styles.menuSegPillOn]}>
+      <View style={[styles.menuSegDot, checked && styles.menuSegDotOn]} />
+      <Text numberOfLines={1} style={[styles.menuSegLabel, checked && styles.menuSegLabelOn]}>{label}</Text>
     </View>
   </Pressable>
 );
@@ -1262,6 +1298,26 @@ export default function ModernHomeUI(props) {
 
   const renderMapToolsColumn = () => {
     if ((!isHomePage && !isFieldsPage) || !navIconsVisible) return null;
+    const layerTiles = [
+      ...(hasExtensionLines
+        ? [{
+            key: "extension",
+            icon: Spline,
+            label: "Extension",
+            checked: layerVisibility?.extension !== false,
+            onPress: () => toggleLayerFlag("extension"),
+          }]
+        : []),
+      { key: "rover", icon: Tractor, label: "Rover", checked: showRoverMarker, onPress: () => toggleLayerFlag("rover") },
+      {
+        key: "refPoints",
+        icon: Crosshair,
+        label: "Ref points",
+        checked: layerVisibility?.refPoints !== false,
+        onPress: () => toggleLayerFlag("refPoints"),
+      },
+      { key: "lengths", icon: Ruler, label: "Lengths", checked: showLengthLabels, onPress: toggleLengthLabels },
+    ];
     return (
       <AnimatedReanimated.View style={[styles.mapToolsColumn, compassAnimatedStyle]} pointerEvents="box-none">
         <View style={styles.mapToolsGroupCard} pointerEvents="auto">
@@ -1315,67 +1371,27 @@ export default function ModernHomeUI(props) {
                   <Text style={[styles.focusToolLabel, drawingMode !== "none" && { color: COLORS.accentBrand }]}>Mark</Text>
                 </Pressable>
                 {showMarkMenu && (
-                  <View style={{
-                    position: "absolute",
-                    top: "100%",
-                    marginTop: 14,
-                    right: 0,
-                    backgroundColor: COLORS.cardSolid,
-                    borderRadius: 12,
-                    padding: 6,
-                    minWidth: 180,
-                    borderWidth: 1,
-                    borderColor: COLORS.panelBorder,
-                    shadowColor: "#000",
-                    shadowOffset: { width: 0, height: 8 },
-                    shadowOpacity: 0.5,
-                    shadowRadius: 24,
-                    elevation: 10,
-                    zIndex: 100,
-                  }}>
-                    {/* Top Pointer Triangle */}
-                    <View style={{
-                      position: "absolute",
-                      top: -6,
-                      right: 22,
-                      width: 12,
-                      height: 12,
-                      backgroundColor: COLORS.cardSolid,
-                      borderTopWidth: 1,
-                      borderLeftWidth: 1,
-                      borderColor: COLORS.panelBorder,
-                      transform: [{ rotate: "45deg" }],
-                    }} />
+                  <View style={[styles.menuPopover, styles.menuPopoverOptions]}>
+                    <View style={styles.menuPopoverArrow} />
 
-                    <Pressable
-                      style={({ pressed }) => [
-                        { padding: 10, borderRadius: 8 },
-                        pressed && { backgroundColor: COLORS.surfaceSolid },
-                        drawingMode === "click" && { backgroundColor: COLORS.accentMuted }
-                      ]}
-                      onPress={() => handleStartDrawingMode("click")}
-                    >
-                      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "flex-start", gap: 12 }}>
-                        <MapPin color={drawingMode === "click" ? COLORS.accentBrand : COLORS.textMain} size={18} strokeWidth={2.2} />
-                        <Text numberOfLines={1} style={{ flex: 1, color: drawingMode === "click" ? COLORS.accentBrand : COLORS.textMain, fontSize: 13, fontWeight: "600" }}>Click to Waypoint</Text>
-                      </View>
-                    </Pressable>
+                    <MenuSectionLabel label="Draw Mode" hint={drawingMode !== "none" ? "Active" : null} />
 
-                    <View style={{ height: 1, backgroundColor: COLORS.panelBorder, marginVertical: 4, marginHorizontal: 6 }} />
-
-                    <Pressable
-                      style={({ pressed }) => [
-                        { padding: 10, borderRadius: 8 },
-                        pressed && { backgroundColor: COLORS.surfaceSolid },
-                        drawingMode === "manual" && { backgroundColor: COLORS.accentMuted }
-                      ]}
-                      onPress={() => handleStartDrawingMode("manual")}
-                    >
-                      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "flex-start", gap: 12 }}>
-                        <Pencil color={drawingMode === "manual" ? COLORS.accentBrand : COLORS.textMain} size={18} strokeWidth={2.2} />
-                        <Text numberOfLines={1} style={{ flex: 1, color: drawingMode === "manual" ? COLORS.accentBrand : COLORS.textMain, fontSize: 13, fontWeight: "600" }}>Manual Drawing</Text>
-                      </View>
-                    </Pressable>
+                    <View style={styles.menuTileRow}>
+                      <MenuModeTile
+                        icon={MapPin}
+                        label="Click to Waypoint"
+                        description="Tap map to drop points"
+                        active={drawingMode === "click"}
+                        onPress={() => handleStartDrawingMode("click")}
+                      />
+                      <MenuModeTile
+                        icon={Pencil}
+                        label="Manual Drawing"
+                        description="Freehand sketch"
+                        active={drawingMode === "manual"}
+                        onPress={() => handleStartDrawingMode("manual")}
+                      />
+                    </View>
                   </View>
                 )}
               </View>
@@ -1398,98 +1414,62 @@ export default function ModernHomeUI(props) {
                   <Text style={styles.focusToolLabel}>Layers</Text>
                 </Pressable>
                 {showLayersMenu && (
-                  <View style={{
-                    position: "absolute",
-                    top: "100%",
-                    marginTop: 14,
-                    right: 0,
-                    backgroundColor: COLORS.cardSolid,
-                    borderRadius: 12,
-                    padding: 6,
-                    minWidth: 200,
-                    borderWidth: 1,
-                    borderColor: COLORS.panelBorder,
-                    shadowColor: "#000",
-                    shadowOffset: { width: 0, height: 8 },
-                    shadowOpacity: 0.5,
-                    shadowRadius: 24,
-                    elevation: 10,
-                    zIndex: 100,
-                  }}>
-                    {/* Top Pointer Triangle */}
-                    <View style={{
-                      position: "absolute",
-                      top: -6,
-                      right: 22,
-                      width: 12,
-                      height: 12,
-                      backgroundColor: COLORS.cardSolid,
-                      borderTopWidth: 1,
-                      borderLeftWidth: 1,
-                      borderColor: COLORS.panelBorder,
-                      transform: [{ rotate: "45deg" }],
-                    }} />
+                  <View style={[styles.menuPopover, { width: menuPopoverWidthFor(layerTiles.length, MENU_LAYER_TILE_W) }]}>
+                    <View style={styles.menuPopoverArrow} />
 
-                    {hasExtensionLines && (
-                      <LayerCheckboxRow
-                        label="Extension"
-                        checked={layerVisibility?.extension !== false}
-                        onPress={() => toggleLayerFlag("extension")}
-                        colors={COLORS}
-                      />
-                    )}
-                    <LayerCheckboxRow
-                      label="Rover"
-                      checked={showRoverMarker}
-                      onPress={() => toggleLayerFlag("rover")}
-                      colors={COLORS}
-                    />
-                    <LayerCheckboxRow
-                      label="Ref points"
-                      checked={layerVisibility?.refPoints !== false}
-                      onPress={() => toggleLayerFlag("refPoints")}
-                      colors={COLORS}
-                    />
-                    <LayerCheckboxRow
-                      label="Lengths"
-                      checked={showLengthLabels}
-                      onPress={toggleLengthLabels}
-                      colors={COLORS}
+                    <MenuSectionLabel
+                      label="Map Layers"
+                      hint={`${layerTiles.filter((l) => l.checked).length}/${layerTiles.length}`}
                     />
 
-                    <View style={{ height: 1, backgroundColor: COLORS.panelBorder, marginVertical: 4, marginHorizontal: 6 }} />
+                    <View style={styles.menuTileRow}>
+                      {layerTiles.map((tile) => (
+                        <MenuLayerTile
+                          key={tile.key}
+                          icon={tile.icon}
+                          label={tile.label}
+                          checked={tile.checked}
+                          onPress={tile.onPress}
+                        />
+                      ))}
+                    </View>
 
-                    <Pressable
-                      style={({ pressed }) => [
-                        { padding: 10, borderRadius: 8, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-                        pressed && { backgroundColor: COLORS.surfaceSolid },
-                      ]}
-                      onPress={() => setShowLayersPlanSubmenu((v) => !v)}
-                    >
-                      <Text style={{ color: COLORS.textMain, fontSize: 13, fontWeight: "600" }}>Plan</Text>
-                      <ChevronRight
-                        color={COLORS.textMuted}
-                        size={16}
-                        style={{ transform: [{ rotate: showLayersPlanSubmenu ? "90deg" : "0deg" }] }}
-                      />
+                    <View style={styles.menuDivider} />
+
+                    <Pressable onPress={() => setShowLayersPlanSubmenu((v) => !v)} accessibilityRole="button">
+                      <View style={styles.menuGroupHeader}>
+                        <ChevronRight
+                          color={COLORS.textMuted}
+                          size={13}
+                          strokeWidth={2.6}
+                          style={{ transform: [{ rotate: showLayersPlanSubmenu ? "90deg" : "0deg" }] }}
+                        />
+                        <Text style={styles.menuGroupTitle}>Plan Segments</Text>
+                        {availableSegmentKinds.length > 0 && (
+                          <View style={styles.menuCountBadge}>
+                            <Text style={styles.menuCountText}>
+                              {availableSegmentKinds.filter((k) => layerVisibility?.segmentTypes?.[k] !== false).length}/{availableSegmentKinds.length}
+                            </Text>
+                          </View>
+                        )}
+                      </View>
                     </Pressable>
 
                     {showLayersPlanSubmenu && (
-                      <View style={{ paddingLeft: 10 }}>
-                        {availableSegmentKinds.length === 0 ? (
-                          <Text style={{ color: COLORS.textMuted, fontSize: 12, padding: 10 }}>No plan loaded</Text>
-                        ) : (
-                          availableSegmentKinds.map((kind) => (
-                            <LayerCheckboxRow
+                      availableSegmentKinds.length === 0 ? (
+                        <Text style={styles.menuEmptyText}>No plan loaded</Text>
+                      ) : (
+                        <View style={styles.menuSegRow}>
+                          {availableSegmentKinds.map((kind) => (
+                            <MenuSegmentPill
                               key={kind}
                               label={kind.charAt(0).toUpperCase() + kind.slice(1)}
                               checked={layerVisibility?.segmentTypes?.[kind] !== false}
                               onPress={() => toggleSegmentKind(kind)}
-                              colors={COLORS}
                             />
-                          ))
-                        )}
-                      </View>
+                          ))}
+                        </View>
+                      )
                     )}
                   </View>
                 )}
@@ -2228,6 +2208,249 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     borderRadius: 10,
     backgroundColor: "transparent",
+  },
+
+  // ── Mark / Layers dropdown popovers ──
+  menuPopover: {
+    position: "absolute",
+    top: "100%",
+    marginTop: 18,
+    // Left-anchored: these buttons sit at the right end of the tool bar, so
+    // opening rightward keeps the panel clear of the left Navbar.
+    left: 0,
+    backgroundColor: COLORS.panelSolid,
+    borderRadius: 16,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    ...SHADOWS.panel,
+    zIndex: 100,
+  },
+  menuPopoverOptions: {
+    width: menuPopoverWidthFor(2, MENU_MODE_TILE_W),
+  },
+  menuPopoverArrow: {
+    position: "absolute",
+    top: -6,
+    left: 22,
+    width: 11,
+    height: 11,
+    backgroundColor: COLORS.panelSolid,
+    borderTopWidth: 1,
+    borderLeftWidth: 1,
+    borderColor: COLORS.panelBorder,
+    borderTopLeftRadius: 3,
+    transform: [{ rotate: "45deg" }],
+  },
+  menuSectionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 6,
+    paddingBottom: 8,
+  },
+  menuSectionLabel: {
+    flex: 1,
+    color: COLORS.textDim,
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+    textTransform: "uppercase",
+  },
+  menuSectionHintPill: {
+    backgroundColor: COLORS.accentMuted,
+    borderWidth: 1,
+    borderColor: COLORS.accentBorder,
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  menuSectionHintText: {
+    color: COLORS.accentBrand,
+    fontSize: 8.5,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+  },
+
+  menuTileRow: {
+    flexDirection: "row",
+    flexWrap: "nowrap",
+    alignItems: "stretch",
+    gap: MENU_TILE_GAP,
+  },
+  menuIconChip: {
+    width: 28,
+    height: 28,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.surfaceSolid,
+  },
+  menuIconChipSmall: {
+    width: 26,
+    height: 26,
+    borderRadius: 9,
+  },
+  menuIconChipOn: {
+    backgroundColor: COLORS.accentBrand,
+  },
+
+  // Mark → mode tiles
+  menuModeTile: {
+    width: MENU_MODE_TILE_W,
+    padding: 9,
+    borderRadius: 14,
+    backgroundColor: COLORS.cardSolid,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+  },
+  menuModeTileOn: {
+    backgroundColor: COLORS.accentMuted,
+    borderColor: COLORS.accentBorder,
+  },
+  menuModeTileTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+  menuTileCheck: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.accentBrand,
+  },
+  menuModeTitle: {
+    color: COLORS.textMuted,
+    fontSize: 11.5,
+    fontWeight: "700",
+  },
+  menuModeTitleOn: {
+    color: COLORS.textMain,
+    fontWeight: "800",
+  },
+  menuModeDesc: {
+    color: COLORS.textDim,
+    fontSize: 9.5,
+    fontWeight: "500",
+    marginTop: 2,
+  },
+
+  // Layers → toggle tiles
+  menuLayerTile: {
+    width: MENU_LAYER_TILE_W,
+    paddingVertical: 9,
+    paddingHorizontal: 3,
+    borderRadius: 14,
+    alignItems: "center",
+    backgroundColor: COLORS.cardSolid,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+  },
+  menuLayerTileOn: {
+    backgroundColor: COLORS.accentMuted,
+    borderColor: COLORS.accentBorder,
+  },
+  menuLayerLabel: {
+    marginTop: 7,
+    color: COLORS.textDim,
+    fontSize: 10,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+  menuLayerLabelOn: {
+    color: COLORS.textMain,
+    fontWeight: "800",
+  },
+
+  menuDivider: {
+    height: 1,
+    backgroundColor: COLORS.panelBorder,
+    marginVertical: 8,
+    marginHorizontal: 2,
+  },
+  menuGroupHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    paddingVertical: 2,
+    paddingHorizontal: 4,
+    marginBottom: 6,
+  },
+  menuGroupTitle: {
+    flex: 1,
+    color: COLORS.textDim,
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+    textTransform: "uppercase",
+  },
+  menuCountBadge: {
+    backgroundColor: COLORS.surfaceSolid,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+  },
+  menuCountText: {
+    color: COLORS.textMuted,
+    fontSize: 9.5,
+    fontWeight: "800",
+    letterSpacing: 0.4,
+  },
+
+  // Layers → plan segment pills
+  menuSegRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 2,
+  },
+  menuSegPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    paddingVertical: 6,
+    paddingHorizontal: 11,
+    borderRadius: 999,
+    backgroundColor: COLORS.cardSolid,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+  },
+  menuSegPillOn: {
+    backgroundColor: COLORS.accentMuted,
+    borderColor: COLORS.accentBorder,
+  },
+  menuSegDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: COLORS.textDim,
+  },
+  menuSegDotOn: {
+    backgroundColor: COLORS.accentBrand,
+  },
+  menuSegLabel: {
+    color: COLORS.textDim,
+    fontSize: 10.5,
+    fontWeight: "700",
+  },
+  menuSegLabelOn: {
+    color: COLORS.textMain,
+    fontWeight: "800",
+  },
+  menuEmptyText: {
+    color: COLORS.textDim,
+    fontSize: 11,
+    fontWeight: "600",
+    paddingHorizontal: 4,
+    paddingBottom: 4,
   },
   compassCard: {
     flexDirection: "row",
