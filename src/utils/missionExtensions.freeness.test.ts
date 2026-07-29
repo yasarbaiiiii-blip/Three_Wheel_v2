@@ -108,6 +108,48 @@ describe("extension freeness (Phase 3)", () => {
     expect(lines.filter((l) => l.segmentRole === "aft")).toHaveLength(1);
   });
 
+  it("PRE lands on the mark start (backend offset_point(start, −pre))", () => {
+    // Path runs north from origin; PRE tip should be south of start, end of PRE = start.
+    const line = polyLine("n", [
+      [0, 0],
+      [10, 0],
+    ]);
+    const lines = buildCsvExtensionLines([line], {
+      enabled: true,
+      preM: 0.5,
+      aftM: 0.5,
+      perLine: false,
+    });
+    const pre = lines.find((l) => l.segmentRole === "pre")!;
+    const pts = pre.entity!.preview_points;
+    expect(pts[pts.length - 1].north).toBeCloseTo(0, 6);
+    expect(pts[pts.length - 1].east).toBeCloseTo(0, 6);
+    expect(pts[0].north).toBeCloseTo(-0.5, 6);
+    expect(pts[0].east).toBeCloseTo(0, 6);
+  });
+
+  it("touching chain: only free ends get PRE/AFT (backend freeness)", () => {
+    // Two collinear segments sharing a junction — middle ends blocked.
+    const a = polyLine("a", [
+      [0, 0],
+      [5, 0],
+    ]);
+    const b = polyLine("b", [
+      [5, 0],
+      [10, 0],
+    ]);
+    const lines = buildCsvExtensionLines([a, b], {
+      enabled: true,
+      preM: 0.5,
+      aftM: 0.5,
+      perLine: false,
+    });
+    expect(lines.filter((l) => l.segmentRole === "pre")).toHaveLength(1);
+    expect(lines.filter((l) => l.segmentRole === "aft")).toHaveLength(1);
+    expect(lines.find((l) => l.segmentRole === "pre")!.id).toContain("a");
+    expect(lines.find((l) => l.segmentRole === "aft")!.id).toContain("b");
+  });
+
   it("splitPolylineAtCorners splits square into 4 sides", () => {
     const pts: Array<[number, number]> = [
       [0, 0],

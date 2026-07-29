@@ -207,11 +207,11 @@ export function UploadAndPreviewStep({
       : null
   );
 
-  // Extension state (inline, no modal) — DXF remote; CSV drafts below
+  // Extension state (inline, no modal) — DXF remote; CSV drafts below.
+  // DXF always uses chain-ends freeness (per_line=false) — same as rover default.
   const [extEnabled, setExtEnabled] = useState(false);
   const [extPre, setExtPre] = useState("0.5");
   const [extAft, setExtAft] = useState("0.5");
-  const [extPerLine, setExtPerLine] = useState(false);
   const [isExtSetting, setIsExtSetting] = useState(false);
   /** Draft strings for CSV extension inputs (commit normalized values on blur). */
   const [csvExtPreDraft, setCsvExtPreDraft] = useState(
@@ -253,30 +253,40 @@ export function UploadAndPreviewStep({
     !!targetPathName?.toLowerCase().endsWith(".csv") ||
     localCsvPreview != null ||
     localCsvSummary != null;
+  /** DXF parsed on device — never hit /parse-dxf, /entities, or /extensions. */
+  const isLocalDxfPlanner = DXF_PLANNER === "app" && isDxfPath;
   /** Extension UI must not depend on local-only summary — that state dies on remount. */
   const showCsvExtension =
     isCsvPath &&
     !isDxfPath &&
     onCsvExtensionConfigChange != null &&
     csvExtensionConfig != null;
+  /** Local DXF uses the same purple PRE/AFT card as CSV (app state only). */
+  const showLocalDxfExtension =
+    isLocalDxfPlanner &&
+    onCsvExtensionConfigChange != null &&
+    csvExtensionConfig != null &&
+    !!importedPlan;
 
+  // Rover-side extension config only when DXF still lives on the rover.
   useEffect(() => {
+    if (isLocalDxfPlanner) return;
     if (isDxfPath && targetPathName && apiBaseUrl) {
       pathApi.getExtensions(apiBaseUrl, targetPathName)
         .then(cfg => {
           setExtEnabled(cfg.enabled);
           setExtPre(String(cfg.pre_extension_m ?? 0.5));
           setExtAft(String(cfg.aft_extension_m ?? 0.5));
-          setExtPerLine(!!cfg.per_line);
         })
         .catch(() => {
           // keep defaults if it fails
         });
     }
-  }, [targetPathName, isDxfPath, apiBaseUrl]);
+  }, [targetPathName, isDxfPath, apiBaseUrl, isLocalDxfPlanner]);
 
-  // Backend path preview for DXF / waypoints only — never for local CSV.
+  // Backend path preview for rover DXF / waypoints only — never local CSV or local DXF.
   useEffect(() => {
+    if (isLocalDxfPlanner) return;
     if (!targetPathName || !apiBaseUrl || isCsvPath) return;
     setPreviewData(null);
     pathApi.getPathPreview(apiBaseUrl, targetPathName)
@@ -288,11 +298,11 @@ export function UploadAndPreviewStep({
       .catch(() => {
         // Preview is optional — swallow errors silently
       });
-  }, [targetPathName, apiBaseUrl, isCsvPath]);
+  }, [targetPathName, apiBaseUrl, isCsvPath, isLocalDxfPlanner]);
 
   /**
-   * CSV: parse entirely on-device — no parse-point-*, upload, or /preview.
-   * DXF / waypoints: upload + backend map preview (unchanged).
+   * CSV + app-planned DXF: parse on-device (no upload).
+   * Waypoints / rover DXF (DXF_PLANNER=rover): upload + backend preview.
    */
   const importAndPreviewFile = async (file: DocumentPicker.DocumentPickerAsset) => {
     if (blockProtectedWorkflowMutation("Parsing a new path")) return;
@@ -353,7 +363,7 @@ export function UploadAndPreviewStep({
       return;
     }
 
-    // DXF app-planned path: parse entirely on-device (mirrors CSV).
+    // DXF app-planned path: parse entirely on-device (mirrors CSV) — no rover round-trip.
     if (ext === "dxf" && DXF_PLANNER === "app") {
       setPickedFile(file);
       setImportError(null);
@@ -383,6 +393,18 @@ export function UploadAndPreviewStep({
         setPreviewData(null);
         setPickedFile(null);
         setImportError(null);
+        // Seed local extension defaults (same as CSV card).
+        if (onCsvExtensionConfigChange && csvExtensionConfig) {
+          onCsvExtensionConfigChange(
+            normalizeCsvExtensionConfig({
+              ...csvExtensionConfig,
+              enabled: false,
+              preM: 0.5,
+              aftM: 0.5,
+              perLine: false,
+            })
+          );
+        }
         if (parsed.warnings.length > 0) {
           console.warn("[import][dxf-local] warnings:", parsed.warnings);
         }
@@ -481,7 +503,6 @@ export function UploadAndPreviewStep({
             setExtEnabled(cfg.enabled);
             setExtPre(String(cfg.pre_extension_m ?? 0.5));
             setExtAft(String(cfg.aft_extension_m ?? 0.5));
-            setExtPerLine(!!cfg.per_line);
           } catch {
             // keep defaults
           }
@@ -532,66 +553,64 @@ export function UploadAndPreviewStep({
     await importAndPreviewFile(pickedFile);
   };
 
-  const handleToggleExtension = async (enabled: boolean) => {
-    if (!targetPathName || !apiBaseUrl) return;
+  /** Persist DXF extension sidecar (always per_line=false — chain free ends only). */
+  const saveDxfExtensions = async (opts: {
+    enabled: boolean;
+    preM: number;
+    aftM: number;
+  }) => {
+    if (!targetPathName || !apiBaseUrl) return false;
     setIsExtSetting(true);
     try {
       const res = await pathApi.saveExtensions(apiBaseUrl, targetPathName, {
-        enabled,
-        pre_extension_m: parseFloat(extPre) || 0.5,
-        aft_extension_m: parseFloat(extAft) || 0.5,
-        per_line: extPerLine,
+        enabled: opts.enabled,
+        pre_extension_m: opts.preM,
+        aft_extension_m: opts.aftM,
+        // Always false: matches rover chain-ends freeness (no per-side split UI).
+        per_line: false,
       });
       if (res.ok) {
-        setExtEnabled(enabled);
+        setExtEnabled(opts.enabled);
         onInvalidateWorkflow("spray");
-        onSelectPath(targetPathName, true); // refreshOnly — re-fetch lines, stay out of edit mode
-      } else {
-        const errText = await res.text();
-        Alert.alert("Error", errText || "Failed to update extensions");
+        onSelectPath(targetPathName, true); // refreshOnly — rebuild purple PRE/AFT on device
+        return true;
       }
+      const errText = await res.text();
+      Alert.alert("Error", errText || "Failed to update extensions");
+      return false;
     } catch (err: any) {
       Alert.alert("Error", err.message || "Failed to connect to backend");
+      return false;
     } finally {
       setIsExtSetting(false);
     }
   };
 
-  // Once extension is applied (enabled), this same button flips into a "Disable
-  // Extension" action so the operator doesn't have to scroll back up to the
-  // switch — pressing it again sends enabled:false instead of re-applying.
-  const handleToggleApplyExtension = async () => {
-    if (!targetPathName || !apiBaseUrl) return;
-    const nextEnabled = !extEnabled;
-    setIsExtSetting(true);
-    try {
-      const res = await pathApi.saveExtensions(apiBaseUrl, targetPathName, {
-        enabled: nextEnabled,
-        pre_extension_m: parseFloat(extPre) || 0,
-        aft_extension_m: parseFloat(extAft) || 0,
-        per_line: extPerLine,
-      });
-      if (res.ok) {
-        setExtEnabled(nextEnabled);
-        onInvalidateWorkflow("spray");
-        onSelectPath(targetPathName, true); // refreshOnly — re-fetch lines, stay out of edit mode
-      } else {
-        const errText = await res.text();
-        Alert.alert("Error", errText || `Failed to ${nextEnabled ? "save" : "disable"} extensions`);
-      }
-    } catch (err: any) {
-      Alert.alert("Error", err.message || "Failed to connect to backend");
-    } finally {
-      setIsExtSetting(false);
-    }
+  const handleToggleExtension = async (enabled: boolean) => {
+    await saveDxfExtensions({
+      enabled,
+      preM: parseFloat(extPre) || 0.5,
+      aftM: parseFloat(extAft) || 0.5,
+    });
+  };
+
+  /** Commit PRE/AFT when operator finishes editing (same as CSV blur). */
+  const commitDxfExtensionLengths = async () => {
+    if (!extEnabled || !targetPathName || !apiBaseUrl) return;
+    await saveDxfExtensions({
+      enabled: true,
+      preM: parseFloat(extPre) || 0.5,
+      aftM: parseFloat(extAft) || 0.5,
+    });
   };
 
   return (
     <View style={{ gap: 14 }}>
       {/* File Upload Section */}
       <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
-        Import a .dxf, .csv, or .waypoints file. DXF/waypoints use the rover; CSV is parsed
-        on-device and drawn locally (not uploaded).
+        {DXF_PLANNER === "app"
+          ? "Import a .dxf, .csv, or .waypoints file. DXF and CSV are parsed on-device (not uploaded). Waypoints still use the rover."
+          : "Import a .dxf, .csv, or .waypoints file. DXF/waypoints use the rover; CSV is parsed on-device and drawn locally (not uploaded)."}
       </Text>
 
       {!pickedFile && !targetPathName ? (
@@ -777,8 +796,8 @@ export function UploadAndPreviewStep({
         </View>
       ) : null}
 
-      {/* Extension Config — DXF: rover /extensions API. CSV: local state only (no network). */}
-      {targetPathName && isDxfPath ? (
+      {/* Rover DXF extension (legacy) — only when file is on the rover. */}
+      {targetPathName && isDxfPath && !isLocalDxfPlanner ? (
         <View
           style={{
             borderRadius: 10,
@@ -801,7 +820,7 @@ export function UploadAndPreviewStep({
                 Enable Extension
               </Text>
               <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-                Add run-up / run-out segments
+                Purple PRE/AFT run-ups at free chain ends only (same as rover). PRE lands on the path start.
               </Text>
             </View>
             <Switch
@@ -813,90 +832,75 @@ export function UploadAndPreviewStep({
             />
           </View>
 
-          <View style={{ padding: 12, paddingTop: 0, gap: 10 }}>
-            <View style={{ flexDirection: "row", gap: 8 }}>
-              <View style={{ flex: 1, gap: 3 }}>
-                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, fontWeight: "700" }}>PRE (m)</Text>
-                <TextInput
-                  style={{
-                    height: 36,
-                    backgroundColor: FIELDS_COLORS.cardSolid,
-                    borderWidth: 1,
-                    borderColor: FIELDS_COLORS.panelBorder,
-                    borderRadius: 6,
-                    paddingHorizontal: 8,
-                    fontSize: 13,
-                    color: FIELDS_COLORS.textMain,
-                  }}
-                  value={extPre}
-                  onChangeText={(v) => {
-                    onInvalidateWorkflow("spray");
-                    setExtPre(v);
-                  }}
-                  keyboardType="numeric"
-                />
+          {extEnabled ? (
+            <View style={{ padding: 12, paddingTop: 0, gap: 8 }}>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <View style={{ flex: 1, gap: 3 }}>
+                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, fontWeight: "700" }}>
+                    PRE (m)
+                  </Text>
+                  <TextInput
+                    style={{
+                      height: 36,
+                      backgroundColor: FIELDS_COLORS.cardSolid,
+                      borderWidth: 1,
+                      borderColor: FIELDS_COLORS.panelBorder,
+                      borderRadius: 6,
+                      paddingHorizontal: 8,
+                      fontSize: 13,
+                      color: FIELDS_COLORS.textMain,
+                    }}
+                    value={extPre}
+                    onChangeText={(v) => {
+                      onInvalidateWorkflow("spray");
+                      setExtPre(v);
+                    }}
+                    onBlur={() => {
+                      void commitDxfExtensionLengths();
+                    }}
+                    keyboardType="numeric"
+                    editable={!isExtSetting}
+                  />
+                </View>
+                <View style={{ flex: 1, gap: 3 }}>
+                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, fontWeight: "700" }}>
+                    AFT (m)
+                  </Text>
+                  <TextInput
+                    style={{
+                      height: 36,
+                      backgroundColor: FIELDS_COLORS.cardSolid,
+                      borderWidth: 1,
+                      borderColor: FIELDS_COLORS.panelBorder,
+                      borderRadius: 6,
+                      paddingHorizontal: 8,
+                      fontSize: 13,
+                      color: FIELDS_COLORS.textMain,
+                    }}
+                    value={extAft}
+                    onChangeText={(v) => {
+                      onInvalidateWorkflow("spray");
+                      setExtAft(v);
+                    }}
+                    onBlur={() => {
+                      void commitDxfExtensionLengths();
+                    }}
+                    keyboardType="numeric"
+                    editable={!isExtSetting}
+                  />
+                </View>
               </View>
-              <View style={{ flex: 1, gap: 3 }}>
-                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, fontWeight: "700" }}>AFT (m)</Text>
-                <TextInput
-                  style={{
-                    height: 36,
-                    backgroundColor: FIELDS_COLORS.cardSolid,
-                    borderWidth: 1,
-                    borderColor: FIELDS_COLORS.panelBorder,
-                    borderRadius: 6,
-                    paddingHorizontal: 8,
-                    fontSize: 13,
-                    color: FIELDS_COLORS.textMain,
-                  }}
-                  value={extAft}
-                  onChangeText={(v) => {
-                    onInvalidateWorkflow("spray");
-                    setExtAft(v);
-                  }}
-                  keyboardType="numeric"
-                />
-              </View>
+              {isExtSetting ? (
+                <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10 }}>Saving…</Text>
+              ) : null}
             </View>
-
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}
-            >
-              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "600" }}>Per-line</Text>
-              <Switch
-                value={extPerLine}
-                onValueChange={(v) => {
-                  onInvalidateWorkflow("spray");
-                  setExtPerLine(v);
-                }}
-                trackColor={{ false: FIELDS_COLORS.panelBorder, true: "#8b5cf6" }}
-              />
-            </View>
-
-            <Pressable
-              onPress={handleToggleApplyExtension}
-              disabled={isExtSetting}
-              style={{
-                height: 36,
-                borderRadius: 8,
-                alignItems: "center",
-                justifyContent: "center",
-                backgroundColor: isExtSetting ? FIELDS_COLORS.textDim : extEnabled ? "#ef4444" : "#8b5cf6",
-              }}
-            >
-              <Text style={{ color: "#fff", fontSize: 12, fontWeight: "800" }}>
-                {isExtSetting ? "Saving..." : extEnabled ? "Disable Extension" : "Apply Extension"}
-              </Text>
-            </Pressable>
-          </View>
+          ) : null}
         </View>
       ) : null}
 
-      {showCsvExtension && csvExtensionConfig && onCsvExtensionConfigChange ? (
+      {(showCsvExtension || showLocalDxfExtension) &&
+      csvExtensionConfig &&
+      onCsvExtensionConfigChange ? (
         <View
           style={{
             borderRadius: 10,
@@ -919,7 +923,9 @@ export function UploadAndPreviewStep({
                 Enable Extension
               </Text>
               <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-                Run-up / run-out (travel, no spray). Local only — not saved to the rover.
+                {showLocalDxfExtension
+                  ? "Purple PRE/AFT at free chain ends. Built on device — not saved to the rover."
+                  : "Run-up / run-out (travel, no spray). Local only — not saved to the rover."}
               </Text>
             </View>
             <Switch
@@ -930,6 +936,7 @@ export function UploadAndPreviewStep({
                   normalizeCsvExtensionConfig({
                     ...csvExtensionConfig,
                     enabled,
+                    perLine: false,
                     aftM: enabled
                       ? Math.max(CSV_EXT_AFT_FLOOR_M, csvExtensionConfig.aftM)
                       : csvExtensionConfig.aftM,

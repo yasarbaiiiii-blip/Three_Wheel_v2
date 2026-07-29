@@ -974,6 +974,15 @@ export default function App() {
     // Keep canonical DXF lines unchanged; retain the sticker transform for map preview.
     setExtractedCorners(extractedLLA);
     setAlignedRefPoints(extractedLLA);
+    // Local DXF (app planner): origin_gps for plan-trajectory is the latched map origin
+    // the sticker was placed against — same contract as CSV survey anchor.
+    setVerifiedAlignmentRequest({
+      origin_gps: [baseLat, baseLon],
+      rotation_deg: visualAlignmentItem.rotation ?? 0,
+      ref_points: extractedLLA,
+    });
+    // Do not call setStagedWorkflow here — it is declared later in this component
+    // (TDZ). Alignment is marked verified by AlignDxfPanel Fix / setWorkflowStep.
     setIsVisualAlignmentMode(false);
     // Also used from the Multi-Point Fit tab's "Use This Position" (Move Plan flow), which
     // drives the SAME sticker via isPlanEditingMode rather than isVisualAlignmentMode — clear
@@ -1314,6 +1323,17 @@ export default function App() {
   const setWorkflowStep = useCallback((step: StagedWorkflowStep, status: StagedWorkflowStatus) => {
     setStagedWorkflow((prev) => (prev[step] === status ? prev : { ...prev, [step]: status }));
   }, []);
+
+  // Visual "Use This Position" sets verifiedAlignmentRequest before setWorkflowStep exists
+  // in the component body — promote alignment status here.
+  useEffect(() => {
+    if (
+      verifiedAlignmentRequest?.origin_gps &&
+      stagedWorkflow.alignment !== "verified"
+    ) {
+      setWorkflowStep("alignment", "verified");
+    }
+  }, [verifiedAlignmentRequest, stagedWorkflow.alignment, setWorkflowStep]);
 
   const invalidateStagedWorkflowFrom = useCallback((step: "alignment" | "spray" | "staged" | "loaded") => {
     missionIdentityGenerationRef.current += 1;
@@ -2218,11 +2238,12 @@ export default function App() {
             if (markLines.length === 0 && generatedLines.length === 0) {
               throw new Error("Preview entities did not contain valid geometries");
             }
+            // Always chain free-ends (per_line=false) — matches rover default freeness.
             const extCfg = {
               enabled: isEnabled,
               preM: Number(body.extension_config?.pre_extension_m ?? 0.5) || 0.5,
               aftM: Number(body.extension_config?.aft_extension_m ?? 0.5) || 0.5,
-              perLine: Boolean(body.extension_config?.per_line),
+              perLine: false as const,
             };
             const order = defaultPathOrder(markLines.length > 0 ? markLines : generatedLines);
             generatedLines = applyCsvOrderToPlanLines(
@@ -2852,17 +2873,29 @@ export default function App() {
     setMissionFileReady(false);
     setMissionLoaded(false);
     setMissionRunning(false);
+    setExtensionsEnabled(false);
+    // Same two flags the rover /entities path sets — Align copy and the "no alignment
+    // needed" affordance read them, so a locally parsed geographic DXF must set them too.
+    setIsGeographicDxf(!!data.isGeographic);
+    setGeoOriginDxf(
+      data.isGeographic && data.geoOrigin ? [data.geoOrigin.lat, data.geoOrigin.lon] : null
+    );
 
-    const markLines = data.lines.filter((l) => l.layer !== "transit");
-    const transitSource = data.lines.filter((l) => l.layer === "transit");
-    // Transit layers already in the DXF; also build connectors between mark paths
-    // when operator order is default file order (Path Order rebuilds later).
-    const transitBridges = buildCsvTransitLines(markLines);
-    setLines(sanitizePlanLines([...data.lines, ...transitBridges]));
-    setSelectedLineId(data.lines[0]?.id ?? null);
+    // Frontend-only geometry: marks + inter-path transit (extensions via Upload toggle).
+    const markLines = data.lines.filter(
+      (l) => l.layer !== "transit" && l.layer !== "extension"
+    );
+    const order = defaultPathOrder(selectMarkPlanLines(markLines));
+    const withTransit = applyCsvOrderToPlanLines(markLines, order, {
+      enabled: false,
+      preM: 0.5,
+      aftM: 0.5,
+      perLine: false,
+    });
+    setLines(sanitizePlanLines(withTransit));
+    setSelectedLineId(markLines[0]?.id ?? null);
     setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
-    void transitSource;
 
     if (data.isGeographic && data.geoOrigin) {
       const a = alignmentFromGeographic(data.geoOrigin);

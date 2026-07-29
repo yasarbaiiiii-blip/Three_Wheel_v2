@@ -64,5 +64,8 @@ export const CSV_PLANNER: CsvPlannerMode = "app";
  * the file path with no other code changes.
  */
 export type DxfPlannerMode = "app" | "rover";
-/** Keep `"rover"` until Phase 7 gate is green. */
-export const DXF_PLANNER: DxfPlannerMode = "rover";
+/**
+ * App-planned DXF: parseLocalDxf on device, no POST /parse-dxf.
+ * Flip to `"rover"` only to restore the legacy upload → entities flow.
+ */
+export const DXF_PLANNER: DxfPlannerMode = "app";

@@ -24,6 +24,7 @@ import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPrevi
 import { useFieldsWorkflow } from "../hooks/useFieldsWorkflow";
 import { parseGuidePointsCsv } from "../utils/refPointsCsv";
 import { designObbFromLines } from "../utils/planResizeHandles";
+import { DXF_PLANNER } from "../config/featureFlags";
 import {
   applyCsvOrderToPlanLines,
   type CsvPathOrderEntry,
@@ -82,7 +83,6 @@ export type FieldsPageProps = {
   extPre?: string;
   extAft?: string;
   extensionsEnabled?: boolean;
-  extPerLine?: boolean;
   apiBaseUrl: string;
   onRefreshPaths: () => void;
   onWorkflowStep?: (step: StagedWorkflowStep, status: StagedWorkflowStatus) => void;
@@ -212,7 +212,6 @@ export function FieldsPage(props: FieldsPageProps) {
     extPre,
     extAft,
     extensionsEnabled = false,
-    extPerLine = false,
     apiBaseUrl,
     onRefreshPaths,
     onWorkflowStep,
@@ -587,6 +586,13 @@ export function FieldsPage(props: FieldsPageProps) {
     importedPlan?.fileType === "csv" ||
     !!importedPlan?.fileName?.toLowerCase().endsWith(".csv");
   const isLocalCsvFlow = activeCsvPreview != null || planLooksLikeCsv;
+  /** Local DXF: parsed on device (DXF_PLANNER=app), no selectedPathName on rover. */
+  const isLocalDxfFlow =
+    DXF_PLANNER === "app" &&
+    isDxfPath &&
+    !selectedPathName &&
+    importedPlan?.fileType === "dxf";
+  const isLocalFlow = isLocalCsvFlow || isLocalDxfFlow;
   const alignDone =
     isLocalCsvFlow ||
     !isDxfPath ||
@@ -968,7 +974,7 @@ export function FieldsPage(props: FieldsPageProps) {
         {/* Path Order uses DraggableFlatList (VirtualizedList) — never nest it
             inside the page ScrollView (same orientation). CSV and DXF both
             host that section outside ScrollView. */}
-        {isLocalCsvFlow ? (
+        {isLocalFlow ? (
         <View
           style={{
             flex: 1,
@@ -980,13 +986,17 @@ export function FieldsPage(props: FieldsPageProps) {
           }}
         >
           <ScrollView
-            style={{ flexGrow: 0, flexShrink: 1, maxHeight: isSectionOpen("upload") ? 420 : undefined }}
+            style={{
+              flexGrow: 0,
+              flexShrink: 1,
+              maxHeight: isSectionOpen("upload") || isSectionOpen("align") ? 420 : undefined,
+            }}
             contentContainerStyle={{ gap: 8 }}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
-            showsVerticalScrollIndicator={isSectionOpen("upload")}
+            showsVerticalScrollIndicator={isSectionOpen("upload") || isSectionOpen("align")}
           >
-            {renderFieldsSteps("csvUpload")}
+            {renderFieldsSteps(isLocalDxfFlow ? "localDxfTop" : "csvUpload")}
           </ScrollView>
           {/* Path order list (VirtualizedList) + Verify & Load — outside ScrollView. */}
           {renderFieldsSteps("csvPathOrder")}
@@ -1033,20 +1043,110 @@ export function FieldsPage(props: FieldsPageProps) {
   );
 
   /**
+   * Templates body, shared by the two places it can appear: nested under Bounding Box in the
+   * rover-planned DXF flow, and as its own trailing step in both local flows.
+   *
+   * `placementMode` is what keeps a local flow local — "csvLocal" adds strokes straight to
+   * `lines`, while "dxf" round-trips a generated DXF through POST /parse-dxf.
+   */
+  function renderTemplatePanel() {
+    return (
+      <TemplatePanel
+        apiBaseUrl={apiBaseUrl}
+        onRefreshPaths={onRefreshPaths}
+        onSelectPath={(name) => {
+          onSelectPath(name);
+          setShowMapInteraction(true);
+          if (isPlanEditingMode !== true) {
+            onStartPlanEditing?.();
+          }
+          setActiveStep("align");
+          setOpenSections((prev) => ({ ...prev, align: true, boundingBox: false }));
+        }}
+        boundaryMode={boundaryMode}
+        onToggleBoundaryMode={handleToggleBoundaryMode}
+        boundaryWidthStr={boundaryWidthStr}
+        onChangeBoundaryWidthStr={setBoundaryWidthStr}
+        boundaryHeightStr={boundaryHeightStr}
+        onChangeBoundaryHeightStr={setBoundaryHeightStr}
+        onApplyBoundary={handleApplyBoundary}
+        sketchMode={sketchMode}
+        onToggleSketchMode={setSketchMode}
+        showSnapPoints={showSnapPoints}
+        onToggleShowSnapPoints={setShowSnapPoints}
+        telemetryPosN={telemetrySnapshot?.pos_n ?? null}
+        telemetryPosE={telemetrySnapshot?.pos_e ?? null}
+        placementMode={isLocalFlow ? "csvLocal" : "dxf"}
+        onAddLocalTemplateLines={
+          isLocalFlow
+            ? (templateLines) => {
+                setLines((prev) => {
+                  const existingMarks = prev.filter(
+                    (l) => l.layer !== "transit" && l.layer !== "extension"
+                  );
+                  const marks = [...existingMarks, ...templateLines];
+                  const order =
+                    csvPathOrder ??
+                    marks.map((l) => ({
+                      lineId: l.id,
+                      label: l.label,
+                      paint: true as boolean,
+                    }));
+                  return applyCsvOrderToPlanLines(marks, order, csvExtensionConfig);
+                });
+                setShowMapInteraction(true);
+              }
+            : undefined
+        }
+      />
+    );
+  }
+
+  /**
    * Slice the step tree so Path Order VirtualizedLists are never ScrollView children.
-   * - csvUpload / csvPathOrder / csvScroll: Mission CSV sections
+   * - csvUpload / csvPathOrder / csvScroll: local-flow sections (CSV and local DXF)
+   * - localDxfTop: Upload + Align (scrollable) — no Bounding Box
    * - dxfTop: Upload + Bounding Box + Align (scrollable)
    * - dxfPathOrder: Path Order & Load (flex fill, own list scroll)
    */
   function renderFieldsSteps(
-    slice: "csvUpload" | "csvPathOrder" | "csvScroll" | "dxfTop" | "dxfPathOrder"
+    slice: "csvUpload" | "csvPathOrder" | "csvScroll" | "dxfTop" | "dxfPathOrder" | "localDxfTop"
   ) {
-    const showUpload = slice === "csvUpload" || slice === "dxfTop";
+    const showUpload =
+      slice === "csvUpload" || slice === "dxfTop" || slice === "localDxfTop";
     const showCsvPathOrder = slice === "csvPathOrder";
-    const showTemplatesOrBbox = slice === "csvScroll" || slice === "dxfTop";
-    const showDxfAlign = slice === "dxfTop";
-    const showDxfPathOrder = slice === "dxfPathOrder";
+    /**
+     * Bounding Box is a placement aid for the ROVER-planned DXF flow only. Both local flows
+     * drop it: a survey CSV carries its own georeference, and a local DXF is placed by the
+     * Align step. It renders only in the rover-DXF top slice, with Templates nested under it.
+     */
+    const showBoundingBox = slice === "dxfTop" && !isLocalFlow;
+    /**
+     * Local flows get Templates as their own trailing step, after Path Order. It must come
+     * after Align: `placeTemplateLinesInCsvFrame` positions strokes relative to the rover's
+     * live position, which is an already-aligned frame — placing them before Align would let
+     * the alignment transform move them again.
+     */
+    const showTemplatesStep = slice === "csvScroll" && isLocalFlow;
+    const showDxfAlign = slice === "dxfTop" || slice === "localDxfTop";
+    const showDxfPathOrder = slice === "dxfPathOrder" && !isLocalDxfFlow;
     const activeCsvForSend = activeCsvPreview;
+    const showLocalDxfPathOrder = showCsvPathOrder && isLocalDxfFlow;
+    const showLocalCsvPathOrder = showCsvPathOrder && isLocalCsvFlow;
+
+    /**
+     * Card numbering per flow:
+     *   local CSV   1 Upload · 2 Path Order & Load · 3 Templates
+     *   local DXF   1 Upload · 2 Align · 3 Path Order & Load · 4 Templates
+     *   rover DXF   1 Upload · 2 Bounding Box · 3 Align · 4 Path Order & Load
+     */
+    const stepNo = {
+      upload: 1,
+      boundingBox: 2,
+      align: isLocalDxfFlow ? 2 : 3,
+      pathOrder: isLocalCsvFlow ? 2 : isLocalDxfFlow ? 3 : 4,
+      templates: isLocalCsvFlow ? 3 : 4,
+    };
 
     return (
       <>
@@ -1088,6 +1188,21 @@ export function FieldsPage(props: FieldsPageProps) {
                 setShowMapInteraction(true);
                 setCsvPathOrder(null);
                 setCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG);
+                setShowTemplates(false);
+                // A georeferenced DXF is already placed, so Align has nothing to do and the
+                // operator goes straight to ordering. A metric one cannot be sent until it is
+                // aligned (plan-trajectory requires origin_gps), so lead with Align open.
+                const placed = data.isGeographic && data.geoOrigin != null;
+                setActiveStep(placed ? "upload" : "align");
+                setOpenSections((prev) => ({
+                  ...prev,
+                  upload: true,
+                  align: !placed,
+                  boundingBox: false,
+                  pathOrder: placed,
+                  templates: false,
+                  send: false,
+                }));
               }}
               onLocalCsvParsed={(data) => {
                 // Flip UI immediately in this screen (do not wait only on App props).
@@ -1142,19 +1257,26 @@ export function FieldsPage(props: FieldsPageProps) {
           </FieldsStepCard>
           ) : null}
 
-          {/* Mission CSV: paths + paint + transit + Verify & Load in one section. */}
-          {showCsvPathOrder && activeCsvForSend ? (
+          {/* (local DXF Align is rendered via showDxfAlign below) */}
+
+          {/* Local CSV / local DXF: paths + paint + transit + Verify & Load (plan-trajectory). */}
+          {(showLocalCsvPathOrder && activeCsvForSend) || showLocalDxfPathOrder ? (
             <FieldsStepCard
-              stepNumber={2}
+              stepNumber={stepNo.pathOrder}
               title="Path Order & Load"
               status={
                 stagedWorkflow.loaded === "verified" || stagedWorkflow.staged === "verified"
                   ? "done"
                   : "active"
               }
-              expanded={isSectionOpen("pathOrder")}
-              onToggle={() => toggleSection("pathOrder")}
-              fillAvailable={isSectionOpen("pathOrder")}
+              expanded={isSectionOpen("pathOrder") || isSectionOpen("orderAndSpray")}
+              onToggle={() => {
+                if (isLocalDxfFlow) toggleSection("orderAndSpray", "orderAndSpray");
+                else toggleSection("pathOrder");
+              }}
+              fillAvailable={
+                isSectionOpen("pathOrder") || isSectionOpen("orderAndSpray")
+              }
             >
               <View style={{ flex: 1, minHeight: 0, gap: 14 }}>
                 <CsvPathOrderStep
@@ -1171,10 +1293,17 @@ export function FieldsPage(props: FieldsPageProps) {
                         );
                       return same ? prev : fullOrder;
                     });
-                    // Rebuild map transit + extensions for the new order.
-                    setLines((prev) =>
-                      applyCsvOrderToPlanLines(prev, fullOrder, csvExtensionConfig)
-                    );
+                    // Rebuild map transit + extensions only when topology changes.
+                    setLines((prev) => {
+                      const next = applyCsvOrderToPlanLines(
+                        prev,
+                        fullOrder,
+                        csvExtensionConfig
+                      );
+                      const prevSig = prev.map((l) => `${l.id}:${l.layer}`).join("|");
+                      const nextSig = next.map((l) => `${l.id}:${l.layer}`).join("|");
+                      return prevSig === nextSig ? prev : next;
+                    });
                   }}
                 />
                 <View
@@ -1192,6 +1321,17 @@ export function FieldsPage(props: FieldsPageProps) {
                     lines={lines}
                     pathOrder={csvPathOrder}
                     extensionConfig={csvExtensionConfig}
+                    originGps={
+                      isLocalDxfFlow && verifiedAlignmentRequest?.origin_gps
+                        ? (verifiedAlignmentRequest.origin_gps as [number, number])
+                        : null
+                    }
+                    missionName={
+                      isLocalDxfFlow
+                        ? importedPlan?.fileName ?? "dxf_mission"
+                        : null
+                    }
+                    parseWarnings={[]}
                     setLines={setLines}
                     onSelectLine={onSelectLine}
                     setStagedMissionId={setStagedMissionId}
@@ -1214,72 +1354,54 @@ export function FieldsPage(props: FieldsPageProps) {
               onToggle={() => toggleSection("pathOrder")}
             >
               <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, lineHeight: 16 }}>
-                Load a survey CSV first, then order paths, review transit, and verify & load.
+                Load a survey CSV or DXF first, then order paths, review transit, and verify & load.
               </Text>
             </FieldsStepCard>
           ) : null}
 
-          {/* Step: Bounding Box (DXF only) + Templates (both). CSV templates optional after load. */}
-          {showTemplatesOrBbox ? (
+          {/* Step: Bounding Box — ROVER-planned DXF only, with Templates nested under it. */}
+          {showBoundingBox ? (
           <FieldsStepCard
-            stepNumber={isLocalCsvFlow ? 3 : 2}
-            title={isLocalCsvFlow ? "Templates" : "Bounding Box"}
-            status={
-              isLocalCsvFlow
-                ? isSectionOpen("templates")
-                  ? "active"
-                  : "pending"
-                : stepStatus("boundingBox")
-            }
-            expanded={isLocalCsvFlow ? isSectionOpen("templates") : isSectionOpen("boundingBox")}
-            onToggle={() => {
-              if (isLocalCsvFlow) {
-                toggleSection("templates");
-              } else {
-                toggleSection("boundingBox", "boundingBox");
-              }
-            }}
+            stepNumber={stepNo.boundingBox}
+            title="Bounding Box"
+            status={stepStatus("boundingBox")}
+            expanded={isSectionOpen("boundingBox")}
+            onToggle={() => toggleSection("boundingBox", "boundingBox")}
             scrollableBody
             bodyMaxHeight={380}
           >
             <View style={{ gap: 14 }}>
-              {/* Bounding box is for DXF placement only — not used for survey CSV. */}
-              {!isLocalCsvFlow ? (
-                <BoundingBoxStep
-                  widthStr={boundaryWidthStr}
-                  onChangeWidthStr={setBoundaryWidthStr}
-                  heightStr={boundaryHeightStr}
-                  onChangeHeightStr={setBoundaryHeightStr}
-                  onApplyBoundary={handleApplyBoundary}
-                  activeWidth={activeBoundaryWidth}
-                  activeHeight={activeBoundaryHeight}
-                  onProceedNext={() => setActiveStep("align")}
-                />
-              ) : null}
+              <BoundingBoxStep
+                widthStr={boundaryWidthStr}
+                onChangeWidthStr={setBoundaryWidthStr}
+                heightStr={boundaryHeightStr}
+                onChangeHeightStr={setBoundaryHeightStr}
+                onApplyBoundary={handleApplyBoundary}
+                activeWidth={activeBoundaryWidth}
+                activeHeight={activeBoundaryHeight}
+                onProceedNext={() => setActiveStep("align")}
+              />
 
-              {/* Templates — DXF (under Bounding Box) and mission CSV (own step). */}
               <View>
-                {!isLocalCsvFlow ? (
-                  <Pressable
-                    onPress={() => setShowTemplates(!showTemplates)}
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 8,
-                      paddingVertical: 8,
-                    }}
-                  >
-                    {showTemplates ? (
-                      <ChevronDown size={14} color={FIELDS_COLORS.textMuted} />
-                    ) : (
-                      <ChevronRight size={14} color={FIELDS_COLORS.textDim} />
-                    )}
-                    <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "700" }}>
-                      Templates
-                    </Text>
-                  </Pressable>
-                ) : null}
-                {isLocalCsvFlow || showTemplates ? (
+                <Pressable
+                  onPress={() => setShowTemplates(!showTemplates)}
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 8,
+                    paddingVertical: 8,
+                  }}
+                >
+                  {showTemplates ? (
+                    <ChevronDown size={14} color={FIELDS_COLORS.textMuted} />
+                  ) : (
+                    <ChevronRight size={14} color={FIELDS_COLORS.textDim} />
+                  )}
+                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "700" }}>
+                    Templates
+                  </Text>
+                </Pressable>
+                {showTemplates ? (
                   <View
                     style={{
                       borderRadius: 10,
@@ -1289,58 +1411,7 @@ export function FieldsPage(props: FieldsPageProps) {
                       padding: 12,
                     }}
                   >
-                    <TemplatePanel
-                      apiBaseUrl={apiBaseUrl}
-                      onRefreshPaths={onRefreshPaths}
-                      onSelectPath={(name) => {
-                        onSelectPath(name);
-                        setShowMapInteraction(true);
-                        if (isPlanEditingMode !== true) {
-                          onStartPlanEditing?.();
-                        }
-                        setActiveStep("align");
-                        setOpenSections((prev) => ({ ...prev, align: true, boundingBox: false }));
-                      }}
-                      boundaryMode={boundaryMode}
-                      onToggleBoundaryMode={handleToggleBoundaryMode}
-                      boundaryWidthStr={boundaryWidthStr}
-                      onChangeBoundaryWidthStr={setBoundaryWidthStr}
-                      boundaryHeightStr={boundaryHeightStr}
-                      onChangeBoundaryHeightStr={setBoundaryHeightStr}
-                      onApplyBoundary={handleApplyBoundary}
-                      sketchMode={sketchMode}
-                      onToggleSketchMode={setSketchMode}
-                      showSnapPoints={showSnapPoints}
-                      onToggleShowSnapPoints={setShowSnapPoints}
-                      telemetryPosN={telemetrySnapshot?.pos_n ?? null}
-                      telemetryPosE={telemetrySnapshot?.pos_e ?? null}
-                      placementMode={isLocalCsvFlow ? "csvLocal" : "dxf"}
-                      onAddLocalTemplateLines={
-                        isLocalCsvFlow
-                          ? (templateLines) => {
-                              setLines((prev) => {
-                                const existingMarks = prev.filter(
-                                  (l) => l.layer !== "transit" && l.layer !== "extension"
-                                );
-                                const marks = [...existingMarks, ...templateLines];
-                                const order =
-                                  csvPathOrder ??
-                                  marks.map((l) => ({
-                                    lineId: l.id,
-                                    label: l.label,
-                                    paint: true as boolean,
-                                  }));
-                                return applyCsvOrderToPlanLines(
-                                  marks,
-                                  order,
-                                  csvExtensionConfig
-                                );
-                              });
-                              setShowMapInteraction(true);
-                            }
-                          : undefined
-                      }
-                    />
+                    {renderTemplatePanel()}
                   </View>
                 ) : (
                   <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, lineHeight: 16 }}>
@@ -1352,10 +1423,35 @@ export function FieldsPage(props: FieldsPageProps) {
           </FieldsStepCard>
           ) : null}
 
+          {/* Step: Templates — trailing step for both local flows (after Align + Path Order). */}
+          {showTemplatesStep ? (
+          <FieldsStepCard
+            stepNumber={stepNo.templates}
+            title="Templates"
+            status={isSectionOpen("templates") ? "active" : "pending"}
+            expanded={isSectionOpen("templates")}
+            onToggle={() => toggleSection("templates")}
+            scrollableBody
+            bodyMaxHeight={380}
+          >
+            <View
+              style={{
+                borderRadius: 10,
+                backgroundColor: FIELDS_COLORS.surfaceSolid,
+                borderWidth: 1,
+                borderColor: FIELDS_COLORS.panelBorder,
+                padding: 12,
+              }}
+            >
+              {renderTemplatePanel()}
+            </View>
+          </FieldsStepCard>
+          ) : null}
+
           {/* Align DXF — DXF only (scrollable top section) */}
           {showDxfAlign && isDxfPath && (
           <FieldsStepCard
-            stepNumber={3}
+            stepNumber={stepNo.align}
             title="Align DXF"
             status={stepStatus("align")}
             expanded={isSectionOpen("align")}
@@ -1449,7 +1545,6 @@ export function FieldsPage(props: FieldsPageProps) {
               extPre={extPre}
               extAft={extAft}
               extensionsEnabled={extensionsEnabled}
-              extPerLine={extPerLine}
             />
           </FieldsStepCard>
           )}

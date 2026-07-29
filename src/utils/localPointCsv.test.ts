@@ -8,25 +8,53 @@ import {
   projectGpsToLocalMetersEllipsoid,
   sampleEvenly,
 } from "./localPointCsv";
-describe("metresPerDegree / ellipsoid projection", () => {
-  it("matches WGS84 meridional scale (not sphere) near Chennai latitude", () => {
-    // Sphere uses a for north → ~0.62 % long at 13°. Ellipsoid north must be shorter.
+/**
+ * Earth model. These metres go to POST /api/path/plan-trajectory and are used VERBATIM as
+ * PX4 local NED anchored at origin_gps — the rover never re-projects them. PX4 defines that
+ * frame on a sphere of R = 6 371 000 m, so that is the scale we must produce.
+ *
+ * History, all three at 13.07 °N:
+ *   WGS84 semi-major used as a sphere  111 319.5 m/deg  — 0.6 % long (original app bug)
+ *   WGS84 meridional radius            110 627   m/deg  — true ground, 0.52 % short in PX4's frame
+ *   PX4 sphere (6 371 000)             111 194.9 m/deg  — what the EKF actually navigates  ✓
+ *
+ * The middle row was an intermediate fix that overshot; see the field measurement recorded in
+ * path_engine/parsers/georef.py::metres_per_degree (2026-07-25 bags).
+ */
+describe("metresPerDegree / PX4-sphere projection", () => {
+  const PX4_R = 6_371_000;
+  const WGS84_A = 6_378_137;
+
+  it("matches the PX4 sphere, not WGS84 semi-major or meridional", () => {
     const { mPerDegNorth, mPerDegEast } = metresPerDegree(13.07);
-    const sphereNorth = 6378137.0 * (Math.PI / 180);
-    expect(mPerDegNorth).toBeLessThan(sphereNorth);
-    expect(mPerDegNorth / sphereNorth).toBeCloseTo(1 / 1.00622, 3);
-    expect(mPerDegEast).toBeGreaterThan(100_000);
-    expect(mPerDegEast).toBeLessThan(sphereNorth);
+
+    expect(mPerDegNorth).toBeCloseTo(PX4_R * (Math.PI / 180), 3);
+
+    // Strictly between the two superseded models.
+    const semiMajorNorth = WGS84_A * (Math.PI / 180);
+    const meridionalNorth = semiMajorNorth / 1.00622;
+    expect(mPerDegNorth).toBeLessThan(semiMajorNorth);
+    expect(mPerDegNorth).toBeGreaterThan(meridionalNorth);
+
+    // East shrinks by cos(lat) off the same sphere.
+    expect(mPerDegEast).toBeCloseTo(
+      PX4_R * (Math.PI / 180) * Math.cos((13.07 * Math.PI) / 180),
+      3
+    );
+    expect(mPerDegEast).toBeLessThan(mPerDegNorth);
   });
 
-  it("shared GPS→NED is ellipsoidal (alias + canonical agree)", () => {
+  it("GPS→NED uses the same sphere as metresPerDegree", () => {
     const originLat = 13.07;
     const originLon = 80.26;
-    const lat = originLat + 0.001;
-    const ell = projectGpsToLocalMetersEllipsoid(lat, originLon, originLat, originLon);
-    const sphereNorth = 0.001 * 6378137.0 * (Math.PI / 180);
-    expect(ell.north).toBeLessThan(sphereNorth);
-    expect(ell.north / sphereNorth).toBeCloseTo(1 / 1.00622, 3);
+    const projected = projectGpsToLocalMetersEllipsoid(
+      originLat + 0.001,
+      originLon,
+      originLat,
+      originLon
+    );
+    expect(projected.north).toBeCloseTo(0.001 * metresPerDegree(originLat).mPerDegNorth, 6);
+    expect(projected.east).toBeCloseTo(0, 9);
   });
 });
 

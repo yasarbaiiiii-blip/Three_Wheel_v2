@@ -4,7 +4,13 @@ import { Check, ChevronDown, Maximize2, Move, Upload, X } from "lucide-react-nat
 import * as DocumentPicker from "expo-document-picker";
 
 import * as pathApi from "../../../api/pathApi";
+import { DXF_PLANNER } from "../../../config/featureFlags";
 import { enforceAlignmentScale } from "../../../utils/designAlignmentPolicy";
+import {
+  applyAlignmentToLines,
+  solveMultiPointAlignment,
+} from "../../../utils/dxfAlignment";
+import { metresPerDegreePx4 } from "../../../utils/geoProjection";
 import {
   coerceFiniteNumber,
   formatFinite,
@@ -375,8 +381,8 @@ export function AlignDxfPanel({
       validPoints = validTypedRefPoints;
     }
 
-    if (!selectedPathName || !apiBaseUrl || !validPoints || validPoints.length === 0) {
-      console.log("[AlignDXF][Fix] Aborted: missing path/apiBaseUrl/points guard.");
+    if (!validPoints || validPoints.length === 0) {
+      console.log("[AlignDXF][Fix] Aborted: missing points guard.");
       if (alignmentMethod === "least_squares" && !extractedCorners) {
         Alert.alert(
           "Need control points",
@@ -388,11 +394,67 @@ export function AlignDxfPanel({
       return;
     }
 
+    const localAppDxf = DXF_PLANNER === "app" && !selectedPathName;
+
     setIsFixing(true);
     try {
       console.log("[AlignDXF][Fix] validPoints (dxf_x=east, dxf_y=north):", JSON.stringify(validPoints));
 
       const payload: pathApi.AlignPathRequest = { ref_points: validPoints };
+
+      // Local DXF: solve similarity on device — no POST /align.
+      if (localAppDxf) {
+        const refs = validPoints.map((p) => ({
+          designNorth: p.dxf_y,
+          designEast: p.dxf_x,
+          lat: p.lat,
+          lon: p.lon,
+        }));
+        const solved = solveMultiPointAlignment(refs, metresPerDegreePx4);
+        setMissionSummary(null);
+        setVerifiedAlignmentRequest({
+          ...payload,
+          origin_gps: solved.originGps,
+          rotation_deg: solved.rotationDeg,
+        });
+        setAlignmentResult({
+          method: solved.method,
+          scale: enforceAlignmentScale(solved.scale),
+          rotation_deg: solved.rotationDeg,
+          offset_n: null,
+          offset_e: null,
+          origin_gps: solved.originGps,
+          rmse_m: solved.rmseM,
+          sample_coords: null,
+          residuals: solved.residualsM,
+          warnings: null,
+        });
+        setLines((prev) =>
+          sanitizePlanLines(
+            applyAlignmentToLines(prev, solved, 0, 0)
+          )
+        );
+        setAlignedRefPoints?.(
+          validPoints.map((p) => ({
+            dxf_x: p.dxf_x,
+            dxf_y: p.dxf_y,
+            lat: p.lat,
+            lon: p.lon,
+          }))
+        );
+        onWorkflowStep?.("alignment", "verified");
+        Alert.alert(
+          "Alignment applied",
+          `Local fix (RMSE ${solved.rmseM != null ? solved.rmseM.toFixed(3) : "—"} m). Origin ready for Send.`
+        );
+        return;
+      }
+
+      if (!selectedPathName || !apiBaseUrl) {
+        Alert.alert("Not connected", "Connect to the rover or use a local DXF file.");
+        onWorkflowStep?.("alignment", "failed");
+        return;
+      }
 
       console.log(`[AlignDXF][Fix] POST /api/path/${selectedPathName}/align payload:`, JSON.stringify(payload));
 
@@ -885,13 +947,16 @@ export function AlignDxfPanel({
               ))}
               <Pressable
                 onPress={handleFixAlignment}
-                disabled={isFixing || !selectedPathName}
+                disabled={isFixing || (!selectedPathName && DXF_PLANNER !== "app")}
                 style={{
                   height: 44,
                   borderRadius: 10,
                   alignItems: "center",
                   justifyContent: "center",
-                  backgroundColor: isFixing || !selectedPathName ? FIELDS_COLORS.textDim : FIELDS_COLORS.warning,
+                  backgroundColor:
+                    isFixing || (!selectedPathName && DXF_PLANNER !== "app")
+                      ? FIELDS_COLORS.textDim
+                      : FIELDS_COLORS.warning,
                 }}
               >
                 <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>
@@ -996,13 +1061,16 @@ export function AlignDxfPanel({
           ))}
           <Pressable
             onPress={handleFixAlignment}
-            disabled={isFixing || !selectedPathName}
+            disabled={isFixing || (!selectedPathName && DXF_PLANNER !== "app")}
             style={{
               height: 44,
               borderRadius: 10,
               alignItems: "center",
               justifyContent: "center",
-              backgroundColor: isFixing || !selectedPathName ? FIELDS_COLORS.textDim : FIELDS_COLORS.warning,
+              backgroundColor:
+                isFixing || (!selectedPathName && DXF_PLANNER !== "app")
+                  ? FIELDS_COLORS.textDim
+                  : FIELDS_COLORS.warning,
             }}
           >
             <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>
@@ -1169,14 +1237,22 @@ export function AlignDxfPanel({
             <View style={{ gap: 6 }}>
               <Pressable
                 onPress={handleFixAlignment}
-                disabled={isFixing || !selectedPathName || !canFixFromTypedRefs || missionRunning}
+                disabled={
+                  isFixing ||
+                  (!selectedPathName && DXF_PLANNER !== "app") ||
+                  !canFixFromTypedRefs ||
+                  missionRunning
+                }
                 style={{
                   height: 46,
                   borderRadius: 10,
                   alignItems: "center",
                   justifyContent: "center",
                   backgroundColor:
-                    isFixing || !selectedPathName || !canFixFromTypedRefs || missionRunning
+                    isFixing ||
+                    (!selectedPathName && DXF_PLANNER !== "app") ||
+                    !canFixFromTypedRefs ||
+                    missionRunning
                       ? FIELDS_COLORS.textDim
                       : FIELDS_COLORS.warning,
                 }}

@@ -140,6 +140,8 @@ export function CsvPathOrderStep({
   const [order, setOrder] = useState<CsvPathOrderEntry[]>(() => defaultPathOrder(markLines));
   const onOrderChangeRef = useRef(onOrderChange);
   onOrderChangeRef.current = onOrderChange;
+  /** Last order signature we pushed to parent — avoids setLines loops on every paint rebuild. */
+  const lastNotifiedOrderKeyRef = useRef<string>("");
 
   useEffect(() => {
     setOrder((prev) => {
@@ -169,7 +171,7 @@ export function CsvPathOrderStep({
       }
       return next;
     });
-  }, [markKey, markLines]);
+  }, [markKey]); // markKey only — not markLines reference (avoids thrash when parent rebuilds transit)
 
   const painted = useMemo(() => resolveOrderedPaintedLines(markLines, order), [markLines, order]);
   const trajectory = useMemo(
@@ -194,9 +196,17 @@ export function CsvPathOrderStep({
     [painted, extensionConfig]
   );
 
+  // Notify parent only when order/paint actually changes — not when map line
+  // objects are rebuilt (that was causing Maximum update depth exceeded).
+  const orderNotifyKey = useMemo(
+    () => order.map((e) => `${e.lineId}:${e.paint !== false ? 1 : 0}`).join("|"),
+    [order]
+  );
   useEffect(() => {
+    if (orderNotifyKey === lastNotifiedOrderKeyRef.current) return;
+    lastNotifiedOrderKeyRef.current = orderNotifyKey;
     onOrderChangeRef.current?.(painted, order);
-  }, [painted, order]);
+  }, [orderNotifyKey, painted, order]);
 
   const orderedLines = useMemo(
     () =>

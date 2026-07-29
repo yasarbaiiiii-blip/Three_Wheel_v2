@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { PlanLine } from "../types/plan";
 import { buildTrajectory } from "./csvTrajectory";
 import {
   csvFrameExtents,

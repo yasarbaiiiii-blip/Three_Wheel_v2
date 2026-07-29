@@ -57,8 +57,6 @@ type PathOrderAndSprayStepProps = {
   extAft?: string;
   /** When true, client builds purple PRE/AFT geometry into `lines` (CSV parity). */
   extensionsEnabled?: boolean;
-  /** DXF per-line corner split (port of backend per_line). */
-  extPerLine?: boolean;
 };
 
 const LOAD_STEP_LABELS: Record<pathApi.LoadToControllerStep, string> = {
@@ -126,7 +124,6 @@ export function PathOrderAndSprayStep({
   extPre,
   extAft,
   extensionsEnabled = false,
-  extPerLine = false,
 }: PathOrderAndSprayStepProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [loadStep, setLoadStep] = useState<pathApi.LoadToControllerStep | null>(null);
@@ -139,14 +136,25 @@ export function PathOrderAndSprayStep({
         enabled: extensionsEnabled,
         preM: Number(extPre) || 0.5,
         aftM: Number(extAft) || 0.5,
-        perLine: extPerLine,
+        // Always chain free-ends (matches rover path_entities with per_line=false).
+        perLine: false,
       }),
-    [extensionsEnabled, extPre, extAft, extPerLine]
+    [extensionsEnabled, extPre, extAft]
   );
 
   const markLines = useMemo(() => selectMarkPlanLines(lines), [lines]);
 
-  // Seed order when marks appear / change ids.
+  const markKey = useMemo(
+    () =>
+      markLines
+        .map((l) => l.id)
+        .slice()
+        .sort()
+        .join("|"),
+    [markLines]
+  );
+
+  // Seed order when mark ids appear / change.
   useEffect(() => {
     setPathOrder((prev) => {
       if (markLines.length === 0) return prev;
@@ -164,16 +172,33 @@ export function PathOrderAndSprayStep({
           next.push({ lineId: line.id, label: line.label, paint: true });
         }
       }
+      if (
+        prev &&
+        next.length === prev.length &&
+        next.every(
+          (e, i) =>
+            e.lineId === prev[i]?.lineId &&
+            e.paint === prev[i]?.paint &&
+            e.label === prev[i]?.label
+        )
+      ) {
+        return prev;
+      }
       return next;
     });
-  }, [markLines]);
+  }, [markKey, markLines]);
 
-  // When Upload toggles extension config, rebuild purple PRE/AFT + transit (CSV parity).
+  // When Upload toggles extension config, rebuild purple PRE/AFT + transit.
+  // Bail out when topology is unchanged to avoid render loops.
   useEffect(() => {
     if (markLines.length === 0) return;
     const order = pathOrder ?? defaultPathOrder(markLines);
-    setLines((prev) => applyCsvOrderToPlanLines(prev, order, extensionConfig));
-    // Intentionally not depending on pathOrder — order rebuilds via onOrderChange.
+    setLines((prev) => {
+      const next = applyCsvOrderToPlanLines(prev, order, extensionConfig);
+      const prevSig = prev.map((l) => `${l.id}:${l.layer}`).join("|");
+      const nextSig = next.map((l) => `${l.id}:${l.layer}`).join("|");
+      return prevSig === nextSig ? prev : next;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [extensionConfig.enabled, extensionConfig.preM, extensionConfig.aftM, extensionConfig.perLine]);
 
@@ -278,7 +303,12 @@ export function PathOrderAndSprayStep({
         onOrderChange={(_painted, fullOrder) => {
           onInvalidateWorkflow("spray");
           setPathOrder(fullOrder);
-          setLines((prev) => applyCsvOrderToPlanLines(prev, fullOrder, extensionConfig));
+          setLines((prev) => {
+            const next = applyCsvOrderToPlanLines(prev, fullOrder, extensionConfig);
+            const prevSig = prev.map((l) => `${l.id}:${l.layer}`).join("|");
+            const nextSig = next.map((l) => `${l.id}:${l.layer}`).join("|");
+            return prevSig === nextSig ? prev : next;
+          });
         }}
       />
 

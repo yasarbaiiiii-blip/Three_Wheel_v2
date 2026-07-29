@@ -7,11 +7,19 @@
  * GPS header rules match guide/ref CSV (`parseGuidePointsCsv`) so the same file
  * lands at the same map position in both Upload plan and Import guide CSV.
  *
- * Local metres for GPS rows use the shared WGS84 ellipsoidal projection
- * (`visualAlignment.projectGpsToLocalMeters` / rover `georef.metres_per_degree`).
+ * Local metres for GPS rows use the shared PX4-sphere projection
+ * (`geoProjection.projectGpsToLocalMeters` / rover `georef.metres_per_degree`).
+ *
+ * On the earth model: these metres are sent to `POST /api/path/plan-trajectory`, which uses
+ * them VERBATIM as PX4 local NED anchored at `origin_gps` — the rover never re-projects them.
+ * PX4 defines that frame on a sphere of R = 6 371 000 m (geo.cpp CONSTANTS_RADIUS_OF_EARTH),
+ * so that is the only scale under which the rover lands on the surveyed lat/lon. See
+ * `path_engine/parsers/georef.py::metres_per_degree`, which records the 2026-07-25 field
+ * measurement: the WGS84 meridional radius is true-to-ground but 0.52 % short *in the frame
+ * the EKF navigates*, seen as a −0.51 cm-per-metre-north placement walk at 13 °N.
  */
 
-import { metresPerDegreeShared, projectGpsToLocalMeters } from "./visualAlignment";
+import { metresPerDegreePx4, projectGpsToLocalMeters } from "./geoProjection";
 import { splitCsvCells } from "./refPointsCsv";
 import {
   buildRoadMarkingFittedPath,
@@ -26,12 +34,16 @@ export const PROJECTED_COORD_BLOCK_M = 10_000;
 /** Soft cap for map pin markers (polyline still uses full point set). */
 export const LOCAL_CSV_MAX_MAP_PINS = 1000;
 
-/** Re-export of shared WGS84 metres-per-degree (rover georef parity). */
+/** Re-export of shared PX4-sphere metres-per-degree (rover georef parity). */
 export function metresPerDegree(lat0Deg: number): { mPerDegNorth: number; mPerDegEast: number } {
-  return metresPerDegreeShared(lat0Deg);
+  return metresPerDegreePx4(lat0Deg);
 }
 
-/** Alias of shared ellipsoidal GPS→NED (kept for tests that imported this name). */
+/**
+ * @deprecated Misleading name — this has never been ellipsoidal since the move to the shared
+ * PX4-sphere projection. Import `projectGpsToLocalMeters` from `./geoProjection` instead.
+ * Kept only so existing callers/tests keep compiling.
+ */
 export function projectGpsToLocalMetersEllipsoid(
   lat: number,
   lon: number,

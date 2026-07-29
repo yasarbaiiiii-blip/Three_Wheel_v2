@@ -371,9 +371,21 @@ function makeExtensionPlanLine(
 }
 
 /**
- * Preview PlanLines for each painted path (map / Path Order).
- * Suppresses all when mission is closed or config disabled (CSV / perLine=false).
- * When perLine=true, uses endpoint freeness so closed polylines get per-corner run-ups.
+ * Preview PlanLines for painted paths (map / Path Order).
+ *
+ * Matches rover `path_entities` + `split_mark_segment_with_extensions` chain-ends
+ * policy (per_line=false, the only mode the DXF UI exposes):
+ *
+ *   PRE: tip = start − preM · û_start  →  mark start
+ *        (same as offset_point(start, sdir, −pre_m) → start)
+ *   AFT: mark end  →  tip = end + aftM · û_end
+ *
+ * Only **free** ends get run-ups: an end is free when no other mark edge shares
+ * that point within {@link EXT_JUNCTION_TOL_M} (backend `_extension_endpoint_freeness`).
+ * Self-closed entities and closed chains therefore get no PRE/AFT — same as rover.
+ *
+ * perLine=true remains available for tests (corner-split freeness) but is not
+ * exposed in the DXF Upload UI.
  */
 export function buildCsvExtensionLines(
   paintedLines: PlanLine[],
@@ -382,27 +394,18 @@ export function buildCsvExtensionLines(
   const cfg = normalizeCsvExtensionConfig(config);
   if (!cfg.enabled || paintedLines.length === 0) return [];
 
-  // CSV default: mission-level closed loop suppresses everything.
+  // Mission-level closed loop (first of first ≈ last of last) — same idea as
+  // engine ends_at_start; freeness alone also covers entity-touch closed chains.
   if (!cfg.perLine && isMissionClosedLoop(paintedLines)) return [];
 
-  if (!cfg.perLine) {
-    const out: PlanLine[] = [];
-    for (const line of paintedLines) {
-      const prePts = extensionEndpointsForLine(line, "pre", cfg.preM);
-      if (prePts) out.push(makeExtensionPlanLine(line.id, "pre", prePts, line.label ?? line.id));
-      const aftPts = extensionEndpointsForLine(line, "aft", cfg.aftM);
-      if (aftPts) out.push(makeExtensionPlanLine(line.id, "aft", aftPts, line.label ?? line.id));
-    }
-    return out;
-  }
-
-  // DXF per-line mode: freeness + corner split
-  const edges = buildMarkEdges(paintedLines, true);
-  const freeness = computeEndpointFreeness(edges, true);
+  const edges = buildMarkEdges(paintedLines, Boolean(cfg.perLine));
+  const freeness = computeEndpointFreeness(edges, Boolean(cfg.perLine));
   const out: PlanLine[] = [];
+
   for (let i = 0; i < edges.length; i++) {
     const edge = edges[i];
     const free = freeness[i];
+    // PRE: approach into the mark start along the first-segment tangent.
     if (free.startFree && cfg.preM > 0 && edge.startDir) {
       const start = edge.points[0];
       const from: NedPair = [
@@ -413,6 +416,7 @@ export function buildCsvExtensionLines(
         makeExtensionPlanLine(edge.parentId, "pre", [from, start], edge.parentLabel)
       );
     }
+    // AFT: leave the mark end along the last-segment tangent.
     if (free.endFree && cfg.aftM > 0 && edge.endDir) {
       const end = edge.points[edge.points.length - 1];
       const to: NedPair = [

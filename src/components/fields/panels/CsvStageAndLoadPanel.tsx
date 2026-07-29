@@ -32,7 +32,11 @@ import { FIELDS_COLORS } from "../fieldsTheme";
 
 type CsvStageAndLoadPanelProps = {
   apiBaseUrl: string;
-  localCsvPreview: LocalPointCsvResult;
+  /**
+   * CSV local preview (required for CSV / rover-CSV path).
+   * Optional when `originGps` is provided for local DXF app-planned send.
+   */
+  localCsvPreview?: LocalPointCsvResult | null;
   /** Sampled map pins, purely to explain "map shows N of M pins" to the operator. */
   mapPinCount?: number | null;
   /** Current map plan lines (CSV marks + templates + preview transit). */
@@ -41,6 +45,15 @@ type CsvStageAndLoadPanelProps = {
   pathOrder?: CsvPathOrderEntry[] | null;
   /** Local PRE/AFT config for app-planned trajectory (spray-off travel runs). */
   extensionConfig?: CsvExtensionConfig | null;
+  /**
+   * Explicit origin for app-planned plan-trajectory (DXF alignment / geoOrigin).
+   * When set, overrides CSV anchor.
+   */
+  originGps?: [number, number] | null;
+  /** Mission name stem for plan-trajectory (defaults from CSV/DXF file name). */
+  missionName?: string | null;
+  /** Parse/import warnings for readiness (DXF local warnings). */
+  parseWarnings?: string[];
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   onSelectLine: (id: string | null) => void;
   setStagedMissionId: React.Dispatch<React.SetStateAction<string | null>>;
@@ -85,11 +98,14 @@ async function buildUploadFormData(exported: SurveyCsvExport): Promise<FormData>
  */
 export function CsvStageAndLoadPanel({
   apiBaseUrl,
-  localCsvPreview,
+  localCsvPreview = null,
   mapPinCount: _mapPinCount = null,
   lines = [],
   pathOrder = null,
   extensionConfig = null,
+  originGps = null,
+  missionName = null,
+  parseWarnings = [],
   setLines,
   onSelectLine,
   setStagedMissionId,
@@ -115,8 +131,13 @@ export function CsvStageAndLoadPanel({
   /** Operator confirmed critical parse-frame warnings. */
   const [parseAcknowledged, setParseAcknowledged] = useState(false);
 
-  const exported = useMemo(() => buildSurveyCsvExport(localCsvPreview), [localCsvPreview]);
-  const useAppPlanner = CSV_PLANNER === "app";
+  const isDxfLocal = localCsvPreview == null && originGps != null;
+  const exported = useMemo(
+    () => (localCsvPreview ? buildSurveyCsvExport(localCsvPreview) : null),
+    [localCsvPreview]
+  );
+  // Local DXF always uses app planner; CSV follows CSV_PLANNER.
+  const useAppPlanner = isDxfLocal || CSV_PLANNER === "app";
 
   const markLines = useMemo(() => selectMarkPlanLines(lines), [lines]);
   const order = useMemo(
@@ -124,15 +145,35 @@ export function CsvStageAndLoadPanel({
     [pathOrder, markLines]
   );
 
+  const resolvedOriginGps: [number, number] | null = useMemo(() => {
+    if (originGps != null && Number.isFinite(originGps[0]) && Number.isFinite(originGps[1])) {
+      return originGps;
+    }
+    if (localCsvPreview?.kind === "gps" && localCsvPreview.anchor) {
+      return [localCsvPreview.anchor.lat, localCsvPreview.anchor.lon];
+    }
+    return null;
+  }, [originGps, localCsvPreview]);
+
+  const resolvedMissionName =
+    missionName?.replace(/\.[^.]+$/, "") ||
+    localCsvPreview?.fileName?.replace(/\.[^.]+$/, "") ||
+    (isDxfLocal ? "dxf_mission" : "csv_mission");
+
+  const combinedWarnings = useMemo(() => {
+    const fromCsv = localCsvPreview?.warnings ?? [];
+    return [...fromCsv, ...parseWarnings];
+  }, [localCsvPreview?.warnings, parseWarnings]);
+
   // New file / geometry → re-require acknowledgement.
   useEffect(() => {
     setGeometryAcknowledged(false);
     setParseAcknowledged(false);
-  }, [localCsvPreview.fileName, localCsvPreview.num_points, markLines.length]);
+  }, [localCsvPreview?.fileName, localCsvPreview?.num_points, missionName, markLines.length]);
 
   const groundTruthSource = useMemo(
     () =>
-      localCsvPreview.points
+      (localCsvPreview?.points ?? [])
         .filter((p) => p.lat != null && p.lon != null)
         .map((p) => ({
           north: p.north_m,
@@ -140,7 +181,7 @@ export function CsvStageAndLoadPanel({
           lat: p.lat as number,
           lon: p.lon as number,
         })),
-    [localCsvPreview.points]
+    [localCsvPreview?.points]
   );
 
   const readiness = useMemo(
@@ -148,21 +189,22 @@ export function CsvStageAndLoadPanel({
       evaluateCsvSendReadiness({
         lines,
         pathOrder: order,
-        parseWarnings: localCsvPreview.warnings,
+        parseWarnings: combinedWarnings,
         geometryAcknowledged,
         parseAcknowledged,
         requireGpsAnchor: useAppPlanner,
-        hasGpsAnchor: localCsvPreview.kind === "gps" && localCsvPreview.anchor != null,
+        hasGpsAnchor: resolvedOriginGps != null,
+        dxfOperatorOrderAuthoritative: isDxfLocal,
       }),
     [
       lines,
       order,
-      localCsvPreview.warnings,
-      localCsvPreview.kind,
-      localCsvPreview.anchor,
+      combinedWarnings,
       geometryAcknowledged,
       parseAcknowledged,
       useAppPlanner,
+      resolvedOriginGps,
+      isDxfLocal,
     ]
   );
 
@@ -188,9 +230,8 @@ export function CsvStageAndLoadPanel({
     !apiBaseUrl ||
     readinessBlocksSend ||
     (useAppPlanner
-      ? (appTrajectory?.runs.length ?? 0) < 1 ||
-        (localCsvPreview.kind === "gps" && !localCsvPreview.anchor)
-      : exported.numPoints < 2 || paintedCount < 1);
+      ? (appTrajectory?.runs.length ?? 0) < 1 || resolvedOriginGps == null
+      : !exported || exported.numPoints < 2 || paintedCount < 1);
 
   const stepLabel =
     step === "loadMission"
@@ -261,9 +302,10 @@ export function CsvStageAndLoadPanel({
       );
       return;
     }
-    if (!localCsvPreview.anchor) {
-      const message =
-        "App-planned trajectory requires GPS survey points with a lat/lon anchor (origin_gps).";
+    if (!resolvedOriginGps) {
+      const message = isDxfLocal
+        ? "App-planned DXF requires a confirmed GPS origin (complete Align first)."
+        : "App-planned trajectory requires GPS survey points with a lat/lon anchor (origin_gps).";
       setError(message);
       Alert.alert("Missing origin", message);
       return;
@@ -287,8 +329,8 @@ export function CsvStageAndLoadPanel({
       const preSendExtensions = buildCsvExtensionLines(appTrajectory.paintedLines, extCfg);
 
       const result = await planAndStageAppTrajectory(apiBaseUrl, {
-        missionName: localCsvPreview.fileName.replace(/\.[^.]+$/, "") || "csv_mission",
-        originGps: [localCsvPreview.anchor.lat, localCsvPreview.anchor.lon],
+        missionName: resolvedMissionName,
+        originGps: resolvedOriginGps,
         runs: built.runs,
         groundTruth: built.groundTruth,
         onStep: setStep,
@@ -328,6 +370,10 @@ export function CsvStageAndLoadPanel({
   const handleSendRoverPlanned = async () => {
     if (!apiBaseUrl) {
       Alert.alert("Not connected", "Connect to the rover before sending the path.");
+      return;
+    }
+    if (!exported) {
+      Alert.alert("Error", "No survey CSV to upload.");
       return;
     }
     if (!readiness.canSend) {
