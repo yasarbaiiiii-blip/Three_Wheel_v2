@@ -51,17 +51,6 @@ type UploadAndPreviewStepProps = {
   extensionStatus?: { count: number; hint: string | null } | null;
   /** Clears parent local-CSV preview state when the operator dismisses LOADED. */
   onClearLocalCsv?: () => void;
-  /**
-   * Lets the operator import a guide-points CSV once the plan preview is up
-   * (same parser as Align step). Hidden for mission-path CSV uploads — those
-   * already carry survey geometry; guide CSV is only for DXF multi-point align.
-   */
-  onImportRefPointsCsv?: () => void;
-  isImportingRefPointsCsv?: boolean;
-  /** When set, the guide-CSV button shows this file name instead of a generic label. */
-  guideCsvFileName?: string | null;
-  /** When true, hide "Import guide CSV" (mission survey CSV already loaded). */
-  hideGuideCsvImport?: boolean;
   /** Local CSV extension config (app state — no network). */
   csvExtensionConfig?: CsvExtensionConfig;
   onCsvExtensionConfigChange?: (next: CsvExtensionConfig) => void;
@@ -185,10 +174,6 @@ export function UploadAndPreviewStep({
   onLocalCsvParsed,
   onLocalDxfParsed,
   onClearLocalCsv,
-  onImportRefPointsCsv,
-  isImportingRefPointsCsv = false,
-  guideCsvFileName = null,
-  hideGuideCsvImport = false,
   csvExtensionConfig,
   onCsvExtensionConfigChange,
   localCsvPreview = null,
@@ -762,39 +747,8 @@ export function UploadAndPreviewStep({
             </Text>
           </Pressable>
 
-          {/* Guide-points CSV — DXF/waypoints only; hide for mission survey CSV */}
-          {onImportRefPointsCsv && !hideGuideCsvImport && !localCsvSummary ? (
-            <Pressable
-              onPress={onImportRefPointsCsv}
-              disabled={protectedResident || isImportingRefPointsCsv}
-              style={{
-                height: 36,
-                borderRadius: 8,
-                alignItems: "center",
-                justifyContent: "center",
-                paddingHorizontal: 12,
-                backgroundColor: guideCsvFileName ? FIELDS_COLORS.surfaceSolid : FIELDS_COLORS.teal,
-                borderWidth: guideCsvFileName ? 1 : 0,
-                borderColor: FIELDS_COLORS.teal,
-                opacity: protectedResident || isImportingRefPointsCsv ? 0.5 : 1,
-              }}
-            >
-              <Text
-                numberOfLines={1}
-                style={{
-                  color: guideCsvFileName ? FIELDS_COLORS.teal : "#fff",
-                  fontSize: 12,
-                  fontWeight: "800",
-                }}
-              >
-                {isImportingRefPointsCsv
-                  ? "Importing…"
-                  : guideCsvFileName
-                    ? guideCsvFileName
-                    : "Import guide CSV"}
-              </Text>
-            </Pressable>
-          ) : null}
+          {/* Guide-points CSV lives in Align DXF, next to the control-point list it feeds —
+              importing it from Upload put an alignment control two steps early. */}
         </View>
       ) : null}
 

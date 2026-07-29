@@ -33,6 +33,8 @@ const DEFAULT_SPEEDS = { markSpeedMs: 0.35, travelSpeedMs: 0.5 };
 
 const PATH_ROW_HEIGHT = 48;
 const TRANSIT_ROW_HEIGHT = 28;
+/** Keep a couple of rows visible even when the card is squeezed, so drag still works. */
+const MIN_LIST_HEIGHT = 120;
 
 type PathRow = {
   kind: "path";
@@ -229,17 +231,6 @@ export function CsvPathOrderStep({
     );
   }
 
-  const listHeight = Math.min(
-    280,
-    Math.max(
-      100,
-      orderedLines.length * PATH_ROW_HEIGHT +
-        transitPreviews.length * TRANSIT_ROW_HEIGHT +
-        extensionPreviews.length * TRANSIT_ROW_HEIGHT +
-        8
-    )
-  );
-
   const commitPathOrder = (nextPaths: PlanLine[]) => {
     const idOrder = nextPaths.map((l) => l.id);
     setOrder((prev) => {
@@ -266,11 +257,16 @@ export function CsvPathOrderStep({
         ) : null}
       </Text>
 
+      {/*
+        Take the whole area the card gives us and let the list scroll inside it, rather than
+        pinning a fixed height. The old `height: min(280, …)` clipped mid-row as soon as the
+        rows exceeded it — a square with per-line extensions is 4 paths + 8 run-ups + the
+        connectors between them, which is well past 280 px.
+      */}
       <View
         style={{
-          height: listHeight,
-          flexGrow: 1,
-          minHeight: 100,
+          flex: 1,
+          minHeight: MIN_LIST_HEIGHT,
           borderRadius: 12,
           borderWidth: 1,
           borderColor: FIELDS_COLORS.panelBorder,

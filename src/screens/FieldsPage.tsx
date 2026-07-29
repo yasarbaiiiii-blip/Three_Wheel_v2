@@ -1,7 +1,6 @@
 import React, { useCallback, useMemo, useState } from "react";
 import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { ChevronDown, ChevronRight } from "lucide-react-native";
-import * as DocumentPicker from "expo-document-picker";
 
 import * as missionApi from "../api/missionApi";
 import * as pathApi from "../api/pathApi";
@@ -22,7 +21,6 @@ import { PathOrderAndSprayStep } from "../components/fields/panels/PathOrderAndS
 import { TemplatePanel } from "../components/fields/panels/TemplatePanel";
 import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPreviewStep";
 import { useFieldsWorkflow } from "../hooks/useFieldsWorkflow";
-import { parseGuidePointsCsv } from "../utils/refPointsCsv";
 import { designObbFromLines } from "../utils/planResizeHandles";
 import { DXF_PLANNER } from "../config/featureFlags";
 import {
@@ -278,7 +276,6 @@ export function FieldsPage(props: FieldsPageProps) {
   const [csvGuidePointsActive, setCsvGuidePointsActive] = useState(false);
   /** Original guide CSV file name for Upload/Align button labels (not “Reference Points”). */
   const [guideCsvFileName, setGuideCsvFileName] = useState<string | null>(null);
-  const [isImportingRefPointsCsv, setIsImportingRefPointsCsv] = useState(false);
   const [missionSummary, setMissionSummary] = useState<any | null>(null);
   /** Align DXF methods: Multi-Point Fit | Visual (1-Point Fit removed). Auto Origin is a separate toggle peer. */
   const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "visual_alignment">("least_squares");
@@ -460,86 +457,6 @@ export function FieldsPage(props: FieldsPageProps) {
     },
     [loadedPathInspection, protectedResident]
   );
-
-  /**
-   * Lets the operator add reference points right after uploading the plan, instead of only
-   * discovering the CSV guide-point uploader once they open the Align step. Reuses the same
-   * shared CSV parser as AlignDxfPanel's own "Upload CSV" button; jumps the stepper to Align
-   * once points are loaded so the newly-visible map dots are the very next thing shown.
-   */
-  const handleImportRefPointsCsvFromUpload = useCallback(async () => {
-    if (blockProtectedWorkflowMutation("Importing reference points")) return;
-
-    let asset: DocumentPicker.DocumentPickerAsset | null = null;
-    try {
-      const result = await DocumentPicker.getDocumentAsync({ type: ["*/*"], copyToCacheDirectory: true });
-      if (result.canceled || !result.assets || result.assets.length === 0) return;
-      asset = result.assets[0];
-    } catch (err) {
-      console.log("[Upload][RefPointsCSV] Error picking CSV:", err);
-      Alert.alert("Error", "Could not open the file picker.");
-      return;
-    }
-
-    const ext = asset.name.split(".").pop()?.toLowerCase();
-    if (ext !== "csv") {
-      Alert.alert("Invalid File", "Please select a .csv file.");
-      return;
-    }
-
-    setIsImportingRefPointsCsv(true);
-    try {
-      let text: string;
-      if (Platform.OS === "web") {
-        const webFile = (asset as any).file ?? (await (await fetch(asset.uri)).blob());
-        text = await webFile.text();
-      } else {
-        text = await (await fetch(asset.uri)).text();
-      }
-      if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-
-      const { points, errors } = parseGuidePointsCsv(text);
-      if (points.length === 0) {
-        Alert.alert("Import Failed", errors[0] ?? "No valid Latitude/Longitude rows were found in the file.");
-        return;
-      }
-
-      onInvalidateWorkflow("alignment");
-      setMissionSummary(null);
-      setAlignmentResult(null);
-      setVerifiedAlignmentRequest(null);
-      setRefPoints(points.map((p) => ({ dxf_x: 0, dxf_y: 0, lat: p.latRaw, lon: p.lonRaw })));
-      setCsvGuidePointsActive(true);
-      setGuideCsvFileName(asset.name || "guide.csv");
-      setActiveStep("align");
-      openOnlySection("align");
-
-      if (errors.length > 0) {
-        Alert.alert(
-          "Imported With Warnings",
-          `${points.length} point(s) imported. ${errors.length} row(s) skipped:\n${errors.slice(0, 5).join("\n")}${
-            errors.length > 5 ? `\n…and ${errors.length - 5} more` : ""
-          }`
-        );
-      } else {
-        Alert.alert(
-          "Guide CSV Loaded",
-          `${points.length} point(s) from ${asset.name}. Open Align → Move / Rotate Plan, then Resize if needed.`
-        );
-      }
-    } catch (err) {
-      console.log("[Upload][RefPointsCSV] Error importing CSV:", err);
-      Alert.alert("Error", "Could not read or parse the selected CSV file.");
-    } finally {
-      setIsImportingRefPointsCsv(false);
-    }
-  }, [
-    blockProtectedWorkflowMutation,
-    onInvalidateWorkflow,
-    setAlignmentResult,
-    setVerifiedAlignmentRequest,
-    setActiveStep,
-  ]);
 
   /**
    * Map tap → yellow guide points. Enabled ONLY for Multi-Point Fit when:
@@ -1036,18 +953,14 @@ export function FieldsPage(props: FieldsPageProps) {
           }}
         >
           {/*
-            Only one of these three containers ever holds an expanded body (the accordion
-            guarantees it), so the one that does gets flexGrow:1 and the other two collapse
-            to their headers. Growing the open container — rather than capping it at a fixed
-            maxHeight — is what stops a tall body (Align) being clipped by whatever sits
-            below it in the column.
+            These containers size to their content (flexGrow:0) and shrink only when the
+            column runs out of room. Never flexGrow:1 — a scroller that grows past its
+            content pads the leftover space *inside* itself, which is what opened a dead gap
+            between Align DXF and Path Order & Load. The only element allowed to claim
+            leftover space is the open Path Order card, via `fillAvailable`.
           */}
           <ScrollView
-            style={{
-              flexGrow: topSectionOpen ? 1 : 0,
-              flexShrink: 1,
-              minHeight: 0,
-            }}
+            style={{ flexGrow: 0, flexShrink: 1, minHeight: 0 }}
             contentContainerStyle={{ gap: 8 }}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
@@ -1058,11 +971,7 @@ export function FieldsPage(props: FieldsPageProps) {
           {/* Path order list (VirtualizedList) + Verify & Load — outside ScrollView. */}
           {renderFieldsSteps("csvPathOrder")}
           <ScrollView
-            style={{
-              flexGrow: isSectionOpen("templates") ? 1 : 0,
-              flexShrink: 1,
-              minHeight: 0,
-            }}
+            style={{ flexGrow: 0, flexShrink: 1, minHeight: 0 }}
             contentContainerStyle={{ gap: 8, paddingBottom: 12 }}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
@@ -1082,13 +991,9 @@ export function FieldsPage(props: FieldsPageProps) {
             gap: 8,
           }}
         >
-          {/* Same rule as the local column: the container holding the open body grows. */}
+          {/* Same rule as the local column: size to content, shrink only when out of room. */}
           <ScrollView
-            style={{
-              flexGrow: topSectionOpen ? 1 : 0,
-              flexShrink: 1,
-              minHeight: 0,
-            }}
+            style={{ flexGrow: 0, flexShrink: 1, minHeight: 0 }}
             contentContainerStyle={{ gap: 8, paddingBottom: 4 }}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
@@ -1299,10 +1204,6 @@ export function FieldsPage(props: FieldsPageProps) {
                 setCsvPathOrder(null);
                 onClearLocalCsv?.();
               }}
-              onImportRefPointsCsv={handleImportRefPointsCsvFromUpload}
-              isImportingRefPointsCsv={isImportingRefPointsCsv}
-              guideCsvFileName={guideCsvFileName}
-              hideGuideCsvImport={isLocalCsvFlow}
             />
           </FieldsStepCard>
           ) : null}
