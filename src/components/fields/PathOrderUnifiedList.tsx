@@ -183,17 +183,18 @@ export function PathOrderUnifiedList({
                   alignItems: "center",
                   padding: 10,
                   gap: 8,
-                  backgroundColor: bg,
+                  // Match CSV path-order purple extension rows
+                  backgroundColor: "rgba(139, 92, 246, 0.08)",
                   borderBottomWidth: 1,
                   borderBottomColor: FIELDS_COLORS.panelBorder,
                 }}
               >
                 <View style={{ width: 16 }} />
                 <Pressable onPress={() => onPressExtension(item.group.lineIds)} style={{ flex: 1 }}>
-                  <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
+                  <Text style={{ color: "#8b5cf6", fontSize: 12, fontWeight: "700" }}>
                     {item.title}
                   </Text>
-                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, marginTop: 1 }}>
+                  <Text style={{ color: "#8b5cf6", fontSize: 10, marginTop: 1, fontWeight: "600" }}>
                     Pre {formatFinite(item.group.preM, 2)} m · Aft {formatFinite(item.group.aftM, 2)} m
                   </Text>
                 </Pressable>
@@ -206,8 +207,8 @@ export function PathOrderUnifiedList({
                     height: 24,
                     borderRadius: 6,
                     borderWidth: 1.5,
-                    borderColor: extensionVisible ? FIELDS_COLORS.teal : FIELDS_COLORS.textDim,
-                    backgroundColor: extensionVisible ? FIELDS_COLORS.teal : "transparent",
+                    borderColor: extensionVisible ? "#8b5cf6" : FIELDS_COLORS.textDim,
+                    backgroundColor: extensionVisible ? "#8b5cf6" : "transparent",
                     alignItems: "center",
                     justifyContent: "center",
                   }}

@@ -5,6 +5,7 @@ import * as FileSystem from "expo-file-system/legacy";
 import { Upload, X } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
+import { DXF_PLANNER } from "../../../config/featureFlags";
 import type { ImportedPlan } from "../../../types/plan";
 import {
   CSV_EXT_AFT_FLOOR_M,
@@ -13,6 +14,7 @@ import {
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
 } from "../../../utils/csvExtensions";
+import { parseLocalDxf, type LocalDxfResult } from "../../../utils/dxfLocalImport";
 import { parseLocalPointCsv, type LocalPointCsvResult } from "../../../utils/localPointCsv";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
@@ -35,6 +37,11 @@ type UploadAndPreviewStepProps = {
    * Mission Select File .csv never calls parse-point-* / upload / preview.
    */
   onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
+  /**
+   * Local-only DXF parse when DXF_PLANNER === "app". Parent sets lines + alignment.
+   * No parse-dxf / entities / upload.
+   */
+  onLocalDxfParsed?: (data: LocalDxfResult) => void;
   /** Clears parent local-CSV preview state when the operator dismisses LOADED. */
   onClearLocalCsv?: () => void;
   /**
@@ -169,6 +176,7 @@ export function UploadAndPreviewStep({
   blockProtectedWorkflowMutation,
   protectedResident,
   onLocalCsvParsed,
+  onLocalDxfParsed,
   onClearLocalCsv,
   onImportRefPointsCsv,
   isImportingRefPointsCsv = false,
@@ -337,6 +345,53 @@ export function UploadAndPreviewStep({
           err instanceof Error && err.message
             ? err.message
             : "Could not parse the CSV file.";
+        setImportError(msg);
+        Alert.alert("Import Failed", msg);
+      } finally {
+        setIsUploading(false);
+      }
+      return;
+    }
+
+    // DXF app-planned path: parse entirely on-device (mirrors CSV).
+    if (ext === "dxf" && DXF_PLANNER === "app") {
+      setPickedFile(file);
+      setImportError(null);
+      setIsUploading(true);
+      try {
+        const stable = await resolveStableUploadAsset(file);
+        let text = "";
+        if (Platform.OS === "web") {
+          const webFile = (file as any).file ?? (await (await fetch(file.uri)).blob());
+          text = await webFile.text();
+        } else {
+          text = await FileSystem.readAsStringAsync(stable.uri, {
+            encoding: FileSystem.EncodingType.UTF8,
+          });
+        }
+        const parsed = parseLocalDxf(text, file.name);
+        onInvalidateWorkflow("alignment");
+        onClearLocalCsv?.();
+        onLocalDxfParsed?.(parsed);
+        setImportedPlan({
+          fileName: file.name,
+          uri: stable.uri,
+          fileType: "dxf",
+          source: "imported",
+        });
+        setLocalCsvSummary(null);
+        setPreviewData(null);
+        setPickedFile(null);
+        setImportError(null);
+        if (parsed.warnings.length > 0) {
+          console.warn("[import][dxf-local] warnings:", parsed.warnings);
+        }
+      } catch (err) {
+        console.log("Error importing DXF locally:", err);
+        const msg =
+          err instanceof Error && err.message
+            ? err.message
+            : "Could not parse the DXF file.";
         setImportError(msg);
         Alert.alert("Import Failed", msg);
       } finally {

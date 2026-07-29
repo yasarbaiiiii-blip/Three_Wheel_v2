@@ -78,10 +78,11 @@ export type FieldsPageProps = {
    */
   highlightLineIds?: string[] | null;
   /** Global DXF extension config (enabled + pre/aft distance), already fetched by the
-   * parent — reused here so the Path Order & Load Extension row shows the same values
-   * as Step 1's Upload panel without a second fetch. */
+   * parent — reused so Path Order builds purple PRE/AFT client-side like CSV. */
   extPre?: string;
   extAft?: string;
+  extensionsEnabled?: boolean;
+  extPerLine?: boolean;
   apiBaseUrl: string;
   onRefreshPaths: () => void;
   onWorkflowStep?: (step: StagedWorkflowStep, status: StagedWorkflowStatus) => void;
@@ -176,6 +177,7 @@ export type FieldsPageProps = {
   }) => React.ReactNode;
   localCsvPreview?: LocalPointCsvResult | null;
   onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
+  onLocalDxfParsed?: (data: import("../utils/dxfLocalImport").LocalDxfResult) => void;
   onClearLocalCsv?: () => void;
 };
 
@@ -209,6 +211,8 @@ export function FieldsPage(props: FieldsPageProps) {
     highlightLineIds = null,
     extPre,
     extAft,
+    extensionsEnabled = false,
+    extPerLine = false,
     apiBaseUrl,
     onRefreshPaths,
     onWorkflowStep,
@@ -255,6 +259,7 @@ export function FieldsPage(props: FieldsPageProps) {
     renderPlanPreview,
     localCsvPreview = null,
     onLocalCsvParsed,
+    onLocalDxfParsed,
     onClearLocalCsv,
   } = props;
 
@@ -960,8 +965,9 @@ export function FieldsPage(props: FieldsPageProps) {
         }}
       >
         <FieldsClearBar onClear={onClearMission} busy={missionActionBusy} />
-        {/* Mission CSV: Path Order VirtualizedList stays outside ScrollView.
-            Padding/gap only — same section slices as before. */}
+        {/* Path Order uses DraggableFlatList (VirtualizedList) — never nest it
+            inside the page ScrollView (same orientation). CSV and DXF both
+            host that section outside ScrollView. */}
         {isLocalCsvFlow ? (
         <View
           style={{
@@ -995,38 +1001,51 @@ export function FieldsPage(props: FieldsPageProps) {
           </ScrollView>
         </View>
         ) : (
-        <ScrollView
-          style={{ flex: 1, minHeight: 0 }}
-          contentContainerStyle={{
+        <View
+          style={{
+            flex: 1,
+            minHeight: 0,
             paddingHorizontal: 14,
             paddingTop: 12,
-            paddingBottom: 20,
+            paddingBottom: 16,
             gap: 8,
-            flexGrow: isSectionOpen("orderAndSpray") ? 1 : undefined,
           }}
-          keyboardShouldPersistTaps="handled"
-          nestedScrollEnabled
-          showsVerticalScrollIndicator
         >
-          {renderFieldsSteps("dxf")}
-        </ScrollView>
+          <ScrollView
+            style={{
+              flexGrow: 0,
+              flexShrink: 1,
+              maxHeight: isSectionOpen("orderAndSpray") ? 280 : undefined,
+            }}
+            contentContainerStyle={{ gap: 8, paddingBottom: 4 }}
+            keyboardShouldPersistTaps="handled"
+            nestedScrollEnabled
+            showsVerticalScrollIndicator
+          >
+            {renderFieldsSteps("dxfTop")}
+          </ScrollView>
+          {/* DXF Path Order DraggableFlatList — outside ScrollView (fixes VirtualizedList warning). */}
+          {renderFieldsSteps("dxfPathOrder")}
+        </View>
         )}
       </View>
     </View>
   );
 
   /**
-   * Slice the step tree so CSV Path Order (VirtualizedList) is never a ScrollView child.
+   * Slice the step tree so Path Order VirtualizedLists are never ScrollView children.
    * - csvUpload / csvPathOrder / csvScroll: Mission CSV sections
-   * - dxf: full DXF accordion column
-   *
-   * CSV path order + verify/load are one combined section (paths, paint, transit, load).
+   * - dxfTop: Upload + Bounding Box + Align (scrollable)
+   * - dxfPathOrder: Path Order & Load (flex fill, own list scroll)
    */
-  function renderFieldsSteps(slice: "csvUpload" | "csvPathOrder" | "csvScroll" | "dxf") {
-    const showUpload = slice === "csvUpload" || slice === "dxf";
+  function renderFieldsSteps(
+    slice: "csvUpload" | "csvPathOrder" | "csvScroll" | "dxfTop" | "dxfPathOrder"
+  ) {
+    const showUpload = slice === "csvUpload" || slice === "dxfTop";
     const showCsvPathOrder = slice === "csvPathOrder";
-    const showTemplatesOrBbox = slice === "csvScroll" || slice === "dxf";
-    const showDxfOnly = slice === "dxf";
+    const showTemplatesOrBbox = slice === "csvScroll" || slice === "dxfTop";
+    const showDxfAlign = slice === "dxfTop";
+    const showDxfPathOrder = slice === "dxfPathOrder";
     const activeCsvForSend = activeCsvPreview;
 
     return (
@@ -1064,6 +1083,12 @@ export function FieldsPage(props: FieldsPageProps) {
               blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
               protectedResident={protectedResident}
               localCsvPreview={activeCsvPreview}
+              onLocalDxfParsed={(data) => {
+                onLocalDxfParsed?.(data);
+                setShowMapInteraction(true);
+                setCsvPathOrder(null);
+                setCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG);
+              }}
               onLocalCsvParsed={(data) => {
                 // Flip UI immediately in this screen (do not wait only on App props).
                 setMissionCsvPreview(data);
@@ -1327,8 +1352,8 @@ export function FieldsPage(props: FieldsPageProps) {
           </FieldsStepCard>
           ) : null}
 
-          {/* Align DXF — DXF only */}
-          {showDxfOnly && isDxfPath && (
+          {/* Align DXF — DXF only (scrollable top section) */}
+          {showDxfAlign && isDxfPath && (
           <FieldsStepCard
             stepNumber={3}
             title="Align DXF"
@@ -1384,8 +1409,8 @@ export function FieldsPage(props: FieldsPageProps) {
           </FieldsStepCard>
           )}
 
-          {/* Path Order & Load — DXF/waypoints only */}
-          {showDxfOnly && (
+          {/* Path Order & Load — DXF/waypoints; hosted outside page ScrollView */}
+          {showDxfPathOrder && (
           <FieldsStepCard
             stepNumber={4}
             title="Path Order & Load"
@@ -1423,6 +1448,8 @@ export function FieldsPage(props: FieldsPageProps) {
               highlightLineIds={highlightLineIds}
               extPre={extPre}
               extAft={extAft}
+              extensionsEnabled={extensionsEnabled}
+              extPerLine={extPerLine}
             />
           </FieldsStepCard>
           )}

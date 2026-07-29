@@ -218,6 +218,13 @@ import {
   localCsvPointsToPlanLines,
   type LocalPointCsvResult,
 } from "./src/utils/localPointCsv";
+import type { LocalDxfResult } from "./src/utils/dxfLocalImport";
+import { alignmentFromGeographic } from "./src/utils/dxfAlignment";
+import {
+  applyCsvOrderToPlanLines,
+  defaultPathOrder,
+  selectMarkPlanLines,
+} from "./src/utils/csvPathOrder";
 import { sanitizeUploadFileName } from "./src/utils/surveyCsvExport";
 import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
 import { rehydrateAlignedPlanLines } from "./src/utils/rehydrateAlignedPlan";
@@ -2172,19 +2179,25 @@ export default function App() {
             setGeoOriginDxf(body.geo_origin ?? null);
             setWorkflowStep("entities", "verified");
             const entities = body.entities || [];
-            // Per-entity extension run-ups are only drawn in the fallback path.
-            // When /plan succeeds, extensions arrive as non-spray runs in the
-            // authoritative merged waypoints, so we must not draw them twice.
-            const fallbackExtLines: PlanLine[] = [];
-
+            // Mark entities only — extension PRE/AFT and inter-path transit are
+            // built on-device (same as CSV) so the map and Path Order stay purple
+            // and interleaved consistently.
             entities.forEach((ent: any, i: number) => {
               const layerUpper = String(ent.layer || "").toUpperCase();
-              let layerName: PlanLine["layer"] = "marking"; // default to marking
+              let layerName: PlanLine["layer"] = "marking";
               if (layerUpper.includes("BOUND")) layerName = "boundary";
               else if (layerUpper.includes("CENTER")) layerName = "center";
               else if (layerUpper.includes("MARK")) layerName = "marking";
+              // Transit-named layers from CAD stay transit (not painted).
+              if (
+                layerUpper.includes("TRANSIT") ||
+                layerUpper.includes("TRAVEL") ||
+                layerUpper.includes("MOVE") ||
+                layerUpper.includes("RAPID")
+              ) {
+                layerName = "transit";
+              }
 
-              // Use the first and last preview_points for 'from' and 'to'
               const pts = ent.preview_points || [];
               const fromPt = pts[0] || { north: 0, east: 0 };
               const toPt = pts[pts.length - 1] || fromPt;
@@ -2199,144 +2212,24 @@ export default function App() {
                 is_mark: ent.is_mark,
                 entity: normalizeDxfEntityGeometry(ent),
               });
-
-              // Add extensions if enabled (buffered — only drawn in fallback).
-              // Do NOT copy parent circle/arc entity_type/geometry onto these lines — renderers
-              // would draw the full parent shape instead of the short pre/aft run-up polyline.
-              if (ent.extension_preview && ent.extension_preview.enabled) {
-                if (ent.extension_preview.pre_points && ent.extension_preview.pre_points.length >= 2) {
-                  const pre = ent.extension_preview.pre_points;
-                  fallbackExtLines.push({
-                    id: `ext-pre-${ent.entity_id || i}`,
-                    label: `Pre-extension ${ent.entity_id || i}`,
-                    layer: "extension",
-                    segmentRole: "pre",
-                    from: { id: i * 100 + 1, x: pre[0].north, y: pre[0].east },
-                    to: { id: i * 100 + 2, x: pre[pre.length - 1].north, y: pre[pre.length - 1].east },
-                    width: 0.1,
-                    entity: {
-                      ...ent,
-                      entity_type: "line",
-                      geometry: undefined,
-                      preview_points: pre,
-                      length_m: ent.extension_preview.pre_length_m ?? ent.length_m,
-                      extension_preview: ent.extension_preview,
-                    },
-                  });
-                }
-                if (ent.extension_preview.aft_points && ent.extension_preview.aft_points.length >= 2) {
-                  const aft = ent.extension_preview.aft_points;
-                  fallbackExtLines.push({
-                    id: `ext-aft-${ent.entity_id || i}`,
-                    label: `Aft-extension ${ent.entity_id || i}`,
-                    layer: "extension",
-                    segmentRole: "aft",
-                    from: { id: i * 100 + 3, x: aft[0].north, y: aft[0].east },
-                    to: { id: i * 100 + 4, x: aft[aft.length - 1].north, y: aft[aft.length - 1].east },
-                    width: 0.1,
-                    entity: {
-                      ...ent,
-                      entity_type: "line",
-                      geometry: undefined,
-                      preview_points: aft,
-                      length_m: ent.extension_preview.aft_length_m ?? ent.length_m,
-                      extension_preview: ent.extension_preview,
-                    },
-                  });
-                }
-              }
             });
 
-            // Catalog of every extension pre/aft leg (top-level extensions[] + previews +
-            // fallbackExtLines). Used to strip extension non-spray from /plan transit so
-            // Path Order Transit dropdown only shows inter-shape legs.
-            let extensionLegCatalog = appendExtensionLegsFromPlanLines(
-              buildExtensionLegCatalogFromEntitiesBody(body),
-              fallbackExtLines
+            const markLines = selectMarkPlanLines(generatedLines);
+            if (markLines.length === 0 && generatedLines.length === 0) {
+              throw new Error("Preview entities did not contain valid geometries");
+            }
+            const extCfg = {
+              enabled: isEnabled,
+              preM: Number(body.extension_config?.pre_extension_m ?? 0.5) || 0.5,
+              aftM: Number(body.extension_config?.aft_extension_m ?? 0.5) || 0.5,
+              perLine: Boolean(body.extension_config?.per_line),
+            };
+            const order = defaultPathOrder(markLines.length > 0 ? markLines : generatedLines);
+            generatedLines = applyCsvOrderToPlanLines(
+              markLines.length > 0 ? markLines : generatedLines,
+              order,
+              extCfg
             );
-
-            // Authoritative runtime path overlay.
-            //
-            // The /entities `transit_preview` connects MARK entities in *saved
-            // order* with straight crossings — it never runs the shape grouper /
-            // optimizer the mission uses. For connected loops (e.g. a square,
-            // where all 4 sides chain into one run) and multi-shape DXFs it
-            // therefore draws phantom transits the rover never drives, so the
-            // preview disagrees with the executed mission.
-            //
-            // Instead, overlay the exact merged waypoints /plan publishes — the
-            // single source of truth for what the rover does. MARK waypoints are
-            // already shown as editable entity lines above, so we draw only the
-            // non-spray runs here (real inter-shape transits). Extension run-ups
-            // are matched against extensionLegCatalog (role pre/aft + endpoints)
-            // and skipped here so fallbackExtLines remain the sole extension draw.
-            // applied=true only when ≥1 inter-shape transit was produced. Empty overlays
-            // must fall through to transit_preview (do not treat waypoint-only /plan as done).
-            let runtimePathApplied = false;
-            try {
-              const planRes = await pathApi.planPath(apiBaseUrl, { source: pathName, include_waypoints: true });
-              if (planRes.ok) {
-                const planData = await planRes.json();
-                const wps = Array.isArray(planData.merged_waypoints) ? planData.merged_waypoints : [];
-                const sprayFlags = Array.isArray(planData.spray_flags) ? planData.spray_flags : [];
-                const overlay = buildRuntimeTransitOverlayFromPlan({
-                  waypoints: wps,
-                  sprayFlags,
-                  extensionLegCatalog,
-                  extensionsEnabled: isEnabled,
-                });
-                if (overlay.applied) {
-                  generatedLines.push(...overlay.transitLines);
-                  runtimePathApplied = true;
-                }
-              } else {
-                console.log(`[API POST] /api/path/plan - overlay status ${planRes.status}, using legacy preview`);
-              }
-            } catch (planErr) {
-              console.log("[API POST] /api/path/plan - overlay failed, using legacy preview:", planErr);
-            }
-
-            // fallbackExtLines (built directly from each entity's own
-            // extension_preview, always correctly tagged layer:"extension") are
-            // pushed unconditionally — the runtime overlay above omits matched
-            // extension non-spray so this is the one source of extension geometry.
-            generatedLines.push(...fallbackExtLines);
-
-            if (!runtimePathApplied) {
-              if (body.transit_preview && Array.isArray(body.transit_preview)) {
-                body.transit_preview.forEach((transit: any, i: number) => {
-                  const pts = transit.points || [];
-                  if (pts.length < 2) return;
-                  const fromNorth = coerceFiniteNumber(pts[0]?.north);
-                  const fromEast = coerceFiniteNumber(pts[0]?.east);
-                  const toNorth = coerceFiniteNumber(pts[pts.length - 1]?.north);
-                  const toEast = coerceFiniteNumber(pts[pts.length - 1]?.east);
-                  if (fromNorth == null || fromEast == null || toNorth == null || toEast == null) return;
-                  // Never list extension run-ups under transit when falling back to transit_preview.
-                  if (
-                    matchNonSprayToExtensionRole(
-                      fromNorth,
-                      fromEast,
-                      toNorth,
-                      toEast,
-                      extensionLegCatalog
-                    )
-                  ) {
-                    return;
-                  }
-                  generatedLines.push({
-                    id: `transit-${i}`,
-                    label: `Transit ${transit.from_entity_id || "?"} to ${transit.to_entity_id || "?"}`,
-                    layer: "transit",
-                    segmentRole: "none",
-                    from: { id: i * 1000 + 1, x: fromNorth, y: fromEast },
-                    to: { id: i * 1000 + 2, x: toNorth, y: toEast },
-                    width: 0.1,
-                    entity: { entity_id: `transit-${i}`, entity_type: "TRANSIT", layer: "TRANSIT", color: 0, is_mark: false, length_m: transit.length_m || 0, geometry: {}, preview_points: pts }
-                  });
-                });
-              }
-            }
             if (generatedLines.length === 0) {
               throw new Error("Preview entities did not contain valid geometries");
             }
@@ -2935,6 +2828,61 @@ export default function App() {
         started: "pending",
       }));
     } else {
+      setVerifiedAlignmentRequest(null);
+      setAlignedRefPoints([]);
+      setStagedWorkflow((prev) => ({
+        ...prev,
+        alignment: "pending",
+        spray: "pending",
+        staged: "pending",
+        loaded: "pending",
+        started: "pending",
+      }));
+    }
+  }
+
+  /**
+   * Local DXF parse (DXF_PLANNER === "app"). Mirrors handleLocalCsvParsed:
+   * lines on device, no rover-side path name, origin_gps when geographic.
+   */
+  function handleLocalDxfParsed(data: LocalDxfResult) {
+    setLocalCsvPreview(null);
+    previousSelectedPathRef.current = null;
+    setSelectedPathName(null);
+    setMissionFileReady(false);
+    setMissionLoaded(false);
+    setMissionRunning(false);
+
+    const markLines = data.lines.filter((l) => l.layer !== "transit");
+    const transitSource = data.lines.filter((l) => l.layer === "transit");
+    // Transit layers already in the DXF; also build connectors between mark paths
+    // when operator order is default file order (Path Order rebuilds later).
+    const transitBridges = buildCsvTransitLines(markLines);
+    setLines(sanitizePlanLines([...data.lines, ...transitBridges]));
+    setSelectedLineId(data.lines[0]?.id ?? null);
+    setVisualAlignmentItem(null);
+    setIsVisualAlignmentMode(false);
+    void transitSource;
+
+    if (data.isGeographic && data.geoOrigin) {
+      const a = alignmentFromGeographic(data.geoOrigin);
+      setVerifiedAlignmentRequest({
+        origin_gps: a.originGps,
+        rotation_deg: 0,
+      });
+      setAlignedRefPoints(
+        anchorToAlignedRefPoints({ lat: data.geoOrigin.lat, lon: data.geoOrigin.lon })
+      );
+      setStagedWorkflow((prev) => ({
+        ...prev,
+        alignment: "verified",
+        spray: "pending",
+        staged: "pending",
+        loaded: "pending",
+        started: "pending",
+      }));
+    } else {
+      // Metric DXF: alignment mandatory before plan-trajectory (G10).
       setVerifiedAlignmentRequest(null);
       setAlignedRefPoints([]);
       setStagedWorkflow((prev) => ({
@@ -4246,6 +4194,7 @@ export default function App() {
                             stopRtk={stopRtk}
                             localCsvPreview={localCsvPreview}
                             onLocalCsvParsed={handleLocalCsvParsed}
+                            onLocalDxfParsed={handleLocalDxfParsed}
                             onClearLocalCsv={handleClearLocalCsv}
                           />
                         )
@@ -5817,6 +5766,7 @@ function SectionPages(props: {
   previewFallbackGps?: { lat: number; lon: number } | null;
   localCsvPreview?: LocalPointCsvResult | null;
   onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
+  onLocalDxfParsed?: (data: LocalDxfResult) => void;
   onClearLocalCsv?: () => void;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;

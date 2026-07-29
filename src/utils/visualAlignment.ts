@@ -23,29 +23,21 @@ export type VisualAlignmentTransform = {
   scaleEast?: number;
 };
 
-// WGS84 — match rover path_engine/parsers/georef.py (metres_per_degree).
-// Previously used spherical a for both axes (~0.6 % long on north at Chennai lat).
-const WGS84_A = 6378137.0;
-const WGS84_F = 1.0 / 298.257223563;
-const WGS84_E2 = WGS84_F * (2.0 - WGS84_F);
+// PX4 sphere metres-per-degree — shared with geoProjection / rover georef (G2).
+// Do not reintroduce WGS84 ellipsoid here; the EKF navigates the PX4 sphere.
+import {
+  projectLocalMetersToGps,
+  metresPerDegreeShared as _metresPerDegreeShared,
+  metresPerDegreePx4 as _metresPerDegreePx4,
+  projectGpsToLocalMeters as _projectGpsToLocalMeters,
+  PX4_EARTH_RADIUS_M as _PX4_EARTH_RADIUS_M,
+} from "./geoProjection";
 
-/** (north, east) metres per degree at lat0 on the WGS84 ellipsoid. */
-export function metresPerDegreeShared(lat0Deg: number): {
-  mPerDegNorth: number;
-  mPerDegEast: number;
-} {
-  const lat0 = (lat0Deg * Math.PI) / 180;
-  const s = Math.sin(lat0);
-  const w2 = 1.0 - WGS84_E2 * s * s;
-  const w = Math.sqrt(w2);
-  const mMeridional = (WGS84_A * (1.0 - WGS84_E2)) / (w2 * w);
-  const nPrimeVertical = WGS84_A / w;
-  const perRad = Math.PI / 180;
-  return {
-    mPerDegNorth: mMeridional * perRad,
-    mPerDegEast: nPrimeVertical * perRad * Math.cos(lat0),
-  };
-}
+export const metresPerDegreeShared = _metresPerDegreeShared;
+export const metresPerDegreePx4 = _metresPerDegreePx4;
+export const projectGpsToLocalMeters = _projectGpsToLocalMeters;
+export const PX4_EARTH_RADIUS_M = _PX4_EARTH_RADIUS_M;
+export { projectLocalMetersToGps };
 
 /** Rotate + translate a DXF point into local north/east metres (latchedOrigin frame). */
 export function transformVisualDxfPoint(
@@ -63,32 +55,6 @@ export function transformVisualDxfPoint(
   return {
     north: sn * cos - se * sin + item.y,
     east: sn * sin + se * cos + item.x,
-  };
-}
-
-export function projectLocalMetersToGps(
-  north: number,
-  east: number,
-  originLat: number,
-  originLon: number
-): { lat: number; lon: number } {
-  const { mPerDegNorth, mPerDegEast } = metresPerDegreeShared(originLat);
-  return {
-    lat: originLat + north / mPerDegNorth,
-    lon: originLon + east / mPerDegEast,
-  };
-}
-
-export function projectGpsToLocalMeters(
-  lat: number,
-  lon: number,
-  originLat: number,
-  originLon: number
-): { north: number; east: number } {
-  const { mPerDegNorth, mPerDegEast } = metresPerDegreeShared(originLat);
-  return {
-    north: (lat - originLat) * mPerDegNorth,
-    east: (lon - originLon) * mPerDegEast,
   };
 }
 

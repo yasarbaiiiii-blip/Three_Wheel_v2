@@ -214,7 +214,7 @@ export function CsvPathOrderStep({
   if (markLines.length === 0) {
     return (
       <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11 }}>
-        No paths yet. Load a survey CSV first.
+        No paths yet. Import a survey CSV or DXF first.
       </Text>
     );
   }

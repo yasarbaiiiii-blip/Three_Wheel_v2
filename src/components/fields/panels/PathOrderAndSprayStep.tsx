@@ -9,14 +9,18 @@ import type {
   StagedWorkflowStep,
 } from "../../../types/fieldsWorkflow";
 import type { ImportedPlan, PlanLine } from "../../../types/plan";
+import type { SelectLineFn } from "../../../utils/pathWorkflow";
 import {
-  buildPathOrderRows,
-  getInterShapeTransitLines,
-  groupExtensionLinesForList,
-  isPrimaryEditableLine,
-  type SelectLineFn,
-} from "../../../utils/pathWorkflow";
-import { PathOrderUnifiedList } from "../PathOrderUnifiedList";
+  applyCsvOrderToPlanLines,
+  defaultPathOrder,
+  selectMarkPlanLines,
+  type CsvPathOrderEntry,
+} from "../../../utils/csvPathOrder";
+import {
+  normalizeCsvExtensionConfig,
+  type CsvExtensionConfig,
+} from "../../../utils/csvExtensions";
+import { CsvPathOrderStep } from "./CsvPathOrderStep";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 type PathOrderAndSprayStepProps = {
@@ -48,10 +52,13 @@ type PathOrderAndSprayStepProps = {
   onToggleExtensionVisible: () => void;
   /** Current multi-line highlight set (used to paint Extension group row selection). */
   highlightLineIds?: string[] | null;
-  /** Global DXF extension config, reused from Step 1 so Extension rows show the same
-   * pre/aft distance without a second fetch when per-entity preview lengths are missing. */
+  /** Global DXF extension config from Upload / entities. */
   extPre?: string;
   extAft?: string;
+  /** When true, client builds purple PRE/AFT geometry into `lines` (CSV parity). */
+  extensionsEnabled?: boolean;
+  /** DXF per-line corner split (port of backend per_line). */
+  extPerLine?: boolean;
 };
 
 const LOAD_STEP_LABELS: Record<pathApi.LoadToControllerStep, string> = {
@@ -105,8 +112,6 @@ export function PathOrderAndSprayStep({
   importedPlan,
   lines,
   setLines,
-  selectedLineId,
-  onSelectLine,
   onInvalidateWorkflow,
   verifiedAlignmentRequest,
   isGeographicDxf = false,
@@ -118,77 +123,59 @@ export function PathOrderAndSprayStep({
   onLoadSelectedPath,
   missionActionBusy,
   onNavigateHome,
-  extensionVisible,
-  onToggleExtensionVisible,
-  highlightLineIds = null,
   extPre,
   extAft,
+  extensionsEnabled = false,
+  extPerLine = false,
 }: PathOrderAndSprayStepProps) {
-  const [reorderedLines, setReorderedLines] = useState<PlanLine[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [loadStep, setLoadStep] = useState<pathApi.LoadToControllerStep | null>(null);
-  // Transit legs under collapsible "Transit" — expanded by default so legs are visible.
-  const [transitDropdownExpanded, setTransitDropdownExpanded] = useState(true);
+  /** Operator path order + paint (CSV-parity list). */
+  const [pathOrder, setPathOrder] = useState<CsvPathOrderEntry[] | null>(null);
 
-  // Primary paths only — drag/reorder + spray
-  const primaryLines = useMemo(() => lines.filter(isPrimaryEditableLine), [lines]);
-
-  useEffect(() => {
-    setReorderedLines(primaryLines);
-  }, [primaryLines]);
-
-  // One Extension row per unique (pre, aft) distance; 0.5 vs 0.2 → two rows.
-  // Extension stubs are never also shown under Transit.
-  const extensionGroups = useMemo(
-    () => groupExtensionLinesForList(lines, extPre, extAft),
-    [lines, extPre, extAft]
-  );
-
-  // Inter-shape transit only (excludes extension run-ups already covered by Extension row).
-  const transitLines = useMemo(() => getInterShapeTransitLines(lines), [lines]);
-
-  // Flat list: paths → extension group(s) → Transit dropdown (+ children when open).
-  const pathOrderRows = useMemo(
+  const extensionConfig: CsvExtensionConfig = useMemo(
     () =>
-      buildPathOrderRows(reorderedLines, transitLines, extensionGroups, {
-        transitExpanded: transitDropdownExpanded,
+      normalizeCsvExtensionConfig({
+        enabled: extensionsEnabled,
+        preM: Number(extPre) || 0.5,
+        aftM: Number(extAft) || 0.5,
+        perLine: extPerLine,
       }),
-    [reorderedLines, transitLines, extensionGroups, transitDropdownExpanded]
+    [extensionsEnabled, extPre, extAft, extPerLine]
   );
 
-  const handleSelectPrimaryOrTransit = (line: PlanLine) => {
-    onSelectLine(line.id);
-  };
+  const markLines = useMemo(() => selectMarkPlanLines(lines), [lines]);
 
-  const handleSelectExtensionGroup = (lineIds: string[]) => {
-    if (lineIds.length === 0) return;
-    onSelectLine(lineIds[0], { highlightLineIds: lineIds });
-  };
-
-  const handleToggleSpray = (lineId: string) => {
-    onInvalidateWorkflow("spray");
-    const idx = reorderedLines.findIndex((l) => l.id === lineId);
-    if (idx === -1) return;
-    const next = [...reorderedLines];
-    if (next[idx].entity) {
-      next[idx] = {
-        ...next[idx],
-        entity: { ...next[idx].entity!, is_mark: !next[idx].entity!.is_mark },
-      };
-    }
-    setReorderedLines(next);
-    setLines((prev) => {
-      const updated = [...prev];
-      const parentIdx = updated.findIndex((l) => l.id === lineId);
-      if (parentIdx !== -1 && updated[parentIdx].entity) {
-        updated[parentIdx] = {
-          ...updated[parentIdx],
-          entity: { ...updated[parentIdx].entity!, is_mark: !updated[parentIdx].entity!.is_mark },
-        };
+  // Seed order when marks appear / change ids.
+  useEffect(() => {
+    setPathOrder((prev) => {
+      if (markLines.length === 0) return prev;
+      if (!prev || prev.length === 0) return defaultPathOrder(markLines);
+      const byId = new Map(prev.map((e) => [e.lineId, e]));
+      const markIds = new Set(markLines.map((l) => l.id));
+      const next: CsvPathOrderEntry[] = [];
+      for (const e of prev) {
+        if (!markIds.has(e.lineId)) continue;
+        const line = markLines.find((l) => l.id === e.lineId);
+        next.push(line ? { ...e, label: line.label } : e);
       }
-      return updated;
+      for (const line of markLines) {
+        if (!byId.has(line.id)) {
+          next.push({ lineId: line.id, label: line.label, paint: true });
+        }
+      }
+      return next;
     });
-  };
+  }, [markLines]);
+
+  // When Upload toggles extension config, rebuild purple PRE/AFT + transit (CSV parity).
+  useEffect(() => {
+    if (markLines.length === 0) return;
+    const order = pathOrder ?? defaultPathOrder(markLines);
+    setLines((prev) => applyCsvOrderToPlanLines(prev, order, extensionConfig));
+    // Intentionally not depending on pathOrder — order rebuilds via onOrderChange.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [extensionConfig.enabled, extensionConfig.preM, extensionConfig.aftM, extensionConfig.perLine]);
 
   const handleLoadToController = async () => {
     const targetPath = selectedPathName || importedPlan?.fileName;
@@ -206,20 +193,25 @@ export function PathOrderAndSprayStep({
     setLoadStep(null);
 
     try {
-      const entityOrder = reorderedLines
+      const order = pathOrder ?? defaultPathOrder(markLines);
+      const orderedMarks = order
+        .map((e) => markLines.find((l) => l.id === e.lineId))
+        .filter((l): l is PlanLine => l != null);
+
+      const entityOrder = orderedMarks
         .filter((line) => line.entity?.entity_id)
         .map((line) => line.entity!.entity_id);
 
-      const overridesMap = new Map<string, boolean>();
-      reorderedLines
+      const sprayOverrides = orderedMarks
         .filter((line) => line.entity?.entity_id)
-        .forEach((line) => {
-          overridesMap.set(line.entity!.entity_id, !!line.entity!.is_mark);
+        .map((line) => {
+          const entry = order.find((e) => e.lineId === line.id);
+          const paint = entry?.paint !== false;
+          return {
+            entity_id: line.entity!.entity_id,
+            is_mark: paint && line.entity?.is_mark !== false,
+          };
         });
-      const sprayOverrides = Array.from(overridesMap.entries()).map(([entity_id, is_mark]) => ({
-        entity_id,
-        is_mark,
-      }));
 
       const result = await pathApi.loadToController(apiBaseUrl, targetPath, {
         entityOrder,
@@ -276,39 +268,19 @@ export function PathOrderAndSprayStep({
   return (
     <View style={{ flex: 1, minHeight: 0, gap: 12 }}>
       <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
-        Paths and Extension are listed separately. Open Transit to see inter-shape legs only
-        (extension run-ups are not listed there). Drag paths to reorder; tap a row to highlight.
+        Same layout as CSV: drag paths to reorder, Paint/Skip each path. Purple pre-ext / aft-ext
+        and transit legs are built on device from path order.
       </Text>
 
-      {/* Bounded flex shell so DraggableFlatList scrolls when rows exceed the viewport. */}
-      <View
-        style={{
-          flex: 1,
-          minHeight: 220,
-          borderRadius: 12,
-          borderWidth: 1,
-          borderColor: FIELDS_COLORS.panelBorder,
-          overflow: "hidden",
-          backgroundColor: FIELDS_COLORS.cardSolid,
+      <CsvPathOrderStep
+        lines={lines}
+        extensionConfig={extensionConfig}
+        onOrderChange={(_painted, fullOrder) => {
+          onInvalidateWorkflow("spray");
+          setPathOrder(fullOrder);
+          setLines((prev) => applyCsvOrderToPlanLines(prev, fullOrder, extensionConfig));
         }}
-      >
-        <PathOrderUnifiedList
-          rows={pathOrderRows}
-          onReorderPrimaries={(next) => {
-            onInvalidateWorkflow("spray");
-            setReorderedLines(next);
-          }}
-          onPressPrimary={handleSelectPrimaryOrTransit}
-          onPressTransit={handleSelectPrimaryOrTransit}
-          onPressExtension={handleSelectExtensionGroup}
-          onToggleTransitDropdown={() => setTransitDropdownExpanded((v) => !v)}
-          selectedLineId={selectedLineId}
-          highlightLineIds={highlightLineIds}
-          extensionVisible={extensionVisible}
-          onToggleExtensionVisible={onToggleExtensionVisible}
-          onToggleSpray={handleToggleSpray}
-        />
-      </View>
+      />
 
       <TouchableOpacity
         onPress={handleLoadToController}

@@ -53,3 +53,16 @@ export type CsvPlannerMode = "app" | "rover";
  * Flip back to `"rover"` only if plan-trajectory is unavailable.
  */
 export const CSV_PLANNER: CsvPlannerMode = "app";
+
+/**
+ * DXF mission planner routing (DXF_APP_PLANNED_TRAJECTORY_PLAN Phase 5 / 8).
+ *
+ * - `"rover"`: today's parse-dxf → entities → align → plan-and-stage flow.
+ * - `"app"`: offline parseLocalDxf → local align → plan-trajectory → verify.
+ *
+ * Flip to `"app"` only after Phase 7 differential bench. `"rover"` restores
+ * the file path with no other code changes.
+ */
+export type DxfPlannerMode = "app" | "rover";
+/** Keep `"rover"` until Phase 7 gate is green. */
+export const DXF_PLANNER: DxfPlannerMode = "rover";

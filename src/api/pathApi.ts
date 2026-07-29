@@ -148,6 +148,10 @@ export function getPaths(apiBaseUrl: string): Promise<PathListItem[]> {
   return getJson<PathListItem[]>(apiBaseUrl, "/api/paths");
 }
 
+/**
+ * Rover-side DXF entity list.
+ * @deprecated When `DXF_PLANNER === "app"`, use `parseLocalDxf` (Phase 8). Kept for rollback.
+ */
 export function getPathEntities(apiBaseUrl: string, pathName: string): Promise<Response> {
   return fetch(apiUrl(apiBaseUrl, `/api/path/${encodeURIComponent(pathName)}/entities`), {
     method: "GET",
@@ -162,6 +166,10 @@ export function getPathPreview(apiBaseUrl: string, pathName: string): Promise<Re
   });
 }
 
+/**
+ * Rover-side DXF parse (uploads file to MISSION_DIR).
+ * @deprecated When `DXF_PLANNER === "app"`, use `parseLocalDxf` on device. Kept for rollback.
+ */
 export function parseDxf(apiBaseUrl: string, formData: FormData): Promise<Response> {
   return fetch(apiUrl(apiBaseUrl, "/api/path/parse-dxf"), {
     method: "POST",
