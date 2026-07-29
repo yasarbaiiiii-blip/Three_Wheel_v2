@@ -28,12 +28,14 @@ import {
   applyCsvOrderToPlanLines,
   type CsvPathOrderEntry,
 } from "../utils/csvPathOrder";
-import { buildCsvTransitLines } from "../utils/localPointCsv";
+import {
+  DEFAULT_CSV_EXTENSION_CONFIG,
+  type CsvExtensionConfig,
+} from "../utils/csvExtensions";
 import {
   localCsvToMapPins,
   type LocalPointCsvResult,
 } from "../utils/localPointCsv";
-import { sanitizePlanLines } from "../utils/pathWorkflow";
 import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
 import type {
   AlignmentResultState,
@@ -276,6 +278,10 @@ export function FieldsPage(props: FieldsPageProps) {
   const [showTemplates, setShowTemplates] = useState(false);
   /** CSV path order / paint flags from CsvPathOrderStep (Phase 3). */
   const [csvPathOrder, setCsvPathOrder] = useState<CsvPathOrderEntry[] | null>(null);
+  /** Local CSV PRE/AFT extensions (app-owned; not saved via /extensions). */
+  const [csvExtensionConfig, setCsvExtensionConfig] = useState<CsvExtensionConfig>(
+    DEFAULT_CSV_EXTENSION_CONFIG
+  );
   const [boundaryMode, setBoundaryMode] = useState(false);
   const [boundaryWidthStr, setBoundaryWidthStr] = useState("4.0");
   const [boundaryHeightStr, setBoundaryHeightStr] = useState("3.0");
@@ -968,7 +974,7 @@ export function FieldsPage(props: FieldsPageProps) {
           }}
         >
           <ScrollView
-            style={{ flexGrow: 0, flexShrink: 1, maxHeight: isSectionOpen("upload") ? 280 : undefined }}
+            style={{ flexGrow: 0, flexShrink: 1, maxHeight: isSectionOpen("upload") ? 420 : undefined }}
             contentContainerStyle={{ gap: 8 }}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
@@ -1034,7 +1040,7 @@ export function FieldsPage(props: FieldsPageProps) {
             expanded={isSectionOpen("upload")}
             onToggle={() => toggleSection("upload", "upload")}
             scrollableBody
-            bodyMaxHeight={320}
+            bodyMaxHeight={400}
           >
             <UploadAndPreviewStep
               apiBaseUrl={apiBaseUrl}
@@ -1057,22 +1063,46 @@ export function FieldsPage(props: FieldsPageProps) {
               onInvalidateWorkflow={onInvalidateWorkflow}
               blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
               protectedResident={protectedResident}
+              localCsvPreview={activeCsvPreview}
               onLocalCsvParsed={(data) => {
                 // Flip UI immediately in this screen (do not wait only on App props).
                 setMissionCsvPreview(data);
                 onLocalCsvParsed?.(data);
                 setShowMapInteraction(true);
                 setCsvPathOrder(null);
-                // After CSV load: collapse Upload, open combined Path Order & Load.
+                setCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG);
+                // Keep Upload expanded so CSV Enable Extension stays visible.
+                // Path Order is available below; do not auto-collapse Upload.
                 setShowTemplates(false);
                 setActiveStep("upload");
                 setOpenSections((prev) => ({
                   ...prev,
-                  upload: false,
+                  upload: true,
                   pathOrder: true,
                   templates: false,
                   send: false,
                 }));
+              }}
+              csvExtensionConfig={csvExtensionConfig}
+              onCsvExtensionConfigChange={(next) => {
+                setCsvExtensionConfig(next);
+                setLines((prev) => {
+                  const order =
+                    csvPathOrder ??
+                    prev
+                      .filter(
+                        (l) =>
+                          l.layer !== "transit" &&
+                          l.layer !== "extension" &&
+                          l.layer !== "virtual_boundary"
+                      )
+                      .map((l) => ({
+                        lineId: l.id,
+                        label: l.label,
+                        paint: true as boolean,
+                      }));
+                  return applyCsvOrderToPlanLines(prev, order, next);
+                });
               }}
               onClearLocalCsv={() => {
                 setMissionCsvPreview(null);
@@ -1104,6 +1134,7 @@ export function FieldsPage(props: FieldsPageProps) {
               <View style={{ flex: 1, minHeight: 0, gap: 14 }}>
                 <CsvPathOrderStep
                   lines={lines}
+                  extensionConfig={csvExtensionConfig}
                   onOrderChange={(_painted, fullOrder) => {
                     setCsvPathOrder((prev) => {
                       const same =
@@ -1115,8 +1146,10 @@ export function FieldsPage(props: FieldsPageProps) {
                         );
                       return same ? prev : fullOrder;
                     });
-                    // Rebuild map transit: end of path N → start of path N+1 in new order.
-                    setLines((prev) => applyCsvOrderToPlanLines(prev, fullOrder));
+                    // Rebuild map transit + extensions for the new order.
+                    setLines((prev) =>
+                      applyCsvOrderToPlanLines(prev, fullOrder, csvExtensionConfig)
+                    );
                   }}
                 />
                 <View
@@ -1133,6 +1166,7 @@ export function FieldsPage(props: FieldsPageProps) {
                     mapPinCount={localCsvMapPins?.length ?? null}
                     lines={lines}
                     pathOrder={csvPathOrder}
+                    extensionConfig={csvExtensionConfig}
                     setLines={setLines}
                     onSelectLine={onSelectLine}
                     setStagedMissionId={setStagedMissionId}
@@ -1264,15 +1298,18 @@ export function FieldsPage(props: FieldsPageProps) {
                                   (l) => l.layer !== "transit" && l.layer !== "extension"
                                 );
                                 const marks = [...existingMarks, ...templateLines];
-                                const transit = buildCsvTransitLines(
-                                  marks.filter(
-                                    (l) =>
-                                      l.layer === "marking" ||
-                                      l.is_mark === true ||
-                                      l.entity?.is_mark === true
-                                  )
+                                const order =
+                                  csvPathOrder ??
+                                  marks.map((l) => ({
+                                    lineId: l.id,
+                                    label: l.label,
+                                    paint: true as boolean,
+                                  }));
+                                return applyCsvOrderToPlanLines(
+                                  marks,
+                                  order,
+                                  csvExtensionConfig
                                 );
-                                return sanitizePlanLines([...marks, ...transit]);
                               });
                               setShowMapInteraction(true);
                             }

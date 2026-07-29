@@ -10,6 +10,12 @@ import { GripVertical } from "lucide-react-native";
 import type { PlanLine } from "../../../types/plan";
 import { getLineFitMeta } from "../../../utils/csvGeometryReadiness";
 import {
+  buildCsvExtensionPreviews,
+  csvExtensionLengthM,
+  type CsvExtensionConfig,
+  type CsvExtensionPreview,
+} from "../../../utils/csvExtensions";
+import {
   buildCsvTransitPreviews,
   buildOrderedTrajectory,
   defaultPathOrder,
@@ -42,21 +48,36 @@ type TransitRow = {
   preview: CsvTransitPreview;
 };
 
-type ListRow = PathRow | TransitRow;
+type ExtensionRow = {
+  kind: "extension";
+  id: string;
+  preview: CsvExtensionPreview;
+};
+
+type ListRow = PathRow | TransitRow | ExtensionRow;
 
 type CsvPathOrderStepProps = {
   lines: PlanLine[];
   onOrderChange?: (orderedPaintedLines: PlanLine[], fullOrder: CsvPathOrderEntry[]) => void;
+  /** Used for extension length totals / list rows only — toggle lives in Upload. */
+  extensionConfig?: CsvExtensionConfig | null;
 };
 
 function buildInterleavedRows(
   orderedLines: PlanLine[],
   order: CsvPathOrderEntry[],
-  transitPreviews: CsvTransitPreview[]
+  transitPreviews: CsvTransitPreview[],
+  extensionPreviews: CsvExtensionPreview[]
 ): ListRow[] {
   const byId = new Map(order.map((e) => [e.lineId, e]));
   const rows: ListRow[] = [];
   const transitByFrom = new Map(transitPreviews.map((t) => [t.fromLineId, t]));
+  const preByLine = new Map(
+    extensionPreviews.filter((e) => e.role === "pre").map((e) => [e.lineId, e])
+  );
+  const aftByLine = new Map(
+    extensionPreviews.filter((e) => e.role === "aft").map((e) => [e.lineId, e])
+  );
 
   orderedLines.forEach((line, index) => {
     const entry = byId.get(line.id) ?? {
@@ -64,6 +85,15 @@ function buildInterleavedRows(
       label: line.label,
       paint: true,
     };
+    const paint = entry.paint !== false;
+
+    if (paint) {
+      const pre = preByLine.get(line.id);
+      if (pre) {
+        rows.push({ kind: "extension", id: `ext-pre:${pre.id}`, preview: pre });
+      }
+    }
+
     rows.push({
       kind: "path",
       id: `path:${line.id}`,
@@ -71,7 +101,12 @@ function buildInterleavedRows(
       entry,
       badge: index + 1,
     });
-    if (entry.paint !== false) {
+
+    if (paint) {
+      const aft = aftByLine.get(line.id);
+      if (aft) {
+        rows.push({ kind: "extension", id: `ext-aft:${aft.id}`, preview: aft });
+      }
       const transit = transitByFrom.get(line.id);
       if (transit) {
         rows.push({
@@ -86,7 +121,11 @@ function buildInterleavedRows(
   return rows;
 }
 
-export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps) {
+export function CsvPathOrderStep({
+  lines,
+  onOrderChange,
+  extensionConfig = null,
+}: CsvPathOrderStepProps) {
   const markLines = useMemo(() => selectMarkPlanLines(lines), [lines]);
   const markKey = useMemo(
     () =>
@@ -134,13 +173,25 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
 
   const painted = useMemo(() => resolveOrderedPaintedLines(markLines, order), [markLines, order]);
   const trajectory = useMemo(
-    () => buildOrderedTrajectory(markLines, order, DEFAULT_SPEEDS),
-    [markLines, order]
+    () =>
+      buildOrderedTrajectory(markLines, order, {
+        ...DEFAULT_SPEEDS,
+        extensions: extensionConfig,
+      }),
+    [markLines, order, extensionConfig]
   );
   const reversals = useMemo(() => detectReversalWarnings(painted), [painted]);
   const transitPreviews = useMemo(
     () => buildCsvTransitPreviews(markLines, order),
     [markLines, order]
+  );
+  const extensionPreviews = useMemo(
+    () => buildCsvExtensionPreviews(painted, extensionConfig),
+    [painted, extensionConfig]
+  );
+  const extensionLengthM = useMemo(
+    () => csvExtensionLengthM(painted, extensionConfig),
+    [painted, extensionConfig]
   );
 
   useEffect(() => {
@@ -156,8 +207,8 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
   );
 
   const listRows = useMemo(
-    () => buildInterleavedRows(orderedLines, order, transitPreviews),
-    [orderedLines, order, transitPreviews]
+    () => buildInterleavedRows(orderedLines, order, transitPreviews, extensionPreviews),
+    [orderedLines, order, transitPreviews, extensionPreviews]
   );
 
   if (markLines.length === 0) {
@@ -172,7 +223,10 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
     280,
     Math.max(
       100,
-      orderedLines.length * PATH_ROW_HEIGHT + transitPreviews.length * TRANSIT_ROW_HEIGHT + 8
+      orderedLines.length * PATH_ROW_HEIGHT +
+        transitPreviews.length * TRANSIT_ROW_HEIGHT +
+        extensionPreviews.length * TRANSIT_ROW_HEIGHT +
+        8
     )
   );
 
@@ -191,6 +245,9 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
         Paint {trajectory.totals.markLengthM.toFixed(1)} m
         {trajectory.totals.travelLengthM > 0.05
           ? `  ·  Transit ${trajectory.totals.travelLengthM.toFixed(1)} m`
+          : ""}
+        {extensionLengthM > 0.05
+          ? `  ·  Extension ${extensionLengthM.toFixed(1)} m`
           : ""}
         {reversals.length > 0 ? (
           <Text style={{ color: FIELDS_COLORS.warning, fontWeight: "600" }}>
@@ -251,6 +308,32 @@ export function CsvPathOrderStep({ lines, onOrderChange }: CsvPathOrderStepProps
                     </Text>
                     <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, fontWeight: "600" }}>
                       {item.preview.lengthM.toFixed(1)} m
+                    </Text>
+                  </View>
+                </ScaleDecorator>
+              );
+            }
+
+            if (item.kind === "extension") {
+              return (
+                <ScaleDecorator>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      paddingLeft: 40,
+                      paddingRight: 12,
+                      paddingVertical: 4,
+                      backgroundColor: "rgba(139, 92, 246, 0.08)",
+                      borderBottomWidth: 1,
+                      borderBottomColor: FIELDS_COLORS.panelBorder,
+                    }}
+                  >
+                    <Text style={{ flex: 1, color: "#8b5cf6", fontSize: 10, fontWeight: "700" }}>
+                      {item.preview.role === "pre" ? "pre-ext" : "aft-ext"}
+                    </Text>
+                    <Text style={{ color: "#8b5cf6", fontSize: 10, fontWeight: "600" }}>
+                      {item.preview.lengthM.toFixed(2)} m
                     </Text>
                   </View>
                 </ScaleDecorator>

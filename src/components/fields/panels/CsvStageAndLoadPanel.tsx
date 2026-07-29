@@ -18,6 +18,11 @@ import {
   selectMarkPlanLines,
   type CsvPathOrderEntry,
 } from "../../../utils/csvPathOrder";
+import {
+  buildCsvExtensionLines,
+  normalizeCsvExtensionConfig,
+  type CsvExtensionConfig,
+} from "../../../utils/csvExtensions";
 import { buildTrajectory } from "../../../utils/csvTrajectory";
 import type { LocalPointCsvResult } from "../../../utils/localPointCsv";
 import { sanitizePlanLines } from "../../../utils/pathWorkflow";
@@ -34,6 +39,8 @@ type CsvStageAndLoadPanelProps = {
   lines?: PlanLine[];
   /** Operator order/paint from CsvPathOrderStep; defaults to all marks painted in list order. */
   pathOrder?: CsvPathOrderEntry[] | null;
+  /** Local PRE/AFT config for app-planned trajectory (spray-off travel runs). */
+  extensionConfig?: CsvExtensionConfig | null;
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   onSelectLine: (id: string | null) => void;
   setStagedMissionId: React.Dispatch<React.SetStateAction<string | null>>;
@@ -82,6 +89,7 @@ export function CsvStageAndLoadPanel({
   mapPinCount: _mapPinCount = null,
   lines = [],
   pathOrder = null,
+  extensionConfig = null,
   setLines,
   onSelectLine,
   setStagedMissionId,
@@ -92,6 +100,10 @@ export function CsvStageAndLoadPanel({
   onLoadSelectedPath,
   missionActionBusy,
 }: CsvStageAndLoadPanelProps) {
+  const extCfg = useMemo(
+    () => normalizeCsvExtensionConfig(extensionConfig),
+    [extensionConfig]
+  );
   void _mapPinCount;
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState<CsvStageStep | "loadMission" | null>(null);
@@ -160,8 +172,9 @@ export function CsvStageAndLoadPanel({
       markSpeedMs: 0.35,
       travelSpeedMs: 0.5,
       groundTruthSource,
+      extensions: extCfg,
     });
-  }, [useAppPlanner, markLines, order, groundTruthSource]);
+  }, [useAppPlanner, markLines, order, groundTruthSource, extCfg]);
 
   const paintedCount = useMemo(
     () => order.filter((e) => e.paint !== false && markLines.some((m) => m.id === e.lineId)).length,
@@ -192,7 +205,8 @@ export function CsvStageAndLoadPanel({
       plan: pathApi.PathPlanResponse;
       stagedInspection?: pathApi.StagedMissionResponse;
     },
-    allowLoad: boolean
+    allowLoad: boolean,
+    preSendExtensionLines: PlanLine[] = []
   ) => {
     const plan = result.plan;
     setStaged({ missionId: result.missionId, plan });
@@ -217,7 +231,10 @@ export function CsvStageAndLoadPanel({
 
     // Prefer stagedInspection (has anchor + waypoints). PathPlanResponse has no anchor —
     // hydrating lines from plan alone caused frame desync under numbered pins.
-    const hydrated = hydrateStagedMissionForMap(result.stagedInspection ?? null);
+    // Extension catalog recovers pre/aft labels (artifact only has spray booleans).
+    const hydrated = hydrateStagedMissionForMap(result.stagedInspection ?? null, {
+      extensionLines: preSendExtensionLines,
+    });
     if (hydrated) {
       setAlignedRefPoints?.(hydrated.alignedRefPoints);
       setLines(sanitizePlanLines(hydrated.lines));
@@ -265,7 +282,9 @@ export function CsvStageAndLoadPanel({
         markSpeedMs: 0.35,
         travelSpeedMs: 0.5,
         groundTruthSource,
+        extensions: extCfg,
       });
+      const preSendExtensions = buildCsvExtensionLines(appTrajectory.paintedLines, extCfg);
 
       const result = await planAndStageAppTrajectory(apiBaseUrl, {
         missionName: localCsvPreview.fileName.replace(/\.[^.]+$/, "") || "csv_mission",
@@ -293,7 +312,8 @@ export function CsvStageAndLoadPanel({
           plan: result.plan,
           stagedInspection: result.stagedInspection,
         },
-        result.echoVerification == null || result.echoVerification.ok
+        result.echoVerification == null || result.echoVerification.ok,
+        preSendExtensions
       );
     } catch (err) {
       const message = err instanceof Error && err.message ? err.message : "Could not send the path.";

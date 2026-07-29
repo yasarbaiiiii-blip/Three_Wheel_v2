@@ -94,3 +94,13 @@ export const INITIAL_STAGED_WORKFLOW_STATE: StagedWorkflowState = {
 };
 
 export type AccordionStatus = StagedWorkflowStatus | "idle";
+
+/** Local CSV PRE/AFT extension config (app state — never saved via /extensions). */
+export type {
+  CsvExtensionConfig,
+} from "../utils/csvExtensions";
+
+export {
+  DEFAULT_CSV_EXTENSION_CONFIG,
+  normalizeCsvExtensionConfig,
+} from "../utils/csvExtensions";

@@ -18,6 +18,12 @@
  */
 
 import type { PlanLine } from "../types/plan";
+import {
+  extensionEndpointsForLine,
+  isMissionClosedLoop,
+  normalizeCsvExtensionConfig,
+  type CsvExtensionConfig,
+} from "./csvExtensions";
 
 /** [north_m, east_m] — explicit NED pair for the plan-trajectory payload. */
 export type NedPair = [number, number];
@@ -56,6 +62,11 @@ export type BuildTrajectoryOpts = {
    * within {@link GROUND_TRUTH_MATCH_M}; fitted fill points contribute nothing.
    */
   groundTruthSource?: GroundTruthSourcePoint[];
+  /**
+   * When enabled, PRE/AFT travel runs are inserted at mark-group boundaries
+   * (see docs/CSV_EXTENSIONS_EXECUTION_PLAN.md). Spray-off by construction.
+   */
+  extensions?: Partial<CsvExtensionConfig> | null;
 };
 
 export type BuildTrajectoryResult = {
@@ -286,11 +297,16 @@ export function findTravelTouchViolations(
 type MarkPoly = {
   points: NedPair[];
   label?: string;
+  /** First painted path in this group — PRE attaches here. */
+  firstLine: PlanLine;
+  /** Last painted path in this group — AFT attaches here. */
+  lastLine: PlanLine;
 };
 
 /**
  * Merge mark polylines whose end→start gap is under MARK_CONTIGUOUS_GAP_M into
  * single contiguous mark groups. Larger gaps stay as separate groups (travel later).
+ * PRE uses firstLine of a group; AFT uses lastLine.
  */
 function mergeContiguousMarks(marks: MarkPoly[]): MarkPoly[] {
   if (marks.length === 0) return [];
@@ -301,6 +317,8 @@ function mergeContiguousMarks(marks: MarkPoly[]): MarkPoly[] {
       groups.push({
         points: mark.points.slice(),
         label: mark.label,
+        firstLine: mark.firstLine,
+        lastLine: mark.lastLine,
       });
       continue;
     }
@@ -321,15 +339,71 @@ function mergeContiguousMarks(marks: MarkPoly[]): MarkPoly[] {
       if (mark.label) {
         prev.label = prev.label ? `${prev.label} + ${mark.label}` : mark.label;
       }
+      prev.lastLine = mark.lastLine;
     } else {
       groups.push({
         points: mark.points.slice(),
         label: mark.label,
+        firstLine: mark.firstLine,
+        lastLine: mark.lastLine,
       });
     }
   }
 
   return groups;
+}
+
+/** Concatenate polylines, dropping near-duplicate junction vertices. */
+function joinPolylines(parts: NedPair[][]): NedPair[] {
+  const out: NedPair[] = [];
+  for (const part of parts) {
+    for (const p of part) {
+      if (out.length > 0 && distM(out[out.length - 1], p) < JUNCTION_DEDUP_M) continue;
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+/**
+ * Inter-group travel with optional AFT + connector + PRE as one run.
+ * AFT runs from mark end along exit tangent; PRE runs into next mark start along entry.
+ * Connector bridges AFT tip → PRE tip (or mark ends when extensions are off).
+ */
+function buildInterGroupTravel(
+  fromGroup: MarkPoly,
+  toGroup: MarkPoly,
+  travelSpeed: number,
+  ext: { preM: number; aftM: number } | null
+): TrajectoryRun {
+  const markEnd = fromGroup.points[fromGroup.points.length - 1];
+  const markStart = toGroup.points[0];
+
+  if (!ext) {
+    return {
+      kind: "travel",
+      points: [markEnd, markStart],
+      speed_m_s: travelSpeed,
+    };
+  }
+
+  const aft = extensionEndpointsForLine(fromGroup.lastLine, "aft", ext.aftM);
+  const pre = extensionEndpointsForLine(toGroup.firstLine, "pre", ext.preM);
+  const midFrom = aft ? aft[aft.length - 1] : markEnd;
+  const midTo = pre ? pre[0] : markStart;
+  const mid: NedPair[] =
+    distM(midFrom, midTo) < JUNCTION_DEDUP_M ? [midFrom] : [midFrom, midTo];
+
+  const parts: NedPair[][] = [];
+  if (aft) parts.push(aft);
+  parts.push(mid);
+  if (pre) parts.push(pre);
+
+  const points = joinPolylines(parts);
+  if (points.length < 2) {
+    return { kind: "travel", points: [markEnd, markStart], speed_m_s: travelSpeed };
+  }
+  return { kind: "travel", points, speed_m_s: travelSpeed };
 }
 
 /**
@@ -389,6 +463,7 @@ export function buildTrajectory(
   }
 
   const marks: MarkPoly[] = [];
+  const acceptedLines: PlanLine[] = [];
   for (const line of orderedMarkLines) {
     // Allowlist only (finding 3) — unknown layers with undefined is_mark do not paint.
     if (!isPaintableMarkLine(line)) {
@@ -429,7 +504,8 @@ export function buildTrajectory(
       warnings.push(`Skipped line "${line.label ?? line.id}": fewer than 2 valid NED points.`);
       continue;
     }
-    marks.push({ points, label: line.label });
+    marks.push({ points, label: line.label, firstLine: line, lastLine: line });
+    acceptedLines.push(line);
   }
 
   if (marks.length === 0) {
@@ -448,7 +524,30 @@ export function buildTrajectory(
     );
   }
 
+  const extCfg = normalizeCsvExtensionConfig(opts.extensions);
+  const useExt =
+    extCfg.enabled &&
+    !isMissionClosedLoop(acceptedLines) &&
+    acceptedLines.length > 0;
+  if (extCfg.enabled && isMissionClosedLoop(acceptedLines)) {
+    warnings.push("Extensions suppressed: mission is a closed loop (first≈last within 0.01 m).");
+  }
+  const extLens = useExt ? { preM: extCfg.preM, aftM: extCfg.aftM } : null;
+
   const runs: TrajectoryRun[] = [];
+
+  if (useExt && extLens) {
+    const pre = extensionEndpointsForLine(groups[0].firstLine, "pre", extLens.preM);
+    if (pre && pre.length >= 2) {
+      runs.push({
+        kind: "travel",
+        points: pre,
+        speed_m_s: travelSpeed,
+        label: "pre-ext",
+      });
+    }
+  }
+
   for (let i = 0; i < groups.length; i++) {
     const g = groups[i];
     const markRun: TrajectoryRun = {
@@ -460,13 +559,20 @@ export function buildTrajectory(
     runs.push(markRun);
 
     if (i < groups.length - 1) {
-      const from = g.points[g.points.length - 1];
-      const to = groups[i + 1].points[0];
       // By construction gap ≥ MARK_CONTIGUOUS_GAP_M, so travel is real and endpoints touch.
+      runs.push(buildInterGroupTravel(g, groups[i + 1], travelSpeed, extLens));
+    }
+  }
+
+  if (useExt && extLens) {
+    const last = groups[groups.length - 1];
+    const aft = extensionEndpointsForLine(last.lastLine, "aft", extLens.aftM);
+    if (aft && aft.length >= 2) {
       runs.push({
         kind: "travel",
-        points: [from, to],
+        points: aft,
         speed_m_s: travelSpeed,
+        label: "aft-ext",
       });
     }
   }

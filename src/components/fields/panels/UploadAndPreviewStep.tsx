@@ -6,9 +6,14 @@ import { Upload, X } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
 import type { ImportedPlan } from "../../../types/plan";
-import { partitionParseWarnings } from "../../../utils/csvGeometryReadiness";
+import {
+  CSV_EXT_AFT_FLOOR_M,
+  CSV_EXT_MAX_M,
+  CSV_EXT_WARN_M,
+  normalizeCsvExtensionConfig,
+  type CsvExtensionConfig,
+} from "../../../utils/csvExtensions";
 import { parseLocalPointCsv, type LocalPointCsvResult } from "../../../utils/localPointCsv";
-import { CsvWarningsPanel } from "../CsvWarningsPanel";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 type UploadAndPreviewStepProps = {
@@ -43,6 +48,14 @@ type UploadAndPreviewStepProps = {
   guideCsvFileName?: string | null;
   /** When true, hide "Import guide CSV" (mission survey CSV already loaded). */
   hideGuideCsvImport?: boolean;
+  /** Local CSV extension config (app state — no network). */
+  csvExtensionConfig?: CsvExtensionConfig;
+  onCsvExtensionConfigChange?: (next: CsvExtensionConfig) => void;
+  /**
+   * Parent-owned parse result. Required after CSV import because FieldsPage flips
+   * isLocalCsvFlow and remounts this step — localCsvSummary state is lost on remount.
+   */
+  localCsvPreview?: LocalPointCsvResult | null;
 };
 
 const MAX_IMPORT_ATTEMPTS = 3;
@@ -161,6 +174,9 @@ export function UploadAndPreviewStep({
   isImportingRefPointsCsv = false,
   guideCsvFileName = null,
   hideGuideCsvImport = false,
+  csvExtensionConfig,
+  onCsvExtensionConfigChange,
+  localCsvPreview = null,
 }: UploadAndPreviewStepProps) {
   const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -172,19 +188,69 @@ export function UploadAndPreviewStep({
     kind: string;
     frame: string;
     warnings: string[];
-  } | null>(null);
+  } | null>(() =>
+    localCsvPreview
+      ? {
+          num_points: localCsvPreview.num_points,
+          kind: localCsvPreview.kind,
+          frame: localCsvPreview.point_source_frame,
+          warnings: localCsvPreview.warnings.slice(0, 12),
+        }
+      : null
+  );
 
-  // Extension state (inline, no modal)
+  // Extension state (inline, no modal) — DXF remote; CSV drafts below
   const [extEnabled, setExtEnabled] = useState(false);
   const [extPre, setExtPre] = useState("0.5");
   const [extAft, setExtAft] = useState("0.5");
   const [extPerLine, setExtPerLine] = useState(false);
   const [isExtSetting, setIsExtSetting] = useState(false);
+  /** Draft strings for CSV extension inputs (commit normalized values on blur). */
+  const [csvExtPreDraft, setCsvExtPreDraft] = useState(
+    () => String(csvExtensionConfig?.preM ?? 0.5)
+  );
+  const [csvExtAftDraft, setCsvExtAftDraft] = useState(
+    () => String(csvExtensionConfig?.aftM ?? 0.5)
+  );
 
-  const targetPathName = importedPlan?.fileName ?? null;
-  const isDxfPath = targetPathName?.toLowerCase().endsWith(".dxf");
+  useEffect(() => {
+    if (!csvExtensionConfig) return;
+    setCsvExtPreDraft(String(csvExtensionConfig.preM));
+    setCsvExtAftDraft(String(csvExtensionConfig.aftM));
+  }, [csvExtensionConfig?.preM, csvExtensionConfig?.aftM, csvExtensionConfig?.enabled]);
+
+  // Re-hydrate summary when parent already holds the parse (layout remount on CSV flow).
+  useEffect(() => {
+    if (!localCsvPreview) return;
+    setLocalCsvSummary({
+      num_points: localCsvPreview.num_points,
+      kind: localCsvPreview.kind,
+      frame: localCsvPreview.point_source_frame,
+      warnings: localCsvPreview.warnings.slice(0, 12),
+    });
+  }, [
+    localCsvPreview?.num_points,
+    localCsvPreview?.kind,
+    localCsvPreview?.point_source_frame,
+    localCsvPreview?.fileName,
+  ]);
+
+  // Prefer plan name; fall back to parent parse so remount after CSV flow still shows LOADED.
+  const targetPathName =
+    importedPlan?.fileName ?? localCsvPreview?.fileName ?? null;
+  const isDxfPath =
+    importedPlan?.fileType === "dxf" || !!targetPathName?.toLowerCase().endsWith(".dxf");
   const isCsvPath =
-    importedPlan?.fileType === "csv" || targetPathName?.toLowerCase().endsWith(".csv");
+    importedPlan?.fileType === "csv" ||
+    !!targetPathName?.toLowerCase().endsWith(".csv") ||
+    localCsvPreview != null ||
+    localCsvSummary != null;
+  /** Extension UI must not depend on local-only summary — that state dies on remount. */
+  const showCsvExtension =
+    isCsvPath &&
+    !isDxfPath &&
+    onCsvExtensionConfigChange != null &&
+    csvExtensionConfig != null;
 
   useEffect(() => {
     if (isDxfPath && targetPathName && apiBaseUrl) {
@@ -262,15 +328,8 @@ export function UploadAndPreviewStep({
         setImportError(null);
 
         if (parsed.warnings.length > 0) {
+          // Keep for logs only — do not surface import warnings in the Upload UI.
           console.warn("[import][csv] warnings:", parsed.warnings);
-          // Loud operator-visible signal for silent-and-wrong frame cases.
-          const critical = parsed.warnings.filter(
-            (w) =>
-              /projected|jumbled|swapped|Headerless|Null Island|do not paint|confirm/i.test(w)
-          );
-          if (critical.length > 0) {
-            Alert.alert("CSV needs review", critical.slice(0, 4).join("\n\n"));
-          }
         }
       } catch (err) {
         console.log("Error importing CSV locally:", err);
@@ -583,25 +642,10 @@ export function UploadAndPreviewStep({
                 {targetPathName}
               </Text>
               {localCsvSummary ? (
-                <View style={{ gap: 6, marginTop: 2 }}>
-                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11 }}>
-                    {localCsvSummary.num_points} points · local {localCsvSummary.kind.toUpperCase()} ·{" "}
-                    {localCsvSummary.frame}
-                  </Text>
-                  {localCsvSummary.warnings.length > 0
-                    ? (() => {
-                        const parts = partitionParseWarnings(localCsvSummary.warnings);
-                        return (
-                          <CsvWarningsPanel
-                            title="Import warnings"
-                            critical={parts.critical}
-                            advisory={parts.advisory}
-                            defaultExpanded={parts.critical.length > 0}
-                          />
-                        );
-                      })()
-                    : null}
-                </View>
+                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
+                  {localCsvSummary.num_points} points · local {localCsvSummary.kind.toUpperCase()} ·{" "}
+                  {localCsvSummary.frame}
+                </Text>
               ) : previewData ? (
                 <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
                   {previewData.num_points ?? "?"} points · {previewData.frame ?? "DXF"}
@@ -678,7 +722,7 @@ export function UploadAndPreviewStep({
         </View>
       ) : null}
 
-      {/* Extension Config (inline, no modal) — only for DXF */}
+      {/* Extension Config — DXF: rover /extensions API. CSV: local state only (no network). */}
       {targetPathName && isDxfPath ? (
         <View
           style={{
@@ -794,6 +838,146 @@ export function UploadAndPreviewStep({
               </Text>
             </Pressable>
           </View>
+        </View>
+      ) : null}
+
+      {showCsvExtension && csvExtensionConfig && onCsvExtensionConfigChange ? (
+        <View
+          style={{
+            borderRadius: 10,
+            backgroundColor: FIELDS_COLORS.surfaceSolid,
+            borderWidth: 1,
+            borderColor: csvExtensionConfig.enabled ? "#8b5cf6" : FIELDS_COLORS.panelBorder,
+            overflow: "hidden",
+          }}
+        >
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: 12,
+            }}
+          >
+            <View style={{ flex: 1, paddingRight: 10 }}>
+              <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "800" }}>
+                Enable Extension
+              </Text>
+              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
+                Run-up / run-out (travel, no spray). Local only — not saved to the rover.
+              </Text>
+            </View>
+            <Switch
+              value={csvExtensionConfig.enabled}
+              onValueChange={(enabled) => {
+                onInvalidateWorkflow("spray");
+                onCsvExtensionConfigChange(
+                  normalizeCsvExtensionConfig({
+                    ...csvExtensionConfig,
+                    enabled,
+                    aftM: enabled
+                      ? Math.max(CSV_EXT_AFT_FLOOR_M, csvExtensionConfig.aftM)
+                      : csvExtensionConfig.aftM,
+                  })
+                );
+              }}
+              trackColor={{ false: FIELDS_COLORS.panelBorder, true: "#8b5cf6" }}
+              thumbColor={csvExtensionConfig.enabled ? "#ffffff" : "#94a3b8"}
+            />
+          </View>
+
+          {csvExtensionConfig.enabled ? (
+            <View style={{ padding: 12, paddingTop: 0, gap: 8 }}>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <View style={{ flex: 1, gap: 3 }}>
+                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, fontWeight: "700" }}>
+                    PRE (m)
+                  </Text>
+                  <TextInput
+                    style={{
+                      height: 36,
+                      backgroundColor: FIELDS_COLORS.cardSolid,
+                      borderWidth: 1,
+                      borderColor: FIELDS_COLORS.panelBorder,
+                      borderRadius: 6,
+                      paddingHorizontal: 8,
+                      fontSize: 13,
+                      color: FIELDS_COLORS.textMain,
+                    }}
+                    value={csvExtPreDraft}
+                    onChangeText={(v) => {
+                      onInvalidateWorkflow("spray");
+                      setCsvExtPreDraft(v);
+                      const n = parseFloat(v);
+                      if (!Number.isFinite(n)) return;
+                      onCsvExtensionConfigChange(
+                        normalizeCsvExtensionConfig({
+                          ...csvExtensionConfig,
+                          preM: n,
+                        })
+                      );
+                    }}
+                    onBlur={() => {
+                      const next = normalizeCsvExtensionConfig({
+                        ...csvExtensionConfig,
+                        preM: parseFloat(csvExtPreDraft),
+                      });
+                      onCsvExtensionConfigChange(next);
+                      setCsvExtPreDraft(String(next.preM));
+                    }}
+                    keyboardType="numeric"
+                  />
+                </View>
+                <View style={{ flex: 1, gap: 3 }}>
+                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, fontWeight: "700" }}>
+                    AFT (m) · min {CSV_EXT_AFT_FLOOR_M.toFixed(2)}
+                  </Text>
+                  <TextInput
+                    style={{
+                      height: 36,
+                      backgroundColor: FIELDS_COLORS.cardSolid,
+                      borderWidth: 1,
+                      borderColor: FIELDS_COLORS.panelBorder,
+                      borderRadius: 6,
+                      paddingHorizontal: 8,
+                      fontSize: 13,
+                      color: FIELDS_COLORS.textMain,
+                    }}
+                    value={csvExtAftDraft}
+                    onChangeText={(v) => {
+                      onInvalidateWorkflow("spray");
+                      setCsvExtAftDraft(v);
+                      const n = parseFloat(v);
+                      if (!Number.isFinite(n)) return;
+                      onCsvExtensionConfigChange(
+                        normalizeCsvExtensionConfig({
+                          ...csvExtensionConfig,
+                          enabled: true,
+                          aftM: n,
+                        })
+                      );
+                    }}
+                    onBlur={() => {
+                      const next = normalizeCsvExtensionConfig({
+                        ...csvExtensionConfig,
+                        enabled: true,
+                        aftM: parseFloat(csvExtAftDraft),
+                      });
+                      onCsvExtensionConfigChange(next);
+                      setCsvExtAftDraft(String(next.aftM));
+                    }}
+                    keyboardType="numeric"
+                  />
+                </View>
+              </View>
+              {(csvExtensionConfig.preM > CSV_EXT_WARN_M ||
+                csvExtensionConfig.aftM > CSV_EXT_WARN_M) && (
+                <Text style={{ color: FIELDS_COLORS.warning, fontSize: 10 }}>
+                  Large extension (&gt;{CSV_EXT_WARN_M} m). Cap is {CSV_EXT_MAX_M} m.
+                </Text>
+              )}
+            </View>
+          ) : null}
         </View>
       ) : null}
 

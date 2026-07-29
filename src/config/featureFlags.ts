@@ -48,4 +48,8 @@ export const SMOKE_TEST_CENTER: [number, number] = [77.5946, 12.9716]; // Bangal
  * `"rover"` restores the file path with no other code changes.
  */
 export type CsvPlannerMode = "app" | "rover";
-export const CSV_PLANNER: CsvPlannerMode = "rover";
+/**
+ * App-planned path required for CSV PRE/AFT extensions (explicit travel runs).
+ * Flip back to `"rover"` only if plan-trajectory is unavailable.
+ */
+export const CSV_PLANNER: CsvPlannerMode = "app";

@@ -891,6 +891,18 @@ const CSV_TRANSIT_MIN_GAP_M = 0.02;
  * classification, its own Path Order row kind) — no further wiring needed beyond appending
  * these to the line list the CSV flow already builds.
  */
+// Re-export extension helpers (CSV_EXTENSIONS_EXECUTION_PLAN) so callers can import
+// alongside buildCsvTransitLines from one module.
+export {
+  buildCsvExtensionLines,
+  buildCsvExtensionPreviews,
+  csvExtensionLengthM,
+  DEFAULT_CSV_EXTENSION_CONFIG,
+  normalizeCsvExtensionConfig,
+  type CsvExtensionConfig,
+  type CsvExtensionPreview,
+} from "./csvExtensions";
+
 export function buildCsvTransitLines(planLines: PlanLine[]): PlanLine[] {
   const transitLines: PlanLine[] = [];
   for (let i = 0; i < planLines.length - 1; i++) {

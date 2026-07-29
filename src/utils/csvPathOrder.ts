@@ -5,6 +5,14 @@
 
 import type { PlanLine } from "../types/plan";
 import {
+  buildCsvExtensionLines,
+  buildCsvExtensionPreviews,
+  csvExtensionLengthM,
+  normalizeCsvExtensionConfig,
+  type CsvExtensionConfig,
+  type CsvExtensionPreview,
+} from "./csvExtensions";
+import {
   buildTrajectory,
   planLineToNedPolyline,
   trajectoryTotals,
@@ -13,6 +21,9 @@ import {
 } from "./csvTrajectory";
 import { buildCsvTransitLines } from "./localPointCsv";
 import { sanitizePlanLines } from "./pathWorkflow";
+
+export type { CsvExtensionConfig, CsvExtensionPreview };
+export { buildCsvExtensionPreviews, csvExtensionLengthM, normalizeCsvExtensionConfig };
 
 /** Operator turns sharper than this (deg) between consecutive painted runs trigger a warning. */
 export const REVERSAL_HEADING_THRESHOLD_DEG = 120;
@@ -232,12 +243,14 @@ export function buildCsvTransitPreviews(
 
 /**
  * Apply operator path order to plan lines: marks follow order, transit connectors
- * are rebuilt from consecutive *painted* paths (end of N → start of N+1).
- * Non-mark / non-transit layers (virtual box, etc.) are preserved.
+ * and extension PRE/AFT lines are rebuilt from consecutive *painted* paths.
+ * Stale `layer:"transit"` and `layer:"extension"` lines are stripped (never kept as orphans).
+ * Other non-mark layers (virtual box, etc.) are preserved.
  */
 export function applyCsvOrderToPlanLines(
   allLines: PlanLine[],
-  order: CsvPathOrderEntry[]
+  order: CsvPathOrderEntry[],
+  extensionConfig?: Partial<CsvExtensionConfig> | null
 ): PlanLine[] {
   const marks = selectMarkPlanLines(allLines);
   const byId = new Map(marks.map((m) => [m.id, m]));
@@ -259,10 +272,14 @@ export function applyCsvOrderToPlanLines(
 
   const painted = resolveOrderedPaintedLines(orderedMarks, order);
   const transit = buildCsvTransitLines(painted);
+  const extensions = buildCsvExtensionLines(painted, extensionConfig);
   const others = allLines.filter(
-    (l) => l.layer !== "transit" && !marks.some((m) => m.id === l.id)
+    (l) =>
+      l.layer !== "transit" &&
+      l.layer !== "extension" &&
+      !marks.some((m) => m.id === l.id)
   );
-  return sanitizePlanLines([...orderedMarks, ...transit, ...others]);
+  return sanitizePlanLines([...orderedMarks, ...transit, ...extensions, ...others]);
 }
 
 /**

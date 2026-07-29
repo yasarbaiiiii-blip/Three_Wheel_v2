@@ -1,4 +1,10 @@
 import type { PlanLine } from "../types/plan";
+import {
+  appendExtensionLegsFromPlanLines,
+  EXTENSION_ENDPOINT_MATCH_EPS_M,
+  matchNonSprayToExtensionRole,
+  type ExtensionSegmentRole,
+} from "./extensionTransitClassify";
 
 export type StagedAlignedRefPoint = {
   dxf_x: number;
@@ -140,8 +146,17 @@ export type StagedMissionMapHydration = {
   selectedLineId: string | null;
 };
 
+export type HydrateStagedMissionOpts = {
+  /**
+   * Pre-send `layer:"extension"` PlanLines. Used to relabel non-spray runs after
+   * hydrate (artifact only has spray_flags — no third run type).
+   */
+  extensionLines?: PlanLine[] | null;
+};
+
 export function hydrateStagedMissionForMap(
-  artifact: StagedMissionHydrationInput | null | undefined
+  artifact: StagedMissionHydrationInput | null | undefined,
+  opts?: HydrateStagedMissionOpts
 ): StagedMissionMapHydration | null {
   if (!artifact) return null;
 
@@ -156,6 +171,10 @@ export function hydrateStagedMissionForMap(
 
   if (lines.length === 0) return null;
 
+  if (opts?.extensionLines && opts.extensionLines.length > 0) {
+    lines = relabelHydratedLinesWithExtensions(lines, opts.extensionLines);
+  }
+
   // Always derive origin from the same artifact as geometry — never leave the
   // caller free to pair plan.merged_waypoints with a stale/missing anchor.
   const alignedRefPoints = anchorToAlignedRefPoints(artifact.anchor ?? null);
@@ -165,6 +184,213 @@ export function hydrateStagedMissionForMap(
     alignedRefPoints,
     selectedLineId: lines[0]?.id ?? null,
   };
+}
+
+function pointNear(
+  n1: number,
+  e1: number,
+  n2: number,
+  e2: number,
+  epsM: number
+): boolean {
+  return Math.hypot(n1 - n2, e1 - e2) <= epsM;
+}
+
+function nearestVertexIndex(
+  pts: Array<{ north: number; east: number }>,
+  north: number,
+  east: number
+): number {
+  let bestI = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const d = Math.hypot(pts[i].north - north, pts[i].east - east);
+    if (d < bestD) {
+      bestD = d;
+      bestI = i;
+    }
+  }
+  return bestI;
+}
+
+function polylineSliceToPlanLine(
+  pts: Array<{ north: number; east: number }>,
+  fromI: number,
+  toI: number,
+  kind: "extension" | "transit",
+  role: ExtensionSegmentRole | "none",
+  ordinal: number
+): PlanLine | null {
+  if (toI <= fromI) return null;
+  const slice = pts.slice(fromI, toI + 1);
+  if (slice.length < 2) return null;
+  let lengthM = 0;
+  for (let i = 1; i < slice.length; i++) {
+    lengthM += Math.hypot(slice[i].north - slice[i - 1].north, slice[i].east - slice[i - 1].east);
+  }
+  const first = slice[0];
+  const last = slice[slice.length - 1];
+  const id =
+    kind === "extension"
+      ? `rover-ext-${role}-${ordinal}`
+      : `rover-transit-${ordinal}`;
+  const label =
+    kind === "extension"
+      ? `${role === "pre" ? "Pre" : "Aft"}-ext ${ordinal} (${lengthM.toFixed(1)} m)`
+      : `Transit ${ordinal} (${lengthM.toFixed(1)} m)`;
+  return {
+    id,
+    label,
+    layer: kind === "extension" ? "extension" : "transit",
+    segmentRole: role === "none" ? "none" : role,
+    ...(kind === "extension" ? { is_mark: false } : {}),
+    from: { id: ordinal * 2 + 1, x: first.north, y: first.east },
+    to: { id: ordinal * 2 + 2, x: last.north, y: last.east },
+    width: 0.1,
+    entity: {
+      entity_id: id,
+      entity_type: kind === "extension" ? "EXTENSION" : "TRANSIT",
+      layer: kind === "extension" ? "EXTENSION" : "TRANSIT",
+      color: 0,
+      is_mark: false,
+      length_m: lengthM,
+      geometry: {},
+      preview_points: slice.map((p) => ({ north: p.north, east: p.east })),
+    },
+  };
+}
+
+/**
+ * Recover extension labels on post-send map redraw.
+ * Full-segment match → one extension line. Merged aft|connector|pre peels ends
+ * when catalog endpoints land on the polyline (middle stays transit).
+ */
+export function relabelHydratedLinesWithExtensions(
+  lines: PlanLine[],
+  extensionSourceLines: PlanLine[],
+  epsM: number = EXTENSION_ENDPOINT_MATCH_EPS_M
+): PlanLine[] {
+  const catalog = appendExtensionLegsFromPlanLines([], extensionSourceLines);
+  if (catalog.length === 0) return lines;
+
+  const out: PlanLine[] = [];
+  let extN = 0;
+  let transitN = 0;
+
+  for (const line of lines) {
+    if (line.layer === "marking" || line.is_mark === true) {
+      out.push(line);
+      continue;
+    }
+
+    const pts =
+      line.entity?.preview_points?.filter(
+        (p) => p != null && Number.isFinite(p.north) && Number.isFinite(p.east)
+      ) ?? null;
+    if (!pts || pts.length < 2) {
+      out.push(line);
+      continue;
+    }
+
+    const fullRole = matchNonSprayToExtensionRole(
+      pts[0].north,
+      pts[0].east,
+      pts[pts.length - 1].north,
+      pts[pts.length - 1].east,
+      catalog,
+      epsM
+    );
+    if (fullRole) {
+      extN += 1;
+      const relabeled = polylineSliceToPlanLine(pts, 0, pts.length - 1, "extension", fullRole, extN);
+      out.push(relabeled ?? line);
+      continue;
+    }
+
+    let lo = 0;
+    let hi = pts.length - 1;
+    let leadRole: ExtensionSegmentRole | null = null;
+    let trailRole: ExtensionSegmentRole | null = null;
+    let leadEnd = 0;
+    let trailStart = hi;
+
+    for (const leg of catalog) {
+      if (
+        leg.role === "aft" &&
+        pointNear(pts[0].north, pts[0].east, leg.fromNorth, leg.fromEast, epsM)
+      ) {
+        const idx = nearestVertexIndex(pts, leg.toNorth, leg.toEast);
+        if (idx > lo && idx < hi) {
+          leadRole = "aft";
+          leadEnd = idx;
+        }
+      }
+      if (
+        leg.role === "pre" &&
+        pointNear(pts[hi].north, pts[hi].east, leg.toNorth, leg.toEast, epsM)
+      ) {
+        const idx = nearestVertexIndex(pts, leg.fromNorth, leg.fromEast);
+        if (idx > lo && idx < hi) {
+          trailRole = "pre";
+          trailStart = idx;
+        }
+      }
+    }
+
+    // Leading pure-pre travel (mission start): catalog pre from tip → mark start.
+    if (!leadRole) {
+      for (const leg of catalog) {
+        if (
+          leg.role === "pre" &&
+          pointNear(pts[0].north, pts[0].east, leg.fromNorth, leg.fromEast, epsM) &&
+          pointNear(pts[hi].north, pts[hi].east, leg.toNorth, leg.toEast, epsM)
+        ) {
+          leadRole = "pre";
+          leadEnd = hi;
+          break;
+        }
+      }
+    }
+    if (!trailRole && leadEnd < hi) {
+      for (const leg of catalog) {
+        if (
+          leg.role === "aft" &&
+          pointNear(pts[0].north, pts[0].east, leg.fromNorth, leg.fromEast, epsM) &&
+          pointNear(pts[hi].north, pts[hi].east, leg.toNorth, leg.toEast, epsM)
+        ) {
+          trailRole = "aft";
+          trailStart = 0;
+          break;
+        }
+      }
+    }
+
+    if (!leadRole && !trailRole) {
+      out.push(line);
+      continue;
+    }
+
+    if (leadRole && leadEnd > 0) {
+      extN += 1;
+      const piece = polylineSliceToPlanLine(pts, 0, leadEnd, "extension", leadRole, extN);
+      if (piece) out.push(piece);
+      lo = leadEnd;
+    }
+    const midEnd = trailRole && trailStart > lo ? trailStart : hi;
+    if (midEnd > lo) {
+      transitN += 1;
+      const mid = polylineSliceToPlanLine(pts, lo, midEnd, "transit", "none", transitN);
+      if (mid) out.push(mid);
+      lo = midEnd;
+    }
+    if (trailRole && hi > lo) {
+      extN += 1;
+      const piece = polylineSliceToPlanLine(pts, lo, hi, "extension", trailRole, extN);
+      if (piece) out.push(piece);
+    }
+  }
+
+  return out;
 }
 
 /** Below this the two points are the same place — no bridging point needed. */
