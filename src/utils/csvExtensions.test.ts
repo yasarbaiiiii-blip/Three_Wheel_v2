@@ -9,7 +9,7 @@ import {
   normalizeCsvExtensionConfig,
   terminalUnitVector,
 } from "./csvExtensions";
-import { buildTrajectory, type TrajectoryRun } from "./csvTrajectory";
+import { buildTrajectory, findAdjacentMarkViolation, type TrajectoryRun } from "./csvTrajectory";
 import { applyCsvOrderToPlanLines, defaultPathOrder } from "./csvPathOrder";
 import { relabelHydratedLinesWithExtensions } from "./stagedMissionHydration";
 
@@ -183,6 +183,40 @@ describe("buildTrajectory with extensions", () => {
     );
     const preTip = runs[0].points[0];
     expect(markPts.has(`${preTip[0].toFixed(4)},${preTip[1].toFixed(4)}`)).toBe(false);
+  });
+
+  it("regression: two mark lines sharing a vertex (e.g. an arrow template) do not crash", () => {
+    // Chain-ends mode blocks PRE/AFT on any shared endpoint, so the shaft's end and the
+    // wing's start both come back non-free — no travel run bridges them, and without merging
+    // the touching edges the two 'mark' runs land adjacent, which used to throw.
+    const shaft = mark("shaft", [
+      { north: 0, east: 0 },
+      { north: 5, east: 0 },
+    ]);
+    const wing = mark("wing", [
+      { north: 5, east: 0 },
+      { north: 5, east: 5 },
+    ]);
+
+    expect(() =>
+      buildTrajectory([shaft, wing], {
+        ...speeds,
+        extensions: { enabled: true, preM: 0.5, aftM: 0.5 },
+      })
+    ).not.toThrow();
+
+    const { runs, warnings } = buildTrajectory([shaft, wing], {
+      ...speeds,
+      extensions: { enabled: true, preM: 0.5, aftM: 0.5 },
+    });
+    expect(findAdjacentMarkViolation(runs)).toBeNull();
+    expect(warnings.some((w) => w.startsWith("INTERNAL:"))).toBe(false);
+    // Touching edges merge into one continuous mark run instead of needing a travel bridge.
+    expect(kinds(runs)).toEqual(["travel", "mark", "travel"]);
+    const merged = runs[1];
+    expect(merged.points[0]).toEqual([0, 0]);
+    expect(merged.points[merged.points.length - 1]).toEqual([5, 5]);
+    expect(merged.label).toBe("shaft + wing");
   });
 });
 

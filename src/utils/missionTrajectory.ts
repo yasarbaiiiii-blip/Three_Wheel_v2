@@ -552,13 +552,35 @@ export function buildTrajectory(
         });
       }
 
-      const markRun: TrajectoryRun = {
-        kind: "mark",
-        points: item.edge.points,
-        speed_m_s: markSpeed,
-      };
-      if (item.edge.parentLabel) markRun.label = item.edge.parentLabel;
-      runs.push(markRun);
+      // When neither this edge's start got a PRE nor the previous edge's end got an AFT,
+      // and the two already touch (shared/near-coincident vertex — e.g. two template edges
+      // meeting at a point), no travel run gets emitted below. Extend the previous mark run
+      // instead of pushing an adjacent 'mark' run, which would violate the no-adjacent-mark
+      // invariant (finding: template shapes whose edges converge on a shared vertex).
+      const lastRun = runs[runs.length - 1];
+      const touchesPrevMark =
+        i > 0 &&
+        lastRun?.kind === "mark" &&
+        !item.pre &&
+        distM(lastRun.points[lastRun.points.length - 1], item.edge.points[0]) <=
+          EXT_SEGMENT_JOIN_TOL_M;
+
+      if (touchesPrevMark && lastRun) {
+        lastRun.points = joinPolylines([lastRun.points, item.edge.points]);
+        if (item.edge.parentLabel) {
+          lastRun.label = lastRun.label
+            ? `${lastRun.label} + ${item.edge.parentLabel}`
+            : item.edge.parentLabel;
+        }
+      } else {
+        const markRun: TrajectoryRun = {
+          kind: "mark",
+          points: item.edge.points,
+          speed_m_s: markSpeed,
+        };
+        if (item.edge.parentLabel) markRun.label = item.edge.parentLabel;
+        runs.push(markRun);
+      }
 
       // Travel out of this edge and into the next one, as a single joined leg.
       const parts: NedPair[][] = [];
