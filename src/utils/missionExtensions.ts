@@ -112,7 +112,44 @@ export type MarkEdge = {
   /** Parent plan-line id (for PRE/AFT ids) */
   parentId: string;
   parentLabel: string;
+  /**
+   * Curved geometry (ARC / CIRCLE) whose directions came from analytic tangents rather
+   * than adjacent vertices. Curves are exempt from the self-closed guard: a full circle's
+   * endpoints coincide, but it still has a well-defined tangent to run in and out along.
+   */
+  curved?: boolean;
 };
+
+/**
+ * CCW travel tangent at DXF angle θ (0° = East), in (north, east).
+ * Single source of truth in the rover is `path_engine/core.py::dxf_arc_tangent`;
+ * this is that formula verbatim.
+ */
+export function dxfArcTangent(angleDeg: number): NedPair {
+  const a = (angleDeg * Math.PI) / 180;
+  return [Math.cos(a), -Math.sin(a)];
+}
+
+/**
+ * Analytic start/end tangents for curved geometry, or null when the line is not a curve.
+ *
+ * Port of `entity_extension_directions` (ARC / CIRCLE branch). A CIRCLE is densified from
+ * 0° travelling CCW and ends where it began, so both tangents are the one at 0°.
+ */
+export function analyticCurveTangents(line: PlanLine): [NedPair, NedPair] | null {
+  const type = String(line.entity?.entity_type ?? "").trim().toUpperCase();
+  const geom = line.entity?.geometry;
+  if (type === "CIRCLE") {
+    return [dxfArcTangent(0), dxfArcTangent(0)];
+  }
+  if (type === "ARC") {
+    const start = Number(geom?.startAngle);
+    const end = Number(geom?.endAngle);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+    return [dxfArcTangent(start), dxfArcTangent(end)];
+  }
+  return null;
+}
 
 export type EndpointFreeness = { startFree: boolean; endFree: boolean };
 
@@ -158,8 +195,16 @@ export function computeEndpointFreeness(
     if (edge.points.length < 2) return { startFree: false, endFree: false };
     const start = edge.points[0];
     const end = edge.points[edge.points.length - 1];
-    if (distM(start, end) <= tolM) {
-      // Self-closed: no free ends
+    if (!edge.curved && distM(start, end) <= tolM) {
+      // Self-closed LINE-LIKE run (closed polyline): a straight run-up would stub into the
+      // shape, so neither end is free.
+      //
+      // Curves are deliberately exempt. In the rover the closed-run guard lives inside
+      // `split_mark_segment_with_extensions`'s `elif _is_line_like_segment(...)` branch —
+      // ARC/CIRCLE take the earlier analytic-tangent branch and keep their extensions even
+      // though a full circle's endpoints coincide ("Curves keep their analytic-tangent
+      // extensions (handled in the branch above)"). The rover drives in along the tangent,
+      // paints the ring, and runs off along the same tangent.
       return { startFree: false, endFree: false };
     }
     return {
@@ -242,6 +287,23 @@ export function buildMarkEdges(
     if (!pts || pts.length < 2) continue;
     const parentId = line.id;
     const parentLabel = line.label ?? line.id;
+
+    // Curves take their directions from analytic tangents, exactly as the rover does
+    // (`entity_extension_directions`), never from finite differences over tessellation —
+    // and they are never split at their sampled vertices.
+    const curveTangents = analyticCurveTangents(line);
+    if (curveTangents) {
+      edges.push({
+        points: pts,
+        startDir: curveTangents[0],
+        endDir: curveTangents[1],
+        parentId,
+        parentLabel,
+        curved: true,
+      });
+      continue;
+    }
+
     // Only line-like geometry is decomposed at its corners. A curve's vertices are
     // tessellation, not corners — splitting there would scatter run-ups along an arc.
     // Mirrors `_is_line_like_segment`, which gates the rover's decompose_line_chain_to_edges.
@@ -425,7 +487,11 @@ export function buildExtendedMarkChain(
   // Chain-ends mode keeps the mission-level closed-loop guard (engine ends_at_start). In
   // per-line mode the chain has already been split into genuinely open edges, so the guard
   // does not apply — that is exactly what lets a closed square grow per-side run-ups.
-  if (!cfg.perLine && isMissionClosedLoop(paintedLines)) return [];
+  //
+  // An all-curve mission is exempt in either mode: a circle closes on itself by definition,
+  // and the rover still extends it along its analytic tangent.
+  const allCurved = paintedLines.every((l) => analyticCurveTangents(l) != null);
+  if (!cfg.perLine && !allCurved && isMissionClosedLoop(paintedLines)) return [];
 
   const edges = buildMarkEdges(paintedLines, Boolean(cfg.perLine));
   const freeness = computeEndpointFreeness(edges, Boolean(cfg.perLine));
