@@ -290,13 +290,13 @@ export function PathOrderAndSprayStep({
     }
   };
 
+  /*
+   * Intro copy and the Load button ride inside the row list's scroll surface (see
+   * CsvPathOrderStep's listHeader/listFooter). The rows are a VirtualizedList, so wrapping
+   * this whole body in a ScrollView is not an option — this is how the step scrolls as one.
+   */
   return (
-    <View style={{ flex: 1, minHeight: 0, gap: 12 }}>
-      <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
-        Same layout as CSV: drag paths to reorder, Paint/Skip each path. Purple pre-ext / aft-ext
-        and transit legs are built on device from path order.
-      </Text>
-
+    <View style={{ flex: 1, minHeight: 0 }}>
       <CsvPathOrderStep
         lines={lines}
         extensionConfig={extensionConfig}
@@ -310,53 +310,63 @@ export function PathOrderAndSprayStep({
             return prevSig === nextSig ? prev : next;
           });
         }}
-      />
-
-      <TouchableOpacity
-        onPress={handleLoadToController}
-        disabled={isLoading || missionActionBusy || (!verifiedAlignmentRequest && !isGeographicDxf)}
-        activeOpacity={0.8}
-        style={{
-          height: 52,
-          flexShrink: 0,
-          borderRadius: 12,
-          alignItems: "center",
-          justifyContent: "center",
-          backgroundColor:
-            isLoading || missionActionBusy || (!verifiedAlignmentRequest && !isGeographicDxf)
-              ? FIELDS_COLORS.textDim
-              : "#7c3aed",
-          elevation: 4,
-          shadowColor: "#7c3aed",
-          shadowOffset: { width: 0, height: 2 },
-          shadowOpacity: 0.3,
-          shadowRadius: 4,
-        }}
-      >
-        {isLoading ? (
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <Loader size={16} color="#fff" />
-            <Text style={{ color: "#fff", fontSize: 13, fontWeight: "700" }}>
-              {loadStep ? LOAD_STEP_LABELS[loadStep] : "Loading..."}
-            </Text>
-          </View>
-        ) : (
-          <Text style={{ color: "#fff", fontSize: 15, fontWeight: "900", letterSpacing: 0.5 }}>
-            Load to Controller
+        listHeader={
+          <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
+            Same layout as CSV: drag paths to reorder, Paint/Skip each path. Purple pre-ext /
+            aft-ext and transit legs are built on device from path order.
           </Text>
-        )}
-      </TouchableOpacity>
+        }
+        listFooter={
+          <>
+            <TouchableOpacity
+              onPress={handleLoadToController}
+              disabled={
+                isLoading || missionActionBusy || (!verifiedAlignmentRequest && !isGeographicDxf)
+              }
+              activeOpacity={0.8}
+              style={{
+                height: 52,
+                borderRadius: 12,
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor:
+                  isLoading || missionActionBusy || (!verifiedAlignmentRequest && !isGeographicDxf)
+                    ? FIELDS_COLORS.textDim
+                    : "#7c3aed",
+                elevation: 4,
+                shadowColor: "#7c3aed",
+                shadowOffset: { width: 0, height: 2 },
+                shadowOpacity: 0.3,
+                shadowRadius: 4,
+              }}
+            >
+              {isLoading ? (
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <Loader size={16} color="#fff" />
+                  <Text style={{ color: "#fff", fontSize: 13, fontWeight: "700" }}>
+                    {loadStep ? LOAD_STEP_LABELS[loadStep] : "Loading..."}
+                  </Text>
+                </View>
+              ) : (
+                <Text style={{ color: "#fff", fontSize: 15, fontWeight: "900", letterSpacing: 0.5 }}>
+                  Load to Controller
+                </Text>
+              )}
+            </TouchableOpacity>
 
-      {!verifiedAlignmentRequest && isGeographicDxf && (
-        <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, textAlign: "center" }}>
-          Georeferenced DXF — no alignment needed.
-        </Text>
-      )}
-      {!verifiedAlignmentRequest && !isGeographicDxf && (
-        <Text style={{ color: FIELDS_COLORS.warning, fontSize: 10, textAlign: "center" }}>
-          Complete alignment before loading to controller.
-        </Text>
-      )}
+            {!verifiedAlignmentRequest && isGeographicDxf && (
+              <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, textAlign: "center" }}>
+                Georeferenced DXF — no alignment needed.
+              </Text>
+            )}
+            {!verifiedAlignmentRequest && !isGeographicDxf && (
+              <Text style={{ color: FIELDS_COLORS.warning, fontSize: 10, textAlign: "center" }}>
+                Complete alignment before loading to controller.
+              </Text>
+            )}
+          </>
+        }
+      />
     </View>
   );
 }

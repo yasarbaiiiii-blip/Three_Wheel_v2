@@ -24,10 +24,6 @@ type TemplatePanelProps = {
   boundaryHeightStr?: string;
   onChangeBoundaryHeightStr?: (val: string) => void;
   onApplyBoundary?: (w: number, h: number) => void;
-  sketchMode?: boolean;
-  onToggleSketchMode?: (enabled: boolean) => void;
-  showSnapPoints?: boolean;
-  onToggleShowSnapPoints?: (enabled: boolean) => void;
   telemetryPosN?: number | null;
   telemetryPosE?: number | null;
   /**
@@ -41,18 +37,11 @@ type TemplatePanelProps = {
 
 export function TemplatePanel(props: TemplatePanelProps) {
   const { apiBaseUrl, onRefreshPaths, onSelectPath } = props;
-  const [internalBoundaryMode, setInternalBoundaryMode] = useState(false);
-  const [internalSketchMode, setInternalSketchMode] = useState(false);
-  const [internalShowSnapPoints, setInternalShowSnapPoints] = useState(true);
+  const [internalBoundaryMode] = useState(false);
   const [internalWidthStr, setInternalWidthStr] = useState("4.0");
   const [internalHeightStr, setInternalHeightStr] = useState("3.0");
 
   const boundaryMode = props.boundaryMode ?? internalBoundaryMode;
-  const setBoundaryMode = props.onToggleBoundaryMode ?? setInternalBoundaryMode;
-  const sketchMode = props.sketchMode ?? internalSketchMode;
-  const setSketchMode = props.onToggleSketchMode ?? setInternalSketchMode;
-  const showSnapPoints = props.showSnapPoints ?? internalShowSnapPoints;
-  const setShowSnapPoints = props.onToggleShowSnapPoints ?? setInternalShowSnapPoints;
   const widthStr = props.boundaryWidthStr ?? internalWidthStr;
   const setWidthStr = props.onChangeBoundaryWidthStr ?? setInternalWidthStr;
   const heightStr = props.boundaryHeightStr ?? internalHeightStr;
@@ -154,28 +143,8 @@ export function TemplatePanel(props: TemplatePanelProps) {
   return (
     <View style={{ gap: 12 }}>
       <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
-        Quick template generator for road signs and text. Boundary toggles apply when placing in boundary mode.
+        Quick template generator for road signs and text. Strokes are placed just ahead of the rover.
       </Text>
-
-      <View
-        style={{
-          padding: 12,
-          borderRadius: 12,
-          backgroundColor: FIELDS_COLORS.surfaceSolid,
-          borderWidth: 1,
-          borderColor: FIELDS_COLORS.panelBorder,
-          gap: 12,
-        }}
-      >
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>Sketch Mode</Text>
-          <Switch value={sketchMode} onValueChange={setSketchMode} trackColor={{ false: FIELDS_COLORS.panelBorder, true: FIELDS_COLORS.tealDark }} />
-        </View>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>Show Snap Points</Text>
-          <Switch value={showSnapPoints} onValueChange={setShowSnapPoints} trackColor={{ false: FIELDS_COLORS.panelBorder, true: FIELDS_COLORS.tealDark }} />
-        </View>
-      </View>
 
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
         <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>Characters</Text>

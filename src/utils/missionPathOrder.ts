@@ -11,6 +11,7 @@ import {
   buildCsvExtensionPreviews,
   buildExtensionTransitLines,
   csvExtensionLengthM,
+  isLineLikePlanLine,
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
   type CsvExtensionPreview,
@@ -173,6 +174,113 @@ export function defaultPathOrder(markLines: PlanLine[]): CsvPathOrderEntry[] {
     label: l.label,
     paint: true,
   }));
+}
+
+// ── Geometric chaining (seeds the default order for CAD imports) ──────────────
+
+/** First and last point of a plan line, in [north, east]. */
+function lineEndpoints(
+  line: PlanLine
+): { start: [number, number]; end: [number, number] } | null {
+  const pts = planLineToNedPolyline(line);
+  if (!pts || pts.length < 2) return null;
+  return { start: pts[0], end: pts[pts.length - 1] };
+}
+
+/**
+ * Same line driven the other way: vertices reversed, `from`/`to` swapped.
+ *
+ * Only ever applied to line-like geometry. An ARC/CIRCLE takes its extension tangents from
+ * `geometry.startAngle`/`endAngle` via `analyticCurveTangents`, which reversing the sampled
+ * points alone would not flip — the run-ups would then point back into the curve.
+ */
+export function reversePlanLineDirection(line: PlanLine): PlanLine {
+  const entity = line.entity;
+  return {
+    ...line,
+    from: line.to ? { ...line.to } : line.from,
+    to: line.from ? { ...line.from } : line.to,
+    entity: entity
+      ? {
+          ...entity,
+          preview_points:
+            entity.preview_points && entity.preview_points.length >= 2
+              ? [...entity.preview_points].reverse()
+              : entity.preview_points,
+        }
+      : entity,
+  };
+}
+
+/**
+ * Order painted paths into one continuous walk, flipping any path drawn against it.
+ *
+ * Why this has to happen at import: PRE/AFT run-ups are joined by a connector spanning
+ * **exit tip → next entry tip** (`buildExtensionTransitLines`), where "next" means next in
+ * path order. Walk a square's four sides in perimeter order and every connector is the short
+ * 0.71 m hypotenuse across a corner — the little triangle the run-ups are supposed to make.
+ * Take the sides in the order CAD happened to store them, or with one side drawn backwards,
+ * and consecutive edges are no longer adjacent: the connector jumps clean across the plan
+ * (measured: 2.5 m and 3.5 m on a 2 m square) and the run-ups read as floating debris.
+ *
+ * The connector is not wrong there — it is honestly drawing the drive the order asks for.
+ * The order is what needs fixing, so this runs once at import to seed the default. It is a
+ * no-op on a file already stored in perimeter order, and the operator can still drag rows
+ * afterwards; nothing re-chains behind them.
+ *
+ * Greedy nearest-endpoint from the first path in file order, which keeps the mission
+ * starting where it starts today.
+ */
+export function chainMarkLinesByGeometry(lines: PlanLine[]): PlanLine[] {
+  const marks = selectMarkPlanLines(lines);
+  const markIds = new Set(marks.map((m) => m.id));
+  const others = lines.filter((l) => !markIds.has(l.id));
+  if (marks.length < 2) return [...marks, ...others];
+
+  // Paths with no usable polyline cannot be chained — keep them, in file order, at the end.
+  const placeable: PlanLine[] = [];
+  const unplaceable: PlanLine[] = [];
+  for (const line of marks) {
+    (lineEndpoints(line) ? placeable : unplaceable).push(line);
+  }
+  if (placeable.length < 2) return [...marks, ...others];
+
+  const remaining = placeable.slice();
+  const chained: PlanLine[] = [remaining.shift() as PlanLine];
+  let cursor = lineEndpoints(chained[0])!.end;
+
+  while (remaining.length > 0) {
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    let bestReversed = false;
+
+    remaining.forEach((line, idx) => {
+      const ends = lineEndpoints(line);
+      if (!ends) return;
+      const forward = Math.hypot(ends.start[0] - cursor[0], ends.start[1] - cursor[1]);
+      if (forward < bestDist) {
+        bestDist = forward;
+        bestIdx = idx;
+        bestReversed = false;
+      }
+      // A path whose far end is the nearer one continues the walk only when driven
+      // backwards. Curves keep their authored direction (see reversePlanLineDirection).
+      if (!isLineLikePlanLine(line)) return;
+      const backward = Math.hypot(ends.end[0] - cursor[0], ends.end[1] - cursor[1]);
+      if (backward < bestDist) {
+        bestDist = backward;
+        bestIdx = idx;
+        bestReversed = true;
+      }
+    });
+
+    const [picked] = remaining.splice(bestIdx, 1);
+    const next = bestReversed ? reversePlanLineDirection(picked) : picked;
+    chained.push(next);
+    cursor = lineEndpoints(next)!.end;
+  }
+
+  return [...chained, ...unplaceable, ...others];
 }
 
 export function reorderPathOrder(

@@ -1,6 +1,5 @@
 import React, { useCallback, useMemo, useState } from "react";
 import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { ChevronDown, ChevronRight } from "lucide-react-native";
 
 import * as missionApi from "../api/missionApi";
 import * as pathApi from "../api/pathApi";
@@ -14,7 +13,6 @@ import { FieldsClearBar } from "../components/fields/FieldsClearBar";
 import { MapPlanInteractionOverlay } from "../components/fields/MapPlanInteractionOverlay";
 import { FIELDS_COLORS } from "../components/fields/fieldsTheme";
 import { AlignDxfPanel } from "../components/fields/panels/AlignDxfPanel";
-import { BoundingBoxStep } from "../components/fields/panels/BoundingBoxStep";
 import { CsvPathOrderStep } from "../components/fields/panels/CsvPathOrderStep";
 import { CsvStageAndLoadPanel } from "../components/fields/panels/CsvStageAndLoadPanel";
 import { PathOrderAndSprayStep } from "../components/fields/panels/PathOrderAndSprayStep";
@@ -280,8 +278,6 @@ export function FieldsPage(props: FieldsPageProps) {
   /** Align DXF methods: Multi-Point Fit | Visual (1-Point Fit removed). Auto Origin is a separate toggle peer. */
   const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "visual_alignment">("least_squares");
 
-  /** DXF nested Templates sub-panel under Bounding Box (not a top-level step card). */
-  const [showTemplates, setShowTemplates] = useState(false);
   /** CSV path order / paint flags from CsvPathOrderStep (Phase 3). */
   const [csvPathOrder, setCsvPathOrder] = useState<CsvPathOrderEntry[] | null>(null);
   /** Local CSV PRE/AFT extensions (app-owned; not saved via /extensions). */
@@ -291,25 +287,17 @@ export function FieldsPage(props: FieldsPageProps) {
   const [boundaryMode, setBoundaryMode] = useState(false);
   const [boundaryWidthStr, setBoundaryWidthStr] = useState("4.0");
   const [boundaryHeightStr, setBoundaryHeightStr] = useState("3.0");
-  const [activeBoundaryWidth, setActiveBoundaryWidth] = useState<number | null>(null);
-  const [activeBoundaryHeight, setActiveBoundaryHeight] = useState<number | null>(null);
-  const [sketchMode, setSketchMode] = useState(false);
-  const [showSnapPoints, setShowSnapPoints] = useState(true);
   const [boundaryPosition, setBoundaryPosition] = useState<{ x: number; y: number } | null>(null);
   const [boundaryRotation, setBoundaryRotation] = useState<number>(0);
 
   const handleToggleBoundaryMode = useCallback((enabled: boolean) => {
     setBoundaryMode(enabled);
     if (!enabled) {
-      setActiveBoundaryWidth(null);
-      setActiveBoundaryHeight(null);
       setBoundaryRotation(0);
     }
   }, []);
 
   const handleApplyBoundary = useCallback((w: number, h: number) => {
-    setActiveBoundaryWidth(w);
-    setActiveBoundaryHeight(h);
     setLines((prev) => {
       const nonVirtual = prev.filter((l) => l.layer !== "virtual_boundary");
       const bMinN = -h / 2;
@@ -365,7 +353,6 @@ export function FieldsPage(props: FieldsPageProps) {
     | "pathOrder"
     | "templates"
     | "send"
-    | "boundingBox"
     | "align"
     | "orderAndSpray";
   const ALL_SECTIONS_CLOSED: Record<PanelSectionKey, boolean> = {
@@ -373,7 +360,6 @@ export function FieldsPage(props: FieldsPageProps) {
     pathOrder: false,
     templates: false,
     send: false,
-    boundingBox: false,
     align: false,
     orderAndSpray: false,
   };
@@ -440,9 +426,9 @@ export function FieldsPage(props: FieldsPageProps) {
     };
   }, [lines, csvPathOrder, csvExtensionConfig]);
 
-  /** True when the section living in the top scroller (Upload / Bounding Box / Align) is open. */
+  /** True when the section living in the top scroller (Upload / Templates / Align) is open. */
   const topSectionOpen =
-    isSectionOpen("upload") || isSectionOpen("align") || isSectionOpen("boundingBox");
+    isSectionOpen("upload") || isSectionOpen("align") || isSectionOpen("templates");
 
   const protectedResident = isProtectedMissionResident(loadedPathInspection);
 
@@ -580,12 +566,6 @@ export function FieldsPage(props: FieldsPageProps) {
 
   const stepStatus = (id: FieldsStepId): "pending" | "active" | "done" => {
     switch (id) {
-      case "boundingBox":
-        return activeBoundaryWidth != null && activeBoundaryHeight != null
-          ? "done"
-          : activeStep === "boundingBox"
-          ? "active"
-          : "pending";
       case "upload":
         return uploadDone ? "done" : activeStep === "upload" ? "active" : "pending";
       case "align":
@@ -604,9 +584,7 @@ export function FieldsPage(props: FieldsPageProps) {
   /** Legacy helper — prefer toggleSection for card headers (true expand/collapse). */
   const toggleStep = (id: FieldsStepId) => {
     const key: PanelSectionKey =
-      id === "boundingBox"
-        ? "boundingBox"
-        : id === "align"
+      id === "align"
         ? "align"
         : id === "orderAndSpray"
         ? "orderAndSpray"
@@ -793,8 +771,10 @@ export function FieldsPage(props: FieldsPageProps) {
           onMoveBoundary: (x: number, y: number) => setBoundaryPosition({ x, y }),
           boundaryRotation,
           onRotateBoundary: (rot: number) => setBoundaryRotation(rot),
-          sketchMode,
-          showBoundaryPoints: showSnapPoints,
+          // Sketch dimming and snap-point markers are no longer operator-toggleable from
+          // Templates — the plan draws at full opacity with snap points on.
+          sketchMode: false,
+          showBoundaryPoints: true,
           snapRefPoints:
             activeStep === "align" && alignmentMethod === "least_squares"
               ? refPoints
@@ -1010,8 +990,8 @@ export function FieldsPage(props: FieldsPageProps) {
   );
 
   /**
-   * Templates body, shared by the two places it can appear: nested under Bounding Box in the
-   * rover-planned DXF flow, and as its own trailing step in both local flows.
+   * Templates body, shared by every flow's Templates step card — second card in the
+   * rover-planned DXF flow, trailing card in both local flows.
    *
    * `placementMode` is what keeps a local flow local — "csvLocal" adds strokes straight to
    * `lines`, while "dxf" round-trips a generated DXF through POST /parse-dxf.
@@ -1037,10 +1017,6 @@ export function FieldsPage(props: FieldsPageProps) {
         boundaryHeightStr={boundaryHeightStr}
         onChangeBoundaryHeightStr={setBoundaryHeightStr}
         onApplyBoundary={handleApplyBoundary}
-        sketchMode={sketchMode}
-        onToggleSketchMode={setSketchMode}
-        showSnapPoints={showSnapPoints}
-        onToggleShowSnapPoints={setShowSnapPoints}
         telemetryPosN={telemetrySnapshot?.pos_n ?? null}
         telemetryPosE={telemetrySnapshot?.pos_e ?? null}
         placementMode={isLocalFlow ? "csvLocal" : "dxf"}
@@ -1072,8 +1048,8 @@ export function FieldsPage(props: FieldsPageProps) {
   /**
    * Slice the step tree so Path Order VirtualizedLists are never ScrollView children.
    * - csvUpload / csvPathOrder / csvScroll: local-flow sections (CSV and local DXF)
-   * - localDxfTop: Upload + Align (scrollable) — no Bounding Box
-   * - dxfTop: Upload + Bounding Box + Align (scrollable)
+   * - localDxfTop: Upload + Align (scrollable) — Templates trails in csvScroll
+   * - dxfTop: Upload + Templates + Align (scrollable)
    * - dxfPathOrder: Path Order & Load (flex fill, own list scroll)
    */
   function renderFieldsSteps(
@@ -1083,18 +1059,17 @@ export function FieldsPage(props: FieldsPageProps) {
       slice === "csvUpload" || slice === "dxfTop" || slice === "localDxfTop";
     const showCsvPathOrder = slice === "csvPathOrder";
     /**
-     * Bounding Box is a placement aid for the ROVER-planned DXF flow only. Both local flows
-     * drop it: a survey CSV carries its own georeference, and a local DXF is placed by the
-     * Align step. It renders only in the rover-DXF top slice, with Templates nested under it.
+     * Templates is its own step card in every flow — there is no Bounding Box step.
+     *
+     * Where it sits differs by flow, and that is deliberate. Local flows put it last, after
+     * Align: `placeTemplateLinesInCsvFrame` positions strokes relative to the rover's live
+     * position, which is an already-aligned frame, so placing them before Align would let the
+     * alignment transform move them a second time. The rover-planned DXF flow has no such
+     * constraint — its templates round-trip through POST /parse-dxf as a fresh plan — so it
+     * keeps Templates up top, before Align, which is also the default (nothing uploaded) view.
      */
-    const showBoundingBox = slice === "dxfTop" && !isLocalFlow;
-    /**
-     * Local flows get Templates as their own trailing step, after Path Order. It must come
-     * after Align: `placeTemplateLinesInCsvFrame` positions strokes relative to the rover's
-     * live position, which is an already-aligned frame — placing them before Align would let
-     * the alignment transform move them again.
-     */
-    const showTemplatesStep = slice === "csvScroll" && isLocalFlow;
+    const showTemplatesStep =
+      (slice === "csvScroll" && isLocalFlow) || (slice === "dxfTop" && !isLocalFlow);
     const showDxfAlign = slice === "dxfTop" || slice === "localDxfTop";
     const showDxfPathOrder = slice === "dxfPathOrder" && !isLocalDxfFlow;
     const activeCsvForSend = activeCsvPreview;
@@ -1105,14 +1080,13 @@ export function FieldsPage(props: FieldsPageProps) {
      * Card numbering per flow:
      *   local CSV   1 Upload · 2 Path Order & Load · 3 Templates
      *   local DXF   1 Upload · 2 Align · 3 Path Order & Load · 4 Templates
-     *   rover DXF   1 Upload · 2 Bounding Box · 3 Align · 4 Path Order & Load
+     *   rover DXF   1 Upload · 2 Templates · 3 Align · 4 Path Order & Load
      */
     const stepNo = {
       upload: 1,
-      boundingBox: 2,
       align: isLocalDxfFlow ? 2 : 3,
       pathOrder: isLocalCsvFlow ? 2 : isLocalDxfFlow ? 3 : 4,
-      templates: isLocalCsvFlow ? 3 : 4,
+      templates: isLocalCsvFlow ? 3 : isLocalDxfFlow ? 4 : 2,
     };
 
     return (
@@ -1155,12 +1129,10 @@ export function FieldsPage(props: FieldsPageProps) {
                 setShowMapInteraction(true);
                 setCsvPathOrder(null);
                 setCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG);
-                setShowTemplates(false);
                 // A georeferenced DXF is already placed, so Align has nothing to do and the
                 // operator goes straight to ordering. A metric one cannot be sent until it is
                 // aligned (plan-trajectory requires origin_gps), so lead with Align open.
                 const placed = data.isGeographic && data.geoOrigin != null;
-                setShowTemplates(false);
                 setActiveStep(placed ? "upload" : "align");
                 openOnlySection(placed ? "upload" : "align");
               }}
@@ -1173,7 +1145,6 @@ export function FieldsPage(props: FieldsPageProps) {
                 setCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG);
                 // Land on Upload so the Enable Extension card is the next thing seen.
                 // Path Order sits right below as a collapsed header.
-                setShowTemplates(false);
                 setActiveStep("upload");
                 openOnlySection("upload");
               }}
@@ -1229,7 +1200,9 @@ export function FieldsPage(props: FieldsPageProps) {
                 isSectionOpen("pathOrder") || isSectionOpen("orderAndSpray")
               }
             >
-              <View style={{ flex: 1, minHeight: 0, gap: 14 }}>
+              {/* Send panel rides in the row list's footer so the whole step scrolls as one —
+                  the rows are a VirtualizedList and cannot live inside a ScrollView. */}
+              <View style={{ flex: 1, minHeight: 0 }}>
                 <CsvPathOrderStep
                   lines={lines}
                   extensionConfig={csvExtensionConfig}
@@ -1256,44 +1229,45 @@ export function FieldsPage(props: FieldsPageProps) {
                       return prevSig === nextSig ? prev : next;
                     });
                   }}
+                  listFooter={
+                    <View
+                      style={{
+                        borderTopWidth: 1,
+                        borderTopColor: FIELDS_COLORS.panelBorder,
+                        paddingTop: 12,
+                      }}
+                    >
+                      <CsvStageAndLoadPanel
+                        apiBaseUrl={apiBaseUrl}
+                        localCsvPreview={activeCsvForSend}
+                        mapPinCount={localCsvMapPins?.length ?? null}
+                        lines={lines}
+                        pathOrder={csvPathOrder}
+                        extensionConfig={csvExtensionConfig}
+                        originGps={
+                          isLocalDxfFlow && verifiedAlignmentRequest?.origin_gps
+                            ? (verifiedAlignmentRequest.origin_gps as [number, number])
+                            : null
+                        }
+                        missionName={
+                          isLocalDxfFlow
+                            ? importedPlan?.fileName ?? "dxf_mission"
+                            : null
+                        }
+                        parseWarnings={[]}
+                        setLines={setLines}
+                        onSelectLine={onSelectLine}
+                        setStagedMissionId={setStagedMissionId}
+                        setStagedPlanResult={setStagedPlanResult}
+                        setStagedMissionInspection={setStagedMissionInspection}
+                        setAlignedRefPoints={setAlignedRefPoints}
+                        onWorkflowStep={onWorkflowStep}
+                        onLoadSelectedPath={onLoadSelectedPath}
+                        missionActionBusy={missionActionBusy}
+                      />
+                    </View>
+                  }
                 />
-                <View
-                  style={{
-                    borderTopWidth: 1,
-                    borderTopColor: FIELDS_COLORS.panelBorder,
-                    paddingTop: 12,
-                    flexShrink: 0,
-                  }}
-                >
-                  <CsvStageAndLoadPanel
-                    apiBaseUrl={apiBaseUrl}
-                    localCsvPreview={activeCsvForSend}
-                    mapPinCount={localCsvMapPins?.length ?? null}
-                    lines={lines}
-                    pathOrder={csvPathOrder}
-                    extensionConfig={csvExtensionConfig}
-                    originGps={
-                      isLocalDxfFlow && verifiedAlignmentRequest?.origin_gps
-                        ? (verifiedAlignmentRequest.origin_gps as [number, number])
-                        : null
-                    }
-                    missionName={
-                      isLocalDxfFlow
-                        ? importedPlan?.fileName ?? "dxf_mission"
-                        : null
-                    }
-                    parseWarnings={[]}
-                    setLines={setLines}
-                    onSelectLine={onSelectLine}
-                    setStagedMissionId={setStagedMissionId}
-                    setStagedPlanResult={setStagedPlanResult}
-                    setStagedMissionInspection={setStagedMissionInspection}
-                    setAlignedRefPoints={setAlignedRefPoints}
-                    onWorkflowStep={onWorkflowStep}
-                    onLoadSelectedPath={onLoadSelectedPath}
-                    missionActionBusy={missionActionBusy}
-                  />
-                </View>
               </View>
             </FieldsStepCard>
           ) : showCsvPathOrder ? (
@@ -1310,71 +1284,10 @@ export function FieldsPage(props: FieldsPageProps) {
             </FieldsStepCard>
           ) : null}
 
-          {/* Step: Bounding Box — ROVER-planned DXF only, with Templates nested under it. */}
-          {showBoundingBox ? (
-          <FieldsStepCard
-            stepNumber={stepNo.boundingBox}
-            title="Bounding Box"
-            status={stepStatus("boundingBox")}
-            expanded={isSectionOpen("boundingBox")}
-            onToggle={() => toggleSection("boundingBox", "boundingBox")}
-            scrollableBody
-            bodyMaxHeight={380}
-          >
-            <View style={{ gap: 14 }}>
-              <BoundingBoxStep
-                widthStr={boundaryWidthStr}
-                onChangeWidthStr={setBoundaryWidthStr}
-                heightStr={boundaryHeightStr}
-                onChangeHeightStr={setBoundaryHeightStr}
-                onApplyBoundary={handleApplyBoundary}
-                activeWidth={activeBoundaryWidth}
-                activeHeight={activeBoundaryHeight}
-                onProceedNext={() => setActiveStep("align")}
-              />
-
-              <View>
-                <Pressable
-                  onPress={() => setShowTemplates(!showTemplates)}
-                  style={{
-                    flexDirection: "row",
-                    alignItems: "center",
-                    gap: 8,
-                    paddingVertical: 8,
-                  }}
-                >
-                  {showTemplates ? (
-                    <ChevronDown size={14} color={FIELDS_COLORS.textMuted} />
-                  ) : (
-                    <ChevronRight size={14} color={FIELDS_COLORS.textDim} />
-                  )}
-                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "700" }}>
-                    Templates
-                  </Text>
-                </Pressable>
-                {showTemplates ? (
-                  <View
-                    style={{
-                      borderRadius: 10,
-                      backgroundColor: FIELDS_COLORS.surfaceSolid,
-                      borderWidth: 1,
-                      borderColor: FIELDS_COLORS.panelBorder,
-                      padding: 12,
-                    }}
-                  >
-                    {renderTemplatePanel()}
-                  </View>
-                ) : (
-                  <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, lineHeight: 16 }}>
-                    Optional. Expand Templates under this step for road / field stamps.
-                  </Text>
-                )}
-              </View>
-            </View>
-          </FieldsStepCard>
-          ) : null}
-
-          {/* Step: Templates — trailing step for both local flows (after Align + Path Order). */}
+          {/*
+            Step: Templates — trailing step in both local flows (after Align + Path Order),
+            and the second card in the rover-DXF flow (where Bounding Box used to sit).
+          */}
           {showTemplatesStep ? (
           <FieldsStepCard
             stepNumber={stepNo.templates}

@@ -36,6 +36,28 @@ const TRANSIT_ROW_HEIGHT = 28;
 /** Keep a couple of rows visible even when the card is squeezed, so drag still works. */
 const MIN_LIST_HEIGHT = 120;
 
+/**
+ * Width of the left strip where a drag may START — and, critically, the ONLY place where
+ * this list's pan gesture is allowed to claim a touch.
+ *
+ * DraggableFlatList wraps the list in a `Gesture.Pan()` configured with
+ * `activeOffsetY([-activationDistance, +activationDistance])`, so any vertical swipe past
+ * that threshold activates the pan. Upstream that is harmless because the library renders
+ * react-native-gesture-handler's FlatList — a NativeViewGestureHandler that RNGH arbitrates
+ * against the pan, so scrolling still wins when no row is being dragged. This project patches
+ * that import back to React Native's plain FlatList (scripts/patch-draggable-flatlist.js, run
+ * on postinstall, to dodge the "Failed to obtain view for NativeViewGestureHandler" crash
+ * documented in docs/gesture_crash.md). RNGH then has no handle on the list's native scroll:
+ * the pan activates, the native ScrollView's touches get cancelled, and because no drag is in
+ * progress the pan itself does nothing — the list simply refuses to scroll.
+ *
+ * Confining the pan's hit area to this strip gives the rest of the row back to the native
+ * scroller. Drag therefore has to start on the grip handle, which is why the grip — not the
+ * whole row — is what calls `drag` below. Keep the two in sync: a long-press that starts
+ * outside this strip would set an active key the pan never tracks, wedging the list.
+ */
+const DRAG_HANDLE_WIDTH = 44;
+
 type PathRow = {
   kind: "path";
   id: string;
@@ -63,6 +85,17 @@ type CsvPathOrderStepProps = {
   onOrderChange?: (orderedPaintedLines: PlanLine[], fullOrder: CsvPathOrderEntry[]) => void;
   /** Used for extension length totals / list rows only — toggle lives in Upload. */
   extensionConfig?: CsvExtensionConfig | null;
+  /**
+   * Step content that scrolls WITH the rows, above and below them.
+   *
+   * The row list is a VirtualizedList, so the card body can never be wrapped in a ScrollView
+   * to make the whole step scroll — that is the nesting the panel layout goes out of its way
+   * to avoid. Handing the surrounding content to the list as its header/footer gets the same
+   * result with one scroller: intro copy, Send/Load buttons and hints stay reachable no
+   * matter how many rows there are or how short the panel column is.
+   */
+  listHeader?: React.ReactNode;
+  listFooter?: React.ReactNode;
 };
 
 function buildInterleavedRows(
@@ -127,6 +160,8 @@ export function CsvPathOrderStep({
   lines,
   onOrderChange,
   extensionConfig = null,
+  listHeader = null,
+  listFooter = null,
 }: CsvPathOrderStepProps) {
   const markLines = useMemo(() => selectMarkPlanLines(lines), [lines]);
   const markKey = useMemo(
@@ -223,14 +258,6 @@ export function CsvPathOrderStep({
     [orderedLines, order, transitPreviews, extensionPreviews]
   );
 
-  if (markLines.length === 0) {
-    return (
-      <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11 }}>
-        No paths yet. Import a survey CSV or DXF first.
-      </Text>
-    );
-  }
-
   const commitPathOrder = (nextPaths: PlanLine[]) => {
     const idOrder = nextPaths.map((l) => l.id);
     setOrder((prev) => {
@@ -241,21 +268,23 @@ export function CsvPathOrderStep({
 
   return (
     <View style={{ gap: 8, flex: 1, minHeight: 0 }}>
-      {/* One-line totals only */}
-      <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
-        Paint {trajectory.totals.markLengthM.toFixed(1)} m
-        {trajectory.totals.travelLengthM > 0.05
-          ? `  ·  Transit ${trajectory.totals.travelLengthM.toFixed(1)} m`
-          : ""}
-        {extensionLengthM > 0.05
-          ? `  ·  Extension ${extensionLengthM.toFixed(1)} m`
-          : ""}
-        {reversals.length > 0 ? (
-          <Text style={{ color: FIELDS_COLORS.warning, fontWeight: "600" }}>
-            {`  ·  ${reversals.length} reversal${reversals.length === 1 ? "" : "s"}`}
-          </Text>
-        ) : null}
-      </Text>
+      {/* One-line totals — pinned above the scroller so it never scrolls out of view */}
+      {markLines.length > 0 ? (
+        <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
+          Paint {trajectory.totals.markLengthM.toFixed(1)} m
+          {trajectory.totals.travelLengthM > 0.05
+            ? `  ·  Transit ${trajectory.totals.travelLengthM.toFixed(1)} m`
+            : ""}
+          {extensionLengthM > 0.05
+            ? `  ·  Extension ${extensionLengthM.toFixed(1)} m`
+            : ""}
+          {reversals.length > 0 ? (
+            <Text style={{ color: FIELDS_COLORS.warning, fontWeight: "600" }}>
+              {`  ·  ${reversals.length} reversal${reversals.length === 1 ? "" : "s"}`}
+            </Text>
+          ) : null}
+        </Text>
+      ) : null}
 
       {/*
         Take the whole area the card gives us and let the list scroll inside it, rather than
@@ -289,10 +318,23 @@ export function CsvPathOrderStep({
           nestedScrollEnabled
           showsVerticalScrollIndicator
           activationDistance={8}
+          dragHitSlop={{ width: DRAG_HANDLE_WIDTH, left: 0 }}
           removeClippedSubviews={false}
           windowSize={8}
           maxToRenderPerBatch={14}
           initialNumToRender={14}
+          keyboardShouldPersistTaps="handled"
+          ListHeaderComponent={
+            listHeader ? <View style={{ padding: 10, gap: 10 }}>{listHeader}</View> : null
+          }
+          ListEmptyComponent={
+            <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, padding: 10 }}>
+              No paths yet. Import a survey CSV or DXF first.
+            </Text>
+          }
+          ListFooterComponent={
+            listFooter ? <View style={{ padding: 10, gap: 10 }}>{listFooter}</View> : null
+          }
           renderItem={({ item, drag, isActive }: RenderItemParams<ListRow>) => {
             if (item.kind === "transit") {
               return (
@@ -352,10 +394,7 @@ export function CsvPathOrderStep({
 
             return (
               <ScaleDecorator>
-                <Pressable
-                  onLongPress={drag}
-                  delayLongPress={180}
-                  disabled={isActive}
+                <View
                   style={{
                     flexDirection: "row",
                     alignItems: "center",
@@ -373,7 +412,22 @@ export function CsvPathOrderStep({
                     opacity: paint ? 1 : 0.5,
                   }}
                 >
-                  <GripVertical size={14} color={FIELDS_COLORS.textDim} />
+                  {/* Drag starts here only — see DRAG_HANDLE_WIDTH. Anywhere else on the
+                      row belongs to the scroller. */}
+                  <Pressable
+                    onLongPress={drag}
+                    delayLongPress={180}
+                    disabled={isActive}
+                    hitSlop={{ top: 8, bottom: 8, left: 10, right: 4 }}
+                    style={{
+                      width: 20,
+                      alignSelf: "stretch",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <GripVertical size={14} color={FIELDS_COLORS.textDim} />
+                  </Pressable>
                   <Text
                     style={{
                       color: paint ? FIELDS_COLORS.accentBrand : FIELDS_COLORS.textDim,
@@ -432,7 +486,7 @@ export function CsvPathOrderStep({
                       {paint ? "Paint" : "Skip"}
                     </Text>
                   </Pressable>
-                </Pressable>
+                </View>
               </ScaleDecorator>
             );
           }}

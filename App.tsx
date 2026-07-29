@@ -222,6 +222,7 @@ import type { LocalDxfResult } from "./src/utils/dxfLocalImport";
 import { alignmentFromGeographic } from "./src/utils/dxfAlignment";
 import {
   applyCsvOrderToPlanLines,
+  chainMarkLinesByGeometry,
   defaultPathOrder,
   selectMarkPlanLines,
 } from "./src/utils/csvPathOrder";
@@ -2882,8 +2883,14 @@ export default function App() {
     );
 
     // Frontend-only geometry: marks + inter-path transit (extensions via Upload toggle).
-    const markLines = data.lines.filter(
-      (l) => l.layer !== "transit" && l.layer !== "extension"
+    //
+    // Chain the paths geometrically before taking the default order. CAD stores entities in
+    // whatever order they were drawn, and a side drawn backwards is just as common — both
+    // leave consecutive paths non-adjacent, which is what sends the PRE/AFT connectors
+    // cutting across the plan instead of clipping each corner. No-op when the file is
+    // already in perimeter order; the operator can still reorder by hand afterwards.
+    const markLines = chainMarkLinesByGeometry(
+      data.lines.filter((l) => l.layer !== "transit" && l.layer !== "extension")
     );
     const order = defaultPathOrder(selectMarkPlanLines(markLines));
     const withTransit = applyCsvOrderToPlanLines(markLines, order, {
