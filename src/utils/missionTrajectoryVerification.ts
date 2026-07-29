@@ -62,6 +62,28 @@ export function filterComparableRunEcho(echo: RunEchoEntry[] | undefined | null)
   return echo.filter((e) => isRunEchoEntry(e) && e.generated !== true);
 }
 
+/**
+ * Total length of backend-generated runs we did NOT send (terminal run-out).
+ *
+ * `transit_length_m` in the response counts these; `trajectoryTotals(sentRuns)`
+ * cannot, because the client never sent them. Subtract before comparing totals,
+ * or the two sides are measuring different paths.
+ *
+ * The engine appends a ~0.10 m TRANSIT run-out past the final MARK point on any
+ * open mission that ends on MARK, so the nozzle has a clean shutoff region. On a
+ * PAINT-ONLY mission the client's travel total is 0, and relDiff's
+ * max(|a|,|b|,eps) denominator makes 0.1 vs 0 a 100 % error — always above the
+ * 1 % tolerance. With real transit present it is ~0.5 % and slips through, which
+ * is why this only ever blocked paint-only loads.
+ */
+export function generatedRunLengthM(echo: RunEchoEntry[] | undefined | null): number {
+  if (!Array.isArray(echo)) return 0;
+  return echo.reduce(
+    (sum, e) => (isRunEchoEntry(e) && e.generated === true ? sum + e.length_m : sum),
+    0,
+  );
+}
+
 function relDiff(a: number, b: number): number {
   const denom = Math.max(Math.abs(a), Math.abs(b), 1e-9);
   return Math.abs(a - b) / denom;
@@ -241,10 +263,25 @@ export function verifyTrajectoryResponse(
       message: `mark_length_m ${markResp.toFixed(3)} vs our ${our.markLengthM.toFixed(3)} m.`,
     });
   }
-  if (travelResp != null && relDiff(our.travelLengthM, travelResp) > LENGTH_TOL_FRAC) {
+  // Compare like with like: strip backend-generated runs (terminal run-out) from
+  // the response total, exactly as filterComparableRunEcho strips them from the
+  // per-run check above. Leaving them in made a paint-only mission fail at
+  // 0.100 vs 0.000 m — a 100 % relative error against a 1 % tolerance.
+  const generatedLen = generatedRunLengthM(rawEcho);
+  const travelRespComparable = travelResp != null ? travelResp - generatedLen : null;
+
+  if (
+    travelRespComparable != null &&
+    relDiff(our.travelLengthM, travelRespComparable) > LENGTH_TOL_FRAC
+  ) {
     issues.push({
       code: "travel_total",
-      message: `transit_length_m ${travelResp.toFixed(3)} vs our ${our.travelLengthM.toFixed(3)} m.`,
+      message:
+        `transit_length_m ${travelRespComparable.toFixed(3)} vs our ` +
+        `${our.travelLengthM.toFixed(3)} m` +
+        (generatedLen > 0
+          ? ` (response ${travelResp!.toFixed(3)} less ${generatedLen.toFixed(3)} m generated run-out).`
+          : "."),
     });
   }
 
