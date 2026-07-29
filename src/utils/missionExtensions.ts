@@ -45,14 +45,38 @@ export const DEFAULT_CSV_EXTENSION_CONFIG: CsvExtensionConfig = {
   enabled: false,
   preM: 0.5,
   aftM: 0.5,
+  // Chain-ends is the right default for a survey CSV: its paths are fitted straights-and-
+  // arcs, so run-ups belong at the two ends of each painted path, not at every vertex.
+  // The DXF flow seeds `perLine: true` at import instead (see DXF_EXTENSION_CONFIG) — CAD
+  // edges genuinely are separate passes, and it is the only mode under which a closed shape
+  // grows run-ups at all.
   perLine: false,
+};
+
+/** Extension defaults for an app-planned DXF — per-line, matching the rover's DXF mode. */
+export const DXF_EXTENSION_CONFIG: CsvExtensionConfig = {
+  enabled: false,
+  preM: 0.5,
+  aftM: 0.5,
+  perLine: true,
 };
 
 /** Match backend _EXTENSION_JUNCTION_TOL_M (m). */
 export const EXT_JUNCTION_TOL_M = 0.05;
 
-/** Match backend _EXTENSION_COLLINEAR_DOT for per-line freeness. */
-export const EXT_COLLINEAR_DOT = 0.98;
+/**
+ * Match backend `_EXTENSION_COLLINEAR_DOT` (server/routes/path.py). A junction blocks a
+ * run-up only when the two directions are near-parallel, because there the run-out and the
+ * next run-in lie along the same line and the connector can only retrace straight back over
+ * them. 0.94 ≈ 20° — anything sharper than that is a real corner and keeps its run-up.
+ */
+export const EXT_COLLINEAR_DOT = 0.94;
+
+/**
+ * Match engine `_SEGMENT_JOIN_TOL_M`. Two consecutive runs closer than this already touch,
+ * so no connector is emitted between them.
+ */
+export const EXT_SEGMENT_JOIN_TOL_M = 0.01;
 
 /**
  * Normalize operator input. When enabled, aftM is floored at {@link CSV_EXT_AFT_FLOOR_M}.
@@ -190,6 +214,24 @@ function unitDir(a: NedPair, b: NedPair): NedPair | null {
 }
 
 /** Build freeness-aware edges from painted plan lines. */
+/**
+ * Geometry whose direction can be read off adjacent vertices, so its corners are real
+ * corners. Port of `_is_line_like_segment` (LINE / LWPOLYLINE / POLYLINE / LINE_CHAIN).
+ *
+ * A fitted CSV road-marking path is excluded on purpose: its vertices are tessellation of
+ * straights-and-arcs, so "corners" there are sampling artefacts, not places to run off.
+ */
+export function isLineLikePlanLine(line: PlanLine): boolean {
+  if (line.entity?.geometry?.road_marking === true) return false;
+  const type = String(line.entity?.entity_type ?? "").trim().toUpperCase();
+  return (
+    type === "LINE" ||
+    type === "LWPOLYLINE" ||
+    type === "POLYLINE" ||
+    type === "LINE_CHAIN"
+  );
+}
+
 export function buildMarkEdges(
   paintedLines: PlanLine[],
   perLine: boolean
@@ -200,7 +242,10 @@ export function buildMarkEdges(
     if (!pts || pts.length < 2) continue;
     const parentId = line.id;
     const parentLabel = line.label ?? line.id;
-    if (!perLine || pts.length < 3) {
+    // Only line-like geometry is decomposed at its corners. A curve's vertices are
+    // tessellation, not corners — splitting there would scatter run-ups along an arc.
+    // Mirrors `_is_line_like_segment`, which gates the rover's decompose_line_chain_to_edges.
+    if (!perLine || pts.length < 3 || !isLineLikePlanLine(line)) {
       edges.push({
         points: pts,
         startDir: unitDir(pts[0], pts[1]),
@@ -336,6 +381,138 @@ export function isMissionClosedLoop(
   return distM(firstPts[0], lastPts[lastPts.length - 1]) < tolM;
 }
 
+/**
+ * One mark edge with the run-up / run-out that attach to it.
+ *
+ * This is the ordered chain the rover executes — `[PRE?, MARK, AFT?]` per edge, in
+ * traversal order — and it is deliberately the ONE structure both the map preview and the
+ * trajectory sent to the rover are derived from. Building them separately is how the
+ * preview and the driven path drift apart.
+ */
+export type ExtendedMarkEdge = {
+  edge: MarkEdge;
+  /** `[tip, markStart]`, or null when this end is not free / preM is 0. */
+  pre: NedPair[] | null;
+  /** `[markEnd, tip]`, or null when this end is not free / aftM is 0. */
+  aft: NedPair[] | null;
+};
+
+/** Where travel into this edge begins: the PRE tip, else the mark start. */
+export function edgeEntryPoint(e: ExtendedMarkEdge): NedPair {
+  return e.pre ? e.pre[0] : e.edge.points[0];
+}
+
+/** Where travel out of this edge ends: the AFT tip, else the mark end. */
+export function edgeExitPoint(e: ExtendedMarkEdge): NedPair {
+  return e.aft ? e.aft[e.aft.length - 1] : e.edge.points[e.edge.points.length - 1];
+}
+
+/**
+ * Decompose painted paths into the ordered extended-edge chain.
+ *
+ * Mirrors the rover: `_entity_extension_edges` splits line-like geometry at its corners in
+ * per-line mode, `_extension_endpoint_freeness` decides which ends may run off, and
+ * `offset_point` places the tips. Returns `[]` when extensions are disabled — callers then
+ * keep their plain mark-to-mark behaviour.
+ */
+export function buildExtendedMarkChain(
+  paintedLines: PlanLine[],
+  config?: Partial<CsvExtensionConfig> | null
+): ExtendedMarkEdge[] {
+  const cfg = normalizeCsvExtensionConfig(config);
+  if (!cfg.enabled || paintedLines.length === 0) return [];
+
+  // Chain-ends mode keeps the mission-level closed-loop guard (engine ends_at_start). In
+  // per-line mode the chain has already been split into genuinely open edges, so the guard
+  // does not apply — that is exactly what lets a closed square grow per-side run-ups.
+  if (!cfg.perLine && isMissionClosedLoop(paintedLines)) return [];
+
+  const edges = buildMarkEdges(paintedLines, Boolean(cfg.perLine));
+  const freeness = computeEndpointFreeness(edges, Boolean(cfg.perLine));
+
+  return edges.map((edge, i) => {
+    const free = freeness[i];
+    let pre: NedPair[] | null = null;
+    let aft: NedPair[] | null = null;
+
+    if (free.startFree && cfg.preM > 0 && edge.startDir) {
+      const start = edge.points[0];
+      pre = [
+        [start[0] - cfg.preM * edge.startDir[0], start[1] - cfg.preM * edge.startDir[1]],
+        start,
+      ];
+    }
+    if (free.endFree && cfg.aftM > 0 && edge.endDir) {
+      const end = edge.points[edge.points.length - 1];
+      aft = [
+        end,
+        [end[0] + cfg.aftM * edge.endDir[0], end[1] + cfg.aftM * edge.endDir[1]],
+      ];
+    }
+    return { edge, pre, aft };
+  });
+}
+
+/**
+ * Connectors that join the chain into one continuous drive.
+ *
+ * Port of the rover's two passes, which agree on one rule: travel spans **exit tip → next
+ * entry tip**, never mark-end → next mark-start.
+ *
+ *  - `_entity_transit_previews` builds the preview from the same entry/exit tips.
+ *  - `_insert_transit_connectors_between_segments` is the only routing pass once extensions
+ *    are on, and emits a TRANSIT wherever consecutive runs do not already touch.
+ *
+ * Getting this wrong is what leaves run-ups floating: connect mark-to-mark and the rover
+ * drives out along AFT, back over it, across, then back out along PRE — two reversals per
+ * junction with the extensions exactly cancelled.
+ */
+export function buildExtensionTransitLines(
+  paintedLines: PlanLine[],
+  config?: Partial<CsvExtensionConfig> | null,
+  tolM: number = EXT_SEGMENT_JOIN_TOL_M
+): PlanLine[] {
+  const chain = buildExtendedMarkChain(paintedLines, config);
+  if (chain.length < 2) return [];
+
+  const out: PlanLine[] = [];
+  for (let i = 0; i < chain.length - 1; i++) {
+    const from = chain[i];
+    const to = chain[i + 1];
+    const start = edgeExitPoint(from);
+    const end = edgeEntryPoint(to);
+    const length_m = distM(start, end);
+    // Already touching (a corner the rover sprays straight through) — no travel to draw.
+    if (length_m <= tolM) continue;
+
+    const id = `ext-join-${from.edge.parentId}->${to.edge.parentId}`;
+    out.push({
+      id,
+      label: `Transit: ${from.edge.parentLabel} → ${to.edge.parentLabel}`,
+      layer: "transit",
+      segmentRole: "none",
+      is_mark: false,
+      from: { id: 1, x: start[0], y: start[1] },
+      to: { id: 2, x: end[0], y: end[1] },
+      width: 0.1,
+      entity: {
+        entity_id: id,
+        entity_type: "TRANSIT",
+        layer: "TRANSIT",
+        color: 0,
+        is_mark: false,
+        length_m,
+        geometry: {},
+        preview_points: [
+          { north: start[0], east: start[1] },
+          { north: end[0], east: end[1] },
+        ],
+      },
+    });
+  }
+  return out;
+}
+
 function makeExtensionPlanLine(
   lineId: string,
   role: "pre" | "aft",
@@ -391,40 +568,16 @@ export function buildCsvExtensionLines(
   paintedLines: PlanLine[],
   config?: Partial<CsvExtensionConfig> | null
 ): PlanLine[] {
-  const cfg = normalizeCsvExtensionConfig(config);
-  if (!cfg.enabled || paintedLines.length === 0) return [];
-
-  // Mission-level closed loop (first of first ≈ last of last) — same idea as
-  // engine ends_at_start; freeness alone also covers entity-touch closed chains.
-  if (!cfg.perLine && isMissionClosedLoop(paintedLines)) return [];
-
-  const edges = buildMarkEdges(paintedLines, Boolean(cfg.perLine));
-  const freeness = computeEndpointFreeness(edges, Boolean(cfg.perLine));
   const out: PlanLine[] = [];
-
-  for (let i = 0; i < edges.length; i++) {
-    const edge = edges[i];
-    const free = freeness[i];
-    // PRE: approach into the mark start along the first-segment tangent.
-    if (free.startFree && cfg.preM > 0 && edge.startDir) {
-      const start = edge.points[0];
-      const from: NedPair = [
-        start[0] - cfg.preM * edge.startDir[0],
-        start[1] - cfg.preM * edge.startDir[1],
-      ];
+  for (const item of buildExtendedMarkChain(paintedLines, config)) {
+    if (item.pre) {
       out.push(
-        makeExtensionPlanLine(edge.parentId, "pre", [from, start], edge.parentLabel)
+        makeExtensionPlanLine(item.edge.parentId, "pre", item.pre, item.edge.parentLabel)
       );
     }
-    // AFT: leave the mark end along the last-segment tangent.
-    if (free.endFree && cfg.aftM > 0 && edge.endDir) {
-      const end = edge.points[edge.points.length - 1];
-      const to: NedPair = [
-        end[0] + cfg.aftM * edge.endDir[0],
-        end[1] + cfg.aftM * edge.endDir[1],
-      ];
+    if (item.aft) {
       out.push(
-        makeExtensionPlanLine(edge.parentId, "aft", [end, to], edge.parentLabel)
+        makeExtensionPlanLine(item.edge.parentId, "aft", item.aft, item.edge.parentLabel)
       );
     }
   }

@@ -21,7 +21,11 @@
 
 import type { PlanLine } from "../types/plan";
 import {
+  buildExtendedMarkChain,
+  edgeEntryPoint,
+  edgeExitPoint,
   extensionEndpointsForLine,
+  EXT_SEGMENT_JOIN_TOL_M,
   isMissionClosedLoop,
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
@@ -518,64 +522,88 @@ export function buildTrajectory(
     };
   }
 
-  const groups = mergeContiguousMarks(marks);
-  if (groups.length < marks.length) {
-    const merged = marks.length - groups.length;
-    warnings.push(
-      `Merged ${merged} contiguous mark path(s) (gap < ${MARK_CONTIGUOUS_GAP_M} m) into neighbouring mark runs.`
-    );
-  }
-
   const extCfg = normalizeCsvExtensionConfig(opts.extensions);
-  const useExt =
-    extCfg.enabled &&
-    !isMissionClosedLoop(acceptedLines) &&
-    acceptedLines.length > 0;
-  if (extCfg.enabled && isMissionClosedLoop(acceptedLines)) {
-    warnings.push("Extensions suppressed: mission is a closed loop (first≈last within 0.01 m).");
-  }
-  const extLens = useExt ? { preM: extCfg.preM, aftM: extCfg.aftM } : null;
-
   const runs: TrajectoryRun[] = [];
 
-  if (useExt && extLens) {
-    const pre = extensionEndpointsForLine(groups[0].firstLine, "pre", extLens.preM);
-    if (pre && pre.length >= 2) {
-      runs.push({
-        kind: "travel",
-        points: pre,
-        speed_m_s: travelSpeed,
-        label: "pre-ext",
-      });
+  // The extended chain is the same decomposition the map preview draws (per-edge in
+  // per-line mode, whole-path otherwise), so what the operator confirmed is what the rover
+  // receives. Empty when extensions are off — we then fall through to the merged-group path.
+  const chain = buildExtendedMarkChain(acceptedLines, extCfg);
+
+  if (chain.length > 0) {
+    if (extCfg.enabled && !extCfg.perLine && isMissionClosedLoop(acceptedLines)) {
+      warnings.push(
+        "Extensions suppressed: mission is a closed loop (first≈last within 0.01 m)."
+      );
     }
-  }
+    // [PRE?, MARK, AFT?] per edge, plus a connector wherever consecutive edges do not
+    // already touch. AFT + connector + PRE are emitted as ONE travel run so the rover never
+    // sees two adjacent travel legs where it should see a single continuous drive.
+    for (let i = 0; i < chain.length; i++) {
+      const item = chain[i];
+      const next = chain[i + 1];
 
-  for (let i = 0; i < groups.length; i++) {
-    const g = groups[i];
-    const markRun: TrajectoryRun = {
-      kind: "mark",
-      points: g.points,
-      speed_m_s: markSpeed,
-    };
-    if (g.label) markRun.label = g.label;
-    runs.push(markRun);
+      if (i === 0 && item.pre) {
+        runs.push({
+          kind: "travel",
+          points: item.pre,
+          speed_m_s: travelSpeed,
+          label: "pre-ext",
+        });
+      }
 
-    if (i < groups.length - 1) {
-      // By construction gap ≥ MARK_CONTIGUOUS_GAP_M, so travel is real and endpoints touch.
-      runs.push(buildInterGroupTravel(g, groups[i + 1], travelSpeed, extLens));
+      const markRun: TrajectoryRun = {
+        kind: "mark",
+        points: item.edge.points,
+        speed_m_s: markSpeed,
+      };
+      if (item.edge.parentLabel) markRun.label = item.edge.parentLabel;
+      runs.push(markRun);
+
+      // Travel out of this edge and into the next one, as a single joined leg.
+      const parts: NedPair[][] = [];
+      if (item.aft) parts.push(item.aft);
+      if (next) {
+        const exit = edgeExitPoint(item);
+        const entry = edgeEntryPoint(next);
+        if (distM(exit, entry) > EXT_SEGMENT_JOIN_TOL_M) parts.push([exit, entry]);
+        if (next.pre) parts.push(next.pre);
+      }
+      if (parts.length > 0) {
+        const points = joinPolylines(parts);
+        if (points.length >= 2) {
+          runs.push({
+            kind: "travel",
+            points,
+            speed_m_s: travelSpeed,
+            label: next ? undefined : "aft-ext",
+          });
+        }
+      }
     }
-  }
+  } else {
+    const groups = mergeContiguousMarks(marks);
+    if (groups.length < marks.length) {
+      const merged = marks.length - groups.length;
+      warnings.push(
+        `Merged ${merged} contiguous mark path(s) (gap < ${MARK_CONTIGUOUS_GAP_M} m) into neighbouring mark runs.`
+      );
+    }
 
-  if (useExt && extLens) {
-    const last = groups[groups.length - 1];
-    const aft = extensionEndpointsForLine(last.lastLine, "aft", extLens.aftM);
-    if (aft && aft.length >= 2) {
-      runs.push({
-        kind: "travel",
-        points: aft,
-        speed_m_s: travelSpeed,
-        label: "aft-ext",
-      });
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i];
+      const markRun: TrajectoryRun = {
+        kind: "mark",
+        points: g.points,
+        speed_m_s: markSpeed,
+      };
+      if (g.label) markRun.label = g.label;
+      runs.push(markRun);
+
+      if (i < groups.length - 1) {
+        // By construction gap ≥ MARK_CONTIGUOUS_GAP_M, so travel is real and endpoints touch.
+        runs.push(buildInterGroupTravel(g, groups[i + 1], travelSpeed, null));
+      }
     }
   }
 

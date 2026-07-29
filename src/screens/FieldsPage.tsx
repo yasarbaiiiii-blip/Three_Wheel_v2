@@ -27,12 +27,17 @@ import { designObbFromLines } from "../utils/planResizeHandles";
 import { DXF_PLANNER } from "../config/featureFlags";
 import {
   applyCsvOrderToPlanLines,
+  defaultPathOrder,
+  resolveOrderedPaintedLines,
+  selectMarkPlanLines,
   type CsvPathOrderEntry,
-} from "../utils/csvPathOrder";
+} from "../utils/missionPathOrder";
 import {
+  buildCsvExtensionLines,
   DEFAULT_CSV_EXTENSION_CONFIG,
+  isMissionClosedLoop,
   type CsvExtensionConfig,
-} from "../utils/csvExtensions";
+} from "../utils/missionExtensions";
 import {
   localCsvToMapPins,
   type LocalPointCsvResult,
@@ -366,19 +371,37 @@ export function FieldsPage(props: FieldsPageProps) {
     | "boundingBox"
     | "align"
     | "orderAndSpray";
-  const [openSections, setOpenSections] = useState<Record<PanelSectionKey, boolean>>({
-    upload: true,
-    pathOrder: true,
+  const ALL_SECTIONS_CLOSED: Record<PanelSectionKey, boolean> = {
+    upload: false,
+    pathOrder: false,
     templates: false,
-    send: true,
+    send: false,
     boundingBox: false,
     align: false,
     orderAndSpray: false,
+  };
+
+  /**
+   * Accordion: at most ONE section open at a time.
+   *
+   * The panel is a fixed-height column holding three stacked containers (top scroller,
+   * Path Order, Templates scroller). Two expanded bodies cannot both fit, so the second
+   * one gets clipped — which is what made Align look like it vanished behind Path Order.
+   * Enforcing exclusivity here means the open body always has the whole column to grow
+   * into, and every collapsed card is just its header.
+   */
+  const [openSections, setOpenSections] = useState<Record<PanelSectionKey, boolean>>({
+    ...ALL_SECTIONS_CLOSED,
+    upload: true,
   });
   const isSectionOpen = useCallback(
     (key: PanelSectionKey) => openSections[key] === true,
     [openSections]
   );
+  /** Open exactly `key` (closing everything else), or close it if it was already open. */
+  const openOnlySection = useCallback((key: PanelSectionKey | null) => {
+    setOpenSections(key ? { ...ALL_SECTIONS_CLOSED, [key]: true } : { ...ALL_SECTIONS_CLOSED });
+  }, []);
   const toggleSection = useCallback(
     (key: PanelSectionKey, activateStep?: FieldsStepId) => {
       setOpenSections((prev) => {
@@ -386,11 +409,43 @@ export function FieldsPage(props: FieldsPageProps) {
         if (opening && activateStep) {
           setActiveStep(activateStep);
         }
-        return { ...prev, [key]: opening };
+        return opening ? { ...ALL_SECTIONS_CLOSED, [key]: true } : { ...ALL_SECTIONS_CLOSED };
       });
     },
     [setActiveStep]
   );
+
+  /**
+   * How many PRE/AFT runs the current config actually produces, and — when that is zero —
+   * why. Extensions are geometry-gated: a shape that closes on itself has no open end to run
+   * off, so `buildCsvExtensionLines` correctly returns nothing. Without this the operator
+   * flips Enable Extension on a 2 × 2 square, sees no purple, and reads it as broken.
+   */
+  const extensionStatus = useMemo(() => {
+    if (!csvExtensionConfig.enabled) return null;
+    const marks = selectMarkPlanLines(lines);
+    if (marks.length === 0) {
+      return { count: 0, hint: "No paintable paths yet." };
+    }
+    const order = csvPathOrder ?? defaultPathOrder(marks);
+    const painted = resolveOrderedPaintedLines(marks, order);
+    const built = buildCsvExtensionLines(painted, csvExtensionConfig);
+    if (built.length > 0) return { count: built.length, hint: null };
+    if (!csvExtensionConfig.perLine && isMissionClosedLoop(painted)) {
+      return {
+        count: 0,
+        hint: "This path closes on itself, so there is no open end to run off.",
+      };
+    }
+    return {
+      count: 0,
+      hint: "No free path ends — every endpoint continues straight into another path, so a run-up would only retrace it.",
+    };
+  }, [lines, csvPathOrder, csvExtensionConfig]);
+
+  /** True when the section living in the top scroller (Upload / Bounding Box / Align) is open. */
+  const topSectionOpen =
+    isSectionOpen("upload") || isSectionOpen("align") || isSectionOpen("boundingBox");
 
   const protectedResident = isProtectedMissionResident(loadedPathInspection);
 
@@ -457,12 +512,7 @@ export function FieldsPage(props: FieldsPageProps) {
       setCsvGuidePointsActive(true);
       setGuideCsvFileName(asset.name || "guide.csv");
       setActiveStep("align");
-      setOpenSections((prev) => ({
-        ...prev,
-        upload: false,
-        align: true,
-        boundingBox: false,
-      }));
+      openOnlySection("align");
 
       if (errors.length > 0) {
         Alert.alert(
@@ -985,23 +1035,34 @@ export function FieldsPage(props: FieldsPageProps) {
             gap: 8,
           }}
         >
+          {/*
+            Only one of these three containers ever holds an expanded body (the accordion
+            guarantees it), so the one that does gets flexGrow:1 and the other two collapse
+            to their headers. Growing the open container — rather than capping it at a fixed
+            maxHeight — is what stops a tall body (Align) being clipped by whatever sits
+            below it in the column.
+          */}
           <ScrollView
             style={{
-              flexGrow: 0,
+              flexGrow: topSectionOpen ? 1 : 0,
               flexShrink: 1,
-              maxHeight: isSectionOpen("upload") || isSectionOpen("align") ? 420 : undefined,
+              minHeight: 0,
             }}
             contentContainerStyle={{ gap: 8 }}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
-            showsVerticalScrollIndicator={isSectionOpen("upload") || isSectionOpen("align")}
+            showsVerticalScrollIndicator={topSectionOpen}
           >
             {renderFieldsSteps(isLocalDxfFlow ? "localDxfTop" : "csvUpload")}
           </ScrollView>
           {/* Path order list (VirtualizedList) + Verify & Load — outside ScrollView. */}
           {renderFieldsSteps("csvPathOrder")}
           <ScrollView
-            style={{ flexGrow: 0, flexShrink: 1, maxHeight: isSectionOpen("templates") ? 360 : undefined }}
+            style={{
+              flexGrow: isSectionOpen("templates") ? 1 : 0,
+              flexShrink: 1,
+              minHeight: 0,
+            }}
             contentContainerStyle={{ gap: 8, paddingBottom: 12 }}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
@@ -1021,16 +1082,17 @@ export function FieldsPage(props: FieldsPageProps) {
             gap: 8,
           }}
         >
+          {/* Same rule as the local column: the container holding the open body grows. */}
           <ScrollView
             style={{
-              flexGrow: 0,
+              flexGrow: topSectionOpen ? 1 : 0,
               flexShrink: 1,
-              maxHeight: isSectionOpen("orderAndSpray") ? 280 : undefined,
+              minHeight: 0,
             }}
             contentContainerStyle={{ gap: 8, paddingBottom: 4 }}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
-            showsVerticalScrollIndicator
+            showsVerticalScrollIndicator={topSectionOpen}
           >
             {renderFieldsSteps("dxfTop")}
           </ScrollView>
@@ -1061,7 +1123,7 @@ export function FieldsPage(props: FieldsPageProps) {
             onStartPlanEditing?.();
           }
           setActiveStep("align");
-          setOpenSections((prev) => ({ ...prev, align: true, boundingBox: false }));
+          openOnlySection("align");
         }}
         boundaryMode={boundaryMode}
         onToggleBoundaryMode={handleToggleBoundaryMode}
@@ -1193,16 +1255,9 @@ export function FieldsPage(props: FieldsPageProps) {
                 // operator goes straight to ordering. A metric one cannot be sent until it is
                 // aligned (plan-trajectory requires origin_gps), so lead with Align open.
                 const placed = data.isGeographic && data.geoOrigin != null;
+                setShowTemplates(false);
                 setActiveStep(placed ? "upload" : "align");
-                setOpenSections((prev) => ({
-                  ...prev,
-                  upload: true,
-                  align: !placed,
-                  boundingBox: false,
-                  pathOrder: placed,
-                  templates: false,
-                  send: false,
-                }));
+                openOnlySection(placed ? "upload" : "align");
               }}
               onLocalCsvParsed={(data) => {
                 // Flip UI immediately in this screen (do not wait only on App props).
@@ -1211,19 +1266,14 @@ export function FieldsPage(props: FieldsPageProps) {
                 setShowMapInteraction(true);
                 setCsvPathOrder(null);
                 setCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG);
-                // Keep Upload expanded so CSV Enable Extension stays visible.
-                // Path Order is available below; do not auto-collapse Upload.
+                // Land on Upload so the Enable Extension card is the next thing seen.
+                // Path Order sits right below as a collapsed header.
                 setShowTemplates(false);
                 setActiveStep("upload");
-                setOpenSections((prev) => ({
-                  ...prev,
-                  upload: true,
-                  pathOrder: true,
-                  templates: false,
-                  send: false,
-                }));
+                openOnlySection("upload");
               }}
               csvExtensionConfig={csvExtensionConfig}
+              extensionStatus={extensionStatus}
               onCsvExtensionConfigChange={(next) => {
                 setCsvExtensionConfig(next);
                 setLines((prev) => {

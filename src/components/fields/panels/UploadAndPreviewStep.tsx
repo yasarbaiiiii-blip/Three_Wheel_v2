@@ -11,9 +11,10 @@ import {
   CSV_EXT_AFT_FLOOR_M,
   CSV_EXT_MAX_M,
   CSV_EXT_WARN_M,
+  DXF_EXTENSION_CONFIG,
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
-} from "../../../utils/csvExtensions";
+} from "../../../utils/missionExtensions";
 import { parseLocalDxf, type LocalDxfResult } from "../../../utils/dxfLocalImport";
 import { parseLocalPointCsv, type LocalPointCsvResult } from "../../../utils/localPointCsv";
 import { FIELDS_COLORS } from "../fieldsTheme";
@@ -42,6 +43,12 @@ type UploadAndPreviewStepProps = {
    * No parse-dxf / entities / upload.
    */
   onLocalDxfParsed?: (data: LocalDxfResult) => void;
+  /**
+   * How many PRE/AFT runs the current config actually builds, and why it built none.
+   * Computed by the parent (it owns `lines`) so the card can say what happened instead of
+   * silently rendering nothing on geometry that has no free ends.
+   */
+  extensionStatus?: { count: number; hint: string | null } | null;
   /** Clears parent local-CSV preview state when the operator dismisses LOADED. */
   onClearLocalCsv?: () => void;
   /**
@@ -185,6 +192,7 @@ export function UploadAndPreviewStep({
   csvExtensionConfig,
   onCsvExtensionConfigChange,
   localCsvPreview = null,
+  extensionStatus = null,
 }: UploadAndPreviewStepProps) {
   const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -395,15 +403,9 @@ export function UploadAndPreviewStep({
         setImportError(null);
         // Seed local extension defaults (same as CSV card).
         if (onCsvExtensionConfigChange && csvExtensionConfig) {
-          onCsvExtensionConfigChange(
-            normalizeCsvExtensionConfig({
-              ...csvExtensionConfig,
-              enabled: false,
-              preM: 0.5,
-              aftM: 0.5,
-              perLine: false,
-            })
-          );
+          // per-line: CAD edges are independent PRE→MARK→AFT passes, and it is the only
+          // mode under which a closed shape (a square drawn as one polyline) gets run-ups.
+          onCsvExtensionConfigChange(normalizeCsvExtensionConfig(DXF_EXTENSION_CONFIG));
         }
         if (parsed.warnings.length > 0) {
           console.warn("[import][dxf-local] warnings:", parsed.warnings);
@@ -932,11 +934,12 @@ export function UploadAndPreviewStep({
               value={csvExtensionConfig.enabled}
               onValueChange={(enabled) => {
                 onInvalidateWorkflow("spray");
+                // Preserve perLine — it is an independent geometry policy, and resetting it
+                // here silently undid the operator's choice every time they re-enabled.
                 onCsvExtensionConfigChange(
                   normalizeCsvExtensionConfig({
                     ...csvExtensionConfig,
                     enabled,
-                    perLine: false,
                     aftM: enabled
                       ? Math.max(CSV_EXT_AFT_FLOOR_M, csvExtensionConfig.aftM)
                       : csvExtensionConfig.aftM,
@@ -950,6 +953,20 @@ export function UploadAndPreviewStep({
 
           {csvExtensionConfig.enabled ? (
             <View style={{ padding: 12, paddingTop: 0, gap: 8 }}>
+              {extensionStatus ? (
+                <Text
+                  style={{
+                    color: extensionStatus.count > 0 ? FIELDS_COLORS.textMuted : FIELDS_COLORS.warning,
+                    fontSize: 10,
+                    lineHeight: 14,
+                  }}
+                >
+                  {extensionStatus.count > 0
+                    ? `${extensionStatus.count} extension run(s) on the plan.`
+                    : extensionStatus.hint}
+                </Text>
+              ) : null}
+
               <View style={{ flexDirection: "row", gap: 8 }}>
                 <View style={{ flex: 1, gap: 3 }}>
                   <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, fontWeight: "700" }}>

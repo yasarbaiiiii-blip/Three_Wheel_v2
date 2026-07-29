@@ -9,6 +9,7 @@ import type { PlanLine } from "../types/plan";
 import {
   buildCsvExtensionLines,
   buildCsvExtensionPreviews,
+  buildExtensionTransitLines,
   csvExtensionLengthM,
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
@@ -287,8 +288,14 @@ export function applyCsvOrderToPlanLines(
   }
 
   const painted = resolveOrderedPaintedLines(orderedMarks, order);
-  const transit = buildCsvTransitLines(painted);
   const extensions = buildCsvExtensionLines(painted, extensionConfig);
+  // With extensions on, travel spans AFT-tip → next PRE-tip; the plain mark-to-mark
+  // connector would cut across the run-ups and leave them floating on the map. Same rule
+  // the rover applies once extensions exist (_insert_transit_connectors_between_segments
+  // is then its only routing pass). Falls back to mark-to-mark when there are none.
+  const extensionTransit = buildExtensionTransitLines(painted, extensionConfig);
+  const transit =
+    extensions.length > 0 ? extensionTransit : buildCsvTransitLines(painted);
   const others = allLines.filter(
     (l) =>
       l.layer !== "transit" &&
