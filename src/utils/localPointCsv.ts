@@ -754,17 +754,35 @@ function measurePreviewLengthM(pts: { north: number; east: number }[]): number {
   return polylineLengthM(pts);
 }
 
+/**
+ * Worst (largest) reported horizontal RMS across a group's source points, for
+ * {@link sparseArcResidualGateM} — the residual gate is a MAX over the group's points, so it
+ * should be judged against the noisiest point in that same group, not an average that a single
+ * bad fix could hide. Returns null when no point in the group reports a usable RMS, which
+ * leaves the fitter on its fixed default gate exactly as before this existed.
+ */
+function groupSurveyRmsM(points: LocalPointCsvPoint[]): number | null {
+  let worst: number | null = null;
+  for (const p of points) {
+    if (p.hrms_m != null && Number.isFinite(p.hrms_m) && p.hrms_m > 0) {
+      worst = worst == null ? p.hrms_m : Math.max(worst, p.hrms_m);
+    }
+  }
+  return worst;
+}
+
 /** Build one open road-marking PlanLine for a single already-split group of points. */
 function buildPlanLineForGroup(
   rawNed: RawNedPoint[],
   sourcePointCount: number,
   pathIndex: number,
   groupCount: number,
-  groupLabel: string | undefined
+  groupLabel: string | undefined,
+  surveyRmsM: number | null
 ): PlanLine | null {
   const id = planLineIdForGroup(pathIndex);
   const label = planLineLabelForGroup(pathIndex, groupCount, groupLabel, sourcePointCount);
-  const fitted = buildRoadMarkingFittedPath(rawNed);
+  const fitted = buildRoadMarkingFittedPath(rawNed, { surveyRmsM });
   const preview_points = fitted.samples;
 
   if (preview_points.length < 2) {
@@ -876,7 +894,14 @@ export function localCsvPointsToPlanLines(points: LocalPointCsvPoint[]): PlanLin
     const groupLabel = groupSourcePoints.every((p) => p.group && p.group === groupSourcePoints[0].group)
       ? groupSourcePoints[0].group
       : undefined;
-    const line = buildPlanLineForGroup(group, group.length, pathIndex, groups.length, groupLabel);
+    const line = buildPlanLineForGroup(
+      group,
+      group.length,
+      pathIndex,
+      groups.length,
+      groupLabel,
+      groupSurveyRmsM(groupSourcePoints)
+    );
     if (line) lines.push(line);
   }
   return lines;

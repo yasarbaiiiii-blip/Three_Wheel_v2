@@ -277,6 +277,90 @@ describe("localCsvPointsToPlanLines", () => {
   });
 });
 
+describe("localCsvPointsToPlanLines — sparse-arc RMS wiring (curve_6_points.csv regression)", () => {
+  /**
+   * NED metres and Lateral RMS, in file order, transcribed from an operator-reported RTK
+   * survey (curve_6_points.csv — 8 usable points after the pipeline's own 2 cm dedupe, plus a
+   * trailing 3-sample cluster 2 mm apart that collapses into the 8th). Reproduced here as a
+   * literal north/east/hrms CSV so the regression does not depend on that file's continued
+   * presence on disk, while still locking in the real numbers.
+   *
+   * The reported bug: the fitted circle sits 3.4 cm (unconstrained) / 5.18 cm (endpoint-
+   * constrained) from these points — genuinely one smooth curve for a survey whose own Lateral
+   * RMS is 1.6-1.8 cm — but a fixed 5 cm gate rejected it by 1.8 mm. The fallback (per-vertex
+   * fillets, each sized from local turn angle alone) then amplified that same GPS noise into a
+   * visible curvature swing between rows 7-11 — an implied radius oscillating 1.48 m to 4.90 m
+   * on a curve whose true radius is a near-constant ~2.4 m. That is the "jiggle from point 2 to
+   * 6" the operator saw on screen.
+   */
+  const CURVE_6_POINTS_NED: Array<[north: number, east: number, hrms: number]> = [
+    [0.0, 0.0, 0.016],
+    [-0.051, 0.546, 0.017],
+    [-0.043, 1.178, 0.017],
+    [0.244, 2.015, 0.017],
+    [0.801, 2.58, 0.017],
+    [1.184, 2.879, 0.017],
+    [1.834, 3.059, 0.018],
+    [2.512, 3.102, 0.017],
+    [2.51, 3.104, 0.017],
+    [2.511, 3.102, 0.017],
+  ];
+
+  function csvWithRms(rows: Array<[number, number, number]>): string {
+    return ["north,east,hrms", ...rows.map(([n, e, h]) => `${n},${e},${h}`)].join("\n");
+  }
+
+  function csvWithoutRms(rows: Array<[number, number, number]>): string {
+    return ["north,east", ...rows.map(([n, e]) => `${n},${e}`)].join("\n");
+  }
+
+  function jointTurnsDeg(pts: { north: number; east: number }[]): number[] {
+    const out: number[] = [];
+    for (let i = 1; i < pts.length - 1; i++) {
+      const a = pts[i - 1];
+      const b = pts[i];
+      const c = pts[i + 1];
+      const h1 = Math.atan2(b.east - a.east, b.north - a.north);
+      const h2 = Math.atan2(c.east - b.east, c.north - b.north);
+      let d = h2 - h1;
+      while (d > Math.PI) d -= 2 * Math.PI;
+      while (d < -Math.PI) d += 2 * Math.PI;
+      out.push(Math.abs((d * 180) / Math.PI));
+    }
+    return out;
+  }
+
+  it("renders one smooth arc, not the per-vertex jiggle, once the survey's own RMS is known", () => {
+    const parsed = parseLocalPointCsv(csvWithRms(CURVE_6_POINTS_NED), "curve_6_points.csv");
+    expect(parsed.points.some((p) => p.hrms_m != null)).toBe(true);
+
+    const lines = localCsvPointsToPlanLines(parsed.points);
+    expect(lines).toHaveLength(1);
+    const pts = lines[0].entity?.preview_points ?? [];
+    const turns = jointTurnsDeg(pts);
+
+    // Before the RMS-scaled gate: turns ranged 1.01°-2.96° across this same span (a per-vertex
+    // implied radius swinging 1.48 m-4.90 m). A true arc turns the same amount at every joint.
+    const spread = Math.max(...turns) - Math.min(...turns);
+    expect(spread).toBeLessThan(0.1);
+  });
+
+  it("without a reported RMS, the same points still fall back to fillets (documents the near miss)", () => {
+    const parsed = parseLocalPointCsv(
+      csvWithoutRms(CURVE_6_POINTS_NED),
+      "curve_6_points_no_rms.csv"
+    );
+    expect(parsed.points.every((p) => p.hrms_m == null)).toBe(true);
+
+    const lines = localCsvPointsToPlanLines(parsed.points);
+    const pts = lines[0].entity?.preview_points ?? [];
+    const turns = jointTurnsDeg(pts);
+    // The fixed 0.05 m gate rejects this fit by 1.8 mm — still a visible spread, unlike above.
+    const spread = Math.max(...turns) - Math.min(...turns);
+    expect(spread).toBeGreaterThan(1);
+  });
+});
+
 describe("buildCsvTransitLines", () => {
   it("connects consecutive group paths with a straight, no-spray-style transit line", () => {
     const rows = ["feature,north,east"];

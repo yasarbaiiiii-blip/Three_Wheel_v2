@@ -43,6 +43,13 @@ export type RoadMarkingPathOptions = {
   outlierPathChordRatio?: number;
   /** Residual multiplier for deterministic spike reject. */
   outlierResidualFactor?: number;
+  /**
+   * The survey's own reported horizontal precision (m) — GNSS HRMS / Lateral RMS from an RTK
+   * receiver, one figure per group. Scales the sparse-arc residual gate (see
+   * {@link sparseArcResidualGateM}); null/omitted falls back to a fixed default, so files with
+   * no quality column behave exactly as before this option existed.
+   */
+  surveyRmsM?: number | null;
 };
 
 // Not `as const`: callers and internal helpers pass runtime `number`s (adaptive
@@ -51,12 +58,28 @@ const DEFAULTS: Required<RoadMarkingPathOptions> = {
   fitToleranceM: 0.08,
   sharpCornerDeg: 12,
   filletRadiusFraction: 0.4,
-  maxFilletRadiusM: 8,
+  /**
+   * Sanity bound on a fillet radius — deliberately NOT a policy knob.
+   *
+   * The two ceilings that encode real policy are the paint budget (how much corner cut we may
+   * spend) and the leg budget (fillets must not overlap). This cap existed at 8 m, which is
+   * below both of them for any turn under ~22°, so on a gently-curving path IT became the
+   * binding constraint: a surveyed curve of radius 26.8 m was filleted at 8 m, bending 3.4×
+   * too tight for 1.4 m and then running dead straight for 3.27 m between vertices. Eight of
+   * those in a row is the faceting operators reported as "shake".
+   *
+   * Raised to a value above any fillet the paint budget would actually allow, so policy comes
+   * from the paint and leg budgets again. Verified over turn 3–179° × legs {0.5,1,2,5,20}: the
+   * worst in-budget corner cut is 0.1500 m against the 0.15 m budget, never above, and every
+   * turn ≥ 20° is bit-identical to the old value — squares and zig-zags do not move.
+   */
+  maxFilletRadiusM: 40,
   sampleSpacingM: 0.35,
   minArcPoints: 4,
   maxArcRadiusM: 5000,
   outlierPathChordRatio: 2.5,
   outlierResidualFactor: 8,
+  surveyRmsM: null,
 };
 
 /**
@@ -79,11 +102,102 @@ export const MAX_BARE_TURN_DEG = 8;
 /** Hard reversal guard (deg). */
 export const MAX_INTERIOR_TURN_DEG = 120;
 
+/**
+ * Sparse arc-run gates — when a sparse point list may be read as ONE surveyed curve rather
+ * than a chain of design vertices.
+ *
+ * Filleting bends AT a vertex, so its error is a corner cut of r·(sec(θ/2) − 1) and the paint
+ * budget caps how smooth it can ever be. Fitting an arc THROUGH the points has no corner to
+ * cut: on the reported 10-point curve the fitted arc sits 0.007 m from the operator's points
+ * where the fillet path sits 0.031 m. The smooth answer is the more accurate one — but only
+ * when the points really are samples of an arc, which is what these gates establish.
+ *
+ * Which gate stops what — measured, because the intuitive answer is wrong twice over:
+ *
+ *  - {@link SPARSE_ARC_CORNER_TURN_DEG} is the ONLY thing that saves a square, and nothing else
+ *    can. The four corners of a square lie exactly on their circumcircle: residual zero,
+ *    deviation from the source points zero, angular progression perfectly monotone. Every other
+ *    test waves a square through. A vertex that turns this hard is a corner, full stop.
+ *  - {@link SPARSE_ARC_MAX_RESIDUAL_M} is what stops a zig-zag. Measured over 9-point zig-zags:
+ *    residual 0.70 m at 45° turns, 0.47 m at 30°, 0.24 m at 15°, 0.13 m at 8° — all far outside
+ *    the 0.05 m gate. It is deliberately much tighter than the 0.15 m paint budget: a genuine
+ *    surveyed curve fits to centimetres, so there is no reason to spend paint error buying a fit.
+ *  - {@link isMonotoneAngularProgression} does NOT stop zig-zags, contrary to the obvious guess —
+ *    a zig-zag advancing along a corridor sweeps monotonically about its own distant best-fit
+ *    centre, and it passed this gate in every case measured. It is kept as a cheap guard on
+ *    traversal ORDER (retraced or out-and-back arcs, where position-based gates see nothing
+ *    wrong), which is the one thing the other two do not look at.
+ *
+ * The resulting invariant, and the thing to assert in tests: an accepted arc never sits more
+ * than {@link SPARSE_ARC_MAX_RESIDUAL_M} from any point the operator surveyed. Anything that
+ * would need a point moved further than that is rejected and left to
+ * {@link buildWaypointFilletPath} unchanged, so the blast radius of this feature is bounded by
+ * the gates.
+ *
+ * Known and accepted: an alternating wiggle small enough to fit inside the residual gate IS
+ * smoothed. Measured on 9-point zig-zags with 1 m legs, under the endpoint-constrained fit:
+ * 8° turns give residual 0.050 m and are preserved, 5° give 0.031 m and are smoothed. That
+ * boundary lands at roughly a 2 cm alternation, which is RTK noise on a line painted ~10 cm
+ * wide — not a zig-zag anyone specified. Smoothing it is noise removal, bounded by the same
+ * 5 cm invariant as everything else.
+ */
+export const SPARSE_ARC_CORNER_TURN_DEG = 30;
+/** Three points always define a circle exactly, so three carry no evidence of one. */
+export const SPARSE_ARC_MIN_POINTS = 4;
+/**
+ * Max |distance-to-centre − r| over the source points for the fit to be believed (m) — used
+ * as-is when the survey reports no precision figure. When it does, {@link sparseArcResidualGateM}
+ * scales this per file instead; see that function for why a single fixed number is knife's-edge
+ * for real RTK data.
+ */
+export const SPARSE_ARC_MAX_RESIDUAL_M = 0.05;
+/** Multiplier on the survey's own reported horizontal RMS — see {@link sparseArcResidualGateM}. */
+export const SPARSE_ARC_RESIDUAL_RMS_MULTIPLE = 4;
+/** Sanity floor so a broken/zero RMS reading cannot collapse the gate toward nothing. */
+export const SPARSE_ARC_RESIDUAL_FLOOR_M = 0.02;
+
+/**
+ * Residual gate for {@link trySparseArcFit}, scaled to what the survey itself reports.
+ *
+ * The fixed {@link SPARSE_ARC_MAX_RESIDUAL_M} is knife's-edge for real RTK surveys. Measured
+ * on an operator-reported case (curve_6_points.csv, Lateral RMS 1.6–1.8 cm): its own best-fit
+ * circle sits at 3.4 cm unconstrained / 5.18 cm endpoint-constrained — genuinely one smooth
+ * curve by any reasonable reading — rejected by 1.8 mm under the fixed gate. Falling through to
+ * per-vertex fillets is the worst place for that near-miss to land: fillet radius is derived
+ * from local turn angle, a second difference of noisy position, so it amplifies exactly the GPS
+ * noise the arc fit was rejected over. On this file the implied per-vertex radius swung
+ * 1.48 m → 4.90 m → 1.48 m across three consecutive points whose true curve is a near-constant
+ * ~2.4 m — that oscillation is the reported "jiggle".
+ *
+ *   gate = clamp(K · reportedRmsM, FLOOR, CORNER_TOLERANCE_M)
+ *
+ * K ({@link SPARSE_ARC_RESIDUAL_RMS_MULTIPLE}) covers the MAX, not the mean, of several noisy
+ * points: the expected max of N draws of 2-D Gaussian position error (a Rayleigh-distributed
+ * magnitude) grows like σ·√(2·ln N) — ≈2.0σ at N=8 — plus margin, since the fitted circle is
+ * itself only an approximation of the true curve. FLOOR keeps a broken/zero RMS column from
+ * collapsing the gate to nothing. The ceiling is {@link CORNER_TOLERANCE_M}: RMS-derived
+ * confidence may loosen the gate, but never past the same "paint error we are willing to spend
+ * replacing the operator's points" budget the dense pipeline is already judged against
+ * ({@link MAX_FIT_DEVIATION_M}'s sibling constant) — so a badly noisy survey can relax the gate
+ * only as far as policy already allows elsewhere, never further.
+ *
+ * No reported RMS (plain NED CSV, synthetic data, existing unit tests) ⇒
+ * {@link SPARSE_ARC_MAX_RESIDUAL_M} unchanged — this is purely additive for files that carry a
+ * quality column to scale from.
+ */
+export function sparseArcResidualGateM(surveyRmsM?: number | null): number {
+  if (surveyRmsM == null || !Number.isFinite(surveyRmsM) || surveyRmsM <= 0) {
+    return SPARSE_ARC_MAX_RESIDUAL_M;
+  }
+  const scaled = SPARSE_ARC_RESIDUAL_RMS_MULTIPLE * surveyRmsM;
+  return Math.min(CORNER_TOLERANCE_M, Math.max(SPARSE_ARC_RESIDUAL_FLOOR_M, scaled));
+}
+
 export type PointSequenceClass = "dense-survey" | "sparse-waypoints";
 
 export type FittedPathResult = {
   samples: RoadMarkingNedPoint[];
-  mode: "dense-fit" | "waypoint-fillet" | "degraded-fillet";
+  mode: "dense-fit" | "waypoint-fillet" | "degraded-fillet" | "sparse-arc";
   warnings: string[];
   /** False when geometry cannot be made paintable (e.g. undrivable corners, validation fail). */
   paintable: boolean;
@@ -729,13 +843,20 @@ function angularCoverageOk(points: RoadMarkingNedPoint[], circle: Circle, minCov
   return maxGapDeg <= 360 - minCoverageDeg + 1e-6;
 }
 
-function isMonotoneAngularProgression(points: RoadMarkingNedPoint[], circle: Circle): boolean {
-  if (points.length < 3) return true;
+/**
+ * Angles of `points` about `circle`, unwrapped so the series follows travel order instead of
+ * jumping at ±π. Shared by the monotonicity gate and by arc sampling, which must sweep the same
+ * way round the circle the operator surveyed.
+ *
+ * Convention matches {@link sampleArc}: north = cn + r·sin(a), east = ce + r·cos(a).
+ */
+export function unwrappedAngles(points: RoadMarkingNedPoint[], circle: Circle): number[] {
+  if (points.length === 0) return [];
   let prev = Math.atan2(points[0].north - circle.cn, points[0].east - circle.ce);
   let unwrapped = prev;
   const series: number[] = [unwrapped];
   for (let i = 1; i < points.length; i++) {
-    let a = Math.atan2(points[i].north - circle.cn, points[i].east - circle.ce);
+    const a = Math.atan2(points[i].north - circle.cn, points[i].east - circle.ce);
     let delta = a - prev;
     while (delta > Math.PI) delta -= 2 * Math.PI;
     while (delta < -Math.PI) delta += 2 * Math.PI;
@@ -743,6 +864,15 @@ function isMonotoneAngularProgression(points: RoadMarkingNedPoint[], circle: Cir
     series.push(unwrapped);
     prev = a;
   }
+  return series;
+}
+
+export function isMonotoneAngularProgression(
+  points: RoadMarkingNedPoint[],
+  circle: Circle
+): boolean {
+  if (points.length < 3) return true;
+  const series = unwrappedAngles(points, circle);
   // Overall direction
   const total = series[series.length - 1] - series[0];
   if (Math.abs(total) < 1e-3) return false;
@@ -754,6 +884,198 @@ function isMonotoneAngularProgression(points: RoadMarkingNedPoint[], circle: Cir
   }
   // Allow a couple of local wobbles; reject zig-zag / out-and-back.
   return reversals <= Math.max(1, Math.floor(points.length * 0.08));
+}
+
+/**
+ * Best-fit circle constrained to pass exactly through the first and last points.
+ *
+ * The unconstrained fit and the I1 terminus rule ("hard-anchor free termini to source
+ * vertices") pull in opposite directions: the circle is the best compromise over ALL points,
+ * so it generally misses the two ends, and then anchoring drags those ends onto the operator's
+ * points. That skews the first and last CHORDS, and the skew is visible twice over — as a kink
+ * at the first joint, and in the run-up, because `terminalUnitVector` aims PRE/AFT along that
+ * chord. Measured on a 10-point arc with one terminus 3 cm off the circle: the first joint
+ * turned 1.24° where every other joint turned 0.74°, and the run-up left 2.35° off tangent.
+ *
+ * Interpolating the ends removes the conflict instead of trading it off. A circle through two
+ * fixed points has its centre on their perpendicular bisector, leaving one free parameter:
+ *   C(t) = M + t·n̂,  r(t) = √(h² + t²)
+ * with M the chord midpoint, n̂ the chord normal and h the half-chord. Minimising the sum of
+ * squared radial residuals over the interior points is then a well-conditioned 1-D problem,
+ * solved here by golden-section search seeded from the unconstrained fit — a fixed iteration
+ * count, so the output is deterministic to the bit.
+ *
+ * Returns null when the endpoints coincide (a closed loop has no chord and no bisector).
+ */
+export function fitCircleThroughEndpoints(
+  points: RoadMarkingNedPoint[],
+  seed?: Circle | null
+): Circle | null {
+  const n = points.length;
+  if (n < 3) return null;
+  const p0 = points[0];
+  const pn = points[n - 1];
+  const dN = pn.north - p0.north;
+  const dE = pn.east - p0.east;
+  const chord = Math.hypot(dN, dE);
+  if (!(chord > 1e-9)) return null;
+
+  const mN = (p0.north + pn.north) / 2;
+  const mE = (p0.east + pn.east) / 2;
+  const h = chord / 2;
+  // Unit normal to the chord — the bisector direction the centre must lie along.
+  const nN = -dE / chord;
+  const nE = dN / chord;
+
+  const cost = (t: number): number => {
+    const cn = mN + t * nN;
+    const ce = mE + t * nE;
+    const r = Math.hypot(h, t);
+    let sum = 0;
+    for (let i = 1; i < n - 1; i++) {
+      const d = Math.hypot(points[i].north - cn, points[i].east - ce) - r;
+      sum += d * d;
+    }
+    return sum;
+  };
+
+  // Seed from the unconstrained centre projected onto the bisector; it is already close, so a
+  // bracket around it is ample and keeps the search inside the basin containing the answer.
+  const t0 = seed ? (seed.cn - mN) * nN + (seed.ce - mE) * nE : 0;
+  const span = Math.max(Math.abs(t0), chord) * 2 + chord;
+  let lo = t0 - span;
+  let hi = t0 + span;
+
+  const PHI_INV = (Math.sqrt(5) - 1) / 2;
+  let x1 = hi - PHI_INV * (hi - lo);
+  let x2 = lo + PHI_INV * (hi - lo);
+  let f1 = cost(x1);
+  let f2 = cost(x2);
+  // Fixed iteration count, not a tolerance loop: byte-identical output for identical input.
+  for (let i = 0; i < 100; i++) {
+    if (f1 < f2) {
+      hi = x2;
+      x2 = x1;
+      f2 = f1;
+      x1 = hi - PHI_INV * (hi - lo);
+      f1 = cost(x1);
+    } else {
+      lo = x1;
+      x1 = x2;
+      f1 = f2;
+      x2 = lo + PHI_INV * (hi - lo);
+      f2 = cost(x2);
+    }
+  }
+
+  const t = (lo + hi) / 2;
+  const circle: Circle = { cn: mN + t * nN, ce: mE + t * nE, r: Math.hypot(h, t) };
+  if (!Number.isFinite(circle.cn) || !Number.isFinite(circle.ce) || !Number.isFinite(circle.r)) {
+    return null;
+  }
+  return circle;
+}
+
+export type SparseArcFit = {
+  circle: Circle;
+  /** Max |distance-to-centre − r| over the source points (m). */
+  maxResidualM: number;
+  /** The gate `maxResidualM` was actually judged against — see {@link sparseArcResidualGateM}. */
+  gateM: number;
+  /** Signed total sweep in radians, in travel order. */
+  sweepRad: number;
+};
+
+/**
+ * Decide whether a sparse point list is ONE surveyed arc, and fit it if so.
+ *
+ * Returns null — meaning "fall back to waypoint fillets, unchanged" — for anything it cannot
+ * establish. See {@link SPARSE_ARC_CORNER_TURN_DEG} for why each gate exists and which shape
+ * each one is there to protect.
+ *
+ * Deliberately whole-path only. A path containing a hard corner is left entirely to the fillet
+ * pipeline rather than being split into arc runs joined at the corner, because a corner fillet
+ * sizes itself from the legs either side of it (`legCeil = 0.45·min(legIn,legOut)/tan(θ/2)`)
+ * and arc samples land 0.35 m apart — feeding a densified run into a corner starves that fillet
+ * of leg budget and drives it under the rover's 0.5 m floor, turning a drivable corner into a
+ * non-paintable one. Splitting properly means trimming each run back to the fillet's tangent
+ * points, which is a bigger change than this one is worth until real files ask for it.
+ */
+export function trySparseArcFit(
+  points: RoadMarkingNedPoint[],
+  opts?: { maxArcRadiusM?: number; surveyRmsM?: number | null }
+): SparseArcFit | null {
+  if (points.length < SPARSE_ARC_MIN_POINTS) return null;
+
+  // Gate 1 — a hard turn is a design corner, and no fit may absorb it.
+  for (let i = 1; i < points.length - 1; i++) {
+    const turn = Math.abs(turningAngleDeg(points[i - 1], points[i], points[i + 1]));
+    if (!Number.isFinite(turn)) return null;
+    if (turn > SPARSE_ARC_CORNER_TURN_DEG) return null;
+  }
+
+  // Interpolate the termini rather than best-fitting past them — see
+  // fitCircleThroughEndpoints for why anchoring an unconstrained fit kinks the first joint and
+  // misaims the run-up. No silent fallback to the unconstrained circle: a fit that cannot hold
+  // the endpoints is one we do not want, so it falls through to waypoint fillets instead.
+  const seed = fitCircleHyper(points) ?? fitCircleKasa(points);
+  const circle = fitCircleThroughEndpoints(points, seed);
+  if (!circle || !Number.isFinite(circle.r)) return null;
+  // Below the rover's floor it cannot be driven; above maxArcRadius it is a straight line by
+  // any useful measure, and the fillet path already handles those without faceting.
+  if (!(circle.r >= R_MIN_ROVER_M)) return null;
+  if (!(circle.r <= (opts?.maxArcRadiusM ?? DEFAULTS.maxArcRadiusM))) return null;
+
+  // Gate 2 — sweeping back and forth about the centre is a zig-zag, not an arc.
+  if (!isMonotoneAngularProgression(points, circle)) return null;
+
+  // Gate 3 — the points must actually lie on it.
+  let maxResidualM = 0;
+  for (const p of points) {
+    const d = Math.hypot(p.north - circle.cn, p.east - circle.ce);
+    maxResidualM = Math.max(maxResidualM, Math.abs(d - circle.r));
+  }
+  const gateM = sparseArcResidualGateM(opts?.surveyRmsM);
+  if (!(maxResidualM <= gateM)) return null;
+
+  const series = unwrappedAngles(points, circle);
+  const sweepRad = series[series.length - 1] - series[0];
+  if (!Number.isFinite(sweepRad) || Math.abs(sweepRad) < 1e-6) return null;
+
+  return { circle, maxResidualM, gateM, sweepRad };
+}
+
+/**
+ * Tessellate the fitted arc across the surveyed span.
+ *
+ * Termini are pinned to the operator's first and last points, matching the I1 rule
+ * {@link buildWaypointFilletPath} follows. Since {@link fitCircleThroughEndpoints} interpolates
+ * those two points, this is now an exactness fix-up of order 1e-12 rather than a correction —
+ * which is the point: an arc that has to be dragged onto its own endpoints arrives at them off
+ * tangent, and the run-up built from that chord inherits the error.
+ *
+ * The {@link PREVIEW_SAMPLE_TARGET} budget applies here for the first time on the sparse path.
+ * Chord-polygon fillets could never run away — the samples were bounded by the surveyed legs —
+ * but an arc through those legs is paced by arc length, and a 1 km-radius ring surveyed with
+ * 40 points is 6.3 km of arc, or 17.5k vertices at the default 0.35 m. Unlike the dense
+ * pipeline, which estimates length from the chord polygon and documents a small overshoot, the
+ * arc's length is known exactly (|sweep|·r), so the budget here is a real ceiling.
+ */
+export function buildSparseArcSamples(
+  points: RoadMarkingNedPoint[],
+  fit: SparseArcFit,
+  sampleSpacingM: number
+): RoadMarkingNedPoint[] {
+  const series = unwrappedAngles(points, fit.circle);
+  const a0 = series[0];
+  const arcLengthM = Math.abs(fit.sweepRad) * fit.circle.r;
+  const spacingM = Math.max(sampleSpacingM, arcLengthM / PREVIEW_SAMPLE_TARGET);
+  const samples = sampleArc(fit.circle, a0, a0 + fit.sweepRad, spacingM);
+  if (samples.length >= 2) {
+    samples[0] = { ...points[0] };
+    samples[samples.length - 1] = { ...points[points.length - 1] };
+  }
+  return dedupeNearPoints(samples, TESSELLATION_DEDUPE_M);
 }
 
 /**
@@ -1961,6 +2283,37 @@ export function buildRoadMarkingFittedPath(
   const forceDense = options.fitToleranceM != null;
 
   if (classification.class === "sparse-waypoints" && !forceDense) {
+    // One surveyed arc, or a chain of design vertices? Only the first can be fitted through;
+    // trySparseArcFit returns null for everything it cannot establish, so the fillet path
+    // below stays the default and this is purely additive.
+    const arcFit = trySparseArcFit(source, {
+      maxArcRadiusM: opts.maxArcRadiusM,
+      surveyRmsM: opts.surveyRmsM,
+    });
+    if (arcFit) {
+      const arcSamples = buildSparseArcSamples(source, arcFit, opts.sampleSpacingM);
+      const arcValidation = validateFittedPath(source, arcSamples, { waypointMode: true });
+      if (arcValidation.ok && arcSamples.length >= 2) {
+        const arcLen = polylineLengthM(arcSamples);
+        return {
+          samples: arcSamples,
+          mode: "sparse-arc",
+          warnings,
+          paintable: true,
+          quality: {
+            class: "sparse-waypoints",
+            toleranceM: arcFit.gateM,
+            maxJointTurnDeg: maxTurningAngleDeg(arcSamples),
+            lengthRatio: srcLen > 1e-9 ? arcLen / srcLen : 1,
+            maxSourceDeviationM: maxSourceDeviationM(source, arcSamples),
+          },
+        };
+      }
+      warnings.push(
+        `Surveyed-arc fit rejected by validation (${arcValidation.reasons.join("; ")}); using waypoint fillets.`
+      );
+    }
+
     const wp = buildWaypointFilletPath(source, options);
     warnings.push(...wp.warnings);
     const v = validateFittedPath(source, wp.samples, { waypointMode: true });
