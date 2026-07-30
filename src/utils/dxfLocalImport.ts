@@ -20,10 +20,8 @@ import { dxfCurveGeometryToNed } from "./curveGeometry";
 import {
   looksGeographic,
   projectGeographicToLocalNed,
-  projectGpsToLocalMeters,
-  projectLocalMetersToGps,
 } from "./geoProjection";
-import { transformPlanLineGeometry } from "./planLineTransform";
+import { rebasePlanLineToOrigin } from "./planOriginRebase";
 
 // ── $INSUNITS → metres (path_engine/parsers/dxf_parser.py) ──────────────────
 
@@ -204,7 +202,7 @@ export function parseLocalDxf(text: string, fileName: string): LocalDxfResult {
   };
 }
 
-function dxfFileStem(fileName: string): string {
+export function dxfFileStem(fileName: string): string {
   const base = (fileName || "").split(/[\\/]/).pop() || "dxf";
   return base.replace(/\.[^.]+$/, "") || base;
 }
@@ -219,7 +217,7 @@ function combinedDxfFileName(fileNames: string[]): string {
  * Prefix plan-line / entity ids so multi-file DXF merges never collide
  * (each parse restarts at LINE-0, ARC-0, …).
  */
-function prefixDxfLineIds(lines: PlanLine[], prefix: string): PlanLine[] {
+export function prefixDxfLineIds(lines: PlanLine[], prefix: string): PlanLine[] {
   return lines.map((line) => ({
     ...line,
     id: `${prefix}__${line.id}`,
@@ -235,28 +233,14 @@ function prefixDxfLineIds(lines: PlanLine[], prefix: string): PlanLine[] {
 
 /**
  * Re-base a geo-DXF line from `fromOrigin` NED into `toOrigin` NED via WGS84.
- * Pure translation in the local frames (no rotation/scale).
+ * Thin wrapper over shared {@link rebasePlanLineToOrigin}.
  */
 function rebaseGeoDxfLine(
   line: PlanLine,
   fromOrigin: { lat: number; lon: number },
   toOrigin: { lat: number; lon: number }
 ): PlanLine {
-  if (
-    fromOrigin.lat === toOrigin.lat &&
-    fromOrigin.lon === toOrigin.lon
-  ) {
-    return line;
-  }
-  return transformPlanLineGeometry(line, (north, east) => {
-    const gps = projectLocalMetersToGps(
-      north,
-      east,
-      fromOrigin.lat,
-      fromOrigin.lon
-    );
-    return projectGpsToLocalMeters(gps.lat, gps.lon, toOrigin.lat, toOrigin.lon);
-  });
+  return rebasePlanLineToOrigin(line, fromOrigin, toOrigin);
 }
 
 /**

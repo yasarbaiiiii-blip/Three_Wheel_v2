@@ -342,9 +342,29 @@ describe("localCsvPointsToPlanLines — sparse-arc RMS wiring (curve_6_points.cs
     const turns = jointTurnsDeg(pts);
 
     // Before the RMS-scaled gate: turns ranged 1.01°-2.96° across this same span (a per-vertex
-    // implied radius swinging 1.48 m-4.90 m). A true arc turns the same amount at every joint.
-    const spread = Math.max(...turns) - Math.min(...turns);
-    expect(spread).toBeLessThan(0.1);
+    // implied radius swinging 1.48 m-4.90 m, i.e. a hard corner-scale jump between joints).
+    // FRONTEND_NOTE_sparse_arc_fit_misses_survey_points.md: the arc fit itself later stopped
+    // resampling one global circle (which had silently displaced interior points up to 7 cm on
+    // a ±2 cm spec) in favor of interpolating every surveyed point exactly — which trades away
+    // perfectly uniform turning between every joint (real survey noise now shows up as a small
+    // per-joint tangent mismatch instead of a position error) for the property that actually
+    // matters here: no per-vertex-fillet-scale jiggle.
+    expect(Math.max(...turns)).toBeLessThan(15);
+  });
+
+  it("hits every surveyed point exactly — the actual reported bug this feature exists to fix", () => {
+    const parsed = parseLocalPointCsv(csvWithRms(CURVE_6_POINTS_NED), "curve_6_points.csv");
+    const lines = localCsvPointsToPlanLines(parsed.points);
+    const pts = lines[0].entity?.preview_points ?? [];
+    // parsed.points already deduped/merged by parseLocalPointCsv; check against the fitted
+    // path's own source rather than the raw literal rows above (which include the 2 near-
+    // duplicate trailing samples that collapse during fitting).
+    for (const p of parsed.points) {
+      const nearest = Math.min(
+        ...pts.map((s) => Math.hypot(s.north - p.north_m, s.east - p.east_m))
+      );
+      expect(nearest).toBeLessThan(0.01); // note's acceptance test: ≤ 1 cm per surveyed point
+    }
   });
 
   it("without a reported RMS, the same points still fall back to fillets (documents the near miss)", () => {

@@ -93,6 +93,18 @@ type AlignDxfPanelProps = {
   /** Map pin tap focuses this guide row for Lat/Lon entry (0-based). */
   focusedGuidePointIndex?: number | null;
   onFocusedGuidePointIndexChange?: (index: number | null) => void;
+  /**
+   * When set, local (app-planned) Fix Alignment commits through this callback
+   * instead of only mutating parent mission `lines` / global workflow verified.
+   * Used for per-file metric DXF in a multi-type batch.
+   */
+  onLocalFixApplied?: (result: {
+    alignedLines: PlanLine[];
+    originGps: [number, number];
+    scale: number | null;
+    rotationDeg: number | null;
+    rmseM: number | null;
+  }) => void;
 };
 
 export function AlignDxfPanel({
@@ -136,6 +148,7 @@ export function AlignDxfPanel({
   onFitToReferencePoints,
   focusedGuidePointIndex = null,
   onFocusedGuidePointIndexChange,
+  onLocalFixApplied,
 }: AlignDxfPanelProps) {
   const [isFixing, setIsFixing] = useState(false);
   const [isImportingCsv, setIsImportingCsv] = useState(false);
@@ -441,15 +454,14 @@ export function AlignDxfPanel({
         const solved = solveMultiPointAlignment(refs, metresPerDegreePx4);
         const originLat = solved.originGps[0];
         const originLon = solved.originGps[1];
+        const scale = enforceAlignmentScale(solved.scale);
+        const alignedLines = sanitizePlanLines(
+          applyAlignmentToLines(lines, solved, 0, 0)
+        );
         setMissionSummary(null);
-        setVerifiedAlignmentRequest({
-          ...payload,
-          origin_gps: solved.originGps,
-          rotation_deg: 0, // rotation already baked into vertices
-        });
         setAlignmentResult({
           method: solved.method,
-          scale: enforceAlignmentScale(solved.scale),
+          scale,
           rotation_deg: solved.rotationDeg,
           offset_n: null,
           offset_e: null,
@@ -459,13 +471,26 @@ export function AlignDxfPanel({
           residuals: solved.residualsM,
           warnings: null,
         });
-        setLines((prev) =>
-          sanitizePlanLines(
-            applyAlignmentToLines(prev, solved, 0, 0)
-          )
-        );
-        // Frame contract: after bake, local (0,0) is at origin_gps (same as CSV anchor).
-        setAlignedRefPoints?.([{ dxf_x: 0, dxf_y: 0, lat: originLat, lon: originLon }]);
+        if (onLocalFixApplied) {
+          // Multi-file batch: parent rebases onto sharedOriginGps and merges into mission lines.
+          onLocalFixApplied({
+            alignedLines,
+            originGps: [originLat, originLon],
+            scale,
+            rotationDeg: solved.rotationDeg,
+            rmseM: solved.rmseM,
+          });
+        } else {
+          setVerifiedAlignmentRequest({
+            ...payload,
+            origin_gps: solved.originGps,
+            rotation_deg: 0, // rotation already baked into vertices
+          });
+          setLines(() => alignedLines);
+          // Frame contract: after bake, local (0,0) is at origin_gps (same as CSV anchor).
+          setAlignedRefPoints?.([{ dxf_x: 0, dxf_y: 0, lat: originLat, lon: originLon }]);
+          onWorkflowStep?.("alignment", "verified");
+        }
         // Atomic handoff — clear sticker/provisional anchor so map projects baked NED
         // under the origin_gps frame (never design-frame + sticker residual).
         setRefPoints([]);
@@ -475,7 +500,6 @@ export function AlignDxfPanel({
         setExtractedCorners?.(null);
         setVisualAlignmentItem?.(null);
         setVisualAlignmentAnchor?.(null);
-        onWorkflowStep?.("alignment", "verified");
         Alert.alert(
           "Alignment applied",
           `Local fix (RMSE ${solved.rmseM != null ? solved.rmseM.toFixed(3) : "—"} m). DXF path ready for Send.`

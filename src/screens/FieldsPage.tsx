@@ -186,6 +186,25 @@ export type FieldsPageProps = {
     isGeographic: boolean;
     warnings: string[];
   } | null;
+  /** Multi-type local batch (CSV + metric/geo DXF). */
+  uploadedFiles?: import("../types/uploadedFiles").UploadedFileEntry[];
+  pendingDxfAlignment?: Record<
+    string,
+    import("../types/uploadedFiles").PendingDxfAlignmentEntry
+  >;
+  setPendingDxfAlignment?: React.Dispatch<
+    React.SetStateAction<
+      Record<string, import("../types/uploadedFiles").PendingDxfAlignmentEntry>
+    >
+  >;
+  sharedOriginGps?: [number, number] | null;
+  onBeginLocalImportBatch?: () => void;
+  onCommitDxfFileAlignment?: (
+    fileId: string,
+    alignedLines: PlanLine[],
+    originGps: [number, number],
+    summary: { scale: number | null; rotationDeg: number | null; rmseM: number | null }
+  ) => void;
   onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
   onLocalDxfParsed?: (data: import("../utils/dxfLocalImport").LocalDxfResult) => void;
   onClearLocalCsv?: () => void;
@@ -268,10 +287,18 @@ export function FieldsPage(props: FieldsPageProps) {
     renderPlanPreview,
     localCsvPreview = null,
     localDxfMeta = null,
+    uploadedFiles = [],
+    pendingDxfAlignment = {},
+    setPendingDxfAlignment,
+    sharedOriginGps = null,
+    onBeginLocalImportBatch,
+    onCommitDxfFileAlignment,
     onLocalCsvParsed,
     onLocalDxfParsed,
     onClearLocalCsv,
   } = props;
+
+  const [selectedUploadedFileId, setSelectedUploadedFileId] = useState<string | null>(null);
 
   const [refPoints, setRefPoints] = useState<RefPoint[]>([]);
   /** Which Multi-Point guide row should show Lat/Lon focus (map pin tap). */
@@ -488,7 +515,10 @@ export function FieldsPage(props: FieldsPageProps) {
       onInvalidateWorkflow("alignment");
       setMissionSummary(null);
       setAlignmentResult(null);
-      setVerifiedAlignmentRequest(null);
+      // Multi-file batch keeps sharedOriginGps / verifiedAlignmentRequest via App invalidate.
+      if (uploadedFiles.length === 0) {
+        setVerifiedAlignmentRequest(null);
+      }
       setRefPoints((prev) => {
         // Same location again → focus that row for Lat/Lon entry (do not remove).
         const existingIdx = prev.findIndex(
@@ -515,6 +545,7 @@ export function FieldsPage(props: FieldsPageProps) {
       isVisualAlignmentMode,
       isPlanEditingMode,
       csvGuidePointsActive,
+      uploadedFiles.length,
       onInvalidateWorkflow,
       setAlignmentResult,
       setVerifiedAlignmentRequest,
@@ -541,28 +572,150 @@ export function FieldsPage(props: FieldsPageProps) {
   }, [localCsvPreview, importedPlan?.fileType]);
 
   const activeCsvPreview = missionCsvPreview ?? localCsvPreview;
+  const hasLocalBatch = uploadedFiles.length > 0;
+  const allFilesVerified =
+    hasLocalBatch && uploadedFiles.every((f) => f.status === "verified");
+  const hasPendingAlignment = uploadedFiles.some((f) => f.status === "needs_alignment");
+  const batchHasDxf = uploadedFiles.some((f) => f.kind === "dxf");
+  const batchHasCsv = uploadedFiles.some((f) => f.kind === "csv");
   // Determine step statuses
-  const hasPath = !!selectedPathName || !!importedPlan || activeCsvPreview != null;
+  const hasPath =
+    !!selectedPathName ||
+    !!importedPlan ||
+    activeCsvPreview != null ||
+    hasLocalBatch;
   const uploadDone = hasPath;
-  const isDxfPath = importedPlan?.fileType === "dxf" || selectedPathName?.toLowerCase().endsWith(".dxf");
+  const isDxfPath =
+    importedPlan?.fileType === "dxf" ||
+    selectedPathName?.toLowerCase().endsWith(".dxf") ||
+    (hasLocalBatch && batchHasDxf && !batchHasCsv);
   const planLooksLikeCsv =
     importedPlan?.fileType === "csv" ||
     !!importedPlan?.fileName?.toLowerCase().endsWith(".csv");
-  const isLocalCsvFlow = activeCsvPreview != null || planLooksLikeCsv;
-  /** Local DXF: parsed on device (DXF_PLANNER=app), no selectedPathName on rover. */
+  /** Pure CSV local flow (no DXF in batch). */
+  const isLocalCsvFlow =
+    (hasLocalBatch && batchHasCsv && !batchHasDxf) ||
+    (!hasLocalBatch && (activeCsvPreview != null || planLooksLikeCsv));
+  /** Local DXF-only (or mixed batch treated as DXF-style steps with Align). */
   const isLocalDxfFlow =
-    DXF_PLANNER === "app" &&
-    isDxfPath &&
-    !selectedPathName &&
-    importedPlan?.fileType === "dxf";
-  const isLocalFlow = isLocalCsvFlow || isLocalDxfFlow;
-  const alignDone =
-    isLocalCsvFlow ||
-    !isDxfPath ||
-    stagedWorkflow.alignment === "verified" ||
-    !!verifiedAlignmentRequest ||
-    autoOrigin ||
-    isGeographicDxf;
+    (hasLocalBatch && batchHasDxf) ||
+    (DXF_PLANNER === "app" &&
+      isDxfPath &&
+      !selectedPathName &&
+      importedPlan?.fileType === "dxf" &&
+      !hasLocalBatch);
+  const isLocalFlow = isLocalCsvFlow || isLocalDxfFlow || hasLocalBatch;
+  /**
+   * Local multi-file batch: `allFilesVerified` is authoritative (every local CSV/DXF import
+   * goes through `uploadedFiles` now, so `hasPendingAlignment` can't disagree with it). The
+   * remaining clauses only matter for the rover/backend DXF path, where `uploadedFiles` stays
+   * empty — kept verbatim from before the batch existed.
+   */
+  const alignDone = hasLocalBatch
+    ? allFilesVerified
+    : !isDxfPath ||
+      autoOrigin ||
+      stagedWorkflow.alignment === "verified" ||
+      !!verifiedAlignmentRequest ||
+      isGeographicDxf;
+
+  // Prefer explicit selection; otherwise the first file that still needs alignment.
+  const effectiveAlignFileId = useMemo(() => {
+    if (selectedUploadedFileId && pendingDxfAlignment[selectedUploadedFileId]) {
+      return selectedUploadedFileId;
+    }
+    const firstPending = uploadedFiles.find((f) => f.status === "needs_alignment");
+    return firstPending?.id ?? null;
+  }, [selectedUploadedFileId, pendingDxfAlignment, uploadedFiles]);
+
+  const selectedPending =
+    effectiveAlignFileId != null
+      ? pendingDxfAlignment[effectiveAlignFileId] ?? null
+      : null;
+
+  const resetWorkingAlignState = useCallback(() => {
+    setRefPoints([]);
+    setFocusedGuidePointIndex(null);
+    setCsvGuidePointsActive(false);
+    setGuideCsvFileNames([]);
+    setAlignmentMethod("least_squares");
+    setExtractedCorners?.(null);
+    setVisualAlignmentItem?.(null);
+    setAlignmentResult(null);
+  }, [setExtractedCorners, setVisualAlignmentItem, setAlignmentResult]);
+
+  const handleSelectUploadedFile = useCallback(
+    (fileId: string) => {
+      setSelectedUploadedFileId(fileId);
+      const entry = uploadedFiles.find((f) => f.id === fileId);
+      if (!entry) return;
+      // Highlight this file's committed geometry when present.
+      const prefixed = lines
+        .filter((l) => l.id.startsWith(`${entry.lineIdPrefix}__`))
+        .map((l) => l.id);
+      if (prefixed.length > 0) {
+        onSelectLine(prefixed[0] ?? null, { highlightLineIds: prefixed });
+      }
+      if (entry.status === "needs_alignment") {
+        resetWorkingAlignState();
+        setActiveStep("align");
+        openOnlySection("align");
+      } else {
+        setActiveStep("upload");
+        openOnlySection("upload");
+      }
+    },
+    [
+      uploadedFiles,
+      lines,
+      onSelectLine,
+      resetWorkingAlignState,
+      setActiveStep,
+      openOnlySection,
+    ]
+  );
+
+  /** Map shows committed mission lines + selected (or sole) pending metric DXF. */
+  const mapDisplayLines = useMemo(() => {
+    const pendingIds = Object.keys(pendingDxfAlignment);
+    if (pendingIds.length === 0) return lines;
+    let pendingRaw: PlanLine[] = [];
+    if (selectedUploadedFileId && pendingDxfAlignment[selectedUploadedFileId]) {
+      pendingRaw = pendingDxfAlignment[selectedUploadedFileId].rawLines;
+    } else if (selectMarkPlanLines(lines).length === 0) {
+      // Nothing committed yet — show all pending so the map is not empty after upload.
+      pendingRaw = pendingIds.flatMap((id) => pendingDxfAlignment[id]?.rawLines ?? []);
+    } else if (activeStep === "align" && selectedPending) {
+      pendingRaw = selectedPending.rawLines;
+    }
+    if (pendingRaw.length === 0) return lines;
+    const boundary = lines.filter((l) => l.layer === "virtual_boundary");
+    const committed = lines.filter((l) => l.layer !== "virtual_boundary");
+    return [...boundary, ...committed, ...pendingRaw];
+  }, [
+    lines,
+    pendingDxfAlignment,
+    selectedUploadedFileId,
+    selectedPending,
+    activeStep,
+  ]);
+
+  const setPendingAlignLines = useCallback(
+    (updater: React.SetStateAction<PlanLine[]>) => {
+      if (!effectiveAlignFileId || !setPendingDxfAlignment) return;
+      setPendingDxfAlignment((prev) => {
+        const cur = prev[effectiveAlignFileId];
+        if (!cur) return prev;
+        const nextLines =
+          typeof updater === "function" ? updater(cur.rawLines) : updater;
+        return {
+          ...prev,
+          [effectiveAlignFileId]: { ...cur, rawLines: nextLines },
+        };
+      });
+    },
+    [effectiveAlignFileId, setPendingDxfAlignment]
+  );
 
   /**
    * Upload-plan CSV pins: same direct lat/lon draw path as guide/ref points
@@ -726,7 +879,7 @@ export function FieldsPage(props: FieldsPageProps) {
       {/* Map preview — full screen background */}
       <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
         {renderPlanPreview({
-          lines,
+          lines: mapDisplayLines,
           mapSourceLines,
           autoOriginReference,
           mapGeometryFrame,
@@ -1083,20 +1236,48 @@ export function FieldsPage(props: FieldsPageProps) {
     const showDxfAlign = slice === "dxfTop" || slice === "localDxfTop";
     const showDxfPathOrder = slice === "dxfPathOrder" && !isLocalDxfFlow;
     const activeCsvForSend = activeCsvPreview;
-    const showLocalDxfPathOrder = showCsvPathOrder && isLocalDxfFlow;
-    const showLocalCsvPathOrder = showCsvPathOrder && isLocalCsvFlow;
+    // Multi-file / local app batch: single Path Order card once every file is verified.
+    const showLocalBatchPathOrder =
+      showCsvPathOrder &&
+      hasLocalBatch &&
+      allFilesVerified;
+    const showLocalDxfPathOrder =
+      showCsvPathOrder && isLocalDxfFlow && !hasLocalBatch;
+    const showLocalCsvPathOrder =
+      showCsvPathOrder && isLocalCsvFlow && !hasLocalBatch;
+    // Only a file that's actually pending gets an Align card — selecting an already-verified
+    // file (its pendingDxfAlignment entry is gone) would otherwise fall back to a blank,
+    // generic "Align DXF" panel with no indication it's already done.
+    const showAlignForBatch =
+      hasLocalBatch &&
+      (hasPendingAlignment ||
+        (selectedUploadedFileId != null &&
+          uploadedFiles.some(
+            (f) => f.id === selectedUploadedFileId && f.status === "needs_alignment"
+          )));
 
     /**
      * Card numbering per flow:
      *   local CSV   1 Upload · 2 Path Order & Load · 3 Templates
      *   local DXF   1 Upload · 2 Align · 3 Path Order & Load · 4 Templates
+     *   multi batch 1 Upload · 2 Align (if needed) · 3 Path Order · 4 Templates
      *   rover DXF   1 Upload · 2 Templates · 3 Align · 4 Path Order & Load
      */
     const stepNo = {
       upload: 1,
-      align: isLocalDxfFlow ? 2 : 3,
-      pathOrder: isLocalCsvFlow ? 2 : isLocalDxfFlow ? 3 : 4,
-      templates: isLocalCsvFlow ? 3 : isLocalDxfFlow ? 4 : 2,
+      align: isLocalCsvFlow && !hasPendingAlignment ? 3 : 2,
+      pathOrder:
+        isLocalCsvFlow && !hasPendingAlignment
+          ? 2
+          : isLocalDxfFlow || hasLocalBatch
+            ? 3
+            : 4,
+      templates:
+        isLocalCsvFlow && !hasPendingAlignment
+          ? 3
+          : isLocalDxfFlow || hasLocalBatch
+            ? 4
+            : 2,
     };
 
     return (
@@ -1135,7 +1316,7 @@ export function FieldsPage(props: FieldsPageProps) {
               protectedResident={protectedResident}
               localCsvPreview={activeCsvPreview}
               localDxfSnapshot={
-                isLocalDxfFlow && localDxfMeta
+                (isLocalDxfFlow || hasLocalBatch) && localDxfMeta
                   ? {
                       fileName: localDxfMeta.fileName,
                       unitScale: 1,
@@ -1164,6 +1345,10 @@ export function FieldsPage(props: FieldsPageProps) {
                     }
                   : null
               }
+              uploadedFiles={uploadedFiles}
+              selectedUploadedFileId={selectedUploadedFileId}
+              onSelectUploadedFile={handleSelectUploadedFile}
+              onBeginLocalImportBatch={onBeginLocalImportBatch}
               onLocalDxfParsed={(data) => {
                 onLocalDxfParsed?.(data);
                 setShowMapInteraction(true);
@@ -1213,6 +1398,7 @@ export function FieldsPage(props: FieldsPageProps) {
               onClearLocalCsv={() => {
                 setMissionCsvPreview(null);
                 setCsvPathOrder(null);
+                setSelectedUploadedFileId(null);
                 onClearLocalCsv?.();
               }}
             />
@@ -1221,8 +1407,10 @@ export function FieldsPage(props: FieldsPageProps) {
 
           {/* (local DXF Align is rendered via showDxfAlign below) */}
 
-          {/* Local CSV / local DXF: paths + paint + transit + Verify & Load (plan-trajectory). */}
-          {(showLocalCsvPathOrder && activeCsvForSend) || showLocalDxfPathOrder ? (
+          {/* Local multi-file batch + single CSV/DXF: Path Order once alignment gate passes. */}
+          {(showLocalBatchPathOrder ||
+            (showLocalCsvPathOrder && activeCsvForSend) ||
+            showLocalDxfPathOrder) ? (
             <FieldsStepCard
               stepNumber={stepNo.pathOrder}
               title="Path Order & Load"
@@ -1279,29 +1467,40 @@ export function FieldsPage(props: FieldsPageProps) {
                     >
                       <CsvStageAndLoadPanel
                         apiBaseUrl={apiBaseUrl}
-                        sourceKind={isLocalDxfFlow ? "dxf" : "csv"}
-                        localCsvPreview={isLocalDxfFlow ? null : activeCsvForSend}
+                        sourceKind={
+                          batchHasDxf ||
+                          isLocalDxfFlow ||
+                          (hasLocalBatch && uploadedFiles.length > 1)
+                            ? "dxf"
+                            : "csv"
+                        }
+                        localCsvPreview={
+                          batchHasDxf || isLocalDxfFlow || uploadedFiles.length > 1
+                            ? null
+                            : activeCsvForSend
+                        }
                         mapPinCount={localCsvMapPins?.length ?? null}
                         lines={lines}
                         pathOrder={csvPathOrder}
                         extensionConfig={csvExtensionConfig}
                         originGps={
-                          // CSV: panel reads anchor from localCsvPreview.
-                          // DXF: real path geometry is in `lines`; origin_gps from
-                          // georef parse or local Align bake (required by plan-trajectory).
-                          isLocalDxfFlow && verifiedAlignmentRequest?.origin_gps
+                          sharedOriginGps ??
+                          (verifiedAlignmentRequest?.origin_gps
                             ? (verifiedAlignmentRequest.origin_gps as [number, number])
-                            : null
+                            : null)
                         }
                         missionName={
-                          isLocalDxfFlow
+                          hasLocalBatch || isLocalDxfFlow
                             ? localDxfMeta?.fileName ??
                               importedPlan?.fileName ??
-                              "dxf_mission"
+                              (batchHasCsv ? activeCsvForSend?.fileName : null) ??
+                              "mission"
                             : null
                         }
                         parseWarnings={
-                          isLocalDxfFlow ? localDxfMeta?.warnings ?? [] : []
+                          isLocalDxfFlow || batchHasDxf
+                            ? localDxfMeta?.warnings ?? []
+                            : []
                         }
                         setLines={setLines}
                         onSelectLine={onSelectLine}
@@ -1360,11 +1559,15 @@ export function FieldsPage(props: FieldsPageProps) {
           </FieldsStepCard>
           ) : null}
 
-          {/* Align DXF — DXF only (scrollable top section) */}
-          {showDxfAlign && isDxfPath && (
+          {/* Align DXF — rover DXF, local metric DXF, or multi-file pending file */}
+          {((showDxfAlign && isDxfPath) || showAlignForBatch) && (
           <FieldsStepCard
             stepNumber={stepNo.align}
-            title="Align DXF"
+            title={
+              selectedPending
+                ? `Align · ${selectedPending.fileName}`
+                : "Align DXF"
+            }
             status={stepStatus("align")}
             expanded={isSectionOpen("align")}
             onToggle={() => toggleSection("align", "align")}
@@ -1374,9 +1577,9 @@ export function FieldsPage(props: FieldsPageProps) {
           >
             <AlignDxfPanel
               apiBaseUrl={apiBaseUrl}
-              selectedPathName={selectedPathName}
-              lines={lines}
-              setLines={setLines}
+              selectedPathName={selectedPending ? null : selectedPathName}
+              lines={selectedPending ? selectedPending.rawLines : lines}
+              setLines={selectedPending ? setPendingAlignLines : setLines}
               alignmentResult={alignmentResult}
               setAlignmentResult={setAlignmentResult}
               setVerifiedAlignmentRequest={setVerifiedAlignmentRequest}
@@ -1413,6 +1616,28 @@ export function FieldsPage(props: FieldsPageProps) {
               onFitToReferencePoints={onFitToReferencePoints}
               focusedGuidePointIndex={focusedGuidePointIndex}
               onFocusedGuidePointIndexChange={setFocusedGuidePointIndex}
+              onLocalFixApplied={
+                effectiveAlignFileId &&
+                selectedPending &&
+                onCommitDxfFileAlignment
+                  ? (result) => {
+                      onCommitDxfFileAlignment(
+                        effectiveAlignFileId,
+                        result.alignedLines,
+                        result.originGps,
+                        {
+                          scale: result.scale,
+                          rotationDeg: result.rotationDeg,
+                          rmseM: result.rmseM,
+                        }
+                      );
+                      resetWorkingAlignState();
+                      setSelectedUploadedFileId(null);
+                      openOnlySection("upload");
+                      setActiveStep("upload");
+                    }
+                  : undefined
+              }
             />
           </FieldsStepCard>
           )}

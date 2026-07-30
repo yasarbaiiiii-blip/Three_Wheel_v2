@@ -1046,36 +1046,114 @@ export function trySparseArcFit(
 }
 
 /**
- * Tessellate the fitted arc across the surveyed span.
+ * Exact circumcircle through three points (closed-form perpendicular-bisector intersection).
+ * Null for a (near-)collinear triple — no circle, or one too large to be a meaningful radius.
+ */
+function circumcircle(
+  a: RoadMarkingNedPoint,
+  b: RoadMarkingNedPoint,
+  c: RoadMarkingNedPoint
+): Circle | null {
+  const d = 2 * (a.north * (b.east - c.east) + b.north * (c.east - a.east) + c.north * (a.east - b.east));
+  if (!Number.isFinite(d) || Math.abs(d) < 1e-9) return null;
+  const aSq = a.north * a.north + a.east * a.east;
+  const bSq = b.north * b.north + b.east * b.east;
+  const cSq = c.north * c.north + c.east * c.east;
+  const cn = (aSq * (b.east - c.east) + bSq * (c.east - a.east) + cSq * (a.east - b.east)) / d;
+  const ce = (aSq * (c.north - b.north) + bSq * (a.north - c.north) + cSq * (b.north - a.north)) / d;
+  if (!Number.isFinite(cn) || !Number.isFinite(ce)) return null;
+  const r = Math.hypot(a.north - cn, a.east - ce);
+  if (!Number.isFinite(r) || r < 1e-6) return null;
+  return { cn, ce, r };
+}
+
+/**
+ * Arc (or straight-chord fallback) samples for one segment of a point chain, built from the
+ * circumcircle of a 3-point window straddling it. `pairIndex` selects which adjacent pair of
+ * the triple this segment actually is: 0 = (triple[0]→triple[1]), 1 = (triple[1]→triple[2]).
+ * Falls back to a straight chord — still hitting both endpoints exactly — when the triple is
+ * (near-)collinear or the local radius is outside what the rover/geometry policy allows.
+ */
+function arcOrLineThroughSegment(
+  triple: [RoadMarkingNedPoint, RoadMarkingNedPoint, RoadMarkingNedPoint],
+  pairIndex: 0 | 1,
+  spacingM: number
+): RoadMarkingNedPoint[] {
+  const p0 = triple[pairIndex];
+  const p1 = triple[pairIndex + 1];
+  const circle = circumcircle(triple[0], triple[1], triple[2]);
+  if (!circle || !(circle.r >= R_MIN_ROVER_M) || !(circle.r <= DEFAULTS.maxArcRadiusM)) {
+    return sampleLine(p0, p1, spacingM);
+  }
+  const angles = unwrappedAngles(triple, circle);
+  return sampleArc(circle, angles[pairIndex], angles[pairIndex + 1], spacingM);
+}
+
+/** Append `segment`, skipping its first sample when it exactly repeats the running output's last. */
+function appendSamples(out: RoadMarkingNedPoint[], segment: RoadMarkingNedPoint[]): void {
+  for (let k = 0; k < segment.length; k++) {
+    if (k === 0 && out.length > 0 && dist(out[out.length - 1], segment[k]) < 1e-6) continue;
+    out.push(segment[k]);
+  }
+}
+
+/**
+ * Tessellate the fitted arc across the surveyed span — interpolating EVERY surveyed point,
+ * not just the two termini.
  *
- * Termini are pinned to the operator's first and last points, matching the I1 rule
- * {@link buildWaypointFilletPath} follows. Since {@link fitCircleThroughEndpoints} interpolates
- * those two points, this is now an exactness fix-up of order 1e-12 rather than a correction —
- * which is the point: an arc that has to be dragged onto its own endpoints arrives at them off
- * tangent, and the run-up built from that chord inherits the error.
+ * FRONTEND_NOTE_sparse_arc_fit_misses_survey_points.md: resampling the single
+ * endpoint-constrained circle from `fit` left interior points wherever that circle happened to
+ * land — up to the residual gate away (measured: up to 7 cm on a ±2 cm paint spec). Since
+ * {@link trySparseArcFit} has already established the WHOLE point list reads as one genuine
+ * arc (corner-turn, monotonicity, and residual-vs-one-circle gates all passed), the circumcircle
+ * of any three consecutive points on that same arc is a close, locally well-conditioned estimate
+ * of the curve right there — so instead of resampling one global circle, this builds one small
+ * arc per segment [P_i, P_{i+1}] from the nearest available point triple and concatenates them.
+ * Every surveyed point becomes an exact vertex of the output (deviation is 0, not up to the
+ * residual gate), and consecutive segments meet with only the small tangent mismatch between two
+ * overlapping 3-point estimates of the same curve — far smaller than the position error this
+ * replaces, and bounded by the same corner-turn/monotonicity/residual gates that already decided
+ * this is one arc, not a design vertex chain.
  *
- * The {@link PREVIEW_SAMPLE_TARGET} budget applies here for the first time on the sparse path.
- * Chord-polygon fillets could never run away — the samples were bounded by the surveyed legs —
- * but an arc through those legs is paced by arc length, and a 1 km-radius ring surveyed with
- * 40 points is 6.3 km of arc, or 17.5k vertices at the default 0.35 m. Unlike the dense
- * pipeline, which estimates length from the chord polygon and documents a small overshoot, the
- * arc's length is known exactly (|sweep|·r), so the budget here is a real ceiling.
+ * Termini are still pinned exactly to the operator's first and last points (I1, matching
+ * {@link buildWaypointFilletPath}), and falls back segment-by-segment to a straight chord when a
+ * triple is collinear or its local radius is not drivable — never throws, never drops a point.
+ *
+ * The {@link PREVIEW_SAMPLE_TARGET} budget is unchanged: a 1 km-radius ring surveyed with 40
+ * points is still 6.3 km of arc, so the total-length estimate from `fit` still paces sampling
+ * the same way it did before this change (only the underlying curve construction is new).
  */
 export function buildSparseArcSamples(
   points: RoadMarkingNedPoint[],
   fit: SparseArcFit,
   sampleSpacingM: number
 ): RoadMarkingNedPoint[] {
-  const series = unwrappedAngles(points, fit.circle);
-  const a0 = series[0];
-  const arcLengthM = Math.abs(fit.sweepRad) * fit.circle.r;
-  const spacingM = Math.max(sampleSpacingM, arcLengthM / PREVIEW_SAMPLE_TARGET);
-  const samples = sampleArc(fit.circle, a0, a0 + fit.sweepRad, spacingM);
-  if (samples.length >= 2) {
-    samples[0] = { ...points[0] };
-    samples[samples.length - 1] = { ...points[points.length - 1] };
+  const n = points.length;
+  if (n < 2) return points.slice();
+  const totalArcLenEstM = Math.abs(fit.sweepRad) * fit.circle.r;
+  const spacingM = Math.max(sampleSpacingM, totalArcLenEstM / PREVIEW_SAMPLE_TARGET);
+  if (n === 2) return sampleLine(points[0], points[1], spacingM);
+
+  const out: RoadMarkingNedPoint[] = [];
+  for (let i = 0; i < n - 1; i++) {
+    // Prefer the triple starting at i; the last segment has none (i+2 would be out of range),
+    // so it borrows the triple ending at i+1 instead — both interpolate this segment's two
+    // points exactly, and reusing that same triple for the last two segments is what keeps the
+    // tail of the path arriving on a single consistent tangent (see the "arrive on tangent" gate
+    // this feature was already judged against).
+    const useForwardTriple = i + 2 <= n - 1;
+    const triple: [RoadMarkingNedPoint, RoadMarkingNedPoint, RoadMarkingNedPoint] = useForwardTriple
+      ? [points[i], points[i + 1], points[i + 2]]
+      : [points[i - 1], points[i], points[i + 1]];
+    const pairIndex: 0 | 1 = useForwardTriple ? 0 : 1;
+    appendSamples(out, arcOrLineThroughSegment(triple, pairIndex, spacingM));
   }
-  return dedupeNearPoints(samples, TESSELLATION_DEDUPE_M);
+  // I1 — belt and suspenders against any floating-point drift from the arc math above.
+  if (out.length >= 2) {
+    out[0] = { ...points[0] };
+    out[out.length - 1] = { ...points[n - 1] };
+  }
+  return dedupeNearPoints(out, TESSELLATION_DEDUPE_M);
 }
 
 /**

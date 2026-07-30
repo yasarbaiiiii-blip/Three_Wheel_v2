@@ -16,15 +16,14 @@ import {
   type CsvExtensionConfig,
 } from "../../../utils/missionExtensions";
 import {
-  mergeLocalDxfResults,
   parseLocalDxf,
   type LocalDxfResult,
 } from "../../../utils/dxfLocalImport";
 import {
-  mergeLocalPointCsvResults,
   parseLocalPointCsv,
   type LocalPointCsvResult,
 } from "../../../utils/localPointCsv";
+import type { UploadedFileEntry } from "../../../types/uploadedFiles";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 type UploadAndPreviewStepProps = {
@@ -72,6 +71,17 @@ type UploadAndPreviewStepProps = {
    * "Add more files" still works after a remount loses in-component `lastLocalDxf`.
    */
   localDxfSnapshot?: LocalDxfResult | null;
+  /** Multi-type local batch — per-file status list (App-owned). */
+  uploadedFiles?: UploadedFileEntry[];
+  /** Tap a file row → parent opens that file's section (Align when needed). */
+  onSelectUploadedFile?: (fileId: string) => void;
+  /** Currently selected file in the upload list. */
+  selectedUploadedFileId?: string | null;
+  /**
+   * Reset multi-file batch state before a non-append local import so files
+   * combine cleanly without residual geometry from a prior mission.
+   */
+  onBeginLocalImportBatch?: () => void;
 };
 
 const MAX_IMPORT_ATTEMPTS = 3;
@@ -209,6 +219,10 @@ export function UploadAndPreviewStep({
   localCsvPreview = null,
   localDxfSnapshot = null,
   extensionStatus = null,
+  uploadedFiles = [],
+  onSelectUploadedFile,
+  selectedUploadedFileId = null,
+  onBeginLocalImportBatch,
 }: UploadAndPreviewStepProps) {
   /** Last failed batch (for Retry). Single-file rover uploads use length 1. */
   const [pickedFiles, setPickedFiles] = useState<DocumentPicker.DocumentPickerAsset[]>([]);
@@ -338,6 +352,9 @@ export function UploadAndPreviewStep({
    * Local multi-CSV: parse each file on-device and merge into one plan.
    * When `append` is true, new files are merged into the already-loaded CSV plan.
    */
+  /**
+   * Parse each CSV on-device and hand up one file at a time. App.tsx owns append/rebase.
+   */
   const importLocalCsvFiles = async (
     files: DocumentPicker.DocumentPickerAsset[],
     opts?: { append?: boolean }
@@ -347,35 +364,41 @@ export function UploadAndPreviewStep({
     setImportError(null);
     setIsUploading(true);
     try {
-      const parsedList: LocalPointCsvResult[] = [];
+      if (!append) {
+        onBeginLocalImportBatch?.();
+      }
+      // Append validity is enforced in importAndPreviewFiles (batch already loaded).
+
       let firstStableUri = files[0]?.uri ?? "";
+      let lastParsed: LocalPointCsvResult | null = null;
+      const allWarnings: string[] = [];
+
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         const { text, stableUri } = await readPickedFileText(file);
         if (i === 0) firstStableUri = stableUri;
-        parsedList.push(parseLocalPointCsv(text, file.name));
+        const parsed = parseLocalPointCsv(text, file.name);
+        lastParsed = parsed;
+        allWarnings.push(...parsed.warnings.map((w) => `${file.name}: ${w}`));
+        onLocalCsvParsed?.(parsed);
       }
 
-      const base =
-        append && localCsvPreview != null ? [localCsvPreview, ...parsedList] : parsedList;
-      if (append && localCsvPreview == null) {
-        throw new Error("Nothing loaded to append to — import a plan first.");
+      if (lastParsed) {
+        setLocalCsvSummary({
+          num_points: lastParsed.num_points,
+          kind: lastParsed.kind,
+          frame: lastParsed.point_source_frame,
+          warnings: allWarnings.slice(0, 12),
+        });
       }
-      const parsed = mergeLocalPointCsvResults(base);
-      onInvalidateWorkflow("alignment");
-      onLocalCsvParsed?.(parsed);
-      setLastLocalDxf(null);
       setImportedPlan({
-        fileName: parsed.fileName,
+        fileName:
+          files.length === 1
+            ? files[0].name
+            : `${files[0]?.name?.replace(/\.[^.]+$/, "") ?? "batch"}_x${files.length}.csv`,
         uri: firstStableUri,
         fileType: "csv",
         source: "imported",
-      });
-      setLocalCsvSummary({
-        num_points: parsed.num_points,
-        kind: parsed.kind,
-        frame: parsed.point_source_frame,
-        warnings: parsed.warnings.slice(0, 12),
       });
       const newNames = files.map((f) => f.name);
       setLoadedSourceFiles((prev) =>
@@ -386,8 +409,8 @@ export function UploadAndPreviewStep({
       setImportError(null);
       setAppendOnImport(false);
 
-      if (parsed.warnings.length > 0) {
-        console.warn("[import][csv] warnings:", parsed.warnings);
+      if (allWarnings.length > 0) {
+        console.warn("[import][csv] warnings:", allWarnings);
       }
     } catch (err) {
       console.log("Error importing CSV locally:", err);
@@ -403,8 +426,8 @@ export function UploadAndPreviewStep({
   };
 
   /**
-   * Local multi-DXF (metric or geo): parse each on-device and merge into one plan.
-   * When `append` is true, new files are merged into the already-loaded DXF plan.
+   * Parse each DXF on-device and hand up one file at a time. App.tsx owns append/rebase
+   * and per-file metric alignment gating.
    */
   const importLocalDxfFiles = async (
     files: DocumentPicker.DocumentPickerAsset[],
@@ -415,34 +438,37 @@ export function UploadAndPreviewStep({
     setImportError(null);
     setIsUploading(true);
     try {
-      const parsedList: LocalDxfResult[] = [];
+      if (!append) {
+        onBeginLocalImportBatch?.();
+      }
+      // Append validity is enforced in importAndPreviewFiles (batch already loaded).
+
       let firstStableUri = files[0]?.uri ?? "";
+      let lastParsed: LocalDxfResult | null = null;
+      const allWarnings: string[] = [];
+
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         const { text, stableUri } = await readPickedFileText(file);
         if (i === 0) firstStableUri = stableUri;
-        parsedList.push(parseLocalDxf(text, file.name));
+        const parsed = parseLocalDxf(text, file.name);
+        lastParsed = parsed;
+        allWarnings.push(...parsed.warnings.map((w) => `${file.name}: ${w}`));
+        onLocalDxfParsed?.(parsed);
       }
 
-      const existingDxf = lastLocalDxf ?? localDxfSnapshot;
-      if (append && existingDxf == null) {
-        throw new Error(
-          "Cannot add more DXF files right now — clear and re-import, or use multi-select on first pick."
-        );
+      if (lastParsed) {
+        setLastLocalDxf(lastParsed);
       }
-      const base = append && existingDxf != null ? [existingDxf, ...parsedList] : parsedList;
-      const parsed = mergeLocalDxfResults(base);
-      onInvalidateWorkflow("alignment");
-      onClearLocalCsv?.();
-      onLocalDxfParsed?.(parsed);
-      setLastLocalDxf(parsed);
       setImportedPlan({
-        fileName: parsed.fileName,
+        fileName:
+          files.length === 1
+            ? files[0].name
+            : `${files[0]?.name?.replace(/\.[^.]+$/, "") ?? "batch"}_x${files.length}.dxf`,
         uri: firstStableUri,
         fileType: "dxf",
         source: "imported",
       });
-      setLocalCsvSummary(null);
       const newNames = files.map((f) => f.name);
       setLoadedSourceFiles((prev) =>
         append && prev.length > 0 ? [...prev, ...newNames] : newNames
@@ -456,8 +482,8 @@ export function UploadAndPreviewStep({
         // mode under which a closed shape (a square drawn as one polyline) gets run-ups.
         onCsvExtensionConfigChange(normalizeCsvExtensionConfig(DXF_EXTENSION_CONFIG));
       }
-      if (parsed.warnings.length > 0) {
-        console.warn("[import][dxf-local] warnings:", parsed.warnings);
+      if (allWarnings.length > 0) {
+        console.warn("[import][dxf-local] warnings:", allWarnings);
       }
     } catch (err) {
       console.log("Error importing DXF locally:", err);
@@ -573,9 +599,9 @@ export function UploadAndPreviewStep({
   };
 
   /**
-   * CSV + app-planned DXF: multi-file parse on-device and merge.
+   * CSV + app-planned DXF: multi-file parse on-device (mixed types allowed).
    * Waypoints / rover DXF (DXF_PLANNER=rover): single-file upload + backend preview.
-   * `append` merges into the plan already shown as LOADED (Add more files).
+   * `append` adds into the local batch already shown as LOADED (Add more files).
    */
   const importAndPreviewFiles = async (
     files: DocumentPicker.DocumentPickerAsset[],
@@ -585,65 +611,103 @@ export function UploadAndPreviewStep({
     if (files.length === 0) return;
 
     const append = !!opts?.append;
-    const exts = files.map((f) => f.name.split(".").pop()?.toLowerCase() ?? "");
-    const uniqueExts = [...new Set(exts)];
-    if (uniqueExts.length > 1) {
-      Alert.alert(
-        "Mixed File Types",
-        "Select only one type at a time (.csv, .dxf, or .waypoints). Multi-file merge works within the same type."
-      );
+    const csvFiles = files.filter((f) => (f.name.split(".").pop()?.toLowerCase() ?? "") === "csv");
+    const dxfFiles = files.filter((f) => (f.name.split(".").pop()?.toLowerCase() ?? "") === "dxf");
+    const waypointFiles = files.filter(
+      (f) => (f.name.split(".").pop()?.toLowerCase() ?? "") === "waypoints"
+    );
+
+    // Waypoints (and rover-side DXF when planner is not app) stay single-file.
+    if (waypointFiles.length > 0) {
+      if (csvFiles.length > 0 || dxfFiles.length > 0 || waypointFiles.length > 1) {
+        Alert.alert(
+          "One File at a Time",
+          "Waypoints uploads support a single file. Select one .waypoints file alone."
+        );
+        return;
+      }
+      if (append) {
+        Alert.alert(
+          "Cannot Add Files",
+          "Adding more files is only available for local CSV and app-planned DXF plans."
+        );
+        return;
+      }
+      await importRoverFile(waypointFiles[0]);
       return;
     }
 
-    const ext = uniqueExts[0];
+    const localDxfOk = DXF_PLANNER === "app";
+    const hasLocalBatch = uploadedFiles.length > 0 || localCsvPreview != null || isLocalDxfPlanner;
 
     if (append) {
-      // Append only for local CSV / local DXF — must match the loaded plan type.
-      if (isCsvPath && !isDxfPath) {
-        if (ext !== "csv") {
-          Alert.alert("Wrong Type", "This plan is a CSV. Add more .csv files only.");
-          return;
-        }
-        await importLocalCsvFiles(files, { append: true });
+      if (!hasLocalBatch) {
+        Alert.alert(
+          "Cannot Add Files",
+          "Adding more files is only available for local CSV and app-planned DXF plans."
+        );
         return;
       }
-      if (isLocalDxfPlanner) {
-        if (ext !== "dxf") {
-          Alert.alert("Wrong Type", "This plan is a DXF. Add more .dxf files only.");
-          return;
-        }
-        await importLocalDxfFiles(files, { append: true });
+      if (dxfFiles.length > 0 && !localDxfOk) {
+        Alert.alert("Wrong Type", "App-planned DXF is required to add .dxf files to a local batch.");
         return;
       }
-      Alert.alert(
-        "Cannot Add Files",
-        "Adding more files is only available for local CSV and app-planned DXF plans."
-      );
+      // Append each type into the existing multi-file batch (no type exclusivity).
+      if (csvFiles.length > 0) {
+        await importLocalCsvFiles(csvFiles, { append: true });
+      }
+      if (dxfFiles.length > 0 && localDxfOk) {
+        await importLocalDxfFiles(dxfFiles, { append: true });
+      }
       return;
     }
 
-    // CSV is local-only and does not require a rover connection. Multi-file supported.
-    if (ext === "csv") {
-      await importLocalCsvFiles(files, { append: false });
+    // Fresh pick: mixed CSV + app DXF in one gesture is allowed.
+    if (dxfFiles.length > 0 && !localDxfOk) {
+      if (csvFiles.length > 0 || dxfFiles.length > 1) {
+        Alert.alert(
+          "One File at a Time",
+          "Rover-side DXF uploads support a single file. Select one file, or switch to app-planned DXF for multi-file merge."
+        );
+        return;
+      }
+      await importRoverFile(dxfFiles[0]);
       return;
     }
 
-    // DXF app-planned path: multi-file parse on-device (metric + geo-referenced).
-    if (ext === "dxf" && DXF_PLANNER === "app") {
-      await importLocalDxfFiles(files, { append: false });
+    // Mixed CSV + app-planned DXF in one pick: reuse the per-type importers so summary
+    // bookkeeping (localCsvSummary / lastLocalDxf) stays correct for both kinds — only the
+    // first call resets the batch, the second appends into what it just started.
+    const mixedLocal = csvFiles.length > 0 && dxfFiles.length > 0 && localDxfOk;
+    if (mixedLocal) {
+      await importLocalCsvFiles(csvFiles, { append: false });
+      await importLocalDxfFiles(dxfFiles, { append: true });
+      // Combined display name/uri once both kinds have imported — deliberately "dxf"
+      // (no "mixed" fileType exists on ImportedPlan; this is only a display fallback,
+      // superseded everywhere else by the per-file `uploadedFiles` list).
+      const firstFile = csvFiles[0] ?? dxfFiles[0];
+      const stableUri = firstFile ? (await resolveStableUploadAsset(firstFile)).uri : "";
+      setImportedPlan({
+        fileName: `mixed_x${csvFiles.length + dxfFiles.length}`,
+        uri: stableUri,
+        fileType: "dxf",
+        source: "imported",
+      });
+      setLoadedSourceFiles([...csvFiles, ...dxfFiles].map((f) => f.name));
       return;
     }
 
-    // Rover DXF / waypoints: one path name per upload.
-    if (files.length > 1) {
-      Alert.alert(
-        "One File at a Time",
-        "Rover-side DXF and waypoints uploads support a single file. Select one file, or switch to app-planned DXF for multi-file merge."
-      );
+    if (csvFiles.length > 0) {
+      await importLocalCsvFiles(csvFiles, { append: false });
       return;
     }
 
-    await importRoverFile(files[0]);
+    if (dxfFiles.length > 0 && localDxfOk) {
+      await importLocalDxfFiles(dxfFiles, { append: false });
+      return;
+    }
+
+    Alert.alert("Invalid File", "Please select one or more .dxf, .csv, or .waypoints files.");
   };
 
   const pickAndImport = async (opts?: { append?: boolean }) => {
@@ -715,10 +779,11 @@ export function UploadAndPreviewStep({
         ? loadedSourceFiles[0]
         : null;
 
-  /** Local CSV or app-planned DXF — can append more files after first load. */
+  /** Local CSV / app-planned DXF batch — can append more files after first load. */
   const canAddMoreFiles =
     !!targetPathName &&
-    ((isCsvPath && !isDxfPath && localCsvPreview != null) ||
+    (uploadedFiles.length > 0 ||
+      (isCsvPath && !isDxfPath && localCsvPreview != null) ||
       (isLocalDxfPlanner && (lastLocalDxf != null || localDxfSnapshot != null)));
 
   return (
@@ -726,7 +791,7 @@ export function UploadAndPreviewStep({
       {/* File Upload Section */}
       <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
         {DXF_PLANNER === "app"
-          ? "Import one or more .dxf / .csv files (same type). Multi-select merges them into one plan — or use + after load if you forgot a file. CSV: survey paths. DXF / geo-DXF: real file path. Waypoints still use the rover (one file)."
+          ? "Import one or more .csv / .dxf files (mixed types OK). Each file is tracked; metric DXFs need Align before Path Order & Load. Use + after load to add more. Waypoints still use the rover (one file)."
           : "Import one or more .csv files (merged locally), or a single .dxf / .waypoints for the rover. Use + after load to add more CSV files."}
       </Text>
 
@@ -839,7 +904,12 @@ export function UploadAndPreviewStep({
                   {loadedFilesLabel}
                 </Text>
               ) : null}
-              {localCsvSummary ? (
+              {uploadedFiles.length > 1 ? (
+                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
+                  {uploadedFiles.length} files in mission ·{" "}
+                  {uploadedFiles.filter((f) => f.status === "verified").length} verified
+                </Text>
+              ) : localCsvSummary ? (
                 <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
                   {localCsvSummary.num_points} points · local {localCsvSummary.kind.toUpperCase()} ·{" "}
                   {localCsvSummary.frame}
@@ -894,6 +964,72 @@ export function UploadAndPreviewStep({
               <X size={18} color={FIELDS_COLORS.textDim} />
             </Pressable>
           </View>
+
+          {/* Per-file status list (multi-type batch) */}
+          {uploadedFiles.length > 0 ? (
+            <View style={{ gap: 6 }}>
+              {uploadedFiles.map((f) => {
+                const selected = selectedUploadedFileId === f.id;
+                const verified = f.status === "verified";
+                const kindLabel =
+                  f.kind === "csv"
+                    ? f.isGeographic
+                      ? "csv · gps"
+                      : "csv · ned"
+                    : f.isGeographic
+                      ? "dxf · geo"
+                      : "dxf · metric";
+                return (
+                  <Pressable
+                    key={f.id}
+                    onPress={() => onSelectUploadedFile?.(f.id)}
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 8,
+                      paddingVertical: 8,
+                      paddingHorizontal: 10,
+                      borderRadius: 8,
+                      borderWidth: 1,
+                      borderColor: selected ? FIELDS_COLORS.stepActive : FIELDS_COLORS.panelBorder,
+                      backgroundColor: FIELDS_COLORS.surfaceSolid,
+                    }}
+                  >
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text
+                        style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}
+                        numberOfLines={1}
+                      >
+                        {f.fileName}
+                      </Text>
+                      <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, marginTop: 1 }}>
+                        {kindLabel}
+                      </Text>
+                    </View>
+                    <View
+                      style={{
+                        paddingHorizontal: 8,
+                        paddingVertical: 3,
+                        borderRadius: 999,
+                        backgroundColor: verified ? "rgba(16,185,129,0.15)" : "rgba(245,158,11,0.18)",
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color: verified ? FIELDS_COLORS.success : FIELDS_COLORS.warning,
+                          fontSize: 10,
+                          fontWeight: "800",
+                        }}
+                      >
+                        {verified ? "Verified" : "Needs Alignment"}
+                      </Text>
+                    </View>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : null}
 
           {/* Add more (append) + replace all */}
           <View style={{ flexDirection: "row", gap: 8 }}>

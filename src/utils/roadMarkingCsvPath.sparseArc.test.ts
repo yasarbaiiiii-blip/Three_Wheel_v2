@@ -256,16 +256,24 @@ describe("the path must arrive at its own endpoints on tangent", () => {
   }
 
   it.each([0, 0.01, 0.03, 0.045])(
-    "turns at a constant rate even when a terminus sits %s m off the best-fit circle",
+    "interpolates an off-circle terminus exactly instead of dragging it onto the fit: %s m",
     (offsetM) => {
-      const fitted = buildRoadMarkingFittedPath(withEndpointOffCircle(offsetM));
+      // FRONTEND_NOTE_sparse_arc_fit_misses_survey_points.md: resampling one global circle
+      // (the old behavior this replaced) silently drags any point not exactly on that circle
+      // onto it — including a deliberately off-circle terminus, same as the reported interior-
+      // point miss. Exact interpolation is the new, primary invariant; perfectly uniform
+      // turning between every joint (the old assertion here) only holds when every point
+      // truly lies on one circle, which an intentionally-perturbed terminus does not — see the
+      // note's "decision needed before coding" for why both cannot hold at once.
+      const src = withEndpointOffCircle(offsetM);
+      const fitted = buildRoadMarkingFittedPath(src);
       expect(fitted.mode).toBe("sparse-arc");
+      expect(fitted.quality.maxSourceDeviationM).toBeLessThan(1e-6);
+      // Still must read as one smooth curve, not a hard kink: per-joint turning stays small
+      // (typical per-tessellation-step turn on this 26.8 m arc is ~0.74°; even the joint
+      // nearest a 4.5 cm-off terminus stays well under a degree).
       const turns = jointTurns(fitted.samples);
-      // Constant curvature means every joint turns the same amount. Before the endpoint
-      // constraint the first joint turned up to 3× the rest (2.22° against 0.74°).
-      const min = Math.min(...turns);
-      const max = Math.max(...turns);
-      expect(max - min).toBeLessThan(0.05);
+      expect(Math.max(...turns)).toBeLessThan(2);
     }
   );
 
@@ -436,7 +444,11 @@ describe("the operator-reported case: curve_6_points.csv", () => {
     );
   });
 
-  it("turns at a uniform rate once accepted — no more 1.48 m/4.90 m radius oscillation", () => {
+  it("no more 1.48 m/4.90 m radius oscillation — every joint stays a driveable curve, not a corner", () => {
+    // The original per-vertex fillet bug this feature exists to replace: fillet radius derived
+    // from local turn angle swung 1.48 m → 4.90 m → 1.48 m against a true ~2.4 m curve. This
+    // checks the actual driveability property, not perfectly uniform turning (which the fix
+    // below intentionally trades away in favor of hitting every point — see the next test).
     const fitted = buildRoadMarkingFittedPath(points, { surveyRmsM: REPORTED_RMS_M });
     const turns: number[] = [];
     for (let i = 1; i < fitted.samples.length - 1; i++) {
@@ -446,7 +458,26 @@ describe("the operator-reported case: curve_6_points.csv", () => {
         )
       );
     }
-    expect(Math.max(...turns) - Math.min(...turns)).toBeLessThan(0.1);
+    // A hard corner reads as tens of degrees between tessellation steps; a smooth curve at
+    // this radius/spacing does not, even allowing for the real survey's own point-to-point
+    // noise (unlike the fixed 0.1° bar this replaces, which assumed every point sits exactly
+    // on one circle).
+    expect(Math.max(...turns)).toBeLessThan(15);
+  });
+
+  it("hits every one of the 8 surveyed points exactly — FRONTEND_NOTE_sparse_arc_fit_misses_survey_points.md's acceptance test", () => {
+    // The actual reported bug: interior points measured up to 7.09 cm off the emitted path on
+    // a ±2 cm spec, because the old fit resampled one global circle and let interior points
+    // land wherever it happened to pass. This is the property that matters.
+    const fitted = buildRoadMarkingFittedPath(points, { surveyRmsM: REPORTED_RMS_M });
+    expect(fitted.mode).toBe("sparse-arc");
+    for (const p of points) {
+      const nearest = Math.min(
+        ...fitted.samples.map((s) => Math.hypot(s.north - p.north, s.east - p.east))
+      );
+      expect(nearest).toBeLessThan(0.01); // note's acceptance test: ≤ 1 cm per surveyed point
+    }
+    expect(fitted.quality.maxSourceDeviationM).toBeLessThan(1e-6);
   });
 });
 

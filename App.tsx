@@ -218,8 +218,17 @@ import {
   localCsvPointsToPlanLines,
   type LocalPointCsvResult,
 } from "./src/utils/localPointCsv";
-import type { LocalDxfResult } from "./src/utils/dxfLocalImport";
+import {
+  dxfFileStem,
+  prefixDxfLineIds,
+  type LocalDxfResult,
+} from "./src/utils/dxfLocalImport";
 import { alignmentFromGeographic } from "./src/utils/dxfAlignment";
+import { rebasePlanLinesToOrigin } from "./src/utils/planOriginRebase";
+import type {
+  PendingDxfAlignmentEntry,
+  UploadedFileEntry,
+} from "./src/types/uploadedFiles";
 import {
   applyCsvOrderToPlanLines,
   defaultPathOrder,
@@ -1143,6 +1152,20 @@ export default function App() {
     isGeographic: boolean;
     warnings: string[];
   } | null>(null);
+  /**
+   * Local multi-type batch (CSV + metric DXF + geo-DXF). Per-file status gates
+   * Path Order & Load; geometry stays flat in `lines` with id prefixes.
+   */
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFileEntry[]>([]);
+  const [pendingDxfAlignment, setPendingDxfAlignment] = useState<
+    Record<string, PendingDxfAlignmentEntry>
+  >({});
+  /** Shared GPS anchor for every contribution currently in `lines`. */
+  const [sharedOriginGps, setSharedOriginGps] = useState<[number, number] | null>(null);
+  const uploadedFilesRef = useRef<UploadedFileEntry[]>([]);
+  uploadedFilesRef.current = uploadedFiles;
+  const sharedOriginGpsRef = useRef<[number, number] | null>(null);
+  sharedOriginGpsRef.current = sharedOriginGps;
   const [loadedPathInspection, setLoadedPathInspection] = useState<missionApi.LoadedPathResponse | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   const [extensionsEnabled, setExtensionsEnabled] = useState(false);
@@ -1391,24 +1414,43 @@ export default function App() {
     setStagedWorkflow((prev) => (prev[step] === status ? prev : { ...prev, [step]: status }));
   }, []);
 
-  // Visual "Use This Position" sets verifiedAlignmentRequest before setWorkflowStep exists
-  // in the component body — promote alignment status here.
+  // Promote alignment when every local batch file is verified, or (legacy single-path)
+  // when verifiedAlignmentRequest carries an origin.
   useEffect(() => {
+    if (uploadedFiles.length > 0) {
+      const allVerified = uploadedFiles.every((f) => f.status === "verified");
+      if (allVerified && stagedWorkflow.alignment !== "verified") {
+        setWorkflowStep("alignment", "verified");
+      } else if (!allVerified && stagedWorkflow.alignment === "verified") {
+        setWorkflowStep("alignment", "pending");
+      }
+      return;
+    }
     if (
       verifiedAlignmentRequest?.origin_gps &&
       stagedWorkflow.alignment !== "verified"
     ) {
       setWorkflowStep("alignment", "verified");
     }
-  }, [verifiedAlignmentRequest, stagedWorkflow.alignment, setWorkflowStep]);
+  }, [
+    uploadedFiles,
+    verifiedAlignmentRequest,
+    stagedWorkflow.alignment,
+    setWorkflowStep,
+  ]);
 
   const invalidateStagedWorkflowFrom = useCallback((step: "alignment" | "spray" | "staged" | "loaded") => {
     missionIdentityGenerationRef.current += 1;
     setStagedWorkflow((prev) => invalidateWorkflowFrom(prev, step));
 
+    const localBatchActive = uploadedFilesRef.current.length > 0;
+
     if (step === "alignment") {
+      // Working Align UI only — never drop sharedOriginGps or committed multi-file lines.
       setAlignmentResult(null);
-      setVerifiedAlignmentRequest(null);
+      if (!localBatchActive || sharedOriginGpsRef.current == null) {
+        setVerifiedAlignmentRequest(null);
+      }
     }
     if (step === "alignment" || step === "spray") {
       setSegmentVerification(null);
@@ -1420,8 +1462,11 @@ export default function App() {
     }
     setLoadedPathInspection(null);
     setMissionLoaded(false);
-    setLocalCsvPreview(null);
-    setLocalDxfMeta(null);
+    // Multi-file batch: keep parse metadata and geometry; only demote send/load stages.
+    if (!localBatchActive) {
+      setLocalCsvPreview(null);
+      setLocalDxfMeta(null);
+    }
   }, []);
 
   /**
@@ -1653,6 +1698,18 @@ export default function App() {
     setLines([]);
     setSelectedLineId(null);
     setImportedPlan(null);
+    setLocalCsvPreview(null);
+    setLocalDxfMeta(null);
+    setUploadedFiles([]);
+    uploadedFilesRef.current = [];
+    setPendingDxfAlignment({});
+    setSharedOriginGps(null);
+    sharedOriginGpsRef.current = null;
+    setAlignedRefPoints([]);
+    setVerifiedAlignmentRequest(null);
+    setAlignmentResult(null);
+    setIsGeographicDxf(false);
+    setGeoOriginDxf(null);
     setAutoOriginReference(null);
     setLayerVisibility({
       boundary: true,
@@ -2872,94 +2929,209 @@ export default function App() {
     }
   }
 
+  /** Allocate a unique line-id prefix for a source file within the current batch. */
+  function allocateLineIdPrefix(fileName: string, used: Set<string>): string {
+    const stem = dxfFileStem(fileName).replace(/[^\w.-]+/g, "_") || "file";
+    let prefix = stem;
+    let n = 2;
+    while (used.has(prefix)) {
+      prefix = `${stem}_${n++}`;
+    }
+    used.add(prefix);
+    return prefix;
+  }
+
+  function usedPrefixesFromUploaded(files: UploadedFileEntry[]): Set<string> {
+    return new Set(files.map((f) => f.lineIdPrefix));
+  }
+
   /**
-   * Local CSV (Select File) — parse result already computed on-device.
-   * Draws the on-device preview only; upload / plan-and-stage / load live in
-   * CsvStageAndLoadPanel (Step 3 "Send to Rover & Load").
+   * Establish sharedOriginGps from the first GPS-anchored contribution, or rebase
+   * geometry onto the existing shared origin. Returns lines ready to append.
    */
-  function handleLocalCsvParsed(data: LocalPointCsvResult) {
-    setLocalCsvPreview(data);
-    setLocalDxfMeta(null);
-    // Keep selectedPathName null so we never hit GET /api/path/{csv}/preview.
-    // Avoid setSelectedPathName here if it would only clear; wipe backend selection
-    // without going through previewSelectedPath.
-    previousSelectedPathRef.current = null;
-    setSelectedPathName(null);
+  function integrateAnchoredLines(
+    rawLines: PlanLine[],
+    fileOrigin: { lat: number; lon: number },
+    lineIdPrefix: string
+  ): PlanLine[] {
+    const shared = sharedOriginGpsRef.current;
+    let toAppend = rawLines;
+    if (shared == null) {
+      const origin: [number, number] = [fileOrigin.lat, fileOrigin.lon];
+      setSharedOriginGps(origin);
+      sharedOriginGpsRef.current = origin;
+      setVerifiedAlignmentRequest({
+        origin_gps: origin,
+        rotation_deg: 0,
+      });
+      setAlignedRefPoints(
+        anchorToAlignedRefPoints({ lat: fileOrigin.lat, lon: fileOrigin.lon })
+      );
+      setGeoOriginDxf(origin);
+    } else {
+      toAppend = rebasePlanLinesToOrigin(
+        rawLines,
+        fileOrigin,
+        { lat: shared[0], lon: shared[1] }
+      );
+    }
+    return prefixDxfLineIds(toAppend, lineIdPrefix);
+  }
+
+  function demoteWorkflowAfterBatchChange(needsAlignment: boolean) {
+    setStagedWorkflow((prev) => ({
+      ...prev,
+      alignment: needsAlignment ? "pending" : prev.alignment === "verified" ? "verified" : "pending",
+      spray: "pending",
+      staged: "pending",
+      loaded: "pending",
+      started: "pending",
+    }));
     setMissionFileReady(false);
     setMissionLoaded(false);
     setMissionRunning(false);
+    setStagedPlanResult(null);
+    setStagedMissionInspection(null);
+    setStagedMissionId(null);
+    setSegmentVerification(null);
+  }
 
-    // One connected polyline (not N zero-length segments — those are invisible on Mapbox).
-    const previewLines = localCsvPointsToPlanLines(data.points);
-    // Straight, unsmoothed connector between consecutive feature/road groups — same
-    // layer:"transit" convention the DXF upload flow already draws for inter-shape
-    // dead-heading (see buildRuntimeTransitOverlayFromPlan / transit_preview above), so a
-    // multi-group CSV shows how the rover gets from one path to the next instead of a
-    // silent gap.
-    const transitLines = buildCsvTransitLines(previewLines);
-    setLines(sanitizePlanLines([...previewLines, ...transitLines]));
-    setSelectedLineId(previewLines[0]?.id ?? null);
+  /**
+   * Called by Upload before a non-append local pick so the batch starts clean.
+   * Keeps virtual_boundary strokes.
+   */
+  function handleBeginLocalImportBatch() {
+    setUploadedFiles([]);
+    uploadedFilesRef.current = [];
+    setPendingDxfAlignment({});
+    setSharedOriginGps(null);
+    sharedOriginGpsRef.current = null;
+    setLocalCsvPreview(null);
+    setLocalDxfMeta(null);
+    setIsGeographicDxf(false);
+    setGeoOriginDxf(null);
+    setLines((prev) => prev.filter((l) => l.layer === "virtual_boundary"));
+    setSelectedLineId(null);
+    setAlignedRefPoints([]);
+    setVerifiedAlignmentRequest(null);
+    setAlignmentResult(null);
+    setVisualAlignmentItem(null);
+    setIsVisualAlignmentMode(false);
+    previousSelectedPathRef.current = null;
+    setSelectedPathName(null);
+    demoteWorkflowAfterBatchChange(true);
+  }
+
+  /**
+   * Local CSV (Select File) — parse result already computed on-device.
+   * Appends into the multi-file batch (or starts one). Upload / plan-and-stage
+   * / load live in CsvStageAndLoadPanel.
+   */
+  function handleLocalCsvParsed(data: LocalPointCsvResult) {
+    previousSelectedPathRef.current = null;
+    setSelectedPathName(null);
     setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
 
-    if (data.kind === "gps" && data.anchor) {
-      // Same geo anchor contract as staged GPS missions: design (0,0) = first CSV row.
-      // Map pins also pass raw lat/lon (FieldsPage) so they match guide/ref CSV exactly.
-      setVerifiedAlignmentRequest({
-        origin_gps: [data.anchor.lat, data.anchor.lon],
-        rotation_deg: 0,
-      });
-      setAlignedRefPoints(anchorToAlignedRefPoints(data.anchor));
-      setStagedWorkflow((prev) => ({
-        ...prev,
-        alignment: "verified",
-        spray: "pending",
-        staged: "pending",
-        loaded: "pending",
-        started: "pending",
-      }));
-    } else {
+    // Local-NED has no GPS anchor — cannot join a GPS-anchored multi-file mission.
+    if (data.kind !== "gps" || !data.anchor) {
+      if (uploadedFilesRef.current.length > 0 || sharedOriginGpsRef.current != null) {
+        Alert.alert(
+          "Local NED CSV",
+          "Headerless / local-metre CSVs cannot be combined with GPS-anchored files. Import this CSV alone, or use a survey CSV with lat/lon."
+        );
+        return;
+      }
+      // Standalone NED: replace-style single file (legacy Auto Origin path).
+      setLocalCsvPreview(data);
+      setLocalDxfMeta(null);
+      const previewLines = localCsvPointsToPlanLines(data.points);
+      const transitLines = buildCsvTransitLines(previewLines);
+      setLines(sanitizePlanLines([...previewLines, ...transitLines]));
+      setSelectedLineId(previewLines[0]?.id ?? null);
       setVerifiedAlignmentRequest(null);
       setAlignedRefPoints([]);
-      setStagedWorkflow((prev) => ({
-        ...prev,
-        alignment: "pending",
-        spray: "pending",
-        staged: "pending",
-        loaded: "pending",
-        started: "pending",
-      }));
+      const prefix = allocateLineIdPrefix(data.fileName, new Set());
+      const entry: UploadedFileEntry = {
+        id: `${prefix}-csv`,
+        fileName: data.fileName,
+        kind: "csv",
+        isGeographic: false,
+        status: "verified",
+        lineIdPrefix: prefix,
+      };
+      uploadedFilesRef.current = [entry];
+      setUploadedFiles([entry]);
+      demoteWorkflowAfterBatchChange(false);
+      setStagedWorkflow((prev) => ({ ...prev, alignment: "pending" }));
+      return;
+    }
+
+    setLocalCsvPreview(data);
+
+    const used = usedPrefixesFromUploaded(uploadedFilesRef.current);
+    const prefix = allocateLineIdPrefix(data.fileName, used);
+    const fileId = `${prefix}-csv`;
+
+    const previewLines = localCsvPointsToPlanLines(data.points);
+    const transitLines = buildCsvTransitLines(previewLines);
+    const integrated = integrateAnchoredLines(
+      [...previewLines, ...transitLines],
+      data.anchor,
+      prefix
+    );
+
+    setLines((prev) => {
+      const boundary = prev.filter((l) => l.layer === "virtual_boundary");
+      const existing = prev.filter((l) => l.layer !== "virtual_boundary");
+      return sanitizePlanLines([...boundary, ...existing, ...integrated]);
+    });
+
+    setSelectedLineId(integrated[0]?.id ?? null);
+
+    const entry: UploadedFileEntry = {
+      id: fileId,
+      fileName: data.fileName,
+      kind: "csv",
+      isGeographic: true,
+      status: "verified",
+      lineIdPrefix: prefix,
+    };
+    const nextFiles = [...uploadedFilesRef.current, entry];
+    uploadedFilesRef.current = nextFiles;
+    setUploadedFiles(nextFiles);
+
+    const stillNeedsAlign = nextFiles.some((f) => f.status === "needs_alignment");
+    demoteWorkflowAfterBatchChange(stillNeedsAlign);
+    if (!stillNeedsAlign) {
+      setStagedWorkflow((prev) => ({ ...prev, alignment: "verified" }));
     }
   }
 
   /**
-   * Local DXF parse (DXF_PLANNER === "app"). Mirrors handleLocalCsvParsed:
-   * lines on device, no rover-side path name, origin_gps when geographic.
+   * Local DXF parse (DXF_PLANNER === "app"). Geo-DXF appends (auto-verified);
+   * metric DXF is held in pendingDxfAlignment until Fix Alignment.
    */
   function handleLocalDxfParsed(data: LocalDxfResult) {
-    setLocalCsvPreview(null);
-    setLocalDxfMeta({
-      fileName: data.fileName,
-      isGeographic: !!data.isGeographic,
-      warnings: data.warnings.slice(),
-    });
     previousSelectedPathRef.current = null;
     setSelectedPathName(null);
     setMissionFileReady(false);
     setMissionLoaded(false);
     setMissionRunning(false);
     setExtensionsEnabled(false);
-    // Same two flags the rover /entities path sets — Align copy and the "no alignment
-    // needed" affordance read them, so a locally parsed geographic DXF must set them too.
-    setIsGeographicDxf(!!data.isGeographic);
-    setGeoOriginDxf(
-      data.isGeographic && data.geoOrigin ? [data.geoOrigin.lat, data.geoOrigin.lon] : null
-    );
+    setVisualAlignmentItem(null);
+    setIsVisualAlignmentMode(false);
 
-    // Real DXF path geometry from the file — do not re-fit, reverse, or re-chain.
-    // Path generation (points → fitted lines) is CSV-only. Here we keep file entity
-    // order and vertex direction so plan-trajectory gets the authored path.
-    // Inter-path transit is drawn for preview only; mark vertices stay unchanged.
+    setLocalDxfMeta({
+      fileName: data.fileName,
+      isGeographic: !!data.isGeographic,
+      warnings: data.warnings.slice(),
+    });
+
+    const used = usedPrefixesFromUploaded(uploadedFilesRef.current);
+    const prefix = allocateLineIdPrefix(data.fileName, used);
+    const fileId = `${prefix}-dxf`;
+
     const markLines = data.lines.filter(
       (l) => l.layer !== "transit" && l.layer !== "extension"
     );
@@ -2970,40 +3142,131 @@ export default function App() {
       aftM: 0.5,
       perLine: false,
     });
-    setLines(sanitizePlanLines(withTransit));
-    setSelectedLineId(markLines[0]?.id ?? null);
-    setVisualAlignmentItem(null);
-    setIsVisualAlignmentMode(false);
 
     if (data.isGeographic && data.geoOrigin) {
-      const a = alignmentFromGeographic(data.geoOrigin);
-      setVerifiedAlignmentRequest({
-        origin_gps: a.originGps,
-        rotation_deg: 0,
-      });
-      setAlignedRefPoints(
-        anchorToAlignedRefPoints({ lat: data.geoOrigin.lat, lon: data.geoOrigin.lon })
+      setIsGeographicDxf(true);
+      const integrated = integrateAnchoredLines(
+        withTransit,
+        data.geoOrigin,
+        prefix
       );
-      setStagedWorkflow((prev) => ({
-        ...prev,
-        alignment: "verified",
-        spray: "pending",
-        staged: "pending",
-        loaded: "pending",
-        started: "pending",
-      }));
-    } else {
-      // Metric DXF: alignment mandatory before plan-trajectory (G10).
-      setVerifiedAlignmentRequest(null);
-      setAlignedRefPoints([]);
-      setStagedWorkflow((prev) => ({
-        ...prev,
-        alignment: "pending",
-        spray: "pending",
-        staged: "pending",
-        loaded: "pending",
-        started: "pending",
-      }));
+      setLines((prev) => {
+        const boundary = prev.filter((l) => l.layer === "virtual_boundary");
+        const existing = prev.filter((l) => l.layer !== "virtual_boundary");
+        return sanitizePlanLines([...boundary, ...existing, ...integrated]);
+      });
+      setSelectedLineId(integrated[0]?.id ?? null);
+
+      const entry: UploadedFileEntry = {
+        id: fileId,
+        fileName: data.fileName,
+        kind: "dxf",
+        isGeographic: true,
+        status: "verified",
+        lineIdPrefix: prefix,
+      };
+      const nextFiles = [...uploadedFilesRef.current, entry];
+      uploadedFilesRef.current = nextFiles;
+      setUploadedFiles(nextFiles);
+      const stillNeedsAlign = nextFiles.some((f) => f.status === "needs_alignment");
+      demoteWorkflowAfterBatchChange(stillNeedsAlign);
+      if (!stillNeedsAlign) {
+        setStagedWorkflow((prev) => ({ ...prev, alignment: "verified" }));
+      }
+      return;
+    }
+
+    // Metric DXF — hold out of mission `lines` until Fix Alignment (map composes pending).
+    setPendingDxfAlignment((prev) => ({
+      ...prev,
+      [fileId]: { fileName: data.fileName, rawLines: sanitizePlanLines(withTransit) },
+    }));
+    setSelectedLineId(withTransit[0]?.id ?? null);
+
+    if (uploadedFilesRef.current.every((f) => !f.isGeographic)) {
+      setIsGeographicDxf(false);
+    }
+
+    const entry: UploadedFileEntry = {
+      id: fileId,
+      fileName: data.fileName,
+      kind: "dxf",
+      isGeographic: false,
+      status: "needs_alignment",
+      lineIdPrefix: prefix,
+    };
+    const nextFiles = [...uploadedFilesRef.current, entry];
+    uploadedFilesRef.current = nextFiles;
+    setUploadedFiles(nextFiles);
+    demoteWorkflowAfterBatchChange(true);
+    setStagedWorkflow((prev) => ({ ...prev, alignment: "pending" }));
+  }
+
+  /**
+   * Merge a Fix-Aligned metric DXF into the shared mission frame.
+   */
+  function commitDxfFileAlignment(
+    fileId: string,
+    alignedLines: PlanLine[],
+    originGps: [number, number],
+    summary: { scale: number | null; rotationDeg: number | null; rmseM: number | null }
+  ) {
+    const entry = uploadedFilesRef.current.find((f) => f.id === fileId);
+    if (!entry) return;
+
+    const integrated = integrateAnchoredLines(
+      alignedLines.filter((l) => l.layer !== "transit" && l.layer !== "extension"),
+      { lat: originGps[0], lon: originGps[1] },
+      entry.lineIdPrefix
+    );
+
+    // Drop any temporary design-frame copy of this file from lines (unprefixed or prior).
+    setPendingDxfAlignment((prev) => {
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+
+    setLines((prev) => {
+      const boundary = prev.filter((l) => l.layer === "virtual_boundary");
+      const kept = prev.filter(
+        (l) =>
+          l.layer !== "virtual_boundary" &&
+          !l.id.startsWith(`${entry.lineIdPrefix}__`)
+      );
+      return sanitizePlanLines([...boundary, ...kept, ...integrated]);
+    });
+
+    const nextFiles = uploadedFilesRef.current.map((f) =>
+      f.id === fileId
+        ? {
+            ...f,
+            status: "verified" as const,
+            verifiedSummary: summary,
+          }
+        : f
+    );
+    uploadedFilesRef.current = nextFiles;
+    setUploadedFiles(nextFiles);
+
+    setSelectedLineId(integrated[0]?.id ?? null);
+    setAlignmentResult({
+      method: "multi_point",
+      scale: summary.scale,
+      rotation_deg: summary.rotationDeg,
+      offset_n: null,
+      offset_e: null,
+      origin_gps: originGps,
+      rmse_m: summary.rmseM,
+      sample_coords: null,
+      residuals: null,
+      warnings: null,
+    });
+
+    const allVerified = nextFiles.every((f) => f.status === "verified");
+    demoteWorkflowAfterBatchChange(!allVerified);
+    if (allVerified) {
+      setStagedWorkflow((prev) => ({ ...prev, alignment: "verified" }));
     }
   }
 
@@ -3020,6 +3283,11 @@ export default function App() {
     setLocalDxfMeta(null);
     setIsGeographicDxf(false);
     setGeoOriginDxf(null);
+    setUploadedFiles([]);
+    uploadedFilesRef.current = [];
+    setPendingDxfAlignment({});
+    setSharedOriginGps(null);
+    sharedOriginGpsRef.current = null;
     setLines((prev) => prev.filter((l) => l.layer === "virtual_boundary"));
     setSelectedLineId(null);
     setAlignedRefPoints([]);
@@ -3028,6 +3296,14 @@ export default function App() {
     setStagedPlanResult(null);
     setStagedMissionInspection(null);
     setStagedMissionId(null);
+    setStagedWorkflow((prev) => ({
+      ...prev,
+      alignment: "pending",
+      spray: "pending",
+      staged: "pending",
+      loaded: "pending",
+      started: "pending",
+    }));
   }
 
   async function startLoadedMission() {
@@ -3548,6 +3824,11 @@ export default function App() {
       setSelectedPathName(null);
       setLocalCsvPreview(null);
       setLocalDxfMeta(null);
+      setUploadedFiles([]);
+      uploadedFilesRef.current = [];
+      setPendingDxfAlignment({});
+      setSharedOriginGps(null);
+      sharedOriginGpsRef.current = null;
       setMissionFileReady(false);
       setMissionLoaded(false);
       setMissionRunning(false);
@@ -4310,6 +4591,12 @@ export default function App() {
                             stopRtk={stopRtk}
                             localCsvPreview={localCsvPreview}
                             localDxfMeta={localDxfMeta}
+                            uploadedFiles={uploadedFiles}
+                            pendingDxfAlignment={pendingDxfAlignment}
+                            setPendingDxfAlignment={setPendingDxfAlignment}
+                            sharedOriginGps={sharedOriginGps}
+                            onBeginLocalImportBatch={handleBeginLocalImportBatch}
+                            onCommitDxfFileAlignment={commitDxfFileAlignment}
                             onLocalCsvParsed={handleLocalCsvParsed}
                             onLocalDxfParsed={handleLocalDxfParsed}
                             onClearLocalCsv={handleClearLocalCsv}
@@ -5887,6 +6174,19 @@ function SectionPages(props: {
     isGeographic: boolean;
     warnings: string[];
   } | null;
+  uploadedFiles?: UploadedFileEntry[];
+  pendingDxfAlignment?: Record<string, PendingDxfAlignmentEntry>;
+  setPendingDxfAlignment?: React.Dispatch<
+    React.SetStateAction<Record<string, PendingDxfAlignmentEntry>>
+  >;
+  sharedOriginGps?: [number, number] | null;
+  onBeginLocalImportBatch?: () => void;
+  onCommitDxfFileAlignment?: (
+    fileId: string,
+    alignedLines: PlanLine[],
+    originGps: [number, number],
+    summary: { scale: number | null; rotationDeg: number | null; rmseM: number | null }
+  ) => void;
   onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
   onLocalDxfParsed?: (data: LocalDxfResult) => void;
   onClearLocalCsv?: () => void;
