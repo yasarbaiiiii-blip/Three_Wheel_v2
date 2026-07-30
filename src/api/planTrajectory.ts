@@ -137,11 +137,24 @@ export function trajectoryRunsToPayload(runs: TrajectoryRun[]): PlanTrajectoryRu
     // index list carried through that merge would silently drift, and a
     // heading test is immune to re-indexing.
     //
-    // TRAVEL runs are deadhead — nothing to protect, and declaring an empty
-    // list would forbid the simplifier from thinning legs it should thin.
-    if (r.kind === "mark") {
-      payload.must_hit_indices = collinearAwareMustHitIndices(payload.points);
-    }
+    // TRAVEL runs are deadhead — nothing to protect. That intent must be sent
+    // EXPLICITLY as [], not by omitting the field: the rover's engine reads an
+    // absent declaration as "protect every source vertex" (deliberate
+    // over-preserve, since under-preserving silently deletes surveyed intent).
+    //
+    // Field 2026-07-30, extensions run stg_f8c9737a_..._141428: omitting it
+    // made every extension waypoint must-hit at 0.125 m spacing, and because
+    // the RPP clips its lookahead to the current segment, the whole approach
+    // ran at 0.096 m lookahead against a 0.52 m design minimum — ~6x steering
+    // gain, below even the 0.12-0.21 m band that went bimodal on 2026-07-29.
+    // The painted span was unaffected (the MARK run declares 2), but the
+    // approach is exactly where the entry transient is set up.
+    //
+    // Sending [] only became meaningful with rover-side b89a7de: before that
+    // the engine tested truthiness, so [] was falsy and fell through to the
+    // same protect-everything fallback as omitting it.
+    payload.must_hit_indices =
+      r.kind === "mark" ? collinearAwareMustHitIndices(payload.points) : [];
     return payload;
   });
 }

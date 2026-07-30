@@ -22,6 +22,16 @@ export const LENGTH_TOL_FRAC = 0.01;
 /** Max distance (m) from a sent vertex to a densified waypoint for must_hit match. */
 export const MUST_HIT_MATCH_M = 0.08;
 
+/**
+ * Two waypoints closer than this are the SAME junction vertex emitted once per
+ * run. Mirrors the engine's own junction de-duplication threshold
+ * (path_engine/engine.py: `if d < 0.01 and spray_flags[-1] == is_mark`), which
+ * deliberately does NOT collapse the pair when the spray state differs — so a
+ * mark↔travel junction always yields a coincident pair, only one of which
+ * carries must_hit.
+ */
+export const JUNCTION_COINCIDENT_M = 0.01;
+
 export type TrajectoryVerifyIssue = {
   code:
     | "missing_run_echo"
@@ -90,8 +100,21 @@ function relDiff(a: number, b: number): number {
 }
 
 /**
- * Collect representative vertices we authored: first/last of every run
- * (mark and travel endpoints are the contract vertices densification must hit).
+ * Collect representative vertices we authored: first/last of every MARK run.
+ *
+ * MARK runs only, deliberately. This check asserts that a vertex we declared
+ * must-hit survived densification as must-hit — so it may only sample vertices
+ * we actually declared. TRAVEL runs are sent with `must_hit_indices: []` (they
+ * are deadhead; declaring them forces a must-hit every ~0.125 m on extension
+ * legs, which truncates the rover's approach lookahead to ~0.10 m — see
+ * trajectoryRunsToPayload). Sampling a travel endpoint would therefore assert
+ * must_hit=true on a point we explicitly asked NOT to be must-hit, and would
+ * block the load on every extensions mission.
+ *
+ * A pre/aft extension shares its inner junction with the mark run, and that
+ * point IS still declared (it is a mark-run endpoint), so the join between
+ * deadhead and paint stays covered. Only the extension's outer tip is dropped
+ * from the check, which is what we intend.
  */
 export function sentVertexSpotSamples(sentRuns: TrajectoryRun[]): Array<[number, number]> {
   const out: Array<[number, number]> = [];
@@ -103,7 +126,7 @@ export function sentVertexSpotSamples(sentRuns: TrajectoryRun[]): Array<[number,
     out.push(p);
   };
   for (const run of sentRuns) {
-    if (run.points.length < 1) continue;
+    if (run.kind !== "mark" || run.points.length < 1) continue;
     push(run.points[0]);
     push(run.points[run.points.length - 1]);
   }
@@ -162,20 +185,36 @@ export function verifyMustHitSpotCheck(args: {
   let falseHit = 0;
 
   for (const [sn, se] of samples) {
+    // Nearest match, resolved deterministically (strict <, so the FIRST of any
+    // equal-distance set wins rather than the last).
     let bestI = -1;
-    let bestD = tol;
+    let bestD = Infinity;
     for (const wp of ned) {
       const d = Math.hypot(wp.n - sn, wp.e - se);
-      if (d <= bestD) {
+      if (d < bestD) {
         bestD = d;
         bestI = wp.i;
       }
     }
-    if (bestI < 0) {
+    if (bestI < 0 || bestD > tol) {
       unmatched += 1;
       continue;
     }
-    if (flags[bestI] !== true) {
+    // A mark↔travel junction emits TWO coincident waypoints: the engine's
+    // de-duplication only collapses coincident points that agree on spray
+    // state, so the shared vertex appears once per run, and only the MARK
+    // one carries must_hit. Picking either single "nearest" is therefore a
+    // coin flip decided by tie-break order — with the old `d <= bestD` the
+    // LAST won, which at a mark END is the travel copy with must_hit=false,
+    // blocking the load on every extensions mission (field 2026-07-30, once
+    // travel runs began declaring `[]`). The declared vertex DID survive, so
+    // accept the sample when ANY coincident waypoint carries the flag.
+    const hit = ned.some(
+      (wp) =>
+        Math.hypot(wp.n - sn, wp.e - se) <= bestD + JUNCTION_COINCIDENT_M &&
+        flags[wp.i] === true
+    );
+    if (!hit) {
       falseHit += 1;
     }
   }

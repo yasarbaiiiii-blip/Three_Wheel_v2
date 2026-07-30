@@ -130,14 +130,21 @@ describe("trajectoryRunsToPayload — must_hit provenance", () => {
     expect(payload.must_hit_indices).toEqual([0, 7]);
   });
 
-  it("declares NOTHING on a TRAVEL run — deadhead should stay thinnable", () => {
+  it("declares an EXPLICIT [] on a TRAVEL run — not undefined", () => {
+    // Must be sent, not omitted: the rover engine reads an ABSENT declaration
+    // as "protect every source vertex". Field 2026-07-30 — omitting it made
+    // every extension waypoint must-hit at 0.125 m and truncated the approach
+    // lookahead to 0.096 m (design minimum 0.52). `[]` only became meaningful
+    // with rover-side b89a7de, which stopped treating it as falsy.
     const [payload] = trajectoryRunsToPayload([travelRun]);
-    expect(payload.must_hit_indices).toBeUndefined();
+    expect(payload.must_hit_indices).toEqual([]);
+    expect(payload.must_hit_indices).not.toBeUndefined();
   });
 
-  it("run endpoints are always declared — the staged spot-check depends on it", () => {
-    // verifyMustHitSpotCheck samples first/last of every sent run and requires
-    // must_hit=true on the staged waypoint they map to.
+  it("MARK run endpoints are always declared — the staged spot-check depends on it", () => {
+    // verifyMustHitSpotCheck samples first/last of every sent MARK run and
+    // requires must_hit=true on the staged waypoint they map to. Travel runs
+    // are excluded there precisely because we now declare [] on them.
     for (const run of [cornerRun, straightFilledRun]) {
       const [payload] = trajectoryRunsToPayload([run]);
       expect(payload.must_hit_indices).toContain(0);
@@ -156,9 +163,30 @@ describe("trajectoryRunsToPayload — must_hit provenance", () => {
     const payloads = trajectoryRunsToPayload([cornerRun, travelRun, straightFilledRun]);
     expect(payloads.map((p) => p.must_hit_indices)).toEqual([
       [0, 1, 2],
-      undefined,
+      [],
       [0, 7],
     ]);
+  });
+
+  it("an extensions mission declares ONLY the mark vertices", () => {
+    // The 2026-07-30 shape: 0.5 m pre-extension, 3 m painted line, 0.5 m aft.
+    // Before this change the staged artifact came back must_hit=12 (every
+    // extension point at 0.125 m); it should be 2.
+    const pre: TrajectoryRun = {
+      kind: "travel",
+      points: [[-0.5, 0], [-0.375, 0], [-0.25, 0], [-0.125, 0], [0, 0]],
+      speed_m_s: 0.5,
+    };
+    const mark: TrajectoryRun = { kind: "mark", points: [[0, 0], [3.069, 0]], speed_m_s: 0.35 };
+    const aft: TrajectoryRun = {
+      kind: "travel",
+      points: [[3.069, 0], [3.194, 0], [3.319, 0], [3.444, 0], [3.569, 0]],
+      speed_m_s: 0.5,
+    };
+    const payloads = trajectoryRunsToPayload([pre, mark, aft]);
+    expect(payloads.map((p) => p.must_hit_indices)).toEqual([[], [0, 1], []]);
+    const declared = payloads.reduce((n, p) => n + (p.must_hit_indices?.length ?? 0), 0);
+    expect(declared).toBe(2);
   });
 
   it("does not disturb the existing payload fields", () => {

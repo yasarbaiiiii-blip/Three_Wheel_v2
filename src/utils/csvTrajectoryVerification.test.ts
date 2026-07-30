@@ -5,6 +5,7 @@ import type { TrajectoryRun } from "./csvTrajectory";
 import {
   filterComparableRunEcho,
   mergeStagedMustHitCheck,
+  sentVertexSpotSamples,
   verifyMustHitSpotCheck,
   verifyTrajectoryResponse,
 } from "./csvTrajectoryVerification";
@@ -170,5 +171,118 @@ describe("must_hit spot-check (Phase 4)", () => {
     });
     expect(merged.ok).toBe(false);
     expect(merged.issues.some((i) => i.code === "must_hit_false")).toBe(true);
+  });
+});
+
+describe("spot-check samples MARK runs only (extensions, 2026-07-30)", () => {
+  // TRAVEL runs are now sent with must_hit_indices: [] so the rover thins them
+  // — omitting the field made the engine protect every extension waypoint at
+  // 0.125 m and truncated the approach lookahead to 0.096 m. The spot-check
+  // must therefore stop asserting must_hit=true on travel endpoints, or every
+  // extensions mission would be blocked at load.
+  const preExt: TrajectoryRun = {
+    kind: "travel",
+    points: [
+      [-0.5, 0],
+      [0, 0],
+    ],
+    speed_m_s: 0.5,
+  };
+  const line: TrajectoryRun = {
+    kind: "mark",
+    points: [
+      [0, 0],
+      [3, 0],
+    ],
+    speed_m_s: 0.35,
+  };
+  const aftExt: TrajectoryRun = {
+    kind: "travel",
+    points: [
+      [3, 0],
+      [3.5, 0],
+    ],
+    speed_m_s: 0.5,
+  };
+  const runs = [preExt, line, aftExt];
+  // Staged geometry: extension tips are NOT must-hit; the mark endpoints are.
+  const waypoints = [
+    [-0.5, 0],
+    [0, 0],
+    [3, 0],
+    [3.5, 0],
+  ];
+  const mustHit = [false, true, true, false];
+
+  it("does not sample extension tips", () => {
+    const samples = sentVertexSpotSamples(runs);
+    const keys = samples.map((p) => `${p[0]},${p[1]}`);
+    expect(keys).toContain("0,0");
+    expect(keys).toContain("3,0");
+    expect(keys).not.toContain("-0.5,0");
+    expect(keys).not.toContain("3.5,0");
+  });
+
+  it("an extensions mission passes instead of being blocked at load", () => {
+    const { blocking } = verifyMustHitSpotCheck({ sentRuns: runs, waypoints, mustHit });
+    expect(blocking).toHaveLength(0);
+  });
+
+  it("still catches a MARK vertex the rover failed to protect", () => {
+    const broken = [false, false, true, false]; // mark start lost its flag
+    const { blocking } = verifyMustHitSpotCheck({
+      sentRuns: runs,
+      waypoints,
+      mustHit: broken,
+    });
+    expect(blocking.some((i) => i.code === "must_hit_false")).toBe(true);
+  });
+});
+
+describe("coincident junction waypoints (field block 2026-07-30)", () => {
+  // The engine emits the shared mark↔travel vertex ONCE PER RUN — its dedup
+  // only collapses coincident points that agree on spray state. So a mark END
+  // is followed immediately by a travel START at the identical coordinate,
+  // and only the mark copy carries must_hit. Verified against the real
+  // path_engine for a 0.5 m pre + 3.069 m mark + 0.5 m aft mission:
+  //   mark START -> waypoints [(4,false),(5,true)]
+  //   mark END   -> waypoints [(67,true),(68,false)]
+  // The old `d <= bestD` tie-break took the LAST, so the mark END resolved to
+  // the false copy: exactly 1 failure, blocking every extensions mission.
+  const runs: TrajectoryRun[] = [
+    { kind: "travel", points: [[-0.5, 0], [0, 0]], speed_m_s: 0.5 },
+    { kind: "mark", points: [[0, 0], [3.069, 0]], speed_m_s: 0.35 },
+    { kind: "travel", points: [[3.069, 0], [3.569, 0]], speed_m_s: 0.5 },
+  ];
+  //            0            1           2            3            4
+  const waypoints = [[-0.5, 0], [0, 0], [0, 0], [3.069, 0], [3.069, 0], [3.569, 0]];
+  //                  travel    travel   mark     mark        travel      travel
+  const mustHit = [false, false, true, true, false, false];
+
+  it("accepts the junction when the MARK copy carries the flag", () => {
+    const { blocking } = verifyMustHitSpotCheck({ sentRuns: runs, waypoints, mustHit });
+    expect(blocking).toHaveLength(0);
+  });
+
+  it("still fails when NO copy of the junction is must-hit", () => {
+    const none = [false, false, false, false, false, false];
+    const { blocking } = verifyMustHitSpotCheck({
+      sentRuns: runs,
+      waypoints,
+      mustHit: none,
+    });
+    expect(blocking.some((i) => i.code === "must_hit_false")).toBe(true);
+  });
+
+  it("a genuinely distant sample is still reported unmatched, not silently passed", () => {
+    const far: TrajectoryRun[] = [
+      { kind: "mark", points: [[50, 50], [60, 50]], speed_m_s: 0.35 },
+    ];
+    const { blocking } = verifyMustHitSpotCheck({
+      sentRuns: far,
+      waypoints,
+      mustHit: waypoints.map(() => true),
+    });
+    expect(blocking.some((i) => i.code === "must_hit_unmatched")).toBe(true);
   });
 });
