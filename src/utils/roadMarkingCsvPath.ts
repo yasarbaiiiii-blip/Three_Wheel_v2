@@ -1098,26 +1098,184 @@ function appendSamples(out: RoadMarkingNedPoint[], segment: RoadMarkingNedPoint[
 }
 
 /**
+ * ONE unit tangent (direction of travel) per surveyed point, from the circumcircle of the
+ * triple CENTERED on that point.
+ *
+ * This is the G1 fix for the per-triple tessellation below: building segment [P_i, P_i+1]
+ * from triple (P_i, P_i+1, P_i+2) and the next segment from the NEXT triple means two
+ * different circumcircles meet at P_i+1 — G0 by construction, and their tangent mismatch is
+ * NOT "small" when real curvature changes between points. Measured on the 2026-07-30
+ * curve_6_points-1 mission (8 RTK stakes): −9.99°/+4.05°/−9.99° single-vertex jumps landing
+ * exactly on stakes 9/10/11; the rover cannot step its heading, saturated at κ=−3.7 m⁻¹
+ * against a 0.384 rad/s firmware yaw-rate limit, ran 6.4 cm wide and the spray safety gate
+ * cut a 31 cm hole in the mark. The centered triple's tangent at its middle point is the
+ * natural single answer both neighbouring spans can share.
+ *
+ * Termini use their one-sided triple; a degenerate (collinear) triple falls back to the
+ * neighbouring chord direction. Never returns a zero vector for distinct points.
+ */
+export function sparsePointTangents(points: RoadMarkingNedPoint[]): RoadMarkingNedPoint[] {
+  const n = points.length;
+  const out: RoadMarkingNedPoint[] = [];
+  for (let i = 0; i < n; i++) {
+    // Travel reference: the chord bridging this point's neighbours.
+    const refA = points[Math.max(0, i - 1)];
+    const refB = points[Math.min(n - 1, i + 1)];
+    let rn = refB.north - refA.north;
+    let re = refB.east - refA.east;
+    const rm = Math.hypot(rn, re);
+    if (rm > 1e-12) {
+      rn /= rm;
+      re /= rm;
+    }
+    const lo = Math.min(Math.max(0, i - 1), n - 3);
+    const triple = [points[lo], points[lo + 1], points[lo + 2]];
+    const circle = n >= 3 ? circumcircle(triple[0], triple[1], triple[2]) : null;
+    if (!circle) {
+      out.push({ north: rn, east: re });
+      continue;
+    }
+    // Tangent of the circumcircle at this point: perpendicular to the radial,
+    // oriented along travel.
+    const radN = points[i].north - circle.cn;
+    const radE = points[i].east - circle.ce;
+    const radM = Math.hypot(radN, radE);
+    if (radM < 1e-12) {
+      out.push({ north: rn, east: re });
+      continue;
+    }
+    let tn = -radE / radM;
+    let te = radN / radM;
+    if (tn * rn + te * re < 0) {
+      tn = -tn;
+      te = -te;
+    }
+    out.push({ north: tn, east: te });
+  }
+  return out;
+}
+
+/**
+ * Samples of the circular arc that leaves `p` along unit tangent `t` and ends at `q`,
+ * inclusive of both endpoints. Falls back to the straight chord when the constraint is
+ * (near-)collinear, and returns null when the implied radius is below the rover's floor —
+ * the caller then keeps its previous behaviour instead of emitting an undrivable arc.
+ */
+function sampleArcFromTangent(
+  p: RoadMarkingNedPoint,
+  t: RoadMarkingNedPoint,
+  q: RoadMarkingNedPoint,
+  spacingM: number
+): RoadMarkingNedPoint[] | null {
+  const cn = q.north - p.north;
+  const ce = q.east - p.east;
+  const chord = Math.hypot(cn, ce);
+  if (chord < 1e-9) return [p, q];
+  // Signed perpendicular offset of q from the tangent line at p.
+  const y = t.north * ce - t.east * cn;
+  if (Math.abs(y) < 1e-6 * chord) return sampleLine(p, q, spacingM);
+  const r = (chord * chord) / (2 * Math.abs(y));
+  if (r < R_MIN_ROVER_M) return null;
+  // cross(t, chord) > 0 ⇔ q sits RIGHT of travel ⇔ clockwise arc, centre right.
+  const sign = y > 0 ? 1 : -1;
+  const centre = {
+    cn: p.north + r * sign * -t.east,
+    ce: p.east + r * sign * t.north,
+    r,
+  };
+  const a0 = angleOf(p, centre);
+  const a1raw = angleOf(q, centre);
+  let sweep = a1raw - a0;
+  while (sweep > Math.PI) sweep -= 2 * Math.PI;
+  while (sweep < -Math.PI) sweep += 2 * Math.PI;
+  // In the north=sin/east=cos parametrization, increasing angle = CCW = a LEFT
+  // (y<0) turn, so a CCW arc must sweep positive and a CW arc negative. Each
+  // biarc half is under a half-turn, so the wrapped delta is already right;
+  // this guard only repairs the sign on a wrap-boundary case.
+  if (sign < 0 && sweep < 0) sweep += 2 * Math.PI;
+  if (sign > 0 && sweep > 0) sweep -= 2 * Math.PI;
+  const pts = sampleArc(centre, a0, a0 + sweep, spacingM);
+  if (pts.length >= 2) {
+    pts[0] = { ...p };
+    pts[pts.length - 1] = { ...q };
+  }
+  return pts;
+}
+
+/**
+ * G1 biarc from (p0, t0) to (p1, t1): two circular arcs, tangent-continuous at both
+ * endpoints and at their own join (equal-parameter construction). Inclusive of both
+ * endpoints. Returns null on a degenerate construction or an undrivable radius; the caller
+ * falls back to the previous per-triple arc, so this can only remove kinks, never add risk.
+ */
+function sampleBiarc(
+  p0: RoadMarkingNedPoint,
+  t0: RoadMarkingNedPoint,
+  p1: RoadMarkingNedPoint,
+  t1: RoadMarkingNedPoint,
+  spacingM: number
+): RoadMarkingNedPoint[] | null {
+  const vn = p1.north - p0.north;
+  const ve = p1.east - p0.east;
+  const vv = vn * vn + ve * ve;
+  if (vv < 1e-18) return null;
+  const un = t0.north + t1.north;
+  const ue = t0.east + t1.east;
+  const vu = vn * un + ve * ue;
+  const denom = 2 * (1 - (t0.north * t1.north + t0.east * t1.east));
+  if (denom < 1e-9) {
+    // Tangents (near-)parallel: a single arc satisfies both end tangents.
+    return sampleArcFromTangent(p0, t0, p1, spacingM);
+  }
+  const disc = vu * vu + denom * vv;
+  if (disc < 0) return null;
+  const d = (-vu + Math.sqrt(disc)) / denom;
+  if (!Number.isFinite(d) || d <= 0) return null;
+  const join = {
+    north: (p0.north + d * t0.north + p1.north - d * t1.north) / 2,
+    east: (p0.east + d * t0.east + p1.east - d * t1.east) / 2,
+  };
+  const first = sampleArcFromTangent(p0, t0, join, spacingM);
+  if (!first) return null;
+  // Second half built backwards from (p1, −t1) so its p1 tangent is exact, then reversed.
+  const secondRev = sampleArcFromTangent(
+    p1,
+    { north: -t1.north, east: -t1.east },
+    join,
+    spacingM
+  );
+  if (!secondRev) return null;
+  const second = secondRev.slice().reverse();
+  const merged = first.slice();
+  appendSamples(merged, second);
+  return merged;
+}
+
+/**
  * Tessellate the fitted arc across the surveyed span — interpolating EVERY surveyed point,
  * not just the two termini.
  *
  * FRONTEND_NOTE_sparse_arc_fit_misses_survey_points.md: resampling the single
  * endpoint-constrained circle from `fit` left interior points wherever that circle happened to
- * land — up to the residual gate away (measured: up to 7 cm on a ±2 cm paint spec). Since
- * {@link trySparseArcFit} has already established the WHOLE point list reads as one genuine
- * arc (corner-turn, monotonicity, and residual-vs-one-circle gates all passed), the circumcircle
- * of any three consecutive points on that same arc is a close, locally well-conditioned estimate
- * of the curve right there — so instead of resampling one global circle, this builds one small
- * arc per segment [P_i, P_{i+1}] from the nearest available point triple and concatenates them.
- * Every surveyed point becomes an exact vertex of the output (deviation is 0, not up to the
- * residual gate), and consecutive segments meet with only the small tangent mismatch between two
- * overlapping 3-point estimates of the same curve — far smaller than the position error this
- * replaces, and bounded by the same corner-turn/monotonicity/residual gates that already decided
- * this is one arc, not a design vertex chain.
+ * land — up to the residual gate away (measured: up to 7 cm on a ±2 cm paint spec). The first
+ * rewrite built one circumcircle arc per segment from the FORWARD point triple, which fixed the
+ * displacement (every surveyed point became an exact vertex) but joined consecutive segments
+ * with two DIFFERENT circles at each shared point — G0, and the "small tangent mismatch" that
+ * design assumed proved false whenever real curvature changes between points: the 2026-07-30
+ * curve_6_points-1 mission staged −9.99°/+4.05°/−9.99° single-vertex tangent jumps landing
+ * exactly on surveyed stakes, which the rover physically cannot track at speed (6.4 cm
+ * excursion, 31 cm spray-gate hole — see the PX4_DXP consolidated analysis of that date).
+ *
+ * G1 construction (this revision): first derive ONE tangent per surveyed point from the triple
+ * CENTERED on it ({@link sparsePointTangents}), then build each segment [P_i, P_i+1] as a
+ * BIARC matching those end tangents exactly. Both neighbouring segments share the same tangent
+ * at their shared point, so the chain is tangent-continuous everywhere by construction — and
+ * every surveyed point is still an exact vertex of the output (deviation 0, unchanged).
  *
  * Termini are still pinned exactly to the operator's first and last points (I1, matching
- * {@link buildWaypointFilletPath}), and falls back segment-by-segment to a straight chord when a
- * triple is collinear or its local radius is not drivable — never throws, never drops a point.
+ * {@link buildWaypointFilletPath}). A degenerate biarc or one whose radius falls below the
+ * rover floor falls back to the previous per-triple arc, and that falls back to a straight
+ * chord — never throws, never drops a point.
  *
  * The {@link PREVIEW_SAMPLE_TARGET} budget is unchanged: a 1 km-radius ring surveyed with 40
  * points is still 6.3 km of arc, so the total-length estimate from `fit` still paces sampling
@@ -1134,13 +1292,16 @@ export function buildSparseArcSamples(
   const spacingM = Math.max(sampleSpacingM, totalArcLenEstM / PREVIEW_SAMPLE_TARGET);
   if (n === 2) return sampleLine(points[0], points[1], spacingM);
 
+  const tangents = sparsePointTangents(points);
   const out: RoadMarkingNedPoint[] = [];
   for (let i = 0; i < n - 1; i++) {
-    // Prefer the triple starting at i; the last segment has none (i+2 would be out of range),
-    // so it borrows the triple ending at i+1 instead — both interpolate this segment's two
-    // points exactly, and reusing that same triple for the last two segments is what keeps the
-    // tail of the path arriving on a single consistent tangent (see the "arrive on tangent" gate
-    // this feature was already judged against).
+    const g1 = sampleBiarc(points[i], tangents[i], points[i + 1], tangents[i + 1], spacingM);
+    if (g1) {
+      appendSamples(out, g1);
+      continue;
+    }
+    // Fallback = the previous per-triple behaviour, so a degenerate biarc can only ever
+    // reproduce the old geometry, never invent worse.
     const useForwardTriple = i + 2 <= n - 1;
     const triple: [RoadMarkingNedPoint, RoadMarkingNedPoint, RoadMarkingNedPoint] = useForwardTriple
       ? [points[i], points[i + 1], points[i + 2]]

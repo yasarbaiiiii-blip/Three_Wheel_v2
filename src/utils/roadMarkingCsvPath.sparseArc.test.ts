@@ -489,3 +489,79 @@ describe("determinism", () => {
     expect(JSON.stringify(a.samples)).toBe(JSON.stringify(b.samples));
   });
 });
+
+// ── G1 joints (2026-07-31) ────────────────────────────────────────────────────
+// The per-triple tessellation fixed the interior-displacement defect but joined
+// consecutive segments with two different circumcircles — G0. On the real
+// curve_6_points-1 survey that staged −9.99°/+4.05°/−9.99° single-vertex tangent
+// jumps exactly on surveyed stakes; the rover ran 6.4 cm wide and the spray gate
+// cut a 31 cm hole (PX4_DXP consolidated analysis, 2026-07-30). These tests pin
+// the G1 contract on that exact survey.
+
+/** curve_6_points-1 — 8 RTK stakes, local NED (PX4-sphere), reported RMS 1.7 cm. */
+const CURVE_6_POINTS_1: RoadMarkingNedPoint[] = [
+  { north: 0.0, east: 0.0 },
+  { north: -0.0511, east: 0.5459 },
+  { north: -0.0434, east: 1.1785 },
+  { north: 0.2435, east: 2.0146 },
+  { north: 0.8006, east: 2.58 },
+  { north: 1.1842, east: 2.879 },
+  { north: 1.8336, east: 3.0588 },
+  { north: 2.5119, east: 3.1021 },
+];
+
+function vertexTurnsDeg(pts: RoadMarkingNedPoint[]): number[] {
+  const out: number[] = [];
+  for (let i = 1; i < pts.length - 1; i++) {
+    out.push(turningAngleDeg(pts[i - 1], pts[i], pts[i + 1]));
+  }
+  return out;
+}
+
+describe("G1 joints on the curve_6_points-1 survey", () => {
+  const res = buildRoadMarkingFittedPath(CURVE_6_POINTS_1, { surveyRmsM: 0.017 });
+
+  it("still fits as a sparse arc and stays paintable", () => {
+    expect(res.mode).toBe("sparse-arc");
+    expect(res.paintable).toBe(true);
+  });
+
+  it("still interpolates every surveyed stake exactly", () => {
+    for (const stake of CURVE_6_POINTS_1) {
+      const best = Math.min(
+        ...res.samples.map((s) => Math.hypot(s.north - stake.north, s.east - stake.east))
+      );
+      expect(best).toBeLessThan(1e-6);
+    }
+  });
+
+  it("emits no G0 tangent kink anywhere (the −9.99° joints are gone)", () => {
+    const turns = vertexTurnsDeg(res.samples).map(Math.abs);
+    // 3° is the arc-sampling step cap (MAX_ARC_SAMPLE_ANGLE_RAD); a genuine
+    // kink reads ~10°. Small headroom over 3° for a discretization boundary.
+    expect(Math.max(...turns)).toBeLessThan(3.5);
+    expect(res.quality.maxJointTurnDeg).toBeLessThan(3.5);
+  });
+
+  it("does not displace the line between stakes (stays near the old geometry)", () => {
+    // The biarc chain may differ from the old per-triple arcs mid-span, but it
+    // must stay within survey noise of the straight chords between stakes —
+    // the same scale of change the deviation-bounded backend blend allows.
+    const distToChords = (p: RoadMarkingNedPoint): number => {
+      let best = Infinity;
+      for (let j = 0; j < CURVE_6_POINTS_1.length - 1; j++) {
+        const a = CURVE_6_POINTS_1[j];
+        const b = CURVE_6_POINTS_1[j + 1];
+        const dn = b.north - a.north;
+        const de = b.east - a.east;
+        const s2 = dn * dn + de * de;
+        if (s2 < 1e-18) continue;
+        const t = Math.max(0, Math.min(1, ((p.north - a.north) * dn + (p.east - a.east) * de) / s2));
+        best = Math.min(best, Math.hypot(p.north - (a.north + t * dn), p.east - (a.east + t * de)));
+      }
+      return best;
+    };
+    const worst = Math.max(...res.samples.map(distToChords));
+    expect(worst).toBeLessThan(0.06);
+  });
+});
