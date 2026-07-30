@@ -33,7 +33,13 @@ const PAINT_ONLY_RUN: TrajectoryRun = {
 
 const RUN_OUT_LEN = 0.1;
 
-function response(over: Record<string, unknown> = {}) {
+type FakeResponse = {
+  mark_length_m: number;
+  transit_length_m: number;
+  run_echo: Array<Record<string, unknown>>;
+} & Record<string, unknown>;
+
+function response(over: Record<string, unknown> = {}): FakeResponse {
   return {
     mark_length_m: 4.7,
     transit_length_m: RUN_OUT_LEN, // engine counts the generated run-out
@@ -48,12 +54,12 @@ function response(over: Record<string, unknown> = {}) {
       },
     ],
     ...over,
-  } as never;
+  };
 }
 
 describe("generatedRunLengthM", () => {
   it("sums only generated:true entries", () => {
-    expect(generatedRunLengthM(response().run_echo)).toBeCloseTo(RUN_OUT_LEN, 6);
+    expect(generatedRunLengthM(response().run_echo as never)).toBeCloseTo(RUN_OUT_LEN, 6);
   });
 
   it("is 0 when nothing is generated, and tolerates junk", () => {
@@ -65,7 +71,7 @@ describe("generatedRunLengthM", () => {
 
 describe("verifyTrajectoryResponse — terminal run-out", () => {
   it("does NOT block a paint-only mission over the generated run-out", () => {
-    const res = verifyTrajectoryResponse([PAINT_ONLY_RUN], response());
+    const res = verifyTrajectoryResponse([PAINT_ONLY_RUN], response() as never);
     expect(res.issues.map((i) => i.code)).not.toContain("travel_total");
     expect(res.ok).toBe(true);
   });
@@ -74,7 +80,7 @@ describe("verifyTrajectoryResponse — terminal run-out", () => {
     // 2 m of genuine transit the client never sent, on top of the run-out.
     const res = verifyTrajectoryResponse(
       [PAINT_ONLY_RUN],
-      response({ transit_length_m: 2 + RUN_OUT_LEN })
+      response({ transit_length_m: 2 + RUN_OUT_LEN }) as never
     );
     expect(res.issues.map((i) => i.code)).toContain("travel_total");
     expect(res.ok).toBe(false);
@@ -83,7 +89,7 @@ describe("verifyTrajectoryResponse — terminal run-out", () => {
   it("names the subtraction in the failure message, so the number is traceable", () => {
     const res = verifyTrajectoryResponse(
       [PAINT_ONLY_RUN],
-      response({ transit_length_m: 2 + RUN_OUT_LEN })
+      response({ transit_length_m: 2 + RUN_OUT_LEN }) as never
     );
     const msg = res.issues.find((i) => i.code === "travel_total")?.message ?? "";
     expect(msg).toContain("2.000"); // comparable value, run-out removed
@@ -110,7 +116,7 @@ describe("verifyTrajectoryResponse — terminal run-out", () => {
             generated: true,
           },
         ],
-      })
+      }) as never
     );
     expect(res.issues.map((i) => i.code)).not.toContain("travel_total");
   });

@@ -26,7 +26,10 @@ import {
 import { buildTrajectory } from "../../../utils/csvTrajectory";
 import type { LocalPointCsvResult } from "../../../utils/localPointCsv";
 import { sanitizePlanLines } from "../../../utils/pathWorkflow";
-import { hydrateStagedMissionForMap } from "../../../utils/stagedMissionHydration";
+import {
+  hydrateStagedMissionForMap,
+  isStagedHydrationLineId,
+} from "../../../utils/stagedMissionHydration";
 import { buildSurveyCsvExport, type SurveyCsvExport } from "../../../utils/surveyCsvExport";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
@@ -312,6 +315,18 @@ export function CsvStageAndLoadPanel({
     }
     if (!appTrajectory || appTrajectory.paintedLines.length === 0) {
       Alert.alert("Empty trajectory", "No painted mark paths to send.");
+      return;
+    }
+    // Re-send guard: after a successful send, applyStagedSuccess replaces the
+    // map lines with the rover's densified staged waypoints. Sending THOSE
+    // would re-plan rover output as survey geometry (every 5 cm waypoint
+    // becomes a source vertex — field 2026-07-29 staged must_hit=122/123 and
+    // scored the day's worst curve RMS). Require a fresh import instead.
+    if (appTrajectory.paintedLines.some((l) => isStagedHydrationLineId(l.id))) {
+      Alert.alert(
+        "Already staged — re-import to send again",
+        "The map is showing the rover's staged mission (already densified), not the original survey geometry. Re-import the CSV/DXF file, then send."
+      );
       return;
     }
 

@@ -80,6 +80,26 @@ function makePlanLine(run: PendingLine, index: number): PlanLine {
   };
 }
 
+/**
+ * True when a PlanLine id was minted by staged-mission hydration — i.e. the
+ * line's geometry is the ROVER'S densified output (5 cm waypoints) redrawn on
+ * the map, not a fresh file import.
+ *
+ * Send paths must refuse these as source geometry: re-sending them re-plans
+ * rover output as survey input, so every 5 cm waypoint becomes a "source
+ * vertex". Field 2026-07-29: one such re-send staged a mission with
+ * must_hit=122 of 123 waypoints and scored the worst curve RMS of the day
+ * (4.88 cm) — the RPP lookahead was clipped to the 5 cm segment length.
+ *
+ * Keep the prefix list in sync with the ids minted in this module:
+ * makePlanLine (`staged-line-`), pointMissionPointsToPlanLines (`pt-`),
+ * polylineSliceToPlanLine (`rover-ext-`, `rover-transit-`), and
+ * sprayRunsToPlanLines (`rover-path-`, `rover-transit-`).
+ */
+export function isStagedHydrationLineId(id: string): boolean {
+  return /^(staged-line-|rover-path-|rover-transit-|rover-ext-|pt-)/.test(id);
+}
+
 export function stagedMissionMatchesId(
   artifact: StagedMissionArtifact | null | undefined,
   missionId: string
