@@ -76,7 +76,7 @@ export function isGeometryNonPaintable(line: PlanLine): boolean {
  * These require acknowledgement before Send.
  */
 export function isCriticalParseWarning(warning: string): boolean {
-  return /projected|jumbled|swapped|Headerless|do not paint|confirm this is correct|local metres|cluster median|outlier|Null Island|near 0°|origin set to cluster|\$INSUNITS|assumed centimetres|unit scale|Confirm unit scale|Georeferenced DXF|no route optimisation|operator order/i.test(
+  return /projected|jumbled|swapped|Headerless|do not paint|confirm this is correct|local metres|cluster median|outlier|Null Island|near 0°|origin set to cluster|\$INSUNITS|assumed centimetres|unit scale|Confirm unit scale|Georeferenced DXF|no route optimisation|operator order|does not generate paths from DXF points|No LINE\/LWPOLYLINE/i.test(
     warning
   );
 }
@@ -142,7 +142,9 @@ export function evaluateCsvSendReadiness(opts: {
 
   if (opts.requireGpsAnchor && !opts.hasGpsAnchor) {
     hardBlocks.push(
-      "App-planned trajectory requires a GPS survey with a lat/lon anchor (origin_gps)."
+      opts.dxfOperatorOrderAuthoritative
+        ? "DXF trajectory requires a GPS origin — use a georeferenced DXF, or complete Align first."
+        : "App-planned trajectory requires GPS survey points with a lat/lon anchor (origin_gps)."
     );
   }
 

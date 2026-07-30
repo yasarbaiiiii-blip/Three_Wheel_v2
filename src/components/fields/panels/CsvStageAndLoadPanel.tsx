@@ -36,13 +36,19 @@ import { FIELDS_COLORS } from "../fieldsTheme";
 type CsvStageAndLoadPanelProps = {
   apiBaseUrl: string;
   /**
+   * Which import owns this panel:
+   * - `"csv"`: survey points → frontend fits lines → plan-trajectory (or rover upload)
+   * - `"dxf"`: real DXF path geometry already in `lines` → plan-trajectory only
+   */
+  sourceKind?: "csv" | "dxf";
+  /**
    * CSV local preview (required for CSV / rover-CSV path).
-   * Optional when `originGps` is provided for local DXF app-planned send.
+   * Not used when `sourceKind === "dxf"` (geometry lives in `lines`).
    */
   localCsvPreview?: LocalPointCsvResult | null;
   /** Sampled map pins, purely to explain "map shows N of M pins" to the operator. */
   mapPinCount?: number | null;
-  /** Current map plan lines (CSV marks + templates + preview transit). */
+  /** Current map plan lines (CSV fitted marks / DXF entity paths + transit). */
   lines?: PlanLine[];
   /** Operator order/paint from CsvPathOrderStep; defaults to all marks painted in list order. */
   pathOrder?: CsvPathOrderEntry[] | null;
@@ -94,13 +100,16 @@ async function buildUploadFormData(exported: SurveyCsvExport): Promise<FormData>
 }
 
 /**
- * CSV Verify & Load panel (Send to Rover) — minimal: status, block reason, Send.
+ * Verify & Load panel (Send to Rover) — status, block reason, Send.
  *
- * - `CSV_PLANNER === "rover"` (default): survey CSV upload → plan-and-stage → load.
- * - `CSV_PLANNER === "app"`: buildTrajectory → plan-trajectory → verify run_echo → load.
+ * - CSV + `CSV_PLANNER === "rover"`: survey CSV upload → plan-and-stage → load.
+ * - CSV + `CSV_PLANNER === "app"`: fit points → buildTrajectory → plan-trajectory.
+ * - DXF (`sourceKind === "dxf"`): real file path geometry in `lines` → plan-trajectory.
+ *   Never re-fits CAD entities; never uploads the DXF file on the app-planned path.
  */
 export function CsvStageAndLoadPanel({
   apiBaseUrl,
+  sourceKind,
   localCsvPreview = null,
   mapPinCount: _mapPinCount = null,
   lines = [],
@@ -134,12 +143,15 @@ export function CsvStageAndLoadPanel({
   /** Operator confirmed critical parse-frame warnings. */
   const [parseAcknowledged, setParseAcknowledged] = useState(false);
 
-  const isDxfLocal = localCsvPreview == null && originGps != null;
+  // Prefer explicit sourceKind; fall back to legacy heuristic for callers that omit it.
+  const isDxfLocal =
+    sourceKind === "dxf" ||
+    (sourceKind == null && localCsvPreview == null && originGps != null);
   const exported = useMemo(
-    () => (localCsvPreview ? buildSurveyCsvExport(localCsvPreview) : null),
-    [localCsvPreview]
+    () => (!isDxfLocal && localCsvPreview ? buildSurveyCsvExport(localCsvPreview) : null),
+    [isDxfLocal, localCsvPreview]
   );
-  // Local DXF always uses app planner; CSV follows CSV_PLANNER.
+  // Local DXF always uses app planner (real path vertices); CSV follows CSV_PLANNER.
   const useAppPlanner = isDxfLocal || CSV_PLANNER === "app";
 
   const markLines = useMemo(() => selectMarkPlanLines(lines), [lines]);
@@ -172,7 +184,13 @@ export function CsvStageAndLoadPanel({
   useEffect(() => {
     setGeometryAcknowledged(false);
     setParseAcknowledged(false);
-  }, [localCsvPreview?.fileName, localCsvPreview?.num_points, missionName, markLines.length]);
+  }, [
+    localCsvPreview?.fileName,
+    localCsvPreview?.num_points,
+    missionName,
+    markLines.length,
+    isDxfLocal,
+  ]);
 
   const groundTruthSource = useMemo(
     () =>
@@ -307,14 +325,19 @@ export function CsvStageAndLoadPanel({
     }
     if (!resolvedOriginGps) {
       const message = isDxfLocal
-        ? "App-planned DXF requires a confirmed GPS origin (complete Align first)."
+        ? "DXF trajectory requires a confirmed GPS origin (georeferenced file, or complete Align first)."
         : "App-planned trajectory requires GPS survey points with a lat/lon anchor (origin_gps).";
       setError(message);
       Alert.alert("Missing origin", message);
       return;
     }
     if (!appTrajectory || appTrajectory.paintedLines.length === 0) {
-      Alert.alert("Empty trajectory", "No painted mark paths to send.");
+      Alert.alert(
+        "Empty trajectory",
+        isDxfLocal
+          ? "No painted DXF mark paths to send. Check the file has LINE/POLYLINE geometry (or enough points)."
+          : "No painted mark paths to send."
+      );
       return;
     }
     // Re-send guard: after a successful send, applyStagedSuccess replaces the
@@ -325,7 +348,9 @@ export function CsvStageAndLoadPanel({
     if (appTrajectory.paintedLines.some((l) => isStagedHydrationLineId(l.id))) {
       Alert.alert(
         "Already staged — re-import to send again",
-        "The map is showing the rover's staged mission (already densified), not the original survey geometry. Re-import the CSV/DXF file, then send."
+        isDxfLocal
+          ? "The map is showing the rover's staged mission (already densified), not the original DXF path. Re-import the DXF file, then send."
+          : "The map is showing the rover's staged mission (already densified), not the original survey geometry. Re-import the CSV file, then send."
       );
       return;
     }
@@ -335,12 +360,21 @@ export function CsvStageAndLoadPanel({
     setStep(null);
     setLoadBlocked(false);
     try {
+      // CSV: paintedLines are frontend-fitted from survey points.
+      // DXF: paintedLines are the real entity paths from parseLocalDxf (already baked
+      // through Align when metric). buildTrajectory only packs vertices into mark/travel runs.
       const built = buildTrajectory(appTrajectory.paintedLines, {
         markSpeedMs: 0.35,
         travelSpeedMs: 0.5,
-        groundTruthSource,
+        groundTruthSource: isDxfLocal ? undefined : groundTruthSource,
         extensions: extCfg,
       });
+      if (built.runs.length === 0) {
+        const detail = built.warnings.slice(0, 3).join("\n") || "No mark runs produced.";
+        setError(detail);
+        Alert.alert("Empty trajectory", detail);
+        return;
+      }
       const preSendExtensions = buildCsvExtensionLines(appTrajectory.paintedLines, extCfg);
 
       const result = await planAndStageAppTrajectory(apiBaseUrl, {

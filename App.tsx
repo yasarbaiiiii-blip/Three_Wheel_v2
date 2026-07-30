@@ -2,7 +2,7 @@ import "react-native-gesture-handler";
 import "./global.css";
 
 import { initMapbox } from "./src/config/mapbox";
-import { SMOKE_TEST_MAPBOX, SMOKE_TEST_CENTER } from "./src/config/featureFlags";
+import { DXF_PLANNER, SMOKE_TEST_MAPBOX, SMOKE_TEST_CENTER } from "./src/config/featureFlags";
 
 // Apply the Mapbox public access token once, before any map component mounts.
 initMapbox();
@@ -222,7 +222,6 @@ import type { LocalDxfResult } from "./src/utils/dxfLocalImport";
 import { alignmentFromGeographic } from "./src/utils/dxfAlignment";
 import {
   applyCsvOrderToPlanLines,
-  chainMarkLinesByGeometry,
   defaultPathOrder,
   selectMarkPlanLines,
 } from "./src/utils/csvPathOrder";
@@ -961,6 +960,70 @@ export default function App() {
       originDxfEast = (lines[0].from?.y ?? 0) - 2;
     }
 
+    // Local app-planned DXF: plan-trajectory sends NED vertices as-is about origin_gps.
+    // The sticker is only a map preview — bake the real DXF path (placed geometry) into
+    // `lines` before enabling Send. Never set origin_gps while leaving design-frame
+    // geometry (that used to ship an untransformed DXF trajectory).
+    const isLocalAppDxf =
+      DXF_PLANNER === "app" &&
+      selectedPathName == null &&
+      (importedPlan?.fileType === "dxf" || !!importedPlan?.fileName?.toLowerCase().endsWith(".dxf"));
+
+    if (isLocalAppDxf) {
+      if (!Number.isFinite(baseLat) || !Number.isFinite(baseLon) || (baseLat === 0 && baseLon === 0)) {
+        Alert.alert(
+          "Missing map origin",
+          "Could not resolve a GPS origin for this placement. Wait for a GPS fix, then place the plan again."
+        );
+        return;
+      }
+      const item = visualAlignmentItem;
+      const transformPt = (north: number, east: number) => {
+        const t = transformVisualDxfPoint(north, east, item);
+        // NED about the latched map origin (= origin_gps for plan-trajectory).
+        return {
+          north: t.north - originDxfNorth,
+          east: t.east - originDxfEast,
+        };
+      };
+      setLines((prev) => sanitizePlanLines(transformPlanLinesGeometry(prev, transformPt)));
+      setAlignedRefPoints([{ dxf_x: 0, dxf_y: 0, lat: baseLat, lon: baseLon }]);
+      setVerifiedAlignmentRequest({
+        origin_gps: [baseLat, baseLon],
+        rotation_deg: 0, // rotation already baked into vertices
+      });
+      setAlignmentResult({
+        method: "visual_alignment",
+        scale: enforceAlignmentScale(item.scale ?? 1),
+        rotation_deg: item.rotation ?? 0,
+        offset_n: item.y ?? 0,
+        offset_e: item.x ?? 0,
+        origin_gps: [baseLat, baseLon],
+        rmse_m: null,
+        sample_coords: null,
+        residuals: null,
+        warnings: null,
+      });
+      // Safe at call time (user event) — bindings exist after the full render.
+      setStagedWorkflow((prev) => ({
+        ...prev,
+        alignment: "verified",
+        spray: "pending",
+        staged: "pending",
+        loaded: "pending",
+        started: "pending",
+      }));
+      setExtractedCorners(null);
+      setVisualAlignmentItem(null);
+      setIsVisualAlignmentMode(false);
+      setIsPlanEditingMode(false);
+      setMultiPointPlacementPhase("idle");
+      console.log(
+        `[Align DXF] Local DXF placement baked into lines; origin_gps=[${baseLat}, ${baseLon}] ready for plan-trajectory`
+      );
+      return;
+    }
+
     const extractedLLA = buildVisualAlignmentRefPoints(
       dxfCorners,
       visualAlignmentItem,
@@ -972,22 +1035,16 @@ export default function App() {
 
     console.log("Captured LLA reference points for rover:", extractedLLA);
 
-    // Keep canonical DXF lines unchanged; retain the sticker transform for map preview.
+    // Rover DXF: keep design lines; Fix Alignment POST applies the server transform.
     setExtractedCorners(extractedLLA);
     setAlignedRefPoints(extractedLLA);
-    // Local DXF (app planner): origin_gps for plan-trajectory is the latched map origin
-    // the sticker was placed against — same contract as CSV survey anchor.
     setVerifiedAlignmentRequest({
       origin_gps: [baseLat, baseLon],
       rotation_deg: visualAlignmentItem.rotation ?? 0,
       ref_points: extractedLLA,
     });
-    // Do not call setStagedWorkflow here — it is declared later in this component
-    // (TDZ). Alignment is marked verified by AlignDxfPanel Fix / setWorkflowStep.
     setIsVisualAlignmentMode(false);
-    // Also used from the Multi-Point Fit tab's "Use This Position" (Move Plan flow), which
-    // drives the SAME sticker via isPlanEditingMode rather than isVisualAlignmentMode — clear
-    // it here too so that tab's UI exits drag mode once a position is confirmed.
+    // Also used from the Multi-Point Fit tab's "Use This Position" (Move Plan flow).
     setIsPlanEditingMode(false);
     setMultiPointPlacementPhase("captured");
   }
@@ -1077,6 +1134,15 @@ export default function App() {
   const [stagedMissionId, setStagedMissionId] = useState<string | null>(null);
   /** Local-only CSV preview (Select File .csv never hits backend path APIs). */
   const [localCsvPreview, setLocalCsvPreview] = useState<LocalPointCsvResult | null>(null);
+  /**
+   * Local DXF parse meta (app planner). Geometry lives in `lines`; this keeps
+   * file name / georef / parse warnings for Send readiness and mission naming.
+   */
+  const [localDxfMeta, setLocalDxfMeta] = useState<{
+    fileName: string;
+    isGeographic: boolean;
+    warnings: string[];
+  } | null>(null);
   const [loadedPathInspection, setLoadedPathInspection] = useState<missionApi.LoadedPathResponse | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   const [extensionsEnabled, setExtensionsEnabled] = useState(false);
@@ -1355,6 +1421,7 @@ export default function App() {
     setLoadedPathInspection(null);
     setMissionLoaded(false);
     setLocalCsvPreview(null);
+    setLocalDxfMeta(null);
   }, []);
 
   /**
@@ -2177,8 +2244,9 @@ export default function App() {
   const previewSelectedPath = async (pathName: string) => {
     if (!apiBaseUrl) return;
     setLoadedPathInspection(null);
-    // Backend path selection replaces any on-device CSV preview.
+    // Backend path selection replaces any on-device CSV / local DXF preview.
     setLocalCsvPreview(null);
+    setLocalDxfMeta(null);
     setMissionActionBusy(true);
     try {
       console.log(`[API GET] /api/path/${pathName}/preview - Fetching detailed preview...`);
@@ -2811,6 +2879,7 @@ export default function App() {
    */
   function handleLocalCsvParsed(data: LocalPointCsvResult) {
     setLocalCsvPreview(data);
+    setLocalDxfMeta(null);
     // Keep selectedPathName null so we never hit GET /api/path/{csv}/preview.
     // Avoid setSelectedPathName here if it would only clear; wipe backend selection
     // without going through previewSelectedPath.
@@ -2869,6 +2938,11 @@ export default function App() {
    */
   function handleLocalDxfParsed(data: LocalDxfResult) {
     setLocalCsvPreview(null);
+    setLocalDxfMeta({
+      fileName: data.fileName,
+      isGeographic: !!data.isGeographic,
+      warnings: data.warnings.slice(),
+    });
     previousSelectedPathRef.current = null;
     setSelectedPathName(null);
     setMissionFileReady(false);
@@ -2882,15 +2956,12 @@ export default function App() {
       data.isGeographic && data.geoOrigin ? [data.geoOrigin.lat, data.geoOrigin.lon] : null
     );
 
-    // Frontend-only geometry: marks + inter-path transit (extensions via Upload toggle).
-    //
-    // Chain the paths geometrically before taking the default order. CAD stores entities in
-    // whatever order they were drawn, and a side drawn backwards is just as common — both
-    // leave consecutive paths non-adjacent, which is what sends the PRE/AFT connectors
-    // cutting across the plan instead of clipping each corner. No-op when the file is
-    // already in perimeter order; the operator can still reorder by hand afterwards.
-    const markLines = chainMarkLinesByGeometry(
-      data.lines.filter((l) => l.layer !== "transit" && l.layer !== "extension")
+    // Real DXF path geometry from the file — do not re-fit, reverse, or re-chain.
+    // Path generation (points → fitted lines) is CSV-only. Here we keep file entity
+    // order and vertex direction so plan-trajectory gets the authored path.
+    // Inter-path transit is drawn for preview only; mark vertices stay unchanged.
+    const markLines = data.lines.filter(
+      (l) => l.layer !== "transit" && l.layer !== "extension"
     );
     const order = defaultPathOrder(selectMarkPlanLines(markLines));
     const withTransit = applyCsvOrderToPlanLines(markLines, order, {
@@ -2946,10 +3017,14 @@ export default function App() {
       void pathApi.deletePath(apiBaseUrl, uploadedName).catch(() => {});
     }
     setLocalCsvPreview(null);
+    setLocalDxfMeta(null);
+    setIsGeographicDxf(false);
+    setGeoOriginDxf(null);
     setLines((prev) => prev.filter((l) => l.layer === "virtual_boundary"));
     setSelectedLineId(null);
     setAlignedRefPoints([]);
     setVerifiedAlignmentRequest(null);
+    setAlignmentResult(null);
     setStagedPlanResult(null);
     setStagedMissionInspection(null);
     setStagedMissionId(null);
@@ -3472,6 +3547,7 @@ export default function App() {
       setSelectedLineId(null);
       setSelectedPathName(null);
       setLocalCsvPreview(null);
+      setLocalDxfMeta(null);
       setMissionFileReady(false);
       setMissionLoaded(false);
       setMissionRunning(false);
@@ -4233,6 +4309,7 @@ export default function App() {
                             setRtkAutoConnect={setRtkAutoConnect}
                             stopRtk={stopRtk}
                             localCsvPreview={localCsvPreview}
+                            localDxfMeta={localDxfMeta}
                             onLocalCsvParsed={handleLocalCsvParsed}
                             onLocalDxfParsed={handleLocalDxfParsed}
                             onClearLocalCsv={handleClearLocalCsv}
@@ -5805,6 +5882,11 @@ function SectionPages(props: {
   >;
   previewFallbackGps?: { lat: number; lon: number } | null;
   localCsvPreview?: LocalPointCsvResult | null;
+  localDxfMeta?: {
+    fileName: string;
+    isGeographic: boolean;
+    warnings: string[];
+  } | null;
   onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
   onLocalDxfParsed?: (data: LocalDxfResult) => void;
   onClearLocalCsv?: () => void;

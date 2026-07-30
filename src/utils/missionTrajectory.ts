@@ -185,9 +185,12 @@ function nearestInIndex(
 }
 
 /**
- * Extract an explicit NED polyline from a mark PlanLine.
- * Prefer preview_points (authoritative fitted geometry); fall back to from→to.
- * Returns null when fewer than 2 valid points.
+ * Extract an explicit NED polyline from a mark PlanLine for plan-trajectory.
+ *
+ * Prefer `preview_points` (authoritative):
+ * - CSV: frontend-fitted road-marking samples
+ * - DXF: real file path vertices / sagitta samples — passed through, not re-fitted here
+ * Falls back to from→to. Returns null when fewer than 2 valid points.
  */
 export function planLineToNedPolyline(line: PlanLine): NedPair[] | null {
   const preview = line.entity?.preview_points;
@@ -205,7 +208,7 @@ export function planLineToNedPolyline(line: PlanLine): NedPair[] | null {
   const tx = line.to?.x;
   const ty = line.to?.y;
   if (!isFinitePair(fx, fy) || !isFinitePair(tx, ty)) return null;
-  // CSV PlanLine convention: x = north, y = east (see buildPlanLineForGroup).
+  // PlanLine convention: x = north, y = east (CSV + DXF).
   return [
     [fx, fy],
     [tx, ty],

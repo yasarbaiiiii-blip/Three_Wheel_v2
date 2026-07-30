@@ -261,6 +261,148 @@ function closedSquareLike(
   );
 }
 
+describe("classic POLYLINE + VERTEX (geo-referenced 3D polyline)", () => {
+  /**
+   * Minimal AcDb3dPolyline: entity location (0,0), vertices-follow, 4 lat/lon corners.
+   * Mirrors Emlid / survey exports like `coordinate dxf/test 1.dxf`.
+   */
+  function geoPolyline3d(): string {
+    const verts: [number, number][] = [
+      [80.26194124, 13.07206392],
+      [80.26194283, 13.07208325],
+      [80.26196034, 13.07208256],
+      [80.26195891, 13.07206129],
+    ];
+    let body =
+      `0\nPOLYLINE\n8\nLines\n66\n1\n70\n8\n10\n0\n20\n0\n30\n0\n`;
+    for (const [x, y] of verts) {
+      body += `0\nVERTEX\n8\nLines\n10\n${x}\n20\n${y}\n30\n0\n70\n32\n`;
+    }
+    body += `0\nSEQEND\n8\nLines\n`;
+    return wrapDxf(body, 6);
+  }
+
+  it("does not treat POLYLINE base (0,0) as a path vertex", () => {
+    const r = parseLocalDxf(geoPolyline3d(), "geo-poly.dxf");
+    expect(r.lines).toHaveLength(1);
+    const pp = r.lines[0].entity!.preview_points;
+    // No Null-Island corner after projection
+    for (const p of pp) {
+      expect(Math.hypot(p.north, p.east)).toBeLessThan(500); // local metres about origin
+    }
+  });
+
+  it("detects georeferenced 3D polyline and projects about lat/lon centroid", () => {
+    const r = parseLocalDxf(geoPolyline3d(), "geo-poly.dxf");
+    expect(r.isGeographic).toBe(true);
+    expect(r.geoOrigin).not.toBeNull();
+    expect(r.geoOrigin!.lat).toBeCloseTo(13.072, 2);
+    expect(r.geoOrigin!.lon).toBeCloseTo(80.262, 2);
+    expect(r.lines).toHaveLength(1);
+    // Site is ~2 m across in lat/lon — after projection span is metres, not degrees
+    const pp = r.lines[0].entity!.preview_points;
+    const ns = pp.map((p) => p.north);
+    const es = pp.map((p) => p.east);
+    const spanN = Math.max(...ns) - Math.min(...ns);
+    const spanE = Math.max(...es) - Math.min(...es);
+    expect(spanN).toBeGreaterThan(0.5);
+    expect(spanN).toBeLessThan(50);
+    expect(spanE).toBeGreaterThan(0.5);
+    expect(spanE).toBeLessThan(50);
+  });
+});
+
+describe("DXF path fidelity (no CSV-style path generation)", () => {
+  function pointEntity(x: number, y: number, layer = "Points"): string {
+    return `0\nPOINT\n8\n${layer}\n10\n${x}\n20\n${y}\n`;
+  }
+
+  it("preserves LINE endpoints exactly (metres, after axis swap)", () => {
+    // CAD LINE (0,0)→(3,4): app NED (n,e) = (0,0)→(4,3)
+    const dxf = wrapDxf(lineEntity(0, 0, 3, 4), 6);
+    const r = parseLocalDxf(dxf, "line.dxf");
+    expect(r.lines).toHaveLength(1);
+    const pp = r.lines[0].entity!.preview_points;
+    expect(pp).toHaveLength(2);
+    expect(pp[0].north).toBeCloseTo(0, 9);
+    expect(pp[0].east).toBeCloseTo(0, 9);
+    expect(pp[1].north).toBeCloseTo(4, 9);
+    expect(pp[1].east).toBeCloseTo(3, 9);
+  });
+
+  it("preserves closed LWPOLYLINE vertices in file order (no re-fit)", () => {
+    const dxf = wrapDxf(closedSquareLwpoly(2), 6);
+    const r = parseLocalDxf(dxf, "square.dxf");
+    expect(r.lines.length).toBeGreaterThanOrEqual(1);
+    const pp = r.lines[0].entity!.preview_points;
+    // Closed square: 4 corners + close (or 4) — vertices match CAD, not a CSV Hyper-fit.
+    expect(pp.length).toBeGreaterThanOrEqual(4);
+    // First vertex CAD (0,0) → NED (0,0)
+    expect(pp[0].north).toBeCloseTo(0, 6);
+    expect(pp[0].east).toBeCloseTo(0, 6);
+  });
+
+  it("does not invent a path from bare POINT entities (CSV owns path generation)", () => {
+    const entities =
+      pointEntity(0, 0) + pointEntity(2, 0) + pointEntity(2, 2) + pointEntity(0, 2);
+    const dxf = wrapDxf(entities, 6);
+    const r = parseLocalDxf(dxf, "points-only.dxf");
+    expect(r.lines).toHaveLength(0);
+    expect(r.warnings.some((w) => /does not generate paths from DXF points/i.test(w))).toBe(
+      true
+    );
+  });
+
+  it("keeps real LINE geometry and ignores POINT when both exist", () => {
+    const point = pointEntity(1, 2);
+    const dxf = wrapDxf(point + lineEntity(0, 0, 1, 0), 6);
+    const r = parseLocalDxf(dxf, "pts-with-line.dxf");
+    expect(r.ignoredCount).toBe(1);
+    expect(r.lines).toHaveLength(1);
+    expect(r.warnings.some((w) => /does not generate paths from DXF points/i.test(w))).toBe(
+      false
+    );
+  });
+
+  it("does not CSV-fit one-vertex-per-point degenerate 'line' exports", () => {
+    const oneVertexPoly = (x: number, y: number) =>
+      `0\nLWPOLYLINE\n8\nLines\n90\n1\n70\n0\n10\n${x}\n20\n${y}\n`;
+    const corners: [number, number][] = [
+      [0, 0],
+      [2, 0],
+      [2, 2],
+      [0, 2],
+    ];
+    const entities = corners
+      .map(([x, y]) => oneVertexPoly(x, y) + pointEntity(x, y))
+      .join("");
+    const dxf = wrapDxf(entities, 6);
+    const r = parseLocalDxf(dxf, "square-degenerate.dxf");
+    expect(r.lines).toHaveLength(0);
+    expect(r.warnings.some((w) => /does not generate paths from DXF points/i.test(w))).toBe(
+      true
+    );
+  });
+
+  it("detects georeferenced points-only but still does not invent a path", () => {
+    const lat0 = 13.05;
+    const lon0 = 80.25;
+    const m = metresPerDegreePx4(lat0);
+    const dN = 2 / m.mPerDegNorth;
+    const dE = 2 / m.mPerDegEast;
+    const entities =
+      pointEntity(lon0, lat0) +
+      pointEntity(lon0 + dE, lat0) +
+      pointEntity(lon0 + dE, lat0 + dN) +
+      pointEntity(lon0, lat0 + dN);
+    const dxf = wrapDxf(entities, 6);
+    const r = parseLocalDxf(dxf, "geo-points.dxf");
+    expect(r.isGeographic).toBe(true);
+    expect(r.geoOrigin).not.toBeNull();
+    expect(r.lines).toHaveLength(0);
+  });
+});
+
 describe("readUnitScale helper", () => {
   it("reads header pairs", () => {
     const pairs = [

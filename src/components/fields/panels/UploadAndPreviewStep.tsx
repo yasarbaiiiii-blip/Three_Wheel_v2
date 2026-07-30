@@ -596,7 +596,7 @@ export function UploadAndPreviewStep({
       {/* File Upload Section */}
       <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
         {DXF_PLANNER === "app"
-          ? "Import a .dxf, .csv, or .waypoints file. DXF and CSV are parsed on-device (not uploaded). Waypoints still use the rover."
+          ? "Import a .dxf, .csv, or .waypoints file. CSV: the app generates the path from survey points. DXF / geo-DXF: the file’s real path is used unchanged (no path generation). Send uses plan-trajectory. Waypoints still use the rover."
           : "Import a .dxf, .csv, or .waypoints file. DXF/waypoints use the rover; CSV is parsed on-device and drawn locally (not uploaded)."}
       </Text>
 

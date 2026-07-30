@@ -2,8 +2,14 @@
  * Local DXF import that matches the rover's parser (G1/G2/G3/G6).
  *
  * Built for app-planned DXF missions (DXF_APP_PLANNED_TRAJECTORY_PLAN Phase 1).
- * planImport.parseDxf is the starting point but lacks unit scale, rover
- * classification, and sagitta-bounded tessellation.
+ *
+ * Contract — path fidelity:
+ * - LINE / LWPOLYLINE / ARC / CIRCLE / SPLINE / ELLIPSE vertices (and sagitta
+ *   samples of curves) are the **real file path**. The app does **not** re-fit
+ *   or regenerate that geometry the way CSV road-marking does.
+ * - Unit scale ($INSUNITS) and georef projection only change frame, not shape.
+ * - Path generation (straights + Hyper-fit arcs from sparse points) is CSV-only
+ *   (`localCsvPointsToPlanLines`). A points-only DXF is not auto-fitted here.
  *
  * Output PlanLine[] uses app NED: PlanPoint.x = north, PlanPoint.y = east;
  * entity.preview_points are {north, east} in metres.
@@ -95,10 +101,19 @@ export function parseLocalDxf(text: string, fileName: string): LocalDxfResult {
   let ignoredCount = 0;
   const entityIndexRef = { value: 0 };
   const pointIdRef = { value: 1 };
+  // Standalone POINT entities (raw DXF units, file order) — only used for georef
+  // detection when there is no line/curve sample. Never converted into a fitted path
+  // (path generation is CSV-only via localCsvPointsToPlanLines).
+  const pointCloudCad: Xy[] = [];
 
   for (const group of entityGroups) {
     const layerName = getSingle(group.pairs, "8") || "0";
     const color = getNumber(group.pairs, "62");
+    if (group.type.toUpperCase() === "POINT") {
+      const px = getNumber(group.pairs, "10");
+      const py = getNumber(group.pairs, "20");
+      if (Number.isFinite(px) && Number.isFinite(py)) pointCloudCad.push({ x: px, y: py });
+    }
     const classification = classifyDxfEntity(group.type, layerName);
     if (classification === "ignore") {
       ignoredCount++;
@@ -120,9 +135,15 @@ export function parseLocalDxf(text: string, fileName: string): LocalDxfResult {
   }
 
   // Axis swap CAD (X=east,Y=north) → app PlanPoint (x=north, y=east).
+  // Preserves entity vertices; does not re-fit or smooth the path.
   let nedLines = applyAxisSwap(lines);
 
-  const samplePts = collectPreviewPoints(nedLines);
+  const pointCloudNed = pointCloudCad.map((p) => ({ north: p.y, east: p.x }));
+
+  let samplePts = collectPreviewPoints(nedLines);
+  const usingPointCloudForGeo = samplePts.length === 0 && pointCloudNed.length > 0;
+  if (usingPointCloudForGeo) samplePts = pointCloudNed;
+
   const geoCheck = looksGeographic(samplePts);
   let isGeographic = false;
   let geoOrigin: { lat: number; lon: number } | null = null;
@@ -135,9 +156,10 @@ export function parseLocalDxf(text: string, fileName: string): LocalDxfResult {
     effectiveSource = "insunits";
     const projected = projectGeographicToLocalNed(samplePts);
     geoOrigin = projected.origin;
+    // Frame change only: same relative path, NED about geoOrigin for plan-trajectory.
     nedLines = applyProjectedPoints(nedLines, samplePts, projected.points);
     warnings.push(
-      `Georeferenced DXF detected — projected about (${geoOrigin.lat.toFixed(6)}, ${geoOrigin.lon.toFixed(6)}) using PX4 sphere.`
+      `Georeferenced DXF detected — projected about (${geoOrigin.lat.toFixed(6)}, ${geoOrigin.lon.toFixed(6)}) using PX4 sphere. File path geometry is preserved.`
     );
   } else {
     if (source === "fallback") {
@@ -148,6 +170,14 @@ export function parseLocalDxf(text: string, fileName: string): LocalDxfResult {
     if (scale !== 1) {
       nedLines = scalePlanLines(nedLines, scale);
     }
+  }
+
+  // Points-only DXF: do NOT invent a path. CSV is the only path generator.
+  if (nedLines.length === 0 && pointCloudCad.length > 0) {
+    warnings.push(
+      `No LINE/LWPOLYLINE/ARC/CIRCLE/SPLINE/ELLIPSE path geometry in this DXF (${pointCloudCad.length} POINT entities ignored for path). ` +
+        `The app does not generate paths from DXF points — export LINE/POLYLINE geometry, or use a survey CSV for point-based path generation.`
+    );
   }
 
   const entityCount = nedLines.length;
@@ -437,7 +467,15 @@ function parseEntity(args: {
   }
 
   if (type === "LWPOLYLINE" || type === "POLYLINE") {
-    const vertices = getVertexList(entityPairs);
+    // LWPOLYLINE: every (10,20) is a path vertex.
+    // Classic POLYLINE: entity (10,20,30) is the *base location* (often 0,0,0); path
+    // vertices live only on following VERTEX entities when vertices-follow (66=1).
+    // Including the base point as a vertex poisons georef detection (mixes Null Island
+    // with lat/lon) and places the plan off-map — common for geo-referenced 3D polylines.
+    let vertices =
+      type === "POLYLINE"
+        ? getPolylinePathVertices(entityPairs)
+        : getVertexList(entityPairs);
     if (vertices.length < 2) return;
     const flags = getNumber(entityPairs, "70") || 0;
     const closed = (flags & 1) === 1;
@@ -929,6 +967,29 @@ function getVertexList(pairs: Pair[]): Vertex[] {
   }
   if (current) vertices.push(current);
   return vertices.filter((pt) => Number.isFinite(pt.x) && Number.isFinite(pt.y));
+}
+
+/**
+ * Path vertices for classic POLYLINE (AcDb3dPolyline / AcDb2dPolyline).
+ *
+ * When group 66 = 1 (vertices follow), VERTEX entities carry the path and the
+ * POLYLINE entity's own (10,20) is only a base/location — never a path corner.
+ * Dropping that base point is required for georeferenced polylines whose vertices
+ * are lat/lon while the base sits at (0,0).
+ *
+ * When 66 is absent/0, fall back to every (10,20) in the group (legacy layout).
+ */
+function getPolylinePathVertices(pairs: Pair[]): Vertex[] {
+  const all = getVertexList(pairs);
+  if (all.length === 0) return all;
+  const verticesFollow = getNumber(pairs, "66");
+  // DXF: 66 present and non-zero ⇒ vertices follow as VERTEX entities.
+  if (Number.isFinite(verticesFollow) && verticesFollow !== 0) {
+    // First (10,20) is the POLYLINE entity location; remaining are VERTEX coords
+    // flattened into the same pair list by collectEntityGroups.
+    return all.length >= 2 ? all.slice(1) : [];
+  }
+  return all;
 }
 
 function polylineLength(pts: Xy[]): number {

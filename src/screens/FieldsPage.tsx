@@ -177,6 +177,15 @@ export type FieldsPageProps = {
     snapRefPoints?: { lat: number; lon: number }[];
   }) => React.ReactNode;
   localCsvPreview?: LocalPointCsvResult | null;
+  /**
+   * Local DXF parse meta (app planner). Geometry is in `lines`; this carries
+   * name / georef / warnings for Path Order → plan-trajectory Send.
+   */
+  localDxfMeta?: {
+    fileName: string;
+    isGeographic: boolean;
+    warnings: string[];
+  } | null;
   onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
   onLocalDxfParsed?: (data: import("../utils/dxfLocalImport").LocalDxfResult) => void;
   onClearLocalCsv?: () => void;
@@ -258,6 +267,7 @@ export function FieldsPage(props: FieldsPageProps) {
     onNavigateHome,
     renderPlanPreview,
     localCsvPreview = null,
+    localDxfMeta = null,
     onLocalCsvParsed,
     onLocalDxfParsed,
     onClearLocalCsv,
@@ -272,8 +282,8 @@ export function FieldsPage(props: FieldsPageProps) {
    * method change / empty list.
    */
   const [csvGuidePointsActive, setCsvGuidePointsActive] = useState(false);
-  /** Original guide CSV file name for Upload/Align button labels (not “Reference Points”). */
-  const [guideCsvFileName, setGuideCsvFileName] = useState<string | null>(null);
+  /** Imported guide CSV file names for Upload/Align button labels (supports multiple files). */
+  const [guideCsvFileNames, setGuideCsvFileNames] = useState<string[]>([]);
   const [missionSummary, setMissionSummary] = useState<any | null>(null);
   /** Align DXF methods: Multi-Point Fit | Visual (1-Point Fit removed). Auto Origin is a separate toggle peer. */
   const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "visual_alignment">("least_squares");
@@ -1239,22 +1249,30 @@ export function FieldsPage(props: FieldsPageProps) {
                     >
                       <CsvStageAndLoadPanel
                         apiBaseUrl={apiBaseUrl}
-                        localCsvPreview={activeCsvForSend}
+                        sourceKind={isLocalDxfFlow ? "dxf" : "csv"}
+                        localCsvPreview={isLocalDxfFlow ? null : activeCsvForSend}
                         mapPinCount={localCsvMapPins?.length ?? null}
                         lines={lines}
                         pathOrder={csvPathOrder}
                         extensionConfig={csvExtensionConfig}
                         originGps={
+                          // CSV: panel reads anchor from localCsvPreview.
+                          // DXF: real path geometry is in `lines`; origin_gps from
+                          // georef parse or local Align bake (required by plan-trajectory).
                           isLocalDxfFlow && verifiedAlignmentRequest?.origin_gps
                             ? (verifiedAlignmentRequest.origin_gps as [number, number])
                             : null
                         }
                         missionName={
                           isLocalDxfFlow
-                            ? importedPlan?.fileName ?? "dxf_mission"
+                            ? localDxfMeta?.fileName ??
+                              importedPlan?.fileName ??
+                              "dxf_mission"
                             : null
                         }
-                        parseWarnings={[]}
+                        parseWarnings={
+                          isLocalDxfFlow ? localDxfMeta?.warnings ?? [] : []
+                        }
                         setLines={setLines}
                         onSelectLine={onSelectLine}
                         setStagedMissionId={setStagedMissionId}
@@ -1340,8 +1358,8 @@ export function FieldsPage(props: FieldsPageProps) {
               setRefPoints={setRefPoints}
               csvGuidePointsActive={csvGuidePointsActive}
               setCsvGuidePointsActive={setCsvGuidePointsActive}
-              guideCsvFileName={guideCsvFileName}
-              setGuideCsvFileName={setGuideCsvFileName}
+              guideCsvFileNames={guideCsvFileNames}
+              setGuideCsvFileNames={setGuideCsvFileNames}
               alignmentMethod={alignmentMethod}
               setAlignmentMethod={setAlignmentMethod}
               setMissionSummary={setMissionSummary}

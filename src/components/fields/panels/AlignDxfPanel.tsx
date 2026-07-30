@@ -46,9 +46,9 @@ type AlignDxfPanelProps = {
   /** True while Multi-Point guide points came from CSV — disables map tap-to-pick. */
   csvGuidePointsActive?: boolean;
   setCsvGuidePointsActive?: React.Dispatch<React.SetStateAction<boolean>>;
-  /** Uploaded guide CSV file name for the import button label. */
-  guideCsvFileName?: string | null;
-  setGuideCsvFileName?: React.Dispatch<React.SetStateAction<string | null>>;
+  /** Imported guide CSV file names for the import button label (supports multiple files). */
+  guideCsvFileNames?: string[];
+  setGuideCsvFileNames?: React.Dispatch<React.SetStateAction<string[]>>;
   alignmentMethod: "least_squares" | "visual_alignment";
   setAlignmentMethod: React.Dispatch<React.SetStateAction<"least_squares" | "visual_alignment">>;
   setMissionSummary: React.Dispatch<React.SetStateAction<any>>;
@@ -111,8 +111,8 @@ export function AlignDxfPanel({
   setRefPoints,
   csvGuidePointsActive = false,
   setCsvGuidePointsActive,
-  guideCsvFileName = null,
-  setGuideCsvFileName,
+  guideCsvFileNames = [],
+  setGuideCsvFileNames,
   alignmentMethod,
   setAlignmentMethod,
   setMissionSummary,
@@ -209,7 +209,7 @@ export function AlignDxfPanel({
     setRefPoints([]);
     onFocusedGuidePointIndexChange?.(null);
     setCsvGuidePointsActive?.(false);
-    setGuideCsvFileName?.(null);
+    setGuideCsvFileNames?.([]);
     setExtractedCorners?.(null);
     setVisualAlignmentItem?.(null);
     setVisualAlignmentAnchor?.(null);
@@ -244,7 +244,7 @@ export function AlignDxfPanel({
       const next = prev.filter((_, i) => i !== idx);
       if (next.length === 0) {
         setCsvGuidePointsActive?.(false);
-        setGuideCsvFileName?.(null);
+        setGuideCsvFileNames?.([]);
       }
       return next;
     });
@@ -258,40 +258,61 @@ export function AlignDxfPanel({
   const handleUploadRefPointsCsv = async () => {
     if (blockProtectedWorkflowMutation("Importing reference points")) return;
 
-    let asset: DocumentPicker.DocumentPickerAsset | null = null;
+    let assets: DocumentPicker.DocumentPickerAsset[] = [];
     try {
-      const result = await DocumentPicker.getDocumentAsync({ type: ["*/*"], copyToCacheDirectory: true });
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ["*/*"],
+        copyToCacheDirectory: true,
+        multiple: true,
+      });
       if (result.canceled || !result.assets || result.assets.length === 0) return;
-      asset = result.assets[0];
+      assets = result.assets;
     } catch (err) {
       console.log("[AlignDXF][CSV] Error picking CSV:", err);
       Alert.alert("Error", "Could not open the file picker.");
       return;
     }
 
-    const ext = asset.name.split(".").pop()?.toLowerCase();
-    if (ext !== "csv") {
-      Alert.alert("Invalid File", "Please select a .csv file.");
+    const csvAssets = assets.filter((a) => a.name.split(".").pop()?.toLowerCase() === "csv");
+    if (csvAssets.length === 0) {
+      Alert.alert("Invalid File", "Please select one or more .csv files.");
       return;
     }
 
     setIsImportingCsv(true);
     try {
-      let text: string;
-      if (Platform.OS === "web") {
-        const webFile = (asset as any).file ?? (await (await fetch(asset.uri)).blob());
-        text = await webFile.text();
-      } else {
-        text = await (await fetch(asset.uri)).text();
-      }
-      if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-      console.log(`[AlignDXF][CSV] Raw file "${asset.name}" (first 300 chars):\n${text.slice(0, 300)}`);
+      const newPoints: RefPoint[] = [];
+      const newFileNames: string[] = [];
+      const allErrors: string[] = [];
 
-      const { points, errors } = parseGuidePointsCsv(text);
-      console.log(`[AlignDXF][CSV] Parsed ${points.length} point(s), ${errors.length} error(s).`);
-      if (errors.length > 0) console.log("[AlignDXF][CSV] Errors:", errors);
-      if (points.length === 0) {
-        Alert.alert("Import Failed", errors[0] ?? "No valid Latitude/Longitude rows were found in the file.");
+      for (const asset of csvAssets) {
+        let text: string;
+        if (Platform.OS === "web") {
+          const webFile = (asset as any).file ?? (await (await fetch(asset.uri)).blob());
+          text = await webFile.text();
+        } else {
+          text = await (await fetch(asset.uri)).text();
+        }
+        if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+        console.log(`[AlignDXF][CSV] Raw file "${asset.name}" (first 300 chars):\n${text.slice(0, 300)}`);
+
+        const { points, errors } = parseGuidePointsCsv(text);
+        console.log(`[AlignDXF][CSV] Parsed ${points.length} point(s), ${errors.length} error(s) from ${asset.name}.`);
+        if (errors.length > 0) {
+          console.log(`[AlignDXF][CSV] Errors in ${asset.name}:`, errors);
+          allErrors.push(...errors.map((e) => `${asset.name}: ${e}`));
+        }
+        if (points.length > 0) {
+          newFileNames.push(asset.name || "guide.csv");
+          newPoints.push(...points.map((p) => ({ dxf_x: 0, dxf_y: 0, lat: p.latRaw, lon: p.lonRaw })));
+        }
+      }
+
+      if (newPoints.length === 0) {
+        Alert.alert(
+          "Import Failed",
+          allErrors[0] ?? "No valid Latitude/Longitude rows were found in the selected file(s)."
+        );
         return;
       }
 
@@ -299,30 +320,35 @@ export function AlignDxfPanel({
       setMissionSummary(null);
       setAlignmentResult(null);
       setVerifiedAlignmentRequest(null);
-      // CSV becomes the sole guide-point source: replace any tapped points and lock out
-      // map tap-to-pick until Clear Points. dxf_x/dxf_y are unused placeholders — rendering
+      // The first CSV import replaces any tapped points and locks out map tap-to-pick
+      // until Clear Points; further imports add to the existing CSV guide set so multiple
+      // guide files can be combined. dxf_x/dxf_y are unused placeholders — rendering
       // prioritizes lat/lon (see MapViewNative's selectedPointsFC).
-      setRefPoints(points.map((p) => ({ dxf_x: 0, dxf_y: 0, lat: p.latRaw, lon: p.lonRaw })));
+      setRefPoints((prev) => (csvGuidePointsActive ? [...prev, ...newPoints] : newPoints));
       setCsvGuidePointsActive?.(true);
-      setGuideCsvFileName?.(asset.name || "guide.csv");
-      console.log(`[AlignDXF][CSV] Loaded ${points.length} point(s) from ${asset.name}; tap-to-pick disabled.`);
+      setGuideCsvFileNames?.((prev) => [...prev, ...newFileNames]);
+      console.log(
+        `[AlignDXF][CSV] Loaded ${newPoints.length} point(s) from ${newFileNames.length} file(s); tap-to-pick disabled.`
+      );
 
-      if (errors.length > 0) {
+      if (allErrors.length > 0) {
         Alert.alert(
           "Imported With Warnings",
-          `${points.length} point(s) imported. ${errors.length} row(s) skipped:\n${errors.slice(0, 5).join("\n")}${
-            errors.length > 5 ? `\n…and ${errors.length - 5} more` : ""
-          }`
+          `${newPoints.length} point(s) imported from ${newFileNames.length} file(s). ${allErrors.length} row(s) skipped:\n${allErrors
+            .slice(0, 5)
+            .join("\n")}${allErrors.length > 5 ? `\n…and ${allErrors.length - 5} more` : ""}`
         );
       } else {
         Alert.alert(
           "Guide CSV Loaded",
-          `${points.length} point(s) from ${asset.name}. Use Move / Rotate Plan, then Resize for edge handles.`
+          `${newPoints.length} point(s) from ${
+            newFileNames.length === 1 ? newFileNames[0] : `${newFileNames.length} files`
+          }. Use Move / Rotate Plan, then Resize for edge handles.`
         );
       }
     } catch (err) {
       console.log("[AlignDXF][CSV] Error importing CSV:", err);
-      Alert.alert("Error", "Could not read or parse the selected CSV file.");
+      Alert.alert("Error", "Could not read or parse the selected CSV file(s).");
     } finally {
       setIsImportingCsv(false);
     }
@@ -403,6 +429,8 @@ export function AlignDxfPanel({
       const payload: pathApi.AlignPathRequest = { ref_points: validPoints };
 
       // Local DXF: solve similarity on device — no POST /align.
+      // Bake R·scale into the real DXF path vertices; origin_gps is GPS of design (0,0).
+      // plan-trajectory then receives those NED runs about origin_gps (no further affine).
       if (localAppDxf) {
         const refs = validPoints.map((p) => ({
           designNorth: p.dxf_y,
@@ -411,11 +439,13 @@ export function AlignDxfPanel({
           lon: p.lon,
         }));
         const solved = solveMultiPointAlignment(refs, metresPerDegreePx4);
+        const originLat = solved.originGps[0];
+        const originLon = solved.originGps[1];
         setMissionSummary(null);
         setVerifiedAlignmentRequest({
           ...payload,
           origin_gps: solved.originGps,
-          rotation_deg: solved.rotationDeg,
+          rotation_deg: 0, // rotation already baked into vertices
         });
         setAlignmentResult({
           method: solved.method,
@@ -434,18 +464,21 @@ export function AlignDxfPanel({
             applyAlignmentToLines(prev, solved, 0, 0)
           )
         );
-        setAlignedRefPoints?.(
-          validPoints.map((p) => ({
-            dxf_x: p.dxf_x,
-            dxf_y: p.dxf_y,
-            lat: p.lat,
-            lon: p.lon,
-          }))
-        );
+        // Frame contract: after bake, local (0,0) is at origin_gps (same as CSV anchor).
+        setAlignedRefPoints?.([{ dxf_x: 0, dxf_y: 0, lat: originLat, lon: originLon }]);
+        // Atomic handoff — clear sticker/provisional anchor so map projects baked NED
+        // under the origin_gps frame (never design-frame + sticker residual).
+        setRefPoints([]);
+        onFocusedGuidePointIndexChange?.(null);
+        setCsvGuidePointsActive?.(false);
+        setGuideCsvFileNames?.([]);
+        setExtractedCorners?.(null);
+        setVisualAlignmentItem?.(null);
+        setVisualAlignmentAnchor?.(null);
         onWorkflowStep?.("alignment", "verified");
         Alert.alert(
           "Alignment applied",
-          `Local fix (RMSE ${solved.rmseM != null ? solved.rmseM.toFixed(3) : "—"} m). Origin ready for Send.`
+          `Local fix (RMSE ${solved.rmseM != null ? solved.rmseM.toFixed(3) : "—"} m). DXF path ready for Send.`
         );
         return;
       }
@@ -577,7 +610,7 @@ export function AlignDxfPanel({
         setRefPoints([]);
         onFocusedGuidePointIndexChange?.(null);
         setCsvGuidePointsActive?.(false);
-        setGuideCsvFileName?.(null);
+        setGuideCsvFileNames?.([]);
         setExtractedCorners?.(null);
         setVisualAlignmentItem?.(null);
         setVisualAlignmentAnchor?.(null);
@@ -607,7 +640,7 @@ export function AlignDxfPanel({
     setRefPoints([]);
     onFocusedGuidePointIndexChange?.(null);
     setCsvGuidePointsActive?.(false);
-    setGuideCsvFileName?.(null);
+    setGuideCsvFileNames?.([]);
     setExtractedCorners?.(null);
     setVisualAlignmentItem?.(null);
     setVisualAlignmentAnchor?.(null);
@@ -889,35 +922,52 @@ export function AlignDxfPanel({
       ) : null}
 
       {alignmentMethod === "least_squares" && !isPlanEditingMode && !extractedCorners ? (
-        <Pressable
-          onPress={handleUploadRefPointsCsv}
-          disabled={isImportingCsv || isFixing || missionRunning}
-          style={{
-            height: 40,
-            borderRadius: 8,
-            borderWidth: 1,
-            borderStyle: "dashed",
-            borderColor: FIELDS_COLORS.stepActive,
-            flexDirection: "row",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-            paddingHorizontal: 12,
-            opacity: isImportingCsv || isFixing || missionRunning ? 0.5 : 1,
-          }}
-        >
-          <Upload color={FIELDS_COLORS.stepActive} size={15} />
-          <Text
-            numberOfLines={1}
-            style={{ color: FIELDS_COLORS.stepActive, fontSize: 13, fontWeight: "700", flexShrink: 1 }}
+        <View style={{ gap: 6 }}>
+          <Pressable
+            onPress={handleUploadRefPointsCsv}
+            disabled={isImportingCsv || isFixing || missionRunning}
+            style={{
+              height: 40,
+              borderRadius: 8,
+              borderWidth: 1,
+              borderStyle: "dashed",
+              borderColor: FIELDS_COLORS.stepActive,
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+              paddingHorizontal: 12,
+              opacity: isImportingCsv || isFixing || missionRunning ? 0.5 : 1,
+            }}
           >
-            {isImportingCsv
-              ? "Importing CSV..."
-              : guideCsvFileName
-                ? guideCsvFileName
-                : "Import guide CSV"}
-          </Text>
-        </Pressable>
+            <Upload color={FIELDS_COLORS.stepActive} size={15} />
+            <Text
+              numberOfLines={1}
+              style={{ color: FIELDS_COLORS.stepActive, fontSize: 13, fontWeight: "700", flexShrink: 1 }}
+            >
+              {isImportingCsv
+                ? "Importing CSV..."
+                : guideCsvFileNames.length === 0
+                  ? "Import guide CSV"
+                  : guideCsvFileNames.length === 1
+                    ? guideCsvFileNames[0]
+                    : `${guideCsvFileNames.length} CSV files · tap to add more`}
+            </Text>
+          </Pressable>
+          {guideCsvFileNames.length > 1 ? (
+            <View style={{ gap: 2 }}>
+              {guideCsvFileNames.map((name, i) => (
+                <Text
+                  key={`${name}-${i}`}
+                  numberOfLines={1}
+                  style={{ color: FIELDS_COLORS.textDim, fontSize: 11 }}
+                >
+                  • {name}
+                </Text>
+              ))}
+            </View>
+          ) : null}
+        </View>
       ) : null}
 
       {alignmentMethod === "visual_alignment" ? (
