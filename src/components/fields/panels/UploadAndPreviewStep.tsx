@@ -243,12 +243,6 @@ export function UploadAndPreviewStep({
       : null
   );
 
-  // Extension state (inline, no modal) — DXF remote; CSV drafts below.
-  // DXF always uses chain-ends freeness (per_line=false) — same as rover default.
-  const [extEnabled, setExtEnabled] = useState(false);
-  const [extPre, setExtPre] = useState("0.5");
-  const [extAft, setExtAft] = useState("0.5");
-  const [isExtSetting, setIsExtSetting] = useState(false);
   /** Draft strings for CSV extension inputs (commit normalized values on blur). */
   const [csvExtPreDraft, setCsvExtPreDraft] = useState(
     () => String(csvExtensionConfig?.preM ?? 0.5)
@@ -323,22 +317,6 @@ export function UploadAndPreviewStep({
     onCsvExtensionConfigChange != null &&
     csvExtensionConfig != null &&
     !!importedPlan;
-
-  // Rover-side extension config only when DXF still lives on the rover.
-  useEffect(() => {
-    if (isLocalDxfPlanner) return;
-    if (isDxfPath && targetPathName && apiBaseUrl) {
-      pathApi.getExtensions(apiBaseUrl, targetPathName)
-        .then(cfg => {
-          setExtEnabled(cfg.enabled);
-          setExtPre(String(cfg.pre_extension_m ?? 0.5));
-          setExtAft(String(cfg.aft_extension_m ?? 0.5));
-        })
-        .catch(() => {
-          // keep defaults if it fails
-        });
-    }
-  }, [targetPathName, isDxfPath, apiBaseUrl, isLocalDxfPlanner]);
 
   // Backend path preview for rover DXF / waypoints only — never local CSV or local DXF.
   useEffect(() => {
@@ -576,16 +554,6 @@ export function UploadAndPreviewStep({
           // Preview summary is optional; map lines still load via onSelectPath.
         }
 
-        if (ext === "dxf") {
-          try {
-            const cfg = await pathApi.getExtensions(apiBaseUrl, file.name);
-            setExtEnabled(cfg.enabled);
-            setExtPre(String(cfg.pre_extension_m ?? 0.5));
-            setExtAft(String(cfg.aft_extension_m ?? 0.5));
-          } catch {
-            // keep defaults
-          }
-        }
       } else {
         const errorText = (await res.text()) || `Import failed (${res.status})`;
         setImportError(errorText);
@@ -729,57 +697,6 @@ export function UploadAndPreviewStep({
   const handleRetryImport = async () => {
     if (pickedFiles.length === 0 || isUploading) return;
     await importAndPreviewFiles(pickedFiles, { append: appendOnImport });
-  };
-
-  /** Persist DXF extension sidecar (always per_line=false — chain free ends only). */
-  const saveDxfExtensions = async (opts: {
-    enabled: boolean;
-    preM: number;
-    aftM: number;
-  }) => {
-    if (!targetPathName || !apiBaseUrl) return false;
-    setIsExtSetting(true);
-    try {
-      const res = await pathApi.saveExtensions(apiBaseUrl, targetPathName, {
-        enabled: opts.enabled,
-        pre_extension_m: opts.preM,
-        aft_extension_m: opts.aftM,
-        // Always false: matches rover chain-ends freeness (no per-side split UI).
-        per_line: false,
-      });
-      if (res.ok) {
-        setExtEnabled(opts.enabled);
-        onInvalidateWorkflow("spray");
-        onSelectPath(targetPathName, true); // refreshOnly — rebuild purple PRE/AFT on device
-        return true;
-      }
-      const errText = await res.text();
-      Alert.alert("Error", errText || "Failed to update extensions");
-      return false;
-    } catch (err: any) {
-      Alert.alert("Error", err.message || "Failed to connect to backend");
-      return false;
-    } finally {
-      setIsExtSetting(false);
-    }
-  };
-
-  const handleToggleExtension = async (enabled: boolean) => {
-    await saveDxfExtensions({
-      enabled,
-      preM: parseFloat(extPre) || 0.5,
-      aftM: parseFloat(extAft) || 0.5,
-    });
-  };
-
-  /** Commit PRE/AFT when operator finishes editing (same as CSV blur). */
-  const commitDxfExtensionLengths = async () => {
-    if (!extEnabled || !targetPathName || !apiBaseUrl) return;
-    await saveDxfExtensions({
-      enabled: true,
-      preM: parseFloat(extPre) || 0.5,
-      aftM: parseFloat(extAft) || 0.5,
-    });
   };
 
   const pickedLabel =
@@ -970,7 +887,6 @@ export function UploadAndPreviewStep({
                 setLoadedSourceFiles([]);
                 setLastLocalDxf(null);
                 setAppendOnImport(false);
-                setExtEnabled(false);
                 onClearLocalCsv?.();
               }}
               style={{ padding: 6 }}
@@ -1030,108 +946,6 @@ export function UploadAndPreviewStep({
 
           {/* Guide-points CSV lives in Align DXF, next to the control-point list it feeds —
               importing it from Upload put an alignment control two steps early. */}
-        </View>
-      ) : null}
-
-      {/* Rover DXF extension (legacy) — only when file is on the rover. */}
-      {targetPathName && isDxfPath && !isLocalDxfPlanner ? (
-        <View
-          style={{
-            borderRadius: 10,
-            backgroundColor: FIELDS_COLORS.surfaceSolid,
-            borderWidth: 1,
-            borderColor: extEnabled ? "#8b5cf6" : FIELDS_COLORS.panelBorder,
-            overflow: "hidden",
-          }}
-        >
-          <View
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "space-between",
-              padding: 12,
-            }}
-          >
-            <View style={{ flex: 1, paddingRight: 10 }}>
-              <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "800" }}>
-                Enable Extension
-              </Text>
-              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-                Purple PRE/AFT run-ups at free chain ends only (same as rover). PRE lands on the path start.
-              </Text>
-            </View>
-            <Switch
-              value={extEnabled}
-              onValueChange={handleToggleExtension}
-              disabled={isExtSetting}
-              trackColor={{ false: FIELDS_COLORS.panelBorder, true: "#8b5cf6" }}
-              thumbColor={extEnabled ? "#ffffff" : "#94a3b8"}
-            />
-          </View>
-
-          {extEnabled ? (
-            <View style={{ padding: 12, paddingTop: 0, gap: 8 }}>
-              <View style={{ flexDirection: "row", gap: 8 }}>
-                <View style={{ flex: 1, gap: 3 }}>
-                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, fontWeight: "700" }}>
-                    PRE (m)
-                  </Text>
-                  <TextInput
-                    style={{
-                      height: 36,
-                      backgroundColor: FIELDS_COLORS.cardSolid,
-                      borderWidth: 1,
-                      borderColor: FIELDS_COLORS.panelBorder,
-                      borderRadius: 6,
-                      paddingHorizontal: 8,
-                      fontSize: 13,
-                      color: FIELDS_COLORS.textMain,
-                    }}
-                    value={extPre}
-                    onChangeText={(v) => {
-                      onInvalidateWorkflow("spray");
-                      setExtPre(v);
-                    }}
-                    onBlur={() => {
-                      void commitDxfExtensionLengths();
-                    }}
-                    keyboardType="numeric"
-                    editable={!isExtSetting}
-                  />
-                </View>
-                <View style={{ flex: 1, gap: 3 }}>
-                  <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 10, fontWeight: "700" }}>
-                    AFT (m)
-                  </Text>
-                  <TextInput
-                    style={{
-                      height: 36,
-                      backgroundColor: FIELDS_COLORS.cardSolid,
-                      borderWidth: 1,
-                      borderColor: FIELDS_COLORS.panelBorder,
-                      borderRadius: 6,
-                      paddingHorizontal: 8,
-                      fontSize: 13,
-                      color: FIELDS_COLORS.textMain,
-                    }}
-                    value={extAft}
-                    onChangeText={(v) => {
-                      onInvalidateWorkflow("spray");
-                      setExtAft(v);
-                    }}
-                    onBlur={() => {
-                      void commitDxfExtensionLengths();
-                    }}
-                    keyboardType="numeric"
-                    editable={!isExtSetting}
-                  />
-                </View>
-              </View>
-              {isExtSetting ? (
-                <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10 }}>Saving…</Text>
-              ) : null}
-            </View>
-          ) : null}
         </View>
       ) : null}
 
