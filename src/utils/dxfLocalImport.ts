@@ -20,7 +20,10 @@ import { dxfCurveGeometryToNed } from "./curveGeometry";
 import {
   looksGeographic,
   projectGeographicToLocalNed,
+  projectGpsToLocalMeters,
+  projectLocalMetersToGps,
 } from "./geoProjection";
+import { transformPlanLineGeometry } from "./planLineTransform";
 
 // ── $INSUNITS → metres (path_engine/parsers/dxf_parser.py) ──────────────────
 
@@ -195,6 +198,150 @@ export function parseLocalDxf(text: string, fileName: string): LocalDxfResult {
     isGeographic,
     geoOrigin,
     lines: nedLines,
+    entityCount,
+    ignoredCount,
+    warnings,
+  };
+}
+
+function dxfFileStem(fileName: string): string {
+  const base = (fileName || "").split(/[\\/]/).pop() || "dxf";
+  return base.replace(/\.[^.]+$/, "") || base;
+}
+
+function combinedDxfFileName(fileNames: string[]): string {
+  if (fileNames.length === 0) return "combined.dxf";
+  if (fileNames.length === 1) return fileNames[0];
+  return `${dxfFileStem(fileNames[0])}_x${fileNames.length}.dxf`;
+}
+
+/**
+ * Prefix plan-line / entity ids so multi-file DXF merges never collide
+ * (each parse restarts at LINE-0, ARC-0, …).
+ */
+function prefixDxfLineIds(lines: PlanLine[], prefix: string): PlanLine[] {
+  return lines.map((line) => ({
+    ...line,
+    id: `${prefix}__${line.id}`,
+    label: line.label ? `${prefix}: ${line.label}` : prefix,
+    entity: line.entity
+      ? {
+          ...line.entity,
+          entity_id: `${prefix}__${line.entity.entity_id}`,
+        }
+      : undefined,
+  }));
+}
+
+/**
+ * Re-base a geo-DXF line from `fromOrigin` NED into `toOrigin` NED via WGS84.
+ * Pure translation in the local frames (no rotation/scale).
+ */
+function rebaseGeoDxfLine(
+  line: PlanLine,
+  fromOrigin: { lat: number; lon: number },
+  toOrigin: { lat: number; lon: number }
+): PlanLine {
+  if (
+    fromOrigin.lat === toOrigin.lat &&
+    fromOrigin.lon === toOrigin.lon
+  ) {
+    return line;
+  }
+  return transformPlanLineGeometry(line, (north, east) => {
+    const gps = projectLocalMetersToGps(
+      north,
+      east,
+      fromOrigin.lat,
+      fromOrigin.lon
+    );
+    return projectGpsToLocalMeters(gps.lat, gps.lon, toOrigin.lat, toOrigin.lon);
+  });
+}
+
+/**
+ * Merge several already-parsed local DXFs into one plan (multi-file Select File).
+ *
+ * Rules:
+ * - All files must be the same class: all metric or all georeferenced.
+ * - Metric: lines concatenated (same CAD/site frame assumed).
+ * - Geographic: first file's geoOrigin is the shared plan origin; other files
+ *   are re-based into that NED frame so path geometry stays true to lat/lon.
+ * - Line/entity ids are prefixed per source file to avoid collisions.
+ */
+export function mergeLocalDxfResults(results: LocalDxfResult[]): LocalDxfResult {
+  if (results.length === 0) {
+    throw new Error("No DXF files to merge.");
+  }
+  if (results.length === 1) return results[0];
+
+  const isGeographic = results[0].isGeographic;
+  for (const r of results) {
+    if (r.isGeographic !== isGeographic) {
+      throw new Error(
+        `Cannot mix metric and georeferenced DXFs in one import (${results[0].fileName} is ${
+          results[0].isGeographic ? "geographic" : "metric"
+        }, ${r.fileName} is ${r.isGeographic ? "geographic" : "metric"}).`
+      );
+    }
+  }
+
+  const warnings: string[] = [
+    `Merged ${results.length} DXF files into one plan.`,
+  ];
+  const mergedLines: PlanLine[] = [];
+  let ignoredCount = 0;
+  let entityCount = 0;
+
+  if (isGeographic) {
+    const geoOrigin = results.find((r) => r.geoOrigin != null)?.geoOrigin ?? null;
+    if (!geoOrigin) {
+      throw new Error("No geographic origin found in the selected DXF files.");
+    }
+
+    for (const r of results) {
+      warnings.push(...r.warnings.map((w) => `${r.fileName}: ${w}`));
+      ignoredCount += r.ignoredCount;
+      entityCount += r.entityCount;
+      const stem = dxfFileStem(r.fileName);
+      const origin = r.geoOrigin ?? geoOrigin;
+      const rebased = r.lines.map((line) =>
+        rebaseGeoDxfLine(line, origin, geoOrigin)
+      );
+      mergedLines.push(...prefixDxfLineIds(rebased, stem));
+    }
+
+    return {
+      fileName: combinedDxfFileName(results.map((r) => r.fileName)),
+      unitScale: 1,
+      unitScaleSource: "insunits",
+      insunits: results[0].insunits,
+      isGeographic: true,
+      geoOrigin,
+      lines: mergedLines,
+      entityCount,
+      ignoredCount,
+      warnings,
+    };
+  }
+
+  // Metric DXF — same local CAD frame assumed.
+  for (const r of results) {
+    warnings.push(...r.warnings.map((w) => `${r.fileName}: ${w}`));
+    ignoredCount += r.ignoredCount;
+    entityCount += r.entityCount;
+    const stem = dxfFileStem(r.fileName);
+    mergedLines.push(...prefixDxfLineIds(r.lines, stem));
+  }
+
+  return {
+    fileName: combinedDxfFileName(results.map((r) => r.fileName)),
+    unitScale: results[0].unitScale,
+    unitScaleSource: results[0].unitScaleSource,
+    insunits: results[0].insunits,
+    isGeographic: false,
+    geoOrigin: null,
+    lines: mergedLines,
     entityCount,
     ignoredCount,
     warnings,

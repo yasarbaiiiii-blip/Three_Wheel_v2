@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Alert, Platform, Pressable, TouchableOpacity, ScrollView, Switch, Text, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
-import { Upload, X } from "lucide-react-native";
+import { Plus, Upload, X } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
 import { DXF_PLANNER } from "../../../config/featureFlags";
@@ -15,8 +15,16 @@ import {
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
 } from "../../../utils/missionExtensions";
-import { parseLocalDxf, type LocalDxfResult } from "../../../utils/dxfLocalImport";
-import { parseLocalPointCsv, type LocalPointCsvResult } from "../../../utils/localPointCsv";
+import {
+  mergeLocalDxfResults,
+  parseLocalDxf,
+  type LocalDxfResult,
+} from "../../../utils/dxfLocalImport";
+import {
+  mergeLocalPointCsvResults,
+  parseLocalPointCsv,
+  type LocalPointCsvResult,
+} from "../../../utils/localPointCsv";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 type UploadAndPreviewStepProps = {
@@ -59,6 +67,11 @@ type UploadAndPreviewStepProps = {
    * isLocalCsvFlow and remounts this step — localCsvSummary state is lost on remount.
    */
   localCsvPreview?: LocalPointCsvResult | null;
+  /**
+   * Parent snapshot of the current local DXF plan (mark lines only). Used so
+   * "Add more files" still works after a remount loses in-component `lastLocalDxf`.
+   */
+  localDxfSnapshot?: LocalDxfResult | null;
 };
 
 const MAX_IMPORT_ATTEMPTS = 3;
@@ -162,6 +175,23 @@ async function fetchWithImportRetry(
   throw lastErr ?? new Error(`${label} failed`);
 }
 
+/** Read picked file text via stable cache copy (native) or blob (web). */
+async function readPickedFileText(
+  file: DocumentPicker.DocumentPickerAsset
+): Promise<{ text: string; stableUri: string }> {
+  const stable = await resolveStableUploadAsset(file);
+  let text = "";
+  if (Platform.OS === "web") {
+    const webFile = (file as any).file ?? (await (await fetch(file.uri)).blob());
+    text = await webFile.text();
+  } else {
+    text = await FileSystem.readAsStringAsync(stable.uri, {
+      encoding: FileSystem.EncodingType.UTF8,
+    });
+  }
+  return { text, stableUri: stable.uri };
+}
+
 export function UploadAndPreviewStep({
   apiBaseUrl,
   importedPlan,
@@ -177,12 +207,25 @@ export function UploadAndPreviewStep({
   csvExtensionConfig,
   onCsvExtensionConfigChange,
   localCsvPreview = null,
+  localDxfSnapshot = null,
   extensionStatus = null,
 }: UploadAndPreviewStepProps) {
-  const [pickedFile, setPickedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  /** Last failed batch (for Retry). Single-file rover uploads use length 1. */
+  const [pickedFiles, setPickedFiles] = useState<DocumentPicker.DocumentPickerAsset[]>([]);
+  /** When true, next successful local import merges into the already-loaded plan. */
+  const [appendOnImport, setAppendOnImport] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [previewData, setPreviewData] = useState<pathApi.PathPreviewResponse | null>(null);
+  /** Source file names when multi-file import was merged into one plan. */
+  const [loadedSourceFiles, setLoadedSourceFiles] = useState<string[]>(() =>
+    localCsvPreview?.fileName ? [localCsvPreview.fileName] : []
+  );
+  /**
+   * Last successful local DXF merge — needed so "Add more files" can append without
+   * re-reading the previous pick (parent only keeps geometry in `lines`).
+   */
+  const [lastLocalDxf, setLastLocalDxf] = useState<LocalDxfResult | null>(null);
   /** Local CSV summary for LOADED chip (never from /preview). */
   const [localCsvSummary, setLocalCsvSummary] = useState<{
     num_points: number;
@@ -229,11 +272,31 @@ export function UploadAndPreviewStep({
       frame: localCsvPreview.point_source_frame,
       warnings: localCsvPreview.warnings.slice(0, 12),
     });
+    setLoadedSourceFiles((prev) =>
+      prev.length > 0 ? prev : localCsvPreview.fileName ? [localCsvPreview.fileName] : prev
+    );
   }, [
     localCsvPreview?.num_points,
     localCsvPreview?.kind,
     localCsvPreview?.point_source_frame,
     localCsvPreview?.fileName,
+  ]);
+
+  // After remount, keep a DXF base so "+" append still works without re-picking.
+  useEffect(() => {
+    if (!localDxfSnapshot) return;
+    setLastLocalDxf((prev) => prev ?? localDxfSnapshot);
+    setLoadedSourceFiles((prev) =>
+      prev.length > 0
+        ? prev
+        : localDxfSnapshot.fileName
+          ? [localDxfSnapshot.fileName]
+          : prev
+    );
+  }, [
+    localDxfSnapshot?.fileName,
+    localDxfSnapshot?.entityCount,
+    localDxfSnapshot?.isGeographic,
   ]);
 
   // Prefer plan name; fall back to parent parse so remount after CSV flow still shows LOADED.
@@ -294,127 +357,155 @@ export function UploadAndPreviewStep({
   }, [targetPathName, apiBaseUrl, isCsvPath, isLocalDxfPlanner]);
 
   /**
-   * CSV + app-planned DXF: parse on-device (no upload).
-   * Waypoints / rover DXF (DXF_PLANNER=rover): upload + backend preview.
+   * Local multi-CSV: parse each file on-device and merge into one plan.
+   * When `append` is true, new files are merged into the already-loaded CSV plan.
    */
-  const importAndPreviewFile = async (file: DocumentPicker.DocumentPickerAsset) => {
-    if (blockProtectedWorkflowMutation("Parsing a new path")) return;
-
-    const ext = file.name.split(".").pop()?.toLowerCase();
-
-    // CSV is local-only and does not require a rover connection.
-    if (ext === "csv") {
-      setPickedFile(file);
-      setImportError(null);
-      setIsUploading(true);
-      try {
-        const stable = await resolveStableUploadAsset(file);
-        let text = "";
-        if (Platform.OS === "web") {
-          const webFile = (file as any).file ?? (await (await fetch(file.uri)).blob());
-          text = await webFile.text();
-        } else {
-          text = await FileSystem.readAsStringAsync(stable.uri, {
-            encoding: FileSystem.EncodingType.UTF8,
-          });
-        }
-
-        const parsed = parseLocalPointCsv(text, file.name);
-        onInvalidateWorkflow("alignment");
-        onLocalCsvParsed?.(parsed);
-        setImportedPlan({
-          fileName: file.name,
-          uri: stable.uri,
-          fileType: "csv",
-          source: "imported",
-        });
-        setLocalCsvSummary({
-          num_points: parsed.num_points,
-          kind: parsed.kind,
-          frame: parsed.point_source_frame,
-          warnings: parsed.warnings.slice(0, 12),
-        });
-        setPreviewData(null);
-        setPickedFile(null);
-        setImportError(null);
-
-        if (parsed.warnings.length > 0) {
-          // Keep for logs only — do not surface import warnings in the Upload UI.
-          console.warn("[import][csv] warnings:", parsed.warnings);
-        }
-      } catch (err) {
-        console.log("Error importing CSV locally:", err);
-        const msg =
-          err instanceof Error && err.message
-            ? err.message
-            : "Could not parse the CSV file.";
-        setImportError(msg);
-        Alert.alert("Import Failed", msg);
-      } finally {
-        setIsUploading(false);
+  const importLocalCsvFiles = async (
+    files: DocumentPicker.DocumentPickerAsset[],
+    opts?: { append?: boolean }
+  ) => {
+    const append = !!opts?.append;
+    setPickedFiles(files);
+    setImportError(null);
+    setIsUploading(true);
+    try {
+      const parsedList: LocalPointCsvResult[] = [];
+      let firstStableUri = files[0]?.uri ?? "";
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const { text, stableUri } = await readPickedFileText(file);
+        if (i === 0) firstStableUri = stableUri;
+        parsedList.push(parseLocalPointCsv(text, file.name));
       }
-      return;
-    }
 
-    // DXF app-planned path: parse entirely on-device (mirrors CSV) — no rover round-trip.
-    if (ext === "dxf" && DXF_PLANNER === "app") {
-      setPickedFile(file);
-      setImportError(null);
-      setIsUploading(true);
-      try {
-        const stable = await resolveStableUploadAsset(file);
-        let text = "";
-        if (Platform.OS === "web") {
-          const webFile = (file as any).file ?? (await (await fetch(file.uri)).blob());
-          text = await webFile.text();
-        } else {
-          text = await FileSystem.readAsStringAsync(stable.uri, {
-            encoding: FileSystem.EncodingType.UTF8,
-          });
-        }
-        const parsed = parseLocalDxf(text, file.name);
-        onInvalidateWorkflow("alignment");
-        onClearLocalCsv?.();
-        onLocalDxfParsed?.(parsed);
-        setImportedPlan({
-          fileName: file.name,
-          uri: stable.uri,
-          fileType: "dxf",
-          source: "imported",
-        });
-        setLocalCsvSummary(null);
-        setPreviewData(null);
-        setPickedFile(null);
-        setImportError(null);
-        // Seed local extension defaults (same as CSV card).
-        if (onCsvExtensionConfigChange && csvExtensionConfig) {
-          // per-line: CAD edges are independent PRE→MARK→AFT passes, and it is the only
-          // mode under which a closed shape (a square drawn as one polyline) gets run-ups.
-          onCsvExtensionConfigChange(normalizeCsvExtensionConfig(DXF_EXTENSION_CONFIG));
-        }
-        if (parsed.warnings.length > 0) {
-          console.warn("[import][dxf-local] warnings:", parsed.warnings);
-        }
-      } catch (err) {
-        console.log("Error importing DXF locally:", err);
-        const msg =
-          err instanceof Error && err.message
-            ? err.message
-            : "Could not parse the DXF file.";
-        setImportError(msg);
-        Alert.alert("Import Failed", msg);
-      } finally {
-        setIsUploading(false);
+      const base =
+        append && localCsvPreview != null ? [localCsvPreview, ...parsedList] : parsedList;
+      if (append && localCsvPreview == null) {
+        throw new Error("Nothing loaded to append to — import a plan first.");
       }
-      return;
-    }
+      const parsed = mergeLocalPointCsvResults(base);
+      onInvalidateWorkflow("alignment");
+      onLocalCsvParsed?.(parsed);
+      setLastLocalDxf(null);
+      setImportedPlan({
+        fileName: parsed.fileName,
+        uri: firstStableUri,
+        fileType: "csv",
+        source: "imported",
+      });
+      setLocalCsvSummary({
+        num_points: parsed.num_points,
+        kind: parsed.kind,
+        frame: parsed.point_source_frame,
+        warnings: parsed.warnings.slice(0, 12),
+      });
+      const newNames = files.map((f) => f.name);
+      setLoadedSourceFiles((prev) =>
+        append && prev.length > 0 ? [...prev, ...newNames] : newNames
+      );
+      setPreviewData(null);
+      setPickedFiles([]);
+      setImportError(null);
+      setAppendOnImport(false);
 
+      if (parsed.warnings.length > 0) {
+        console.warn("[import][csv] warnings:", parsed.warnings);
+      }
+    } catch (err) {
+      console.log("Error importing CSV locally:", err);
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : "Could not parse the CSV file(s).";
+      setImportError(msg);
+      Alert.alert("Import Failed", msg);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  /**
+   * Local multi-DXF (metric or geo): parse each on-device and merge into one plan.
+   * When `append` is true, new files are merged into the already-loaded DXF plan.
+   */
+  const importLocalDxfFiles = async (
+    files: DocumentPicker.DocumentPickerAsset[],
+    opts?: { append?: boolean }
+  ) => {
+    const append = !!opts?.append;
+    setPickedFiles(files);
+    setImportError(null);
+    setIsUploading(true);
+    try {
+      const parsedList: LocalDxfResult[] = [];
+      let firstStableUri = files[0]?.uri ?? "";
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const { text, stableUri } = await readPickedFileText(file);
+        if (i === 0) firstStableUri = stableUri;
+        parsedList.push(parseLocalDxf(text, file.name));
+      }
+
+      const existingDxf = lastLocalDxf ?? localDxfSnapshot;
+      if (append && existingDxf == null) {
+        throw new Error(
+          "Cannot add more DXF files right now — clear and re-import, or use multi-select on first pick."
+        );
+      }
+      const base = append && existingDxf != null ? [existingDxf, ...parsedList] : parsedList;
+      const parsed = mergeLocalDxfResults(base);
+      onInvalidateWorkflow("alignment");
+      onClearLocalCsv?.();
+      onLocalDxfParsed?.(parsed);
+      setLastLocalDxf(parsed);
+      setImportedPlan({
+        fileName: parsed.fileName,
+        uri: firstStableUri,
+        fileType: "dxf",
+        source: "imported",
+      });
+      setLocalCsvSummary(null);
+      const newNames = files.map((f) => f.name);
+      setLoadedSourceFiles((prev) =>
+        append && prev.length > 0 ? [...prev, ...newNames] : newNames
+      );
+      setPreviewData(null);
+      setPickedFiles([]);
+      setImportError(null);
+      setAppendOnImport(false);
+      if (onCsvExtensionConfigChange && csvExtensionConfig) {
+        // per-line: CAD edges are independent PRE→MARK→AFT passes, and it is the only
+        // mode under which a closed shape (a square drawn as one polyline) gets run-ups.
+        onCsvExtensionConfigChange(normalizeCsvExtensionConfig(DXF_EXTENSION_CONFIG));
+      }
+      if (parsed.warnings.length > 0) {
+        console.warn("[import][dxf-local] warnings:", parsed.warnings);
+      }
+    } catch (err) {
+      console.log("Error importing DXF locally:", err);
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : "Could not parse the DXF file(s).";
+      setImportError(msg);
+      Alert.alert("Import Failed", msg);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  /**
+   * Rover DXF / waypoints: single-file upload + backend preview.
+   * Multi-select is rejected for rover-side paths (one path name per upload).
+   */
+  const importRoverFile = async (file: DocumentPicker.DocumentPickerAsset) => {
     if (!apiBaseUrl) {
       Alert.alert("Not connected", "Connect to the rover before importing a file.");
       return;
     }
 
-    setPickedFile(file);
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    setPickedFiles([file]);
     setImportError(null);
     setIsUploading(true);
     try {
@@ -467,7 +558,8 @@ export function UploadAndPreviewStep({
             source: "imported",
           });
         }
-        setPickedFile(null);
+        setLoadedSourceFiles([file.name]);
+        setPickedFiles([]);
         setImportError(null);
         onRefreshPaths();
 
@@ -512,32 +604,131 @@ export function UploadAndPreviewStep({
     }
   };
 
-  const handlePickFile = async () => {
-    if (blockProtectedWorkflowMutation("Uploading a new path")) return;
+  /**
+   * CSV + app-planned DXF: multi-file parse on-device and merge.
+   * Waypoints / rover DXF (DXF_PLANNER=rover): single-file upload + backend preview.
+   * `append` merges into the plan already shown as LOADED (Add more files).
+   */
+  const importAndPreviewFiles = async (
+    files: DocumentPicker.DocumentPickerAsset[],
+    opts?: { append?: boolean }
+  ) => {
+    if (blockProtectedWorkflowMutation("Parsing a new path")) return;
+    if (files.length === 0) return;
+
+    const append = !!opts?.append;
+    const exts = files.map((f) => f.name.split(".").pop()?.toLowerCase() ?? "");
+    const uniqueExts = [...new Set(exts)];
+    if (uniqueExts.length > 1) {
+      Alert.alert(
+        "Mixed File Types",
+        "Select only one type at a time (.csv, .dxf, or .waypoints). Multi-file merge works within the same type."
+      );
+      return;
+    }
+
+    const ext = uniqueExts[0];
+
+    if (append) {
+      // Append only for local CSV / local DXF — must match the loaded plan type.
+      if (isCsvPath && !isDxfPath) {
+        if (ext !== "csv") {
+          Alert.alert("Wrong Type", "This plan is a CSV. Add more .csv files only.");
+          return;
+        }
+        await importLocalCsvFiles(files, { append: true });
+        return;
+      }
+      if (isLocalDxfPlanner) {
+        if (ext !== "dxf") {
+          Alert.alert("Wrong Type", "This plan is a DXF. Add more .dxf files only.");
+          return;
+        }
+        await importLocalDxfFiles(files, { append: true });
+        return;
+      }
+      Alert.alert(
+        "Cannot Add Files",
+        "Adding more files is only available for local CSV and app-planned DXF plans."
+      );
+      return;
+    }
+
+    // CSV is local-only and does not require a rover connection. Multi-file supported.
+    if (ext === "csv") {
+      await importLocalCsvFiles(files, { append: false });
+      return;
+    }
+
+    // DXF app-planned path: multi-file parse on-device (metric + geo-referenced).
+    if (ext === "dxf" && DXF_PLANNER === "app") {
+      await importLocalDxfFiles(files, { append: false });
+      return;
+    }
+
+    // Rover DXF / waypoints: one path name per upload.
+    if (files.length > 1) {
+      Alert.alert(
+        "One File at a Time",
+        "Rover-side DXF and waypoints uploads support a single file. Select one file, or switch to app-planned DXF for multi-file merge."
+      );
+      return;
+    }
+
+    await importRoverFile(files[0]);
+  };
+
+  const pickAndImport = async (opts?: { append?: boolean }) => {
+    if (blockProtectedWorkflowMutation(opts?.append ? "Adding files to the plan" : "Uploading a new path"))
+      return;
     if (isUploading) return;
     try {
+      setAppendOnImport(!!opts?.append);
       const result = await DocumentPicker.getDocumentAsync({
         type: ["*/*"],
         copyToCacheDirectory: true,
+        multiple: true,
       });
       if (!result.canceled && result.assets && result.assets.length > 0) {
-        const asset = result.assets[0];
-        const ext = asset.name.split(".").pop()?.toLowerCase();
-        if (ext === "dxf" || ext === "csv" || ext === "waypoints") {
-          // Parse + map preview immediately — no separate Parse step.
-          await importAndPreviewFile(asset);
-        } else {
-          Alert.alert("Invalid File", "Please select a .dxf, .csv, or .waypoints file.");
+        const valid = result.assets.filter((asset) => {
+          const ext = asset.name.split(".").pop()?.toLowerCase();
+          return ext === "dxf" || ext === "csv" || ext === "waypoints";
+        });
+        if (valid.length === 0) {
+          setAppendOnImport(false);
+          Alert.alert("Invalid File", "Please select one or more .dxf, .csv, or .waypoints files.");
+          return;
         }
+        if (valid.length < result.assets.length) {
+          Alert.alert(
+            "Some Files Skipped",
+            `${result.assets.length - valid.length} unsupported file(s) ignored. Importing ${valid.length} file(s).`
+          );
+        }
+        // Parse + map preview immediately — no separate Parse step.
+        await importAndPreviewFiles(valid, { append: !!opts?.append });
+      } else {
+        setAppendOnImport(false);
       }
     } catch (err) {
+      setAppendOnImport(false);
       console.log("Error picking file:", err);
     }
   };
 
+  /** Replace the current plan with a new pick (full multi-select). */
+  const handlePickFile = async () => {
+    await pickAndImport({ append: false });
+  };
+
+  /** Append more files to the already-loaded local CSV / DXF plan. */
+  const handleAddMoreFiles = async () => {
+    await pickAndImport({ append: true });
+  };
+
   const handleRetryImport = async () => {
-    if (!pickedFile || isUploading) return;
-    await importAndPreviewFile(pickedFile);
+    if (pickedFiles.length === 0 || isUploading) return;
+    await importAndPreviewFiles(pickedFiles, { append: appendOnImport });
   };
 
   /** Persist DXF extension sidecar (always per_line=false — chain free ends only). */
@@ -591,16 +782,38 @@ export function UploadAndPreviewStep({
     });
   };
 
+  const pickedLabel =
+    pickedFiles.length === 0
+      ? ""
+      : pickedFiles.length === 1
+        ? pickedFiles[0].name
+        : `${pickedFiles[0].name} + ${pickedFiles.length - 1} more`;
+
+  const loadedFilesLabel =
+    loadedSourceFiles.length > 1
+      ? `${loadedSourceFiles.length} files: ${loadedSourceFiles.slice(0, 3).join(", ")}${
+          loadedSourceFiles.length > 3 ? ` +${loadedSourceFiles.length - 3}` : ""
+        }`
+      : loadedSourceFiles.length === 1
+        ? loadedSourceFiles[0]
+        : null;
+
+  /** Local CSV or app-planned DXF — can append more files after first load. */
+  const canAddMoreFiles =
+    !!targetPathName &&
+    ((isCsvPath && !isDxfPath && localCsvPreview != null) ||
+      (isLocalDxfPlanner && (lastLocalDxf != null || localDxfSnapshot != null)));
+
   return (
     <View style={{ gap: 14 }}>
       {/* File Upload Section */}
       <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
         {DXF_PLANNER === "app"
-          ? "Import a .dxf, .csv, or .waypoints file. CSV: the app generates the path from survey points. DXF / geo-DXF: the file’s real path is used unchanged (no path generation). Send uses plan-trajectory. Waypoints still use the rover."
-          : "Import a .dxf, .csv, or .waypoints file. DXF/waypoints use the rover; CSV is parsed on-device and drawn locally (not uploaded)."}
+          ? "Import one or more .dxf / .csv files (same type). Multi-select merges them into one plan — or use + after load if you forgot a file. CSV: survey paths. DXF / geo-DXF: real file path. Waypoints still use the rover (one file)."
+          : "Import one or more .csv files (merged locally), or a single .dxf / .waypoints for the rover. Use + after load to add more CSV files."}
       </Text>
 
-      {!pickedFile && !targetPathName ? (
+      {pickedFiles.length === 0 && !targetPathName ? (
         <TouchableOpacity
           onPress={handlePickFile}
           disabled={protectedResident || isUploading}
@@ -621,10 +834,10 @@ export function UploadAndPreviewStep({
         >
           <Upload size={18} color={FIELDS_COLORS.stepActive} />
           <Text style={{ color: FIELDS_COLORS.stepActive, fontSize: 14, fontWeight: "700" }}>
-            {isUploading ? "Loading preview…" : "Select File"}
+            {isUploading ? "Loading preview…" : "Select File(s)"}
           </Text>
         </TouchableOpacity>
-      ) : pickedFile ? (
+      ) : pickedFiles.length > 0 ? (
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           <View
             style={{
@@ -636,12 +849,14 @@ export function UploadAndPreviewStep({
               borderColor: FIELDS_COLORS.panelBorder,
             }}
           >
-            <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "600" }} numberOfLines={1}>
-              {pickedFile.name}
+            <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "600" }} numberOfLines={2}>
+              {pickedLabel}
             </Text>
             {isUploading ? (
               <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-                Uploading and loading map preview…
+                {pickedFiles.length > 1
+                  ? `Importing ${pickedFiles.length} files and loading map preview…`
+                  : "Uploading and loading map preview…"}
               </Text>
             ) : (
               <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, marginTop: 2 }} numberOfLines={2}>
@@ -671,7 +886,7 @@ export function UploadAndPreviewStep({
           <Pressable
             onPress={() => {
               if (isUploading) return;
-              setPickedFile(null);
+              setPickedFiles([]);
               setImportError(null);
             }}
             disabled={isUploading}
@@ -695,13 +910,18 @@ export function UploadAndPreviewStep({
               borderColor: FIELDS_COLORS.successBorder,
             }}
           >
-            <View style={{ flex: 1 }}>
+            <View style={{ flex: 1, paddingRight: 4 }}>
               <Text style={{ color: FIELDS_COLORS.success, fontSize: 10, fontWeight: "800", letterSpacing: 0.5 }}>
                 LOADED
               </Text>
               <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700", marginTop: 2 }} numberOfLines={1}>
                 {targetPathName}
               </Text>
+              {loadedFilesLabel && loadedSourceFiles.length > 1 ? (
+                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }} numberOfLines={2}>
+                  {loadedFilesLabel}
+                </Text>
+              ) : null}
               {localCsvSummary ? (
                 <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
                   {localCsvSummary.num_points} points · local {localCsvSummary.kind.toUpperCase()} ·{" "}
@@ -711,13 +931,45 @@ export function UploadAndPreviewStep({
                 <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
                   {previewData.num_points ?? "?"} points · {previewData.frame ?? "DXF"}
                 </Text>
+              ) : isLocalDxfPlanner && (lastLocalDxf || localDxfSnapshot) ? (
+                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
+                  {(lastLocalDxf ?? localDxfSnapshot)!.entityCount} path(s) ·{" "}
+                  {(lastLocalDxf ?? localDxfSnapshot)!.isGeographic ? "geo DXF" : "metric DXF"}
+                  {loadedSourceFiles.length > 1 ? ` · ${loadedSourceFiles.length} files` : ""}
+                </Text>
               ) : null}
             </View>
+            {/* + adds more files into this plan (forgot a file after first pick). */}
+            {canAddMoreFiles ? (
+              <Pressable
+                onPress={() => {
+                  void handleAddMoreFiles();
+                }}
+                disabled={protectedResident || isUploading}
+                accessibilityLabel="Add more files"
+                accessibilityRole="button"
+                style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: 10,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: FIELDS_COLORS.stepActive,
+                  opacity: protectedResident || isUploading ? 0.5 : 1,
+                  marginRight: 4,
+                }}
+              >
+                <Plus size={20} color="#fff" strokeWidth={2.5} />
+              </Pressable>
+            ) : null}
             <Pressable
               onPress={() => {
                 setImportedPlan(null);
                 setPreviewData(null);
                 setLocalCsvSummary(null);
+                setLoadedSourceFiles([]);
+                setLastLocalDxf(null);
+                setAppendOnImport(false);
                 setExtEnabled(false);
                 onClearLocalCsv?.();
               }}
@@ -727,25 +979,54 @@ export function UploadAndPreviewStep({
             </Pressable>
           </View>
 
-          {/* Upload another — also auto-parses on pick */}
-          <Pressable
-            onPress={handlePickFile}
-            disabled={protectedResident || isUploading}
-            style={{
-              height: 36,
-              borderRadius: 8,
-              alignItems: "center",
-              justifyContent: "center",
-              backgroundColor: "transparent",
-              borderWidth: 1,
-              borderColor: FIELDS_COLORS.panelBorder,
-              opacity: protectedResident || isUploading ? 0.5 : 1,
-            }}
-          >
-            <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "600" }}>
-              {isUploading ? "Loading preview…" : "Upload Different File"}
-            </Text>
-          </Pressable>
+          {/* Add more (append) + replace all */}
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            {canAddMoreFiles ? (
+              <Pressable
+                onPress={() => {
+                  void handleAddMoreFiles();
+                }}
+                disabled={protectedResident || isUploading}
+                style={{
+                  flex: 1,
+                  height: 36,
+                  borderRadius: 8,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexDirection: "row",
+                  gap: 6,
+                  backgroundColor: "transparent",
+                  borderWidth: 1,
+                  borderColor: FIELDS_COLORS.stepActive,
+                  opacity: protectedResident || isUploading ? 0.5 : 1,
+                }}
+              >
+                <Plus size={14} color={FIELDS_COLORS.stepActive} strokeWidth={2.5} />
+                <Text style={{ color: FIELDS_COLORS.stepActive, fontSize: 12, fontWeight: "700" }}>
+                  {isUploading && appendOnImport ? "Adding…" : "Add more files"}
+                </Text>
+              </Pressable>
+            ) : null}
+            <Pressable
+              onPress={handlePickFile}
+              disabled={protectedResident || isUploading}
+              style={{
+                flex: 1,
+                height: 36,
+                borderRadius: 8,
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: "transparent",
+                borderWidth: 1,
+                borderColor: FIELDS_COLORS.panelBorder,
+                opacity: protectedResident || isUploading ? 0.5 : 1,
+              }}
+            >
+              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "600" }}>
+                {isUploading && !appendOnImport ? "Loading preview…" : "Replace all"}
+              </Text>
+            </Pressable>
+          </View>
 
           {/* Guide-points CSV lives in Align DXF, next to the control-point list it feeds —
               importing it from Upload put an alignment control two steps early. */}

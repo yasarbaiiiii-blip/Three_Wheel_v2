@@ -1134,6 +1134,36 @@ export function FieldsPage(props: FieldsPageProps) {
               blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
               protectedResident={protectedResident}
               localCsvPreview={activeCsvPreview}
+              localDxfSnapshot={
+                isLocalDxfFlow && localDxfMeta
+                  ? {
+                      fileName: localDxfMeta.fileName,
+                      unitScale: 1,
+                      unitScaleSource: "insunits" as const,
+                      insunits: 6,
+                      isGeographic: localDxfMeta.isGeographic,
+                      geoOrigin:
+                        localDxfMeta.isGeographic && geoOrigin
+                          ? { lat: geoOrigin[0], lon: geoOrigin[1] }
+                          : null,
+                      // Mark geometry only — transit/extension are rebuilt on re-parse.
+                      lines: lines.filter(
+                        (l) =>
+                          l.layer !== "transit" &&
+                          l.layer !== "extension" &&
+                          l.layer !== "virtual_boundary"
+                      ),
+                      entityCount: lines.filter(
+                        (l) =>
+                          l.layer !== "transit" &&
+                          l.layer !== "extension" &&
+                          l.layer !== "virtual_boundary"
+                      ).length,
+                      ignoredCount: 0,
+                      warnings: localDxfMeta.warnings.slice(),
+                    }
+                  : null
+              }
               onLocalDxfParsed={(data) => {
                 onLocalDxfParsed?.(data);
                 setShowMapInteraction(true);

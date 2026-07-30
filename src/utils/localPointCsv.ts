@@ -723,6 +723,141 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
   };
 }
 
+/** Stem of a file name for path-group labels when merging multi-file imports. */
+function fileStem(fileName: string): string {
+  const base = (fileName || "").split(/[\\/]/).pop() || "file";
+  return base.replace(/\.[^.]+$/, "") || base;
+}
+
+/**
+ * Combined display / upload name for multi-file Select File imports.
+ * Single file keeps its original name; multiple becomes `first_xN.ext`.
+ */
+export function combinedImportFileName(fileNames: string[], ext: string): string {
+  if (fileNames.length === 0) return `combined.${ext}`;
+  if (fileNames.length === 1) return fileNames[0];
+  const stem = fileStem(fileNames[0]);
+  return `${stem}_x${fileNames.length}.${ext}`;
+}
+
+/**
+ * Tag every point so each source file (and its own feature groups) stay separate
+ * open paths after {@link localCsvPointsToPlanLines} / jump-split.
+ */
+function tagPointsWithFileGroup(
+  points: LocalPointCsvPoint[],
+  fileName: string
+): LocalPointCsvPoint[] {
+  const stem = fileStem(fileName);
+  return points.map((p) => ({
+    ...p,
+    group: p.group ? `${stem}/${p.group}` : stem,
+  }));
+}
+
+/**
+ * Re-project GPS points so NED metres share a single anchor (first file's origin).
+ * Lat/lon on each point are preserved for map pins.
+ */
+function reprojectCsvPointsToAnchor(
+  points: LocalPointCsvPoint[],
+  anchor: { lat: number; lon: number }
+): LocalPointCsvPoint[] {
+  return points.map((p) => {
+    if (p.lat == null || p.lon == null || !Number.isFinite(p.lat) || !Number.isFinite(p.lon)) {
+      return p;
+    }
+    const { north, east } = projectGpsToLocalMeters(p.lat, p.lon, anchor.lat, anchor.lon);
+    return { ...p, north_m: north, east_m: east };
+  });
+}
+
+/**
+ * Merge several already-parsed mission CSVs into one plan (multi-file Select File).
+ *
+ * Rules:
+ * - All files must share the same kind (GPS or NED).
+ * - GPS: first non-null anchor wins; every file is re-projected into that frame.
+ * - NED: points are concatenated as-is (same local site metres assumed).
+ * - Each source file is tagged as its own path group so features never bridge
+ *   across file boundaries.
+ */
+export function mergeLocalPointCsvResults(
+  results: LocalPointCsvResult[]
+): LocalPointCsvResult {
+  if (results.length === 0) {
+    throw new Error("No CSV files to merge.");
+  }
+  if (results.length === 1) return results[0];
+
+  const kind = results[0].kind;
+  for (const r of results) {
+    if (r.kind !== kind) {
+      throw new Error(
+        `Cannot mix GPS and local NED CSVs in one import (${results[0].fileName} is ${kind.toUpperCase()}, ${r.fileName} is ${r.kind.toUpperCase()}).`
+      );
+    }
+  }
+
+  const warnings: string[] = [
+    `Merged ${results.length} CSV files into one plan.`,
+  ];
+  const allPoints: LocalPointCsvPoint[] = [];
+  let sourceIndex = 1;
+
+  if (kind === "gps") {
+    const anchor =
+      results.find((r) => r.anchor != null)?.anchor ?? null;
+    if (!anchor) {
+      throw new Error("No GPS anchor found in the selected CSV files.");
+    }
+
+    for (const r of results) {
+      warnings.push(...r.warnings.map((w) => `${r.fileName}: ${w}`));
+      const reprojected = reprojectCsvPointsToAnchor(r.points, anchor);
+      const tagged = tagPointsWithFileGroup(reprojected, r.fileName);
+      for (const p of tagged) {
+        allPoints.push({ ...p, source_index: sourceIndex++ });
+      }
+    }
+
+    return {
+      kind: "gps",
+      fileName: combinedImportFileName(
+        results.map((r) => r.fileName),
+        "csv"
+      ),
+      num_points: allPoints.length,
+      points: allPoints,
+      anchor,
+      point_source_frame: "GPS_SURVEYED",
+      warnings,
+    };
+  }
+
+  // NED — same local frame assumed across files.
+  for (const r of results) {
+    warnings.push(...r.warnings.map((w) => `${r.fileName}: ${w}`));
+    const tagged = tagPointsWithFileGroup(r.points, r.fileName);
+    for (const p of tagged) {
+      allPoints.push({ ...p, source_index: sourceIndex++ });
+    }
+  }
+
+  return {
+    kind: "ned",
+    fileName: combinedImportFileName(
+      results.map((r) => r.fileName),
+      "csv"
+    ),
+    num_points: allPoints.length,
+    points: allPoints,
+    anchor: null,
+    point_source_frame: "LOCAL_NED",
+    warnings,
+  };
+}
+
 /** Evenly sample indices so large CSVs still get representative map pins. */
 export function sampleEvenly<T>(items: T[], maxCount: number): T[] {
   if (maxCount <= 0 || items.length === 0) return [];

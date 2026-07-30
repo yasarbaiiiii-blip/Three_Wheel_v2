@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCsvTransitLines,
+  combinedImportFileName,
   localCsvPointsToPlanLines,
   localCsvToMapPins,
+  mergeLocalPointCsvResults,
   metresPerDegree,
   parseLocalPointCsv,
   projectGpsToLocalMetersEllipsoid,
@@ -473,5 +475,55 @@ describe("localCsvToMapPins", () => {
 describe("sampleEvenly", () => {
   it("returns all when under cap", () => {
     expect(sampleEvenly([1, 2, 3], 10)).toEqual([1, 2, 3]);
+  });
+});
+
+describe("mergeLocalPointCsvResults (multi-file Select File)", () => {
+  it("returns single result unchanged", () => {
+    const a = parseLocalPointCsv(["north,east", "0,0", "5,0"].join("\n"), "a.csv");
+    expect(mergeLocalPointCsvResults([a])).toBe(a);
+  });
+
+  it("merges NED CSVs with per-file path groups", () => {
+    const a = parseLocalPointCsv(["north,east", "0,0", "5,0"].join("\n"), "road_a.csv");
+    const b = parseLocalPointCsv(["north,east", "10,0", "15,0"].join("\n"), "road_b.csv");
+    const m = mergeLocalPointCsvResults([a, b]);
+    expect(m.kind).toBe("ned");
+    expect(m.num_points).toBe(4);
+    expect(m.fileName).toBe("road_a_x2.csv");
+    expect(m.points.every((p) => p.group != null)).toBe(true);
+    expect(m.points[0].group).toBe("road_a");
+    expect(m.points[2].group).toBe("road_b");
+    const lines = localCsvPointsToPlanLines(m.points);
+    expect(lines.length).toBe(2);
+  });
+
+  it("merges GPS CSVs onto the first file's anchor", () => {
+    const a = parseLocalPointCsv(
+      ["lat,lon", "13.0000,80.0000", "13.0001,80.0000"].join("\n"),
+      "site1.csv"
+    );
+    const b = parseLocalPointCsv(
+      ["lat,lon", "13.0010,80.0000", "13.0011,80.0000"].join("\n"),
+      "site2.csv"
+    );
+    const m = mergeLocalPointCsvResults([a, b]);
+    expect(m.kind).toBe("gps");
+    expect(m.anchor).toEqual(a.anchor);
+    expect(m.num_points).toBe(4);
+    // Second file's first point is ~111 m north of first anchor.
+    expect(m.points[2].north_m).toBeGreaterThan(100);
+    expect(m.points[2].lat).toBeCloseTo(13.001, 5);
+  });
+
+  it("rejects mixed GPS + NED", () => {
+    const gps = parseLocalPointCsv(["lat,lon", "13,80", "13.001,80"].join("\n"), "g.csv");
+    const ned = parseLocalPointCsv(["north,east", "0,0", "5,0"].join("\n"), "n.csv");
+    expect(() => mergeLocalPointCsvResults([gps, ned])).toThrow(/Cannot mix GPS and local NED/i);
+  });
+
+  it("combinedImportFileName formats multi names", () => {
+    expect(combinedImportFileName(["a.csv"], "csv")).toBe("a.csv");
+    expect(combinedImportFileName(["a.csv", "b.csv"], "csv")).toBe("a_x2.csv");
   });
 });

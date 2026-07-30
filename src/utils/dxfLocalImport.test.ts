@@ -5,6 +5,7 @@ import {
   DEFAULT_UNIT_SCALE_M,
   INSUNITS_TO_METRES,
   MAX_SAGITTA_M,
+  mergeLocalDxfResults,
   parseLocalDxf,
   readUnitScale,
   sampleArcSagitta,
@@ -417,5 +418,72 @@ describe("readUnitScale helper", () => {
     const r = parseLocalDxf(dxf + "", "empty.dxf");
     expect(r.insunits).toBe(6);
     void pairs;
+  });
+});
+
+describe("mergeLocalDxfResults (multi-file Select File)", () => {
+  it("returns single result unchanged", () => {
+    const a = parseLocalDxf(wrapDxf(lineEntity(0, 0, 2, 0), 6), "a.dxf");
+    expect(mergeLocalDxfResults([a])).toBe(a);
+  });
+
+  it("merges metric DXFs with unique line ids", () => {
+    const a = parseLocalDxf(wrapDxf(lineEntity(0, 0, 2, 0), 6), "part_a.dxf");
+    const b = parseLocalDxf(wrapDxf(lineEntity(0, 0, 0, 3), 6), "part_b.dxf");
+    const m = mergeLocalDxfResults([a, b]);
+    expect(m.isGeographic).toBe(false);
+    expect(m.lines).toHaveLength(2);
+    expect(m.fileName).toBe("part_a_x2.dxf");
+    expect(m.lines[0].id).toContain("part_a");
+    expect(m.lines[1].id).toContain("part_b");
+    // Distinct ids even though both parses start at LINE-0.
+    expect(m.lines[0].id).not.toBe(m.lines[1].id);
+  });
+
+  it("merges georeferenced DXFs onto the first file's origin", () => {
+    const lat0 = 13.05;
+    const lon0 = 80.25;
+    const mpd = metresPerDegreePx4(lat0);
+    // Small square-ish lines in geographic degrees near lat0/lon0.
+    const dN = 0.0002; // ~22 m
+    const dE = 0.0002;
+    const geoA = wrapDxf(
+      lineEntity(lon0, lat0, lon0 + dE, lat0) + lineEntity(lon0 + dE, lat0, lon0 + dE, lat0 + dN),
+      6
+    );
+    const lat1 = lat0 + 0.001;
+    const lon1 = lon0;
+    const geoB = wrapDxf(
+      lineEntity(lon1, lat1, lon1 + dE, lat1),
+      6
+    );
+    const a = parseLocalDxf(geoA, "geo_a.dxf");
+    const b = parseLocalDxf(geoB, "geo_b.dxf");
+    expect(a.isGeographic).toBe(true);
+    expect(b.isGeographic).toBe(true);
+
+    const merged = mergeLocalDxfResults([a, b]);
+    expect(merged.isGeographic).toBe(true);
+    expect(merged.geoOrigin).toEqual(a.geoOrigin);
+    expect(merged.lines.length).toBe(a.lines.length + b.lines.length);
+    // Second file's geometry should land roughly 0.001° north of origin ≈ 111 m.
+    const secondFrom = merged.lines[a.lines.length].from;
+    expect(secondFrom.x).toBeGreaterThan(100);
+    void mpd;
+  });
+
+  it("rejects mix of metric and geographic DXF", () => {
+    const metric = parseLocalDxf(wrapDxf(lineEntity(0, 0, 2, 0), 6), "m.dxf");
+    const lat0 = 13.05;
+    const lon0 = 80.25;
+    const geo = parseLocalDxf(
+      wrapDxf(lineEntity(lon0, lat0, lon0 + 0.0002, lat0), 6),
+      "g.dxf"
+    );
+    expect(metric.isGeographic).toBe(false);
+    expect(geo.isGeographic).toBe(true);
+    expect(() => mergeLocalDxfResults([metric, geo])).toThrow(
+      /Cannot mix metric and georeferenced/i
+    );
   });
 });
