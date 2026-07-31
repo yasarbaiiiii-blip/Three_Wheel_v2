@@ -1942,14 +1942,17 @@ function primitiveNeighborTurnDeg(
 }
 
 /**
- * A local direction swing sharper than this, immediately after trimming a candidate
- * sandwiched arc with its real joint fillets, marks the tessellation as having actually
- * overshot/backtracked — as opposed to merely tracing a tight-but-well-behaved curve.
- * Set at 2x `sharpCornerDeg`'s usual 12 deg default: a swing that pronounced right after
- * fillet trimming is the fillet geometry fighting itself, not the survey's real curvature
- * (a clean fillet transition measured well under this on every fixture checked).
+ * A local direction swing sharper than `MAX_BARE_TURN_DEG` (the same "target quality" bar
+ * `buildRoadMarkingFittedPath` already warns against for a whole path), measured immediately
+ * after trimming a candidate sandwiched arc with its real joint fillets, marks the
+ * tessellation as having actually overshot/backtracked — as opposed to merely tracing a
+ * tight-but-well-behaved curve. Reusing that existing bar (rather than a fresh ad-hoc
+ * multiple of `sharpCornerDeg`) keeps this check and the path-level warning agreeing on what
+ * "clean" means, and it is what correctly separates a real sagitta-significant survey curve
+ * (kept) from an S-jog remnant (flattened) once the joint taper itself is smooth (see
+ * `blendArcBoundary`) — both can look similar by sagitta and neighbor-turn angle alone.
  */
-const SANDWICHED_ARC_OVERSHOOT_DEG_MULTIPLE = 2;
+const SANDWICHED_ARC_OVERSHOOT_DEG_THRESHOLD = MAX_BARE_TURN_DEG;
 
 /** True when consecutive tessellated samples ever swing more than `maxDeg` degrees. */
 function hasLocalOvershoot(samples: RoadMarkingNedPoint[], maxDeg: number): boolean {
@@ -2009,7 +2012,7 @@ export function absorbSandwichedCornerArcs(
       maxFilletRadiusM: tessellationOpts.maxFilletRadiusM,
       sampleSpacingM: tessellationOpts.sampleSpacingM,
     });
-    if (!hasLocalOvershoot(microSamples, sharpCornerDeg * SANDWICHED_ARC_OVERSHOOT_DEG_MULTIPLE)) return p;
+    if (!hasLocalOvershoot(microSamples, SANDWICHED_ARC_OVERSHOOT_DEG_THRESHOLD)) return p;
     return { kind: "line", i0: p.i0, i1: p.i1 };
   });
 }
@@ -2070,8 +2073,19 @@ function primitiveLength(points: RoadMarkingNedPoint[], prim: PathPrimitive): nu
   return Math.abs(ab - aa) * prim.circle.r;
 }
 
-/** Samples over which a forced arc-boundary correction is tapered — see `blendArcBoundary`. */
-const BOUNDARY_BLEND_SAMPLES = 3;
+/**
+ * Samples over which a forced arc-boundary correction is tapered — see `blendArcBoundary`.
+ * Was 3 with a linear weight; measured on a real survey (field_test_02.csv, 2026-07-31) to
+ * leave a 15.9 deg direction snap right at the seam between a straight run and a tight
+ * (r=2.55 m) real curve — a visible "chord/corner" artifact even though the underlying
+ * survey trend there is smooth. Widening to 8 (with the smoothstep weighting below) spreads
+ * the same position correction over more distance: measured worst joint turn on that same
+ * file drops to 7.0 deg (under the existing MAX_BARE_TURN_DEG=8 deg "clean" bar, warning
+ * clears), at the cost of ~0.03 m more max source deviation — still well inside
+ * CORNER_TOLERANCE_M. Verified no regression on roundabout_coordinates.csv or the
+ * Haddows Road half of roads_coordinates.csv (loaded directly, not via synthetic stand-ins).
+ */
+const BOUNDARY_BLEND_SAMPLES = 8;
 
 /**
  * Final near-duplicate-point dedupe threshold for the tessellated preview. Must stay well
@@ -2091,6 +2105,12 @@ const TESSELLATION_DEDUPE_M = 0.003;
  * correction at `endIdx`, decreasing to zero by the edge of the blend window). Spreads a
  * forced position correction (fitted-circle reconstruction vs. the exact point a neighbor
  * uses for the same joint) across several segments instead of dumping it into one.
+ *
+ * Weighted by smoothstep (3t^2-2t^3), not a linear ramp: a linear ramp's weight has a
+ * discontinuous slope at the far edge of the window (full-strength correction one sample,
+ * none the next), which is exactly what reads as a direction "snap" right where the taper
+ * ends. Smoothstep's derivative is zero at both ends of the window, so the correction fades
+ * in and back out gradually instead of stopping abruptly.
  */
 function blendArcBoundary(
   samples: RoadMarkingNedPoint[],
@@ -2104,7 +2124,8 @@ function blendArcBoundary(
   const de = target.east - samples[endIdx].east;
   for (let k = 0; k < blendN; k++) {
     const idx = endIdx + k * step;
-    const w = 1 - k / blendN;
+    const t = 1 - k / blendN;
+    const w = t * t * (3 - 2 * t);
     samples[idx] = {
       north: samples[idx].north + dn * w,
       east: samples[idx].east + de * w,
