@@ -2561,6 +2561,39 @@ export function buildRoadMarkingFittedPath(
   points: RoadMarkingNedPoint[],
   options: RoadMarkingPathOptions = {}
 ): FittedPathResult {
+  // Direction invariance (2026-08-01): the sequential fitter decomposes the
+  // SAME ground points into different arc chains depending on traversal
+  // order — measured 2.20 cm mean / 6.12 cm max planned-path shift between
+  // the two directions of one 54-stake survey (PX4_DXP
+  // bags/31_07_2026/ANALYSIS_2026-07-31_CLEAN_vs_RAW.md §6). Fit every open
+  // path in a canonical orientation (lexicographically smaller endpoint
+  // first) and restore the caller's direction on the way out, so A→B and
+  // B→A yield the identical painted line. Closed loops are left untouched.
+  // Note: warning texts that reference point indices refer to the canonical
+  // order when the input was flipped.
+  const n = points.length;
+  if (n >= 2) {
+    const a = points[0];
+    const b = points[n - 1];
+    const closed = Math.hypot(a.north - b.north, a.east - b.east) < 1e-6;
+    const reversedOrder =
+      b.north < a.north - 1e-9 ||
+      (Math.abs(b.north - a.north) <= 1e-9 && b.east < a.east - 1e-9);
+    if (!closed && reversedOrder) {
+      const result = buildRoadMarkingFittedPathDirected(
+        [...points].reverse(),
+        options
+      );
+      return { ...result, samples: [...result.samples].reverse() };
+    }
+  }
+  return buildRoadMarkingFittedPathDirected(points, options);
+}
+
+function buildRoadMarkingFittedPathDirected(
+  points: RoadMarkingNedPoint[],
+  options: RoadMarkingPathOptions = {}
+): FittedPathResult {
   const opts = { ...DEFAULTS, ...options };
   const warnings: string[] = [];
   let pts = dedupeNearPoints(points, 0.02);
