@@ -1942,23 +1942,57 @@ function primitiveNeighborTurnDeg(
 }
 
 /**
- * Reclassify a short 'arc' primitive to 'line' when BOTH its neighbors turn sharply away
- * from it — i.e. it is really just the corner transition between two other runs, not a
- * genuine road-scale curve feature. A genuine curve has smooth tangent continuity at its
- * own boundaries by construction (that continuity is what made it classify as one arc), so
- * this only ever fires on a short arc "spike" flanked by real corners on both sides.
- *
- * Two independent joint fillets straddling that short arc each compute their trim budget
- * from the arc's FULL length without knowing the sibling joint on the other end also
- * claims a share of it — for a short, tightly-sandwiched arc this can produce conflicting
- * trims and a mis-parameterized (even backtracking) tessellated sample. Collapsing it to
- * one line lets the existing single-joint fillet mechanism round the whole transition in
- * one already-well-tested pass instead.
+ * A local direction swing sharper than this, immediately after trimming a candidate
+ * sandwiched arc with its real joint fillets, marks the tessellation as having actually
+ * overshot/backtracked — as opposed to merely tracing a tight-but-well-behaved curve.
+ * Set at 2x `sharpCornerDeg`'s usual 12 deg default: a swing that pronounced right after
+ * fillet trimming is the fillet geometry fighting itself, not the survey's real curvature
+ * (a clean fillet transition measured well under this on every fixture checked).
+ */
+const SANDWICHED_ARC_OVERSHOOT_DEG_MULTIPLE = 2;
+
+/** True when consecutive tessellated samples ever swing more than `maxDeg` degrees. */
+function hasLocalOvershoot(samples: RoadMarkingNedPoint[], maxDeg: number): boolean {
+  const cosThreshold = Math.cos((maxDeg * Math.PI) / 180);
+  for (let i = 1; i < samples.length - 1; i++) {
+    const a = samples[i - 1];
+    const b = samples[i];
+    const c = samples[i + 1];
+    const v1n = b.north - a.north;
+    const v1e = b.east - a.east;
+    const v2n = c.north - b.north;
+    const v2e = c.east - b.east;
+    const m1 = Math.hypot(v1n, v1e);
+    const m2 = Math.hypot(v2n, v2e);
+    if (m1 < 1e-9 || m2 < 1e-9) continue;
+    const cos = (v1n * v2n + v1e * v2e) / (m1 * m2);
+    if (cos < cosThreshold) return true;
+  }
+  return false;
+}
+
+/**
+ * Reclassify a sandwiched 'arc' primitive to 'line' when BOTH its neighbors turn sharply
+ * away from it AND tessellating it with its real joint fillets actually overshoots —
+ * i.e. it is really just the corner transition between two other runs, not a genuine
+ * road-scale curve feature. A genuine curve has smooth tangent continuity at its own
+ * boundaries by construction, so the neighbor-turn condition alone flags this as a
+ * candidate; but neighbor turn angle cannot by itself distinguish a real, sagitta-significant
+ * curve (which must be kept) from an S-jog remnant (which must be flattened) — both can
+ * report similar sagitta and similar neighbor turn (measured: a real 2.55 m-radius survey
+ * curve and a synthetic S-jog remnant both sit in the same 0.4-0.7 m sagitta band). What
+ * differs is what actually happens once the real joint fillets are laid down: two
+ * independent fillets straddling a short arc each compute their trim budget from the arc's
+ * FULL length without knowing the sibling joint on the other end also claims a share of it,
+ * and for a short, tightly-sandwiched arc this can produce conflicting trims and a
+ * mis-parameterized (even backtracking) tessellated sample. Only collapse to a line when
+ * that actually happens; otherwise keep the arc.
  */
 export function absorbSandwichedCornerArcs(
   points: RoadMarkingNedPoint[],
   prims: PathPrimitive[],
-  sharpCornerDeg: number
+  sharpCornerDeg: number,
+  tessellationOpts?: { sampleSpacingM: number; filletRadiusFraction: number; maxFilletRadiusM: number }
 ): PathPrimitive[] {
   if (prims.length < 3) return prims;
   return prims.map((p, idx) => {
@@ -1967,6 +2001,15 @@ export function absorbSandwichedCornerArcs(
     const turnOut = primitiveNeighborTurnDeg(points, p, prims[idx + 1]);
     if (turnIn == null || turnOut == null) return p;
     if (turnIn < sharpCornerDeg || turnOut < sharpCornerDeg) return p;
+    if (!tessellationOpts) return { kind: "line", i0: p.i0, i1: p.i1 };
+    const microChain = [prims[idx - 1], p, prims[idx + 1]];
+    const microSamples = tessellatePrimitivesWithJointFillets(points, microChain, {
+      sharpCornerDeg,
+      filletRadiusFraction: tessellationOpts.filletRadiusFraction,
+      maxFilletRadiusM: tessellationOpts.maxFilletRadiusM,
+      sampleSpacingM: tessellationOpts.sampleSpacingM,
+    });
+    if (!hasLocalOvershoot(microSamples, sharpCornerDeg * SANDWICHED_ARC_OVERSHOOT_DEG_MULTIPLE)) return p;
     return { kind: "line", i0: p.i0, i1: p.i1 };
   });
 }
@@ -2342,7 +2385,11 @@ export function segmentAndTessellate(
   prims = mergeAdjacentPrimitives(points, prims, options.fitToleranceM, options.minArcPoints, options.maxArcRadiusM);
   // Undo short arcs sandwiched between two real corners (conflicting joint-fillet trims);
   // merge once more in case that also opens up a new same-kind neighbor merge.
-  prims = absorbSandwichedCornerArcs(points, prims, options.sharpCornerDeg);
+  prims = absorbSandwichedCornerArcs(points, prims, options.sharpCornerDeg, {
+    sampleSpacingM: options.sampleSpacingM,
+    filletRadiusFraction: options.filletRadiusFraction,
+    maxFilletRadiusM: options.maxFilletRadiusM,
+  });
   prims = mergeAdjacentPrimitives(points, prims, options.fitToleranceM, options.minArcPoints, options.maxArcRadiusM);
   return tessellatePrimitivesWithJointFillets(points, prims, {
     sharpCornerDeg: options.sharpCornerDeg,

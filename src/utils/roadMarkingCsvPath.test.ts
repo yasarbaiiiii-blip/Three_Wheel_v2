@@ -571,8 +571,58 @@ describe("absorbSandwichedCornerArcs", () => {
       { kind: "arc" as const, i0: 16, i1: 21, circle: smallArcFit },
       { kind: "line" as const, i0: 21, i1: 33 },
     ];
-    const result = absorbSandwichedCornerArcs(pts, prims, 12);
+    // With the real joint-fillet options supplied, the function now verifies the overshoot
+    // (rather than assuming it from neighbor-turn angle alone) before flattening — confirm
+    // it still reaches the same conclusion for the case it was originally built to fix.
+    const result = absorbSandwichedCornerArcs(pts, prims, 12, {
+      sampleSpacingM: 0.35,
+      filletRadiusFraction: 0.4,
+      maxFilletRadiusM: 40,
+    });
     expect(result[1].kind).toBe("line");
+  });
+
+  it("preserves a real sandwiched curve when tessellation does not overshoot (regression: field_test_02.csv, 2026-07-31)", () => {
+    // Real RTK survey geometry (dedupe/spike-reject/jog-dampen cleaned, indices 0-45 of a
+    // 77-point dense path). A genuine r=2.55m, ~90deg turn (indices 17-25) sits between a
+    // long straight run (0-17) and a long, gentle arc (25-45) — both neighbors turn sharply
+    // relative to it (same neighbor-turn signature as the S-jog case above), but tessellating
+    // it with its real joint fillets is clean: no overshoot. The old neighbor-turn-only
+    // heuristic flattened this into a straight line that missed a surveyed point by 0.79m
+    // (9x the fit tolerance), which tripped validateFittedPath and dropped the whole dense
+    // fit to the per-point waypoint-fillet fallback — the reported "wobbly, corners and
+    // edges instead of straight and curve" bug.
+    const pts: RoadMarkingNedPoint[] = [
+      { north: 0, east: 0 }, { north: 1.8636, east: 0.0758 }, { north: 4.0608, east: 0.1386 },
+      { north: 6.228, east: 0.197 }, { north: 8.6643, east: 0.3313 }, { north: 10.9849, east: 0.38 },
+      { north: 12.9965, east: 0.4038 }, { north: 15.1848, east: 0.459 }, { north: 17.2519, east: 0.511 },
+      { north: 19.4925, east: 0.5056 }, { north: 21.4362, east: 0.4633 }, { north: 24.0081, east: 0.4103 },
+      { north: 25.467, east: 0.4136 }, { north: 26.729, east: 0.4114 }, { north: 27.3317, east: 0.3724 },
+      { north: 27.9333, east: 0.3356 }, { north: 28.4581, east: 0.3648 }, { north: 28.8707, east: 0.3995 },
+      { north: 29.4366, east: 0.4742 }, { north: 29.8692, east: 0.5142 }, { north: 30.3507, east: 0.5619 },
+      { north: 30.8132, east: 0.7892 }, { north: 31.1846, east: 1.0967 }, { north: 31.6016, east: 1.4788 },
+      { north: 31.8651, east: 2.0223 }, { north: 31.8907, east: 2.5008 }, { north: 31.8974, east: 3.0821 },
+      { north: 31.8996, east: 3.7837 }, { north: 31.8295, east: 4.7764 }, { north: 31.7395, east: 5.7334 },
+      { north: 31.6783, east: 6.6774 }, { north: 31.6272, east: 7.3681 }, { north: 31.596, east: 8.4182 },
+      { north: 31.5427, east: 9.4315 }, { north: 31.5883, east: 10.394 }, { north: 31.5871, east: 11.2817 },
+      { north: 31.6261, east: 12.0644 }, { north: 31.6294, east: 12.9478 }, { north: 31.6361, east: 13.8951 },
+      { north: 31.6772, east: 14.9116 }, { north: 31.7617, east: 15.9401 }, { north: 31.7973, east: 16.9393 },
+      { north: 31.8796, east: 18.1107 }, { north: 31.9007, east: 18.6065 }, { north: 31.9763, east: 18.9367 },
+      { north: 32.0542, east: 19.3513 },
+    ];
+    const curveFit = fitCircleHyper(pts.slice(17, 26))!;
+    const nextArcFit = fitCircleHyper(pts.slice(25, 46))!;
+    const prims = [
+      { kind: "line" as const, i0: 0, i1: 17 },
+      { kind: "arc" as const, i0: 17, i1: 25, circle: curveFit },
+      { kind: "arc" as const, i0: 25, i1: 45, circle: nextArcFit },
+    ];
+    const result = absorbSandwichedCornerArcs(pts, prims, 12, {
+      sampleSpacingM: 0.35,
+      filletRadiusFraction: 0.4,
+      maxFilletRadiusM: 40,
+    });
+    expect(result[1].kind).toBe("arc");
   });
 
   it("does not touch a genuine road curve with smooth tangent continuity at its boundaries", () => {

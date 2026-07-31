@@ -151,4 +151,37 @@ describe("CSV geometry robustness", () => {
     expect(R_MIN_ROVER_M).toBeGreaterThan(0);
     expect(CORNER_TOLERANCE_M).toBeGreaterThan(0);
   });
+
+  it("dense-fits a real serpentine field survey instead of degrading to waypoint fillets (regression: field_test_02.csv, 2026-07-31)", () => {
+    // Full raw 78-point RTK survey (field_test_02.csv), reported HRMS 0.02 m. A genuine
+    // r=2.55m ~90deg turn partway through was previously flattened by
+    // absorbSandwichedCornerArcs (neighbor-turn-angle heuristic, no overshoot check), missing
+    // a surveyed point by 0.79m — 9x the fit tolerance — which tripped validateFittedPath and
+    // dropped the WHOLE dense fit to the per-point waypoint-fillet fallback: every one of the
+    // 78 raw fixes became its own straight leg with only light corner rounding, i.e. the
+    // reported "wobbly, corners and edges instead of straight and curve" preview bug.
+    const raw: { north: number; east: number }[] = [
+      [0, 0], [1.8636, 0.0758], [4.0608, 0.1386], [6.228, 0.197], [8.6643, 0.3313], [10.9849, 0.38],
+      [12.9965, 0.4038], [15.1848, 0.459], [17.2519, 0.511], [19.4925, 0.5056], [21.4362, 0.4633],
+      [24.0081, 0.4103], [25.467, 0.4136], [26.729, 0.4114], [27.3317, 0.3724], [27.9333, 0.3356],
+      [28.4581, 0.3648], [28.8707, 0.3995], [29.4366, 0.4742], [29.8692, 0.5142], [30.3507, 0.5619],
+      [30.8132, 0.7892], [31.1846, 1.0967], [31.6016, 1.4788], [31.8651, 2.0223], [31.8907, 2.5008],
+      [31.8974, 3.0821], [31.8996, 3.7837], [31.8295, 4.7764], [31.7395, 5.7334], [31.6783, 6.6774],
+      [31.6272, 7.3681], [31.596, 8.4182], [31.5427, 9.4315], [31.5883, 10.394], [31.5871, 11.2817],
+      [31.6261, 12.0644], [31.6294, 12.9478], [31.6361, 13.8951], [31.6772, 14.9116], [31.7617, 15.9401],
+      [31.7973, 16.9393], [31.8796, 18.1107], [31.9007, 18.6065], [31.9763, 18.9367], [32.0542, 19.3513],
+      [32.1843, 19.7519], [32.3288, 20.1546], [32.4967, 20.7814], [32.6857, 21.2881], [32.8625, 21.7882],
+      [33.0583, 22.2408], [33.1906, 22.7128], [33.3318, 23.1675], [33.6031, 23.6189], [33.95, 24.2414],
+      [34.3203, 24.8152], [34.6005, 25.233], [34.9775, 25.7397], [35.2721, 26.1814], [35.5157, 26.5527],
+      [35.8593, 26.9739], [36.2596, 27.4415], [36.6376, 27.8778], [37.0335, 28.3173], [37.3848, 28.6659],
+      [37.9753, 29.1856], [38.4801, 29.6933], [38.4768, 29.7009], [39.0683, 30.108], [39.5743, 30.476],
+      [40.1959, 30.9578], [40.8975, 31.3789], [41.6625, 31.9841], [42.4842, 32.5557], [43.1603, 33.0515],
+      [43.7096, 33.5214], [44.4824, 34.0453],
+    ].map(([north, east]) => ({ north, east }));
+
+    const fitted = buildRoadMarkingFittedPath(raw, { surveyRmsM: 0.02 });
+    expect(fitted.mode).toBe("dense-fit");
+    expect(fitted.quality.maxSourceDeviationM).toBeLessThan(CORNER_TOLERANCE_M);
+    expect(polylineLengthM(fitted.samples) / polylineLengthM(raw)).toBeGreaterThan(0.95);
+  });
 });
