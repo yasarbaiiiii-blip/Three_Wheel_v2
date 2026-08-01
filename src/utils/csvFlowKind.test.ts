@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyCsvFlow, hidesLoadStep } from "./csvFlowKind";
+import { classifyCsvFlow, hidesLoadStep, isExtendablePathName } from "./csvFlowKind";
 
 const kind = (over: Partial<Parameters<typeof classifyCsvFlow>[0]> = {}) =>
   classifyCsvFlow({
@@ -55,5 +55,13 @@ describe("hidesLoadStep", () => {
     expect(oldRule(null, "csv")).toBe(true);
     // New: it is not.
     expect(hidesLoadStep(kind({ preLineCsvMode: true }))).toBe(false);
+  });
+});
+
+describe("isExtendablePathName", () => {
+  it("unlocks extensions for pre-line CSV (A16 frontend)", () => {
+    expect(isExtendablePathName("road.csv", true)).toBe(true);
+    expect(isExtendablePathName("road.csv", false)).toBe(false);
+    expect(isExtendablePathName("road.dxf", false)).toBe(true);
   });
 });

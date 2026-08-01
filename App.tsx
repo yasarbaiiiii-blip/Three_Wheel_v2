@@ -148,6 +148,7 @@ import {
   buildRuntimeTransitOverlayFromPlan,
   matchNonSprayToExtensionRole,
 } from "./src/utils/extensionTransitClassify";
+import { planLinesFromPreviewWaypoints } from "./src/utils/previewWaypointLayers";
 import type {
   AlignmentResultState,
   MultiPointPlacementPhase,
@@ -2321,34 +2322,23 @@ export default function App() {
             }
 
             // If only 1 point was drawn, create a zero-length segment so it can still be aligned and previewed
-            const effectivePts = pts.length === 1 ? [pts[0], pts[0]] : pts;
-
-            for (let i = 0; i < effectivePts.length - 1; i++) {
-              const fromPt = effectivePts[i];
-              const toPt = effectivePts[i + 1];
-              const fromNorth = coerceFiniteNumber(fromPt?.north);
-              const fromEast = coerceFiniteNumber(fromPt?.east);
-              const toNorth = coerceFiniteNumber(toPt?.north);
-              const toEast = coerceFiniteNumber(toPt?.east);
-
-              if (fromNorth == null || fromEast == null || toNorth == null || toEast == null) {
-                continue;
-              }
-
-              const sprayFlag = fromPt?.spray ?? true;
-              generatedLines.push({
-                id: `rpp-line-${i}`,
-                label: `Segment ${i + 1}`,
-                layer: sprayFlag ? "marking" : "center",
-                // Carry surveyed-vertex provenance so the viewport/map can mark
-                // must-hit points (RPP must never simplify these away).
-                from: { id: i * 2 + 1, x: fromNorth, y: fromEast, mustHit: fromPt?.must_hit === true },
-                to: { id: i * 2 + 2, x: toNorth, y: toEast, mustHit: toPt?.must_hit === true },
-                width: 0.1,
-              });
-            }
+            // Classify leading/trailing spray-OFF as PRE/AFT extension (A16 survey CSV),
+            // interior spray-OFF as transit, and the short terminal run-out stub as transit.
+            generatedLines = planLinesFromPreviewWaypoints(pts);
             if (generatedLines.length === 0) {
               throw new Error("Preview waypoints did not contain valid coordinates");
+            }
+
+            // Keep Path Order Extension distances in sync (DXF gets these from /entities).
+            if (pathName.toLowerCase().endsWith(".csv")) {
+              try {
+                const cfg = await pathApi.getExtensions(apiBaseUrl, pathName);
+                setExtensionsEnabled(!!cfg.enabled);
+                setExtPre(String(cfg.pre_extension_m ?? "0.5"));
+                setExtAft(String(cfg.aft_extension_m ?? "0.5"));
+              } catch {
+                // keep defaults when the sidecar is absent
+              }
             }
           } else {
             console.error(`[API GET] /api/path/${pathName}/preview - Failed with status ${res.status}`);

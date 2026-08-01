@@ -34,3 +34,18 @@ export function classifyCsvFlow(args: {
 export function hidesLoadStep(kind: CsvFlowKind): boolean {
   return kind === "local-point-csv";
 }
+
+/**
+ * Paths that may use GET/POST /api/path/{name}/extensions (A16).
+ * DXF always; survey CSV only in pre-line mode (local point CSV must not).
+ */
+export function isExtendablePathName(
+  fileName: string | null | undefined,
+  preLineCsvMode: boolean
+): boolean {
+  if (!fileName) return false;
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith(".dxf")) return true;
+  if (lower.endsWith(".csv") && preLineCsvMode) return true;
+  return false;
+}

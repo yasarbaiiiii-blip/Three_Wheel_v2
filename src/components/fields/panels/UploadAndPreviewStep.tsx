@@ -7,6 +7,7 @@ import { Upload, X } from "lucide-react-native";
 import * as pathApi from "../../../api/pathApi";
 import type { ImportedPlan } from "../../../types/plan";
 import { parseLocalPointCsv, type LocalPointCsvResult } from "../../../utils/localPointCsv";
+import { isExtendablePathName } from "../../../utils/csvFlowKind";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 type UploadAndPreviewStepProps = {
@@ -202,7 +203,8 @@ export function UploadAndPreviewStep({
   const [isExtSetting, setIsExtSetting] = useState(false);
 
   const targetPathName = importedPlan?.fileName ?? null;
-  const isDxfPath = targetPathName?.toLowerCase().endsWith(".dxf");
+  // A16: extensions apply to DXF and pre-line survey CSV (not local point CSV).
+  const isExtendablePath = isExtendablePathName(targetPathName, preLineCsvMode);
   // A pre-line CSV is a backend path (previewed via /preview), so it must NOT be
   // treated as a local-only CSV that suppresses the backend preview.
   const isLocalCsvPath =
@@ -210,7 +212,7 @@ export function UploadAndPreviewStep({
     (importedPlan?.fileType === "csv" || !!targetPathName?.toLowerCase().endsWith(".csv"));
 
   useEffect(() => {
-    if (isDxfPath && targetPathName && apiBaseUrl) {
+    if (isExtendablePath && targetPathName && apiBaseUrl) {
       pathApi.getExtensions(apiBaseUrl, targetPathName)
         .then(cfg => {
           setExtEnabled(cfg.enabled);
@@ -222,7 +224,7 @@ export function UploadAndPreviewStep({
           // keep defaults if it fails
         });
     }
-  }, [targetPathName, isDxfPath, apiBaseUrl]);
+  }, [targetPathName, isExtendablePath, apiBaseUrl]);
 
   // Backend path preview for DXF / waypoints only — never for local CSV.
   useEffect(() => {
@@ -377,7 +379,7 @@ export function UploadAndPreviewStep({
           // Preview summary is optional; map lines still load via onSelectPath.
         }
 
-        if (ext === "dxf") {
+        if (isExtendablePathName(file.name, preLineCsvMode)) {
           try {
             const cfg = await pathApi.getExtensions(apiBaseUrl, file.name);
             setExtEnabled(cfg.enabled);
@@ -714,8 +716,8 @@ export function UploadAndPreviewStep({
         </View>
       ) : null}
 
-      {/* Extension Config (inline, no modal) — only for DXF */}
-      {targetPathName && isDxfPath ? (
+      {/* Extension Config — DXF + pre-line survey CSV (A16); not local point CSV */}
+      {targetPathName && isExtendablePath ? (
         <View
           style={{
             borderRadius: 10,
