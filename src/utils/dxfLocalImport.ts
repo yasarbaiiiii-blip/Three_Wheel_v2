@@ -19,6 +19,7 @@ import type { PlanLayer, PlanLine, PlanPoint } from "../types/plan";
 import { dxfCurveGeometryToNed } from "./curveGeometry";
 import {
   looksGeographic,
+  metresPerDegreePx4,
   projectGeographicToLocalNed,
 } from "./geoProjection";
 import { rebasePlanLineToOrigin } from "./planOriginRebase";
@@ -75,6 +76,28 @@ type DxfBlock = {
   entities: { type: string; pairs: Pair[] }[];
 };
 
+/**
+ * Curve source kept from the parse pass so a geographic file can be re-derived
+ * in metres once `looksGeographic` has run.
+ *
+ * Detection needs every coordinate in the file, so it can only run AFTER the
+ * entities are parsed — by which time an ARC/CIRCLE/bulge has already been
+ * tessellated in the file's own units. Keyed by entity id (`ARC-3`, …).
+ *
+ * Coordinates are CAD x (=lon for a geo file) / y (=lat), with any INSERT
+ * transform already applied.
+ */
+type RawGeoCurve =
+  | {
+      kind: "arc";
+      cx: number;
+      cy: number;
+      radius: number;
+      startAngle: number;
+      endAngle: number;
+    }
+  | { kind: "bulge"; vertices: Vertex[]; closed: boolean };
+
 type InsertTransform = {
   dx: number;
   dy: number;
@@ -94,6 +117,9 @@ export function parseLocalDxf(text: string, fileName: string): LocalDxfResult {
   // Parse in raw DXF units (scale=1). Unit scale is applied only after we know
   // the drawing is metric — geographic files store lat/lon and must not be
   // multiplied by cm/mm fallbacks (G1/G2 order).
+  // `scale` still rides along as fileUnitScale: curve tessellation needs a metre
+  // sagitta bound expressed in drawing units, which is a density choice, not a
+  // coordinate change (see parseEntity's sagittaFileUnits).
   const blockLib = buildBlockLibrary(pairs);
   const sectionPairs = extractSection(pairs, "ENTITIES");
   const entityGroups = collectEntityGroups(sectionPairs);
@@ -106,6 +132,8 @@ export function parseLocalDxf(text: string, fileName: string): LocalDxfResult {
   // detection when there is no line/curve sample. Never converted into a fitted path
   // (path generation is CSV-only via localCsvPointsToPlanLines).
   const pointCloudCad: Xy[] = [];
+  // Curve sources in raw file units, for geographic re-tessellation (see projectGeoCurves).
+  const rawGeoCurves = new Map<string, RawGeoCurve>();
 
   for (const group of entityGroups) {
     const layerName = getSingle(group.pairs, "8") || "0";
@@ -127,11 +155,13 @@ export function parseLocalDxf(text: string, fileName: string): LocalDxfResult {
       color: Number.isFinite(color) ? color : 7,
       classification,
       unitScale: 1,
+      fileUnitScale: scale,
       blockLib,
       entityIndexRef,
       pointIdRef,
       lines,
       insertTransform: null,
+      rawGeoCurves,
     });
   }
 
@@ -159,6 +189,7 @@ export function parseLocalDxf(text: string, fileName: string): LocalDxfResult {
     geoOrigin = projected.origin;
     // Frame change only: same relative path, NED about geoOrigin for plan-trajectory.
     nedLines = applyProjectedPoints(nedLines, samplePts, projected.points);
+    nedLines = projectGeoCurves(nedLines, rawGeoCurves, geoOrigin);
     warnings.push(
       `Georeferenced DXF detected — projected about (${geoOrigin.lat.toFixed(6)}, ${geoOrigin.lon.toFixed(6)}) using PX4 sphere. File path geometry is preserved.`
     );
@@ -508,11 +539,13 @@ function parseEntity(args: {
   color: number;
   classification: DxfEntityClass;
   unitScale: number;
+  fileUnitScale: number;
   blockLib: Map<string, DxfBlock>;
   entityIndexRef: { value: number };
   pointIdRef: { value: number };
   lines: PlanLine[];
   insertTransform: InsertTransform | null;
+  rawGeoCurves: Map<string, RawGeoCurve>;
 }): void {
   const {
     type,
@@ -521,14 +554,28 @@ function parseEntity(args: {
     color,
     classification,
     unitScale,
+    fileUnitScale,
     blockLib,
     entityIndexRef,
     pointIdRef,
     lines,
     insertTransform,
+    rawGeoCurves,
   } = args;
 
   const s = unitScale;
+  /**
+   * MAX_SAGITTA_M is a bound on real-world flattening error, but coordinates here
+   * are still in drawing units (`s` is always 1 — see parseLocalDxf), so the bound
+   * has to be converted into those units or it means nothing. Comparing 0.005 to a
+   * radius in millimetres over-samples ~32x; against kilometres it is a 5 m sagitta
+   * and under-samples by the same factor.
+   *
+   * $INSUNITS is only a hint and geographic files lie about it — that is harmless
+   * here, because projectGeoCurves re-tessellates every geographic curve in true
+   * metres after detection.
+   */
+  const sagittaFileUnits = MAX_SAGITTA_M / (fileUnitScale > 0 ? fileUnitScale : 1);
   const tf = (x: number, y: number): Xy => {
     const sx = x * s;
     const sy = y * s;
@@ -560,9 +607,11 @@ function parseEntity(args: {
       color,
       classification,
       unitScale,
+      fileUnitScale,
       entityIndexRef,
       pointIdRef,
       lines,
+      rawGeoCurves,
     });
     return;
   }
@@ -614,7 +663,7 @@ function parseEntity(args: {
     const addSeg = (a: Vertex, b: Xy) => {
       if (Math.abs(a.bulge || 0) >= 1e-6) {
         // Sample in raw DXF units then scale each point
-        const raw = sampleBulgeSagitta(a, b, a.bulge, MAX_SAGITTA_M / s);
+        const raw = sampleBulgeSagitta(a, b, a.bulge, sagittaFileUnits);
         for (const rp of raw) {
           const p = scalePt(rp.x, rp.y);
           if (
@@ -636,6 +685,19 @@ function parseEntity(args: {
     if (preview.length < 2) return;
     const idx = entityIndexRef.value++;
     const len = polylineLength(preview);
+    // Bulge arcs only: a straight polyline projects vertex-for-vertex, so it needs
+    // no geographic re-tessellation (see projectGeoCurves).
+    const sim = insertSimilarity(insertTransform);
+    if (sim && vertices.some((v) => Math.abs(v.bulge || 0) >= 1e-6)) {
+      rawGeoCurves.set(`${type}-${idx}`, {
+        kind: "bulge",
+        closed,
+        vertices: vertices.map((v) => {
+          const p = scalePt(v.x, v.y);
+          return { x: p.x, y: p.y, bulge: v.bulge };
+        }),
+      });
+    }
     pushLine(lines, {
       id: `${type}-${idx}`,
       label: `${labelPrefix} Polyline ${idx + 1}`,
@@ -663,12 +725,27 @@ function parseEntity(args: {
     const endAngle = type === "ARC" ? getNumber(entityPairs, "51") : 360;
     if (![cx, cy, radius].every(Number.isFinite) || !(radius > 0)) return;
     // Sagitta bound in metres → convert max sagitta to DXF units for sampling
-    const rawPts = sampleArcSagitta(cx, cy, radius, startAngle, endAngle, MAX_SAGITTA_M / s);
+    const rawPts = sampleArcSagitta(cx, cy, radius, startAngle, endAngle, sagittaFileUnits);
     const pts = rawPts.map((p) => scalePt(p.x, p.y));
     if (pts.length < 2) return;
     const idx = entityIndexRef.value++;
     const sweep = (endAngle >= startAngle ? endAngle : endAngle + 360) - startAngle;
     const arcLen = (Math.abs(sweep) / 360) * 2 * Math.PI * radius * s;
+    // Keep the circle definition for a possible geographic re-tessellation: the
+    // samples above are bounded in FILE units, which is only a metre bound for a
+    // metric drawing (see projectGeoCurves).
+    const sim = insertSimilarity(insertTransform);
+    if (sim) {
+      const center = scalePt(cx, cy);
+      rawGeoCurves.set(`${type}-${idx}`, {
+        kind: "arc",
+        cx: center.x,
+        cy: center.y,
+        radius: radius * s * sim.scale,
+        startAngle: startAngle + sim.rotationDeg,
+        endAngle: endAngle + sim.rotationDeg,
+      });
+    }
     pushLine(lines, {
       id: `${type}-${idx}`,
       label: `${labelPrefix} ${type === "CIRCLE" ? "Circle" : "Arc"} ${idx + 1}`,
@@ -701,7 +778,7 @@ function parseEntity(args: {
     const controlPts = controlXs.map((x, i) => ({ x, y: controlYs[i] ?? 0 }));
     // Dense Catmull-Rom; segment count from chord vs sagitta on avg radius-ish
     const extent = controlExtent(controlPts);
-    const nSeg = Math.max(16, Math.ceil(extent / Math.max(MAX_SAGITTA_M / s, 1e-6)));
+    const nSeg = Math.max(16, Math.ceil(extent / Math.max(sagittaFileUnits, 1e-6)));
     const sampled = sampleSpline(controlPts, Math.min(nSeg, 512));
     const pts = sampled.map((p) => scalePt(p.x, p.y));
     if (pts.length < 2) return;
@@ -739,7 +816,7 @@ function parseEntity(args: {
     const minorLen = majorLen * ratio;
     // Approximate: use major radius for sagitta segment count
     const sweep = endParam - startParam;
-    const n = arcSegmentCount(majorLen, sweep, MAX_SAGITTA_M / s);
+    const n = arcSegmentCount(majorLen, sweep, sagittaFileUnits);
     const pts: Xy[] = [];
     const cosA = Math.cos(majorAngle);
     const sinA = Math.sin(majorAngle);
@@ -789,9 +866,11 @@ function resolveInsert(args: {
   color: number;
   classification: DxfEntityClass;
   unitScale: number;
+  fileUnitScale: number;
   entityIndexRef: { value: number };
   pointIdRef: { value: number };
   lines: PlanLine[];
+  rawGeoCurves: Map<string, RawGeoCurve>;
 }): void {
   const blockName = getSingle(args.entityPairs, "2");
   const block = args.blockLib.get(blockName);
@@ -821,13 +900,32 @@ function resolveInsert(args: {
       color: args.color,
       classification: childClass,
       unitScale: args.unitScale,
+      fileUnitScale: args.fileUnitScale,
       blockLib: args.blockLib,
       entityIndexRef: args.entityIndexRef,
       pointIdRef: args.pointIdRef,
       lines: args.lines,
       insertTransform: t,
+      rawGeoCurves: args.rawGeoCurves,
     });
   }
+}
+
+/**
+ * INSERT transforms under which a circle stays a circle (uniform scale + rotation),
+ * so a curve's centre/radius/angles survive as closed-form values. Returns null for
+ * a non-uniform scale — that curve is an ellipse and cannot be re-tessellated as an arc.
+ * A negative uniform scale is a 180° rotation, not a mirror.
+ */
+function insertSimilarity(
+  t: InsertTransform | null
+): { scale: number; rotationDeg: number } | null {
+  if (!t) return { scale: 1, rotationDeg: 0 };
+  if (t.scaleX !== t.scaleY) return null;
+  const rotationDeg = (Math.atan2(t.sinR, t.cosR) * 180) / Math.PI;
+  return t.scaleX < 0
+    ? { scale: -t.scaleX, rotationDeg: rotationDeg + 180 }
+    : { scale: t.scaleX, rotationDeg };
 }
 
 function pushLine(
@@ -967,6 +1065,163 @@ function applyProjectedPoints(
       to: { ...line.to, x: b.north, y: b.east },
     };
   });
+}
+
+/**
+ * Re-derive geographic ARC/CIRCLE/bulge geometry in the projected metre frame.
+ *
+ * A DXF is only known to be geographic once every coordinate has been read, so the
+ * parse pass has already flattened curves in FILE units — degrees here. Two defects
+ * follow, both fixed by this pass:
+ *  - the MAX_SAGITTA_M bound is compared against a radius in degrees (~1e-5), so
+ *    arcSegmentCount clamps and returns its 4-segment floor: a quarter arc becomes
+ *    4 chords instead of a smooth curve;
+ *  - an isotropic circle flattened in degree space and then projected is squashed
+ *    by cos(lat) E-W, which opens ~3 cm gaps against LINEs authored tangent to it.
+ *
+ * Mirrors path_engine/parsers/georef.py detect_and_project: the CENTRE projects
+ * per-axis about the origin (lat→north, lon→east), the RADIUS scales by the NORTH
+ * rate — the axis cos(lat) does not distort. Bulge is scale-invariant, so a bulge
+ * segment is re-derived from its projected endpoints.
+ *
+ * entity.geometry lands in the same metre frame as preview_points (G2) — leaving it
+ * in degrees makes getCurveGeometry (curveGeometry.ts) draw the curve at Null Island.
+ */
+function projectGeoCurves(
+  lines: PlanLine[],
+  rawCurves: Map<string, RawGeoCurve>,
+  origin: { lat: number; lon: number }
+): PlanLine[] {
+  if (lines.length === 0) return lines;
+  const { mPerDegNorth, mPerDegEast } = metresPerDegreePx4(origin.lat);
+  const toNorth = (lat: number) => (lat - origin.lat) * mPerDegNorth;
+  const toEast = (lon: number) => (lon - origin.lon) * mPerDegEast;
+
+  return lines.map((line) => {
+    const entity = line.entity;
+    if (!entity) return line;
+    const raw = rawCurves.get(entity.entity_id);
+
+    if (raw?.kind === "arc") {
+      const centerEast = toEast(raw.cx);
+      const centerNorth = toNorth(raw.cy);
+      const radiusM = raw.radius * mPerDegNorth;
+      const pts = sampleArcSagitta(
+        centerEast,
+        centerNorth,
+        radiusM,
+        raw.startAngle,
+        raw.endAngle,
+        MAX_SAGITTA_M
+      );
+      if (pts.length < 2) return line;
+      const sweep =
+        (raw.endAngle >= raw.startAngle ? raw.endAngle : raw.endAngle + 360) -
+        raw.startAngle;
+      return replaceCurveSamples(line, pts, {
+        lengthM: (Math.abs(sweep) / 360) * 2 * Math.PI * radiusM,
+        geometry: dxfCurveGeometryToNed({
+          cx: centerEast,
+          cy: centerNorth,
+          radius: radiusM,
+          startAngle: raw.startAngle,
+          endAngle: raw.endAngle,
+        }),
+      });
+    }
+
+    if (raw?.kind === "bulge") {
+      const vertices = raw.vertices.map((v) => ({
+        x: toEast(v.x),
+        y: toNorth(v.y),
+        bulge: v.bulge,
+      }));
+      const pts = tessellateBulgePath(vertices, raw.closed, MAX_SAGITTA_M);
+      if (pts.length < 2) return line;
+      return replaceCurveSamples(line, pts, { lengthM: polylineLength(pts) });
+    }
+
+    // Non-uniform INSERT curves keep their degree-space samples (they are ellipses,
+    // not arcs), but geometry must still leave this function in metres.
+    const entityType = (entity.entity_type ?? "").trim().toUpperCase();
+    if (entityType !== "ARC" && entityType !== "CIRCLE") return line;
+    const geom = entity.geometry as
+      | { centerNorth?: number; centerEast?: number; radius?: number }
+      | undefined;
+    if (
+      typeof geom?.centerNorth !== "number" ||
+      typeof geom?.centerEast !== "number" ||
+      typeof geom?.radius !== "number"
+    ) {
+      return line;
+    }
+    return {
+      ...line,
+      entity: {
+        ...entity,
+        geometry: {
+          ...geom,
+          centerNorth: toNorth(geom.centerNorth),
+          centerEast: toEast(geom.centerEast),
+          radius: geom.radius * mPerDegNorth,
+        },
+      },
+    };
+  });
+}
+
+/** Swap a line's tessellation for `ptsCad` (CAD x=east, y=north), keeping ids/labels. */
+function replaceCurveSamples(
+  line: PlanLine,
+  ptsCad: Xy[],
+  next: { lengthM: number; geometry?: Record<string, unknown> }
+): PlanLine {
+  const preview_points = ptsCad.map((p) => ({ north: p.y, east: p.x }));
+  const first = preview_points[0];
+  const last = preview_points[preview_points.length - 1];
+  return {
+    ...line,
+    from: { ...line.from, x: first.north, y: first.east },
+    to: { ...line.to, x: last.north, y: last.east },
+    entity: line.entity
+      ? {
+          ...line.entity,
+          preview_points,
+          length_m: next.lengthM,
+          ...(next.geometry ? { geometry: next.geometry } : {}),
+        }
+      : undefined,
+  };
+}
+
+/**
+ * Flatten a bulge polyline entirely within one frame.
+ *
+ * Kept separate from the LWPOLYLINE parse branch on purpose: that branch samples in
+ * file units and transforms each sample, which is what projectGeoCurves exists to
+ * undo. Folding the two together would put the degree-space bound back on this path.
+ */
+function tessellateBulgePath(
+  vertices: Vertex[],
+  closed: boolean,
+  maxSagitta: number
+): Xy[] {
+  const out: Xy[] = [];
+  const push = (p: Xy) => {
+    const prev = out[out.length - 1];
+    if (!prev || Math.hypot(p.x - prev.x, p.y - prev.y) > 1e-9) out.push(p);
+  };
+  const addSeg = (a: Vertex, b: Xy) => {
+    if (Math.abs(a.bulge || 0) >= 1e-6) {
+      for (const p of sampleBulgeSagitta(a, b, a.bulge, maxSagitta)) push(p);
+    } else {
+      push({ x: a.x, y: a.y });
+      push({ x: b.x, y: b.y });
+    }
+  };
+  for (let i = 0; i < vertices.length - 1; i++) addSeg(vertices[i], vertices[i + 1]);
+  if (closed && vertices.length > 2) addSeg(vertices[vertices.length - 1], vertices[0]);
+  return out;
 }
 
 // ── DXF pair helpers ────────────────────────────────────────────────────────

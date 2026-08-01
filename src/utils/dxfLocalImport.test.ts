@@ -10,6 +10,7 @@ import {
   readUnitScale,
   sampleArcSagitta,
 } from "./dxfLocalImport";
+import { getCurveGeometry } from "./curveGeometry";
 import { looksGeographic, metresPerDegreePx4, PX4_EARTH_RADIUS_M } from "./geoProjection";
 import { isPaintableMarkLine } from "./missionTrajectory";
 
@@ -186,6 +187,215 @@ describe("sagitta-bounded arc tessellation", () => {
     expect(res.lines).toHaveLength(1);
     const expected = (90 / 360) * 2 * Math.PI * 50;
     expect(res.lines[0].entity!.length_m).toBeCloseTo(expected, 2);
+  });
+});
+
+describe("sagitta bound is metres regardless of $INSUNITS", () => {
+  /** The same physical 50 m quarter arc, declared in five different unit systems. */
+  const FIFTY_METRE_ARC: Array<{ label: string; insunits: number; radius: number }> = [
+    { label: "mm", insunits: 4, radius: 50000 },
+    { label: "cm", insunits: 5, radius: 5000 },
+    { label: "m", insunits: 6, radius: 50 },
+    { label: "km", insunits: 7, radius: 0.05 },
+    { label: "inch", insunits: 1, radius: 50 / 0.0254 },
+  ];
+
+  /** Worst chord-midpoint radial error, in metres, against a 50 m arc centred on the origin. */
+  function achievedSagitta(pts: Array<{ north: number; east: number }>): number {
+    let worst = 0;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const mN = (pts[i].north + pts[i + 1].north) / 2;
+      const mE = (pts[i].east + pts[i + 1].east) / 2;
+      worst = Math.max(worst, Math.abs(50 - Math.hypot(mN, mE)));
+    }
+    return worst;
+  }
+
+  it.each(FIFTY_METRE_ARC)(
+    "$label drawing tessellates the same 50 m arc identically",
+    ({ insunits, radius }) => {
+      const r = parseLocalDxf(wrapDxf(arcEntity(0, 0, radius, 0, 90), insunits), "arc.dxf");
+      const pp = r.lines[0].entity!.preview_points;
+      // 56 chords is what a 5 mm sagitta costs on r = 50 m; the unit system is
+      // irrelevant to that, which is the whole point. Comparing the 0.005 bound
+      // against a radius in file units instead gave 1758 points for mm and 5 for km.
+      expect(pp.length).toBe(57);
+      const sagitta = achievedSagitta(pp);
+      expect(sagitta).toBeLessThanOrEqual(MAX_SAGITTA_M);
+      // Two-sided: an over-dense tessellation (mm was 5 µm) is a defect too.
+      expect(sagitta).toBeGreaterThan(MAX_SAGITTA_M / 2);
+      expect(r.lines[0].entity!.length_m).toBeCloseTo((90 / 360) * 2 * Math.PI * 50, 1);
+    }
+  );
+
+  it("does not under-sample a km drawing", () => {
+    // Was arcSegmentCount's 4-segment floor: 5 points at a 0.96 m sagitta, 192x over spec.
+    const r = parseLocalDxf(wrapDxf(arcEntity(0, 0, 0.05, 0, 90), 7), "arc-km.dxf");
+    const pp = r.lines[0].entity!.preview_points;
+    expect(pp.length).toBeGreaterThan(5);
+    expect(achievedSagitta(pp)).toBeLessThan(0.01);
+  });
+
+  it("does not over-sample a mm drawing", () => {
+    // Was 1758 points — a 0.005 mm bound, ~32x denser than the 5 mm spec asks for.
+    const r = parseLocalDxf(wrapDxf(arcEntity(0, 0, 50000, 0, 90), 4), "arc-mm.dxf");
+    expect(r.lines[0].entity!.preview_points.length).toBeLessThan(200);
+  });
+});
+
+describe("geographic ARC/CIRCLE tessellation", () => {
+  /**
+   * Real geo-DXF chain (verified 2026-08-01): LINE → ARC → LINE authored
+   * tangent-continuous in WGS84 degrees at ~13.0721 N / 80.2620 E.
+   * Arc radius 9.9596381450e-06 deg = 1.1075 m; each LINE is 0.906 m.
+   */
+  function geoTangentChainDxf(): string {
+    return wrapDxf(
+      lineEntity(80.26194119, 13.07206386, 80.2619495372, 13.0720633206) +
+        arcEntity(80.2619502141, 13.0720732584, 9.959638145e-6, 266.2044, 356.2044) +
+        lineEntity(80.2619604162, 13.0720725991, 80.26196097, 13.07208073),
+      6
+    );
+  }
+
+  /** Max radial deviation of chord midpoints — the sagitta the tessellation actually achieves. */
+  function maxSagittaOf(
+    pts: Array<{ north: number; east: number }>,
+    centerNorth: number,
+    centerEast: number,
+    radius: number
+  ): number {
+    let worst = 0;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const mN = (pts[i].north + pts[i + 1].north) / 2;
+      const mE = (pts[i].east + pts[i + 1].east) / 2;
+      worst = Math.max(worst, Math.abs(radius - Math.hypot(mN - centerNorth, mE - centerEast)));
+    }
+    return worst;
+  }
+
+  function polyLen(pts: Array<{ north: number; east: number }>): number {
+    let len = 0;
+    for (let i = 1; i < pts.length; i++) {
+      len += Math.hypot(pts[i].north - pts[i - 1].north, pts[i].east - pts[i - 1].east);
+    }
+    return len;
+  }
+
+  it("bounds the sagitta in metres, not degrees", () => {
+    const r = parseLocalDxf(geoTangentChainDxf(), "geo-arc-chain.dxf");
+    expect(r.isGeographic).toBe(true);
+    expect(r.lines).toHaveLength(3);
+
+    const arc = r.lines[1];
+    expect(arc.entity!.entity_type).toBe("ARC");
+    const pp = arc.entity!.preview_points;
+    // The degree-space bug clamped to arcSegmentCount's 4-segment floor (5 points).
+    expect(pp.length).toBeGreaterThanOrEqual(10);
+
+    const geom = arc.entity!.geometry as {
+      centerNorth: number;
+      centerEast: number;
+      radius: number;
+    };
+    expect(maxSagittaOf(pp, geom.centerNorth, geom.centerEast, geom.radius)).toBeLessThanOrEqual(
+      MAX_SAGITTA_M + 1e-6
+    );
+    // True arc length 1.7396 m; the inscribed polyline sits just inside it.
+    expect(polyLen(pp)).toBeCloseTo(1.739, 2);
+  });
+
+  it("keeps entities that touch in the source touching after projection", () => {
+    const r = parseLocalDxf(geoTangentChainDxf(), "geo-arc-chain.dxf");
+    const [line1, arc, line2] = r.lines;
+    const arcPp = arc.entity!.preview_points;
+    const l1Pp = line1.entity!.preview_points;
+    const l2Pp = line2.entity!.preview_points;
+
+    const gapIn = Math.hypot(
+      l1Pp[l1Pp.length - 1].north - arcPp[0].north,
+      l1Pp[l1Pp.length - 1].east - arcPp[0].east
+    );
+    const gapOut = Math.hypot(
+      arcPp[arcPp.length - 1].north - l2Pp[0].north,
+      arcPp[arcPp.length - 1].east - l2Pp[0].east
+    );
+    // Sampling in degree space and projecting the samples left 1.9 mm / 28.6 mm here.
+    expect(gapIn).toBeLessThan(1e-3);
+    expect(gapOut).toBeLessThan(1e-3);
+
+    // Straights are untouched by the curve pass and stay true to the file.
+    expect(polyLen(l1Pp)).toBeCloseTo(0.906, 3);
+    expect(polyLen(l2Pp)).toBeCloseTo(0.906, 3);
+  });
+
+  it("stores curve geometry in the same metre frame as preview_points", () => {
+    const r = parseLocalDxf(geoTangentChainDxf(), "geo-arc-chain.dxf");
+    const arc = r.lines[1];
+    const geom = arc.entity!.geometry as {
+      centerNorth: number;
+      centerEast: number;
+      radius: number;
+      startAngle: number;
+      endAngle: number;
+    };
+    // georef.py scales the radius by the NORTH rate: 9.959638145e-6 deg * 111194.9266.
+    expect(geom.radius).toBeCloseTo(1.1075, 3);
+    expect(geom.startAngle).toBeCloseTo(266.2044, 6);
+    expect(geom.endAngle).toBeCloseTo(356.2044, 6);
+    // Centre is metres about the geo origin — a degree-space centre would be ~80.
+    expect(Math.hypot(geom.centerNorth, geom.centerEast)).toBeLessThan(50);
+    for (const p of arc.entity!.preview_points) {
+      expect(Math.hypot(p.north - geom.centerNorth, p.east - geom.centerEast)).toBeCloseTo(
+        geom.radius,
+        6
+      );
+    }
+    // getCurveGeometry (map/SVG rendering) must agree with the samples.
+    const curve = getCurveGeometry(arc)!;
+    expect(curve.radius).toBeCloseTo(geom.radius, 9);
+    expect(curve.centerNorth).toBeCloseTo(geom.centerNorth, 9);
+  });
+
+  it("re-derives geographic bulge segments from projected endpoints", () => {
+    // Same 90° arc expressed as an LWPOLYLINE bulge: tan(sweep/4) = tan(22.5°).
+    const bulge = Math.tan((Math.PI / 180) * 22.5);
+    const dxf = wrapDxf(
+      `0\nLWPOLYLINE\n8\n0\n90\n2\n70\n0\n` +
+        `10\n80.26194955461\n20\n13.07206332063\n42\n${bulge}\n` +
+        `10\n80.2619604162\n20\n13.0720725991\n`,
+      6
+    );
+    const r = parseLocalDxf(dxf, "geo-bulge.dxf");
+    expect(r.isGeographic).toBe(true);
+    const pp = r.lines[0].entity!.preview_points;
+    expect(pp.length).toBeGreaterThanOrEqual(10);
+    let maxChord = 0;
+    for (let i = 1; i < pp.length; i++) {
+      maxChord = Math.max(
+        maxChord,
+        Math.hypot(pp[i].north - pp[i - 1].north, pp[i].east - pp[i - 1].east)
+      );
+    }
+    expect(maxChord).toBeLessThan(0.25);
+    expect(polyLen(pp)).toBeCloseTo(1.736, 2);
+  });
+
+  it("leaves metric arcs alone (mm drawing stays dense and correctly scaled)", () => {
+    // 50 000 mm = 50 m quarter arc.
+    const r = parseLocalDxf(wrapDxf(arcEntity(0, 0, 50000, 0, 90), 4), "arc-mm.dxf");
+    expect(r.isGeographic).toBe(false);
+    expect(r.unitScale).toBe(0.001);
+    const entity = r.lines[0].entity!;
+    const geom = entity.geometry as { centerNorth: number; centerEast: number; radius: number };
+    expect(geom.radius).toBeCloseTo(50, 9);
+    expect(geom.centerNorth).toBeCloseTo(0, 9);
+    expect(entity.length_m).toBeCloseTo((90 / 360) * 2 * Math.PI * 50, 2);
+    // 57 points: the sagitta bound is metres, so this matches the identical arc
+    // declared in metres/km/inches (see "sagitta bound is metres regardless of
+    // $INSUNITS"). Before that fix a mm drawing produced 1758.
+    expect(entity.preview_points.length).toBe(57);
+    expect(maxSagittaOf(entity.preview_points, 0, 0, 50)).toBeLessThanOrEqual(MAX_SAGITTA_M);
   });
 });
 
