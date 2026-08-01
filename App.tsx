@@ -633,6 +633,11 @@ export default function App() {
   const [operatorSession, setOperatorSession] = useState<authApi.OperatorSession | null>(null);
   const [operatorPassword, setOperatorPassword] = useState("");
   const [passwordChangeOpen, setPasswordChangeOpen] = useState(false);
+  // Forced rotation: the rover is on its bootstrap password and every endpoint
+  // except change-password/logout answers 403, including the socket handshake.
+  // This is NOT the same as passwordChangeOpen (a voluntary change from
+  // settings) — it cannot be dismissed, because there is nothing else to do.
+  const [mustChangePassword, setMustChangePassword] = useState(false);
   const [currentPasswordInput, setCurrentPasswordInput] = useState("");
   const [newPasswordInput, setNewPasswordInput] = useState("");
   const [confirmPasswordInput, setConfirmPasswordInput] = useState("");
@@ -1257,13 +1262,28 @@ export default function App() {
     setWsError("Session expired. Enter the rover password again.");
   }, [socket]);
 
+  // Any endpoint answering 403 password_change_required. The session stays —
+  // the token is valid and is exactly what change-password needs — but the
+  // socket is dropped, because the server refuses that handshake too and a
+  // reconnect loop would just churn.
+  const handlePasswordChangeRequired = useCallback(() => {
+    // Not inside the state updater — React may invoke updaters more than once
+    // (StrictMode), and they must stay pure.
+    console.log("[UI] AUTH_PASSWORD_ROTATION_REQUIRED", { source: "403" });
+    setMustChangePassword(true);
+    socket?.disconnect();
+    setSocket(null);
+    setWsStatus("idle");
+  }, [socket]);
+
   useEffect(() => {
     authApi.setAuthRuntime({
       token: operatorSession?.token ?? null,
       baseUrl: apiBaseUrl || null,
       onInvalidSession: handleInvalidSession,
+      onPasswordChangeRequired: handlePasswordChangeRequired,
     });
-  }, [apiBaseUrl, handleInvalidSession, operatorSession?.token]);
+  }, [apiBaseUrl, handleInvalidSession, handlePasswordChangeRequired, operatorSession?.token]);
 
   const logAction = useCallback((action: string, details?: Record<string, unknown>) => {
     const stamp = new Date().toISOString();
@@ -1598,13 +1618,29 @@ export default function App() {
       }
 
       setOperatorSession(session);
-      setOperatorPassword("");
       await authApi.saveStoredSession(session);
       authApi.setAuthRuntime({
         token: session.token,
         baseUrl: target,
         onInvalidSession: handleInvalidSession,
+        onPasswordChangeRequired: handlePasswordChangeRequired,
       });
+
+      // Bootstrap password still in force: the token is valid but everything
+      // except change-password answers 403 and the socket handshake is refused.
+      // Stop here — connecting would fail, and any screen we opened would just
+      // render 403s. Prefill the current password with what was typed at login
+      // (it IS the default) and hand over to the mandatory screen.
+      if (session.must_change_password) {
+        logAction("AUTH_PASSWORD_ROTATION_REQUIRED", { target });
+        setCurrentPasswordInput(operatorPassword);
+        setOperatorPassword("");
+        setMustChangePassword(true);
+        setWsStatus("idle");
+        setWsError("");
+        return;
+      }
+      setOperatorPassword("");
 
       pendingSocketRef.current?.disconnect();
       nextSocket = io(target, {
@@ -1808,6 +1844,12 @@ export default function App() {
     await authApi.saveStoredSession(null);
     setOperatorSession(null);
     setOperatorPassword("");
+    // Clear the forced-rotation gate too, or the modal survives the sign-out
+    // and covers the connection screen with no session left to change.
+    setMustChangePassword(false);
+    setCurrentPasswordInput("");
+    setNewPasswordInput("");
+    setConfirmPasswordInput("");
     disconnectToConnectionScreen();
   };
 
@@ -1839,6 +1881,15 @@ export default function App() {
       setNewPasswordInput("");
       setConfirmPasswordInput("");
       setPasswordChangeOpen(false);
+      // Rotation clears the 403 lockout. The token returned above is a NEW
+      // session (the old one is revoked server-side), and setAuthRuntime has
+      // already been pointed at it, so the socket can connect now.
+      if (mustChangePassword) {
+        setMustChangePassword(false);
+        showToast("Password set", "Connecting to the rover...", "success");
+        void connectSelectedWebsocket();
+        return;
+      }
       showToast("Password updated", "Other operator sessions were signed out.", "success");
     } catch (err: any) {
       Alert.alert("Password", err?.message || "Password change failed.");
@@ -3846,12 +3897,23 @@ export default function App() {
                 paddingLeft: insets?.left ?? 0,
               }}
             >
-              <Modal transparent visible={passwordChangeOpen} animationType="fade" onRequestClose={() => setPasswordChangeOpen(false)}>
+              <Modal
+                transparent
+                visible={passwordChangeOpen || mustChangePassword}
+                animationType="fade"
+                // Mandatory mode swallows the Android back button: there is no
+                // other screen to go to — everything else answers 403.
+                onRequestClose={() => {
+                  if (!mustChangePassword) setPasswordChangeOpen(false);
+                }}
+              >
                 <Pressable
-                  onPress={() => setPasswordChangeOpen(false)}
+                  onPress={() => {
+                    if (!mustChangePassword) setPasswordChangeOpen(false);
+                  }}
                   style={{
                     flex: 1,
-                    backgroundColor: "rgba(15,23,42,0.45)",
+                    backgroundColor: mustChangePassword ? "rgba(15,23,42,0.85)" : "rgba(15,23,42,0.45)",
                     alignItems: "center",
                     justifyContent: "center",
                     padding: 24,
@@ -3869,11 +3931,29 @@ export default function App() {
                       gap: 12,
                     }}
                   >
-                    <Text style={{ color: "#0f172a", fontSize: 20, fontWeight: "900" }}>Change rover password</Text>
+                    <Text style={{ color: "#0f172a", fontSize: 20, fontWeight: "900" }}>
+                      {mustChangePassword ? "Set a rover password" : "Change rover password"}
+                    </Text>
+                    {mustChangePassword ? (
+                      <View
+                        style={{
+                          borderRadius: 12,
+                          borderWidth: 1,
+                          borderColor: "#fcd34d",
+                          backgroundColor: "#fffbeb",
+                          padding: 12,
+                        }}
+                      >
+                        <Text style={{ color: "#92400e", fontSize: 13, lineHeight: 19 }}>
+                          This rover is still on its default setup password. It will not drive,
+                          spray or send telemetry until you set a real one.
+                        </Text>
+                      </View>
+                    ) : null}
                     <TextInput
                       value={currentPasswordInput}
                       onChangeText={setCurrentPasswordInput}
-                      placeholder="Current password"
+                      placeholder={mustChangePassword ? "Default password" : "Current password"}
                       placeholderTextColor="#94a3b8"
                       secureTextEntry
                       style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 12, padding: 12, color: "#0f172a" }}
@@ -3895,18 +3975,31 @@ export default function App() {
                       style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 12, padding: 12, color: "#0f172a" }}
                     />
                     <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end" }}>
-                      <Pressable
-                        onPress={() => setPasswordChangeOpen(false)}
-                        style={{ paddingHorizontal: 14, paddingVertical: 12, borderRadius: 12, backgroundColor: "#e2e8f0" }}
-                      >
-                        <Text style={{ color: "#0f172a", fontWeight: "800" }}>Cancel</Text>
-                      </Pressable>
+                      {/* No Cancel in mandatory mode — there is nothing to
+                          cancel back to. Sign out is the only other exit. */}
+                      {mustChangePassword ? (
+                        <Pressable
+                          onPress={logoutToConnectionScreen}
+                          style={{ paddingHorizontal: 14, paddingVertical: 12, borderRadius: 12, backgroundColor: "#e2e8f0" }}
+                        >
+                          <Text style={{ color: "#0f172a", fontWeight: "800" }}>Sign out</Text>
+                        </Pressable>
+                      ) : (
+                        <Pressable
+                          onPress={() => setPasswordChangeOpen(false)}
+                          style={{ paddingHorizontal: 14, paddingVertical: 12, borderRadius: 12, backgroundColor: "#e2e8f0" }}
+                        >
+                          <Text style={{ color: "#0f172a", fontWeight: "800" }}>Cancel</Text>
+                        </Pressable>
+                      )}
                       <Pressable
                         onPress={submitPasswordChange}
                         disabled={passwordChangeBusy}
                         style={{ paddingHorizontal: 14, paddingVertical: 12, borderRadius: 12, backgroundColor: passwordChangeBusy ? "#94a3b8" : "#2563eb" }}
                       >
-                        <Text style={{ color: "#fff", fontWeight: "800" }}>{passwordChangeBusy ? "Saving..." : "Save"}</Text>
+                        <Text style={{ color: "#fff", fontWeight: "800" }}>
+                          {passwordChangeBusy ? "Saving..." : mustChangePassword ? "Set password" : "Save"}
+                        </Text>
                       </Pressable>
                     </View>
                   </Pressable>

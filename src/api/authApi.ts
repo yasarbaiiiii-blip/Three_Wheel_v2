@@ -11,11 +11,26 @@ export type OperatorSession = {
   ttl_s: number;
   /** Backend this session was issued for (tokens are in-memory on the server). */
   baseUrl: string;
+  /**
+   * The rover is still on its documented bootstrap password and refuses to
+   * operate until it is rotated. Login SUCCEEDS in this state — the token is
+   * real and works for change-password — but every other endpoint returns 403
+   * and the Socket.IO handshake is refused, so there is no telemetry either.
+   *
+   * A successful login is the ONLY way to learn this: there is deliberately no
+   * unauthenticated endpoint that reports it, since that would tell an attacker
+   * exactly which rovers are still on a known password.
+   */
+  must_change_password: boolean;
 };
+
+/** Backend's 403 discriminator while the bootstrap password is in force. */
+export const PASSWORD_CHANGE_REQUIRED = "password_change_required";
 
 let sessionToken: string | null = null;
 let activeBaseUrl: string | null = null;
 let invalidSessionHandler: (() => void) | null = null;
+let passwordChangeRequiredHandler: (() => void) | null = null;
 let originalFetch: typeof fetch | null = null;
 
 export function normalizeBase(url: string | null | undefined): string | null {
@@ -36,10 +51,13 @@ export function setAuthRuntime(args: {
   token: string | null;
   baseUrl: string | null;
   onInvalidSession?: () => void;
+  onPasswordChangeRequired?: () => void;
 }) {
   sessionToken = args.token;
   activeBaseUrl = normalizeBase(args.baseUrl);
   invalidSessionHandler = args.onInvalidSession ?? invalidSessionHandler;
+  passwordChangeRequiredHandler =
+    args.onPasswordChangeRequired ?? passwordChangeRequiredHandler;
 }
 
 export function isSessionExpired(session: OperatorSession | null | undefined): boolean {
@@ -108,6 +126,23 @@ function withAuthHeader(init: RequestInit | undefined, token: string): RequestIn
   return { ...init, headers };
 }
 
+/**
+ * Is this 403 the bootstrap-password lockout, or an ordinary authorisation
+ * failure? Reads a CLONE — the caller still needs to consume the real body.
+ * Any parse failure means "not the lockout": never escalate an unrelated 403
+ * into a forced password change.
+ */
+async function isPasswordChangeRequired(response: Response): Promise<boolean> {
+  try {
+    const body = await response.clone().json();
+    const detail = body?.detail;
+    if (typeof detail === "string") return detail === PASSWORD_CHANGE_REQUIRED;
+    return detail?.code === PASSWORD_CHANGE_REQUIRED;
+  } catch {
+    return false;
+  }
+}
+
 export function installAuthenticatedFetch() {
   if (originalFetch) return;
   originalFetch = globalThis.fetch.bind(globalThis);
@@ -116,15 +151,35 @@ export function installAuthenticatedFetch() {
       ? withAuthHeader(init, sessionToken)
       : init;
     const response = await originalFetch!(input, nextInit);
-    if (response.status === 401 && shouldAttachToken(input)) {
-      invalidSessionHandler?.();
+    if (shouldAttachToken(input)) {
+      if (response.status === 401) {
+        invalidSessionHandler?.();
+      } else if (response.status === 403 && (await isPasswordChangeRequired(response))) {
+        // Every endpoint answers 403 until the default password is rotated, so
+        // without this the app renders errors on every screen with no route out.
+        // Reached when the flag is missed at login — e.g. a session restored
+        // from storage that predates the rover being reset to its default.
+        passwordChangeRequiredHandler?.();
+      }
     }
     return response;
   }) as typeof fetch;
 }
 
-function withSessionHost(session: Omit<OperatorSession, "baseUrl"> | OperatorSession, baseUrl: string): OperatorSession {
-  return { ...session, baseUrl: normalizeBase(baseUrl) ?? baseUrl } as OperatorSession;
+function withSessionHost(
+  session: Partial<OperatorSession> & { token: string },
+  baseUrl: string
+): OperatorSession {
+  return {
+    ...session,
+    baseUrl: normalizeBase(baseUrl) ?? baseUrl,
+    // Normalised here, not trusted from the wire. /api/auth/change-password
+    // does not return the field at all (the rotation it just performed is what
+    // clears the condition), and a session stored before this field existed
+    // will not carry it either. Absent must read as "not blocked", or a
+    // successful rotation would leave the app stuck on the mandatory screen.
+    must_change_password: session.must_change_password === true,
+  } as OperatorSession;
 }
 
 export async function login(
@@ -148,7 +203,7 @@ export async function login(
     if (!response.ok) {
       throw new Error(response.status === 503 ? "Rover password is not configured." : "Invalid rover password.");
     }
-    const body = (await response.json()) as Omit<OperatorSession, "baseUrl">;
+    const body = (await response.json()) as Partial<OperatorSession> & { token: string };
     return withSessionHost(body, normalized);
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
@@ -182,6 +237,6 @@ export async function changePassword(
     const text = await response.text();
     throw new Error(text || `Password change failed (${response.status})`);
   }
-  const body = (await response.json()) as Omit<OperatorSession, "baseUrl">;
+  const body = (await response.json()) as Partial<OperatorSession> & { token: string };
   return withSessionHost(body, normalized);
 }
