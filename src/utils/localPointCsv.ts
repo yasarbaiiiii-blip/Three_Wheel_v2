@@ -143,11 +143,23 @@ function stripBom(text: string): string {
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 }
 
+/**
+ * Non-empty lines, with a LEADING comment block stripped.
+ *
+ * `#` is only a comment marker before the header. Applying it to the whole file
+ * deleted data rows: Emlid `Name` is operator-typed, so points named `#1`, `#3`
+ * vanished with an empty `warnings` array while `#`-free rows loaded normally.
+ * Anything at or after the first non-comment line is kept — a stray `#` line there
+ * now reaches the row parser and is rejected loudly instead of disappearing.
+ */
 function nonEmptyLines(text: string): string[] {
-  return stripBom(text)
+  const lines = stripBom(text)
     .split(/\r?\n/)
     .map((l) => l.trim())
-    .filter((l) => l !== "" && !l.startsWith("#"));
+    .filter((l) => l !== "");
+  let start = 0;
+  while (start < lines.length && lines[start].startsWith("#")) start++;
+  return lines.slice(start);
 }
 
 function looksNumeric(cell: string): boolean {
@@ -220,7 +232,15 @@ export function splitDelimitedCells(line: string, delimiter: "," | ";" | "\t" = 
 }
 
 function parseFiniteNumber(raw: string, rowNum: number, label: string): number {
-  const n = Number(String(raw).trim().replace(",", "."));
+  const trimmed = String(raw).trim();
+  // `Number("")` is 0 and passes Number.isFinite, so a blank cell used to parse as a
+  // coordinate of zero. An Emlid export in a projected CS has Easting/Northing filled
+  // and Latitude/Longitude blank; that file resolved as GPS (the headers exist), every
+  // point collapsed onto lat 0 / lon 0, and the warnings were identical to a good file.
+  if (trimmed === "") {
+    throw new Error(`Row ${rowNum}: ${label} is empty`);
+  }
+  const n = Number(trimmed.replace(",", "."));
   if (!Number.isFinite(n)) {
     throw new Error(`Row ${rowNum}: ${label} must be numeric`);
   }

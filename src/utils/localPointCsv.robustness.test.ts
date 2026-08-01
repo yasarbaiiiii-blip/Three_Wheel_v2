@@ -10,6 +10,70 @@ import {
 import { getLineLengthM } from "./pathWorkflow";
 import { getPlanLineRenderPoints, isCircleLikeLine } from "./curveGeometry";
 
+describe("blank coordinate cells must never parse as zero", () => {
+  // Regression: `Number("")` is 0 and finite, so blank lat/lon became a point at
+  // lat 0 / lon 0 with warnings IDENTICAL to a valid file. Real trigger: an Emlid
+  // export in a projected CS has Easting/Northing filled and lat/lon blank.
+  it("rejects a whole file whose Latitude/Longitude are blank (projected-CS export)", () => {
+    const text = [
+      "Name,Easting,Northing,Longitude,Latitude",
+      "P1,1199779.779,1257454.473,,",
+      "P2,1199779.975,1257450.673,,",
+      "P3,1199780.101,1257446.912,,",
+    ].join("\n");
+    expect(() => parseLocalPointCsv(text, "projected.csv")).toThrow(/empty/i);
+  });
+
+  it("drops a single blank-coordinate row and says so, instead of placing it at (0,0)", () => {
+    const text = [
+      "Name,Latitude,Longitude",
+      "P1,13.1957205,80.2179980",
+      "P2,,",
+      "P3,13.1957400,80.2180100",
+      "P4,13.1957500,80.2180150",
+    ].join("\n");
+    const r = parseLocalPointCsv(text, "onegap.csv");
+    expect(r.num_points).toBe(3);
+    expect(r.points.every((p) => p.lat !== 0 && p.lon !== 0)).toBe(true);
+    expect(r.warnings.some((w) => /empty/i.test(w))).toBe(true);
+  });
+
+  it("still rejects non-numeric coordinates", () => {
+    const text = ["north,east", "0,0", "abc,1", "5,5"].join("\n");
+    const r = parseLocalPointCsv(text, "bad.csv");
+    expect(r.num_points).toBe(2);
+    expect(r.warnings.some((w) => /numeric/i.test(w))).toBe(true);
+  });
+});
+
+describe("'#' is a comment marker only before the header", () => {
+  // Regression: the `#` filter ran over the whole file, so operator-typed point
+  // names like `#1` were deleted with an empty warnings array.
+  it("keeps data rows whose Name starts with '#'", () => {
+    const text = [
+      "Name,Latitude,Longitude",
+      "#1,13.1957205,80.2179980",
+      "P2,13.1957275,80.2180018",
+      "#3,13.1957400,80.2180100",
+      "P4,13.1957500,80.2180150",
+    ].join("\n");
+    const r = parseLocalPointCsv(text, "hashnames.csv");
+    expect(r.num_points).toBe(4);
+  });
+
+  it("still strips a leading comment block above the header", () => {
+    const text = [
+      "# Exported by Reach RS3, 2026-08-01",
+      "# CS: WGS84",
+      "Name,Latitude,Longitude",
+      "P1,13.1957205,80.2179980",
+      "P2,13.1957275,80.2180018",
+    ].join("\n");
+    const r = parseLocalPointCsv(text, "leadingcomment.csv");
+    expect(r.num_points).toBe(2);
+  });
+});
+
 describe("CSV parse robustness", () => {
   it("detects semicolon delimiter and decimal-comma numbers", () => {
     expect(detectCsvDelimiter("north;east")).toBe(";");
