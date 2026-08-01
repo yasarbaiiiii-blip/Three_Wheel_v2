@@ -730,9 +730,17 @@ export default function ModernHomeUI(props) {
   // Derived Telemetry Values
   const lat = telemetrySnapshot?.lat?.toFixed(8) ?? "N/A";
   const lon = telemetrySnapshot?.lon?.toFixed(8) ?? "N/A";
-  // Prefer the human-readable fix name from API, fall back to numeric lookup
-  const gpsFix = telemetrySnapshot?.gps_fix_name
-    ?? (telemetrySnapshot?.gps_fix == null ? "No Fix"
+  // Prefer the human-readable fix name from API, fall back to numeric lookup.
+  // Sentinel names ("UNKNOWN", "FIX_n") mean the server couldn't map the fix
+  // type — resolve those from the numeric gps_fix instead of showing them raw.
+  const rawGpsFixName = telemetrySnapshot?.gps_fix_name;
+  const gpsFixNameUsable =
+    rawGpsFixName != null &&
+    rawGpsFixName.toUpperCase() !== "UNKNOWN" &&
+    !rawGpsFixName.toUpperCase().startsWith("FIX_");
+  const gpsFix = gpsFixNameUsable
+    ? rawGpsFixName
+    : (telemetrySnapshot?.gps_fix == null ? "No Fix"
       : telemetrySnapshot.gps_fix === 0 ? "No Fix"
       : telemetrySnapshot.gps_fix === 1 ? "No Fix"
       : telemetrySnapshot.gps_fix === 2 ? "2D Fix"
@@ -787,9 +795,14 @@ export default function ModernHomeUI(props) {
     : batteryPct > 20 ? COLORS.warning
     : COLORS.danger;
 
+  // Order matters: "RTK_FLOAT" contains "rtk", so the float check must come
+  // before the fixed check or Float renders green. 3D/DGPS = usable but not
+  // marking-grade → warning; anything else (no fix, 2D, unknown) → danger.
+  const gpsFixLower = gpsFix.toLowerCase();
   const gpsFixTone =
-    gpsFix.toLowerCase().includes("rtk") || gpsFix.toLowerCase().includes("fixed") ? COLORS.success
-    : gpsFix.toLowerCase().includes("float") ? COLORS.warning
+    gpsFixLower.includes("float") ? COLORS.warning
+    : gpsFixLower.includes("rtk") || gpsFixLower.includes("fixed") ? COLORS.success
+    : gpsFixLower.includes("3d") || gpsFixLower.includes("dgps") ? COLORS.warning
     : COLORS.danger;
 
   const joystickStateTone =
