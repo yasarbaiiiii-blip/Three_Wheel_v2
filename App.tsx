@@ -3485,6 +3485,10 @@ export default function App() {
     }
     logAction("ARM_REQUEST", { apiBaseUrl, arm });
     setMissionActionBusy(true);
+    // Abortable: a hung fetch here used to leave missionActionBusy=true forever,
+    // wedging the whole manual-drive flow until an app restart.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
     try {
       showToast(arm ? "Arm" : "Disarm", arm ? "Arming vehicle..." : "Disarming vehicle...", "info");
       const res = await fetch(`${apiBaseUrl}/api/arm`, {
@@ -3493,6 +3497,7 @@ export default function App() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ arm }),
+        signal: controller.signal,
       });
       let data;
       try { data = await res.clone().json(); } catch (e) { }
@@ -3506,13 +3511,15 @@ export default function App() {
       Alert.alert(arm ? "Armed" : "Disarmed", `Vehicle was successfully ${arm ? "armed" : "disarmed"}.`);
       showToast(arm ? "Armed" : "Disarmed", `Vehicle is now ${arm ? "armed" : "disarmed"}.`, "success");
     } catch (error) {
-      logAction("ARM_FAILED", {
-        arm,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      Alert.alert(arm ? "Arm failed" : "Disarm failed", error instanceof Error ? error.message : "Command rejected.");
-      showToast(arm ? "Arm failed" : "Disarm failed", error instanceof Error ? error.message : "Command rejected.", "error");
+      const aborted = error instanceof Error && error.name === "AbortError";
+      const message = aborted
+        ? "Request timed out — check the rover connection."
+        : error instanceof Error ? error.message : "Command rejected.";
+      logAction("ARM_FAILED", { arm, error: message });
+      Alert.alert(arm ? "Arm failed" : "Disarm failed", message);
+      showToast(arm ? "Arm failed" : "Disarm failed", message, "error");
     } finally {
+      clearTimeout(timeout);
       setMissionActionBusy(false);
     }
   }
@@ -3524,12 +3531,17 @@ export default function App() {
     }
     logAction("SET_MODE_REQUEST", { apiBaseUrl, targetMode });
     setMissionActionBusy(true);
+    // Abortable for the same reason as armVehicle: a hung fetch must never
+    // pin missionActionBusy forever.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
     try {
       showToast("Mode", `Switching to ${targetMode}...`, "info");
       const res = await fetch(`${apiBaseUrl}/api/set_mode`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: targetMode })
+        body: JSON.stringify({ mode: targetMode }),
+        signal: controller.signal,
       });
       if (!res.ok) {
         const errMsg = await parseFetchError(res, "Set mode failed");
@@ -3540,14 +3552,16 @@ export default function App() {
       Alert.alert("Mode Changed", `Vehicle mode set to ${targetMode}.`);
       showToast("Mode Changed", `Vehicle mode is now ${targetMode}.`, "success");
     } catch (error) {
-      logAction("SET_MODE_FAILED", {
-        targetMode,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      Alert.alert("Mode Change Failed", error instanceof Error ? error.message : "Command rejected.");
-      showToast("Mode Change Failed", error instanceof Error ? error.message : "Command rejected.", "error");
+      const aborted = error instanceof Error && error.name === "AbortError";
+      const message = aborted
+        ? "Request timed out — check the rover connection."
+        : error instanceof Error ? error.message : "Command rejected.";
+      logAction("SET_MODE_FAILED", { targetMode, error: message });
+      Alert.alert("Mode Change Failed", message);
+      showToast("Mode Change Failed", message, "error");
       throw error;
     } finally {
+      clearTimeout(timeout);
       setMissionActionBusy(false);
     }
   }
