@@ -15,7 +15,8 @@ export type JoystickErrorCode =
   | "replay"
   | "rate_exceeded"
   | "nan_value"
-  | "out_of_range";
+  | "out_of_range"
+  | "arm_failed";
 
 export interface JoystickAcquireRequest {
   auth: string;

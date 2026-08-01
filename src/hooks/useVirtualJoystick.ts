@@ -36,7 +36,11 @@ import { processAxis } from "../utils/joystickMath";
 const DEFAULT_MAX_THROTTLE = 0.35;
 const DEFAULT_MAX_STEERING = 0.2;
 const DEFAULT_COMMAND_RATE_HZ = 20;
-const ACQUIRE_TIMEOUT_MS = 3800;
+// Must cover the server's real worst case: neutral prestream (0.2 s) +
+// set_mode service (5 s) + MANUAL confirm (3 s) + arm service (5 s) + arm
+// confirm (5 s). The old 3.8 s timed out before slow-but-successful acquires,
+// then the late success raced a user-triggered re-acquire ("already in use").
+const ACQUIRE_TIMEOUT_MS = 20000;
 const RELEASE_CONFIRM_TIMEOUT_MS = 1000;
 const DEAD_ZONE = 0.03;
 const RESPONSE_CURVE = 1;
@@ -48,6 +52,7 @@ const ERROR_MESSAGES: Record<JoystickErrorCode, string> = {
   mode_unavailable: "MANUAL mode unavailable — check FCU state",
   fcu_disconnected: "Flight controller not connected",
   not_armed: "Vehicle must be armed before acquiring joystick",
+  arm_failed: "Vehicle could not be armed — check FCU prearm state",
   not_owner: "Session or lease mismatch — re-acquire required",
   mission_active: "Mission is active — cannot acquire joystick",
   joystick_active: "Joystick already in use by another client",

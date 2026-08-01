@@ -621,8 +621,11 @@ export default function ModernHomeUI(props) {
   const [activeNav, setActiveNav] = useState(PAGE_TO_NAV[currentPage] || "main");
   const lastMenuTapRef = useRef(0);
   const lastNavTapRef = useRef({ id: null, time: 0 });
-  const autoArmAttemptedRef = useRef(false);
-  const autoAcquireAttemptedRef = useRef(false);
+  // Auto-acquire is retriable: the old one-shot "attempted" latch left the
+  // panel stuck on "Preparing joystick control..." after any transient
+  // acquire failure until the panel was closed and reopened.
+  const autoAcquireAttemptsRef = useRef(0);
+  const [autoAcquireExhausted, setAutoAcquireExhausted] = useState(false);
   const wasMissionControlOpenRef = useRef(false);
   const virtualJoystickRef = useRef(virtualJoystick);
   virtualJoystickRef.current = virtualJoystick;
@@ -878,38 +881,41 @@ export default function ModernHomeUI(props) {
     }
   }, [showMissionControl]);
 
+  // Open → drive: acquire is the ONLY round trip. The server sets MANUAL and
+  // arms inside acquire, so the frontend no longer pre-arms (and must not gate
+  // on isVehicleArmed, or a disarmed rover could never open the joystick).
+  // One automatic attempt per panel open; closing the panel resets the latch,
+  // and a failed attempt shows an honest "reopen to retry" hint instead of
+  // the old permanently-stuck "Preparing joystick control...".
   useEffect(() => {
     if (!showJoystick) {
-      autoArmAttemptedRef.current = false;
-      autoAcquireAttemptedRef.current = false;
+      autoAcquireAttemptsRef.current = 0;
+      setAutoAcquireExhausted(false);
       return;
     }
-    if (vehicleMode !== "MANUAL" || missionRunning || isVehicleArmed || missionActionBusy) return;
-    if (autoArmAttemptedRef.current || !onArmVehicle) return;
-
-    autoArmAttemptedRef.current = true;
-    void onArmVehicle(true);
-  }, [showJoystick, vehicleMode, missionRunning, isVehicleArmed, missionActionBusy, onArmVehicle]);
-
-  useEffect(() => {
-    if (!showJoystick || vehicleMode !== "MANUAL" || missionRunning || !isVehicleArmed) return;
+    if (vehicleMode !== "MANUAL" || missionRunning) return;
+    if (hasJoystickLease) {
+      setAutoAcquireExhausted(false);
+      return;
+    }
     if (
       !canAcquireJoystick ||
-      hasJoystickLease ||
       joystickState === "ACQUIRING" ||
       joystickState === "RELEASING"
     ) {
       return;
     }
-    if (autoAcquireAttemptedRef.current || !virtualJoystick) return;
-
-    autoAcquireAttemptedRef.current = true;
+    if (!virtualJoystick) return;
+    if (autoAcquireAttemptsRef.current > 0) {
+      setAutoAcquireExhausted(true);
+      return;
+    }
+    autoAcquireAttemptsRef.current = 1;
     virtualJoystick.acquire();
   }, [
     showJoystick,
     vehicleMode,
     missionRunning,
-    isVehicleArmed,
     canAcquireJoystick,
     hasJoystickLease,
     joystickState,
@@ -1039,11 +1045,9 @@ export default function ModernHomeUI(props) {
           ? "Lease held neutral — move the stick to drive."
           : joystickState === "SUSPENDED"
             ? "App resumed — close and reopen manual control."
-            : !isVehicleArmed
-              ? missionActionBusy
-                ? "Arming vehicle..."
-                : "Waiting for vehicle arm..."
-              : "Preparing joystick control...";
+            : autoAcquireExhausted
+              ? "Joystick unavailable — close the panel and reopen to retry."
+              : "Connecting joystick control...";
 
   const openManualJoystickPanel = useCallback(() => {
     setShowMissionControl(true);
