@@ -149,6 +149,11 @@ import {
   matchNonSprayToExtensionRole,
 } from "./src/utils/extensionTransitClassify";
 import { planLinesFromPreviewWaypoints } from "./src/utils/previewWaypointLayers";
+import {
+  isSprayActive,
+  readSprayGate,
+  type SprayGateNotice,
+} from "./src/utils/sprayGateNotice";
 import type {
   AlignmentResultState,
   MultiPointPlacementPhase,
@@ -8451,6 +8456,7 @@ function SwoziPage({
   const [isSavingSprayParams, setIsSavingSprayParams] = useState(false);
   const [isSprayHoldActive, setIsSprayHoldActive] = useState(false);
   const [isSprayHoldChanging, setIsSprayHoldChanging] = useState(false);
+  const [sprayGate, setSprayGate] = useState<SprayGateNotice | null>(null);
 
   const sprayApiUrl = useCallback((path: string) => {
     if (!apiBaseUrl) return "";
@@ -8517,9 +8523,12 @@ function SwoziPage({
         const res = await fetch(sprayApiUrl("/api/spray/status"));
         if (res.ok) {
           const data = await res.json();
-          const active = !!(data.spraying || data.manual_override || data.spray_active_desired);
+          const active = isSprayActive(data);
           setSprayStatus(active);
           setIsSprayHoldActive(active);
+          // A shut valve does not say why. Keep the node's reason so a refusing
+          // gate is distinguishable from a legitimately dry stretch of path.
+          setSprayGate(readSprayGate(data));
         }
       } catch (err) {
         // ignore network errors
@@ -8775,6 +8784,46 @@ function SwoziPage({
           />
         </View>
       </View>
+
+      {/* Why the valve is shut. Rendered verbatim — the trailing "(param)" /
+          "(mission)" marker is the operator's only clue about which limit
+          refused, so this must never be summarised into a generic message. */}
+      {sprayGate?.blocked && sprayGate.reason ? (
+        <View
+          style={{
+            marginTop: 12,
+            padding: 10,
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: "#fca5a5",
+            backgroundColor: "#fef2f2",
+          }}
+        >
+          <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 4 }}>
+            <Text style={{ color: "#b91c1c", fontSize: 11, fontWeight: "800", letterSpacing: 0.4 }}>
+              SPRAY BLOCKED
+            </Text>
+            {sprayGate.source ? (
+              <View
+                style={{
+                  marginLeft: 8,
+                  backgroundColor: sprayGate.source === "mission" ? "#7c3aed" : "#475569",
+                  paddingHorizontal: 6,
+                  paddingVertical: 1,
+                  borderRadius: 8,
+                }}
+              >
+                <Text style={{ color: "#fff", fontSize: 9, fontWeight: "700" }}>
+                  {sprayGate.source === "mission" ? "MISSION OVERRIDE" : "ROS PARAM"}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+          <Text selectable style={{ color: "#7f1d1d", fontSize: 12, lineHeight: 17 }}>
+            {sprayGate.reason}
+          </Text>
+        </View>
+      ) : null}
 
       {/* Spray Test Section */}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginVertical: 12 }}>
