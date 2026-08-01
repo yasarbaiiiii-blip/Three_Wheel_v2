@@ -353,6 +353,14 @@ export type StagedMissionResponse = {
   mission_id: string;
   created_at?: number | null;
   anchor?: Record<string, unknown> | null;
+  /**
+   * Whether this mission re-binds to its surveyed GPS anchor at start, or drives
+   * in whatever local frame the EKF origin happens to be in. Decides WHERE the
+   * paint lands: a LOCAL_NED fallback on a surveyed job misplaces the whole
+   * mission and shows no other symptom. Absent on artifacts staged before the
+   * backend reported it — read that as "not recorded", never as LOCAL_NED.
+   */
+  placement_mode?: "GPS_SURVEYED" | "LOCAL_NED" | null;
   num_waypoints: number;
   waypoints: number[][];
   spray_flags: boolean[];
