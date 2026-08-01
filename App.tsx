@@ -693,6 +693,63 @@ export default function App() {
   const [latchedPreviewGps, setLatchedPreviewGps] = useState<{ lat: number; lon: number } | null>(null);
 
   /**
+   * Which pending metric DXF the Align step is manipulating, plus the composed line set
+   * the map is drawing for it — published by FieldsPage (see onAlignContextChange).
+   *
+   * A ref, not state: this only needs to be correct at the moment a user action fires one
+   * of the handlers below, and mirroring FieldsPage's render output into App state would
+   * churn a render on every map recomposition for no gain.
+   */
+  const alignContextRef = useRef<{ fileId: string | null; displayLines: PlanLine[] }>({
+    fileId: null,
+    displayLines: [],
+  });
+  const handleAlignContextChange = useCallback(
+    (ctx: { fileId: string | null; displayLines: PlanLine[] }) => {
+      alignContextRef.current = ctx;
+    },
+    []
+  );
+
+  /**
+   * The geometry the plan-manipulation handlers act on.
+   *
+   * A metric DXF is deliberately held OUT of mission `lines` until Fix Alignment (see
+   * handleLocalDxfParsed) — FieldsPage composes it into the map for display only. Reading
+   * `lines` here would hand back an empty array on a first metric-DXF upload (so Move /
+   * Rotate Plan, Fit to Reference Points and Visual Alignment all silently no-op on their
+   * `length === 0` guards), or, in a mixed batch, another already-verified file's geometry.
+   */
+  function getManipulationTarget(): { fileId: string | null; lines: PlanLine[] } {
+    const fileId = alignContextRef.current.fileId;
+    const pending = fileId ? pendingDxfAlignment[fileId] : null;
+    if (fileId && pending) return { fileId, lines: pending.rawLines };
+    return { fileId: null, lines };
+  }
+
+  /** Bake a transform back into wherever the manipulated geometry actually lives. */
+  function commitManipulationLines(
+    transform: (north: number, east: number) => { north: number; east: number }
+  ) {
+    const { fileId } = getManipulationTarget();
+    if (fileId) {
+      setPendingDxfAlignment((prev) => {
+        const cur = prev[fileId];
+        if (!cur) return prev;
+        return {
+          ...prev,
+          [fileId]: {
+            ...cur,
+            rawLines: sanitizePlanLines(transformPlanLinesGeometry(cur.rawLines, transform)),
+          },
+        };
+      });
+      return;
+    }
+    setLines((prev) => transformPlanLinesGeometry(prev, transform));
+  }
+
+  /**
    * Sticky anchor matching the live fields preview (auto-origin / refs / fallback).
    * Function declaration (not useCallback): may close over state declared later in this
    * component body; only reads those bindings when invoked on user action.
@@ -717,19 +774,28 @@ export default function App() {
           ? { lat: telemetrySnapshot!.lat as number, lon: telemetrySnapshot!.lon as number }
           : null),
       // Raw design lines — same coords the map projects under AUTO_ORIGIN_RAW / fallback.
-      lines: sanitizePlanLines(lines),
+      // Must be the SAME list the map resolved its origin from, or the plan jumps the
+      // instant the sticker appears: with a pending metric DXF the map draws FieldsPage's
+      // composed set (boundary + committed + pending), while `lines` alone is still empty.
+      lines: sanitizePlanLines(
+        alignContextRef.current.fileId && alignContextRef.current.displayLines.length > 0
+          ? alignContextRef.current.displayLines
+          : lines
+      ),
     });
   }
 
   // 3. Trigger Function: Bundles lines into one item
   function startVisualAlignment() {
     console.log("[Align DXF] startVisualAlignment: Initiating visual alignment mode.");
-    if (lines.length === 0) {
+    const target = getManipulationTarget();
+    const planLines = target.lines;
+    if (planLines.length === 0) {
       console.log("[Align DXF] startVisualAlignment: No lines available to align, aborting.");
       return;
     }
 
-    const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(lines);
+    const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(planLines);
     // width = east span (maxY−minY), height = north span (maxX−minX) — see planResizeHandles.
     const stickerW = maxY - minY;
     const stickerH = maxX - minX;
@@ -740,7 +806,7 @@ export default function App() {
 
     setVisualAlignmentItem({
       id: "visual-alignment-group",
-      lines: lines,
+      lines: planLines,
       x: 0,
       y: 0,
       rotation: 0,
@@ -755,11 +821,13 @@ export default function App() {
 
   // Plan Editing: lets user drag/scale/rotate the plan from the 4th dropdown
   function startPlanEditing() {
-    if (lines.length === 0) return;
+    const target = getManipulationTarget();
+    const planLines = target.lines;
+    if (planLines.length === 0) return;
     // Sticker still carries ALL lines (extensions transform with the plan), but OBB
     // width/height use primary geometry only so resize handles stay on the field —
     // not inflated by PRE/AFT run-ups when extensions are enabled.
-    const primary = lines.filter(
+    const primary = planLines.filter(
       (l) =>
         l.layer !== "extension" &&
         l.layer !== "transit" &&
@@ -767,7 +835,7 @@ export default function App() {
         !String(l.id ?? "").startsWith("ext-pre-") &&
         !String(l.id ?? "").startsWith("ext-aft-")
     );
-    const bboxSource = primary.length > 0 ? primary : lines;
+    const bboxSource = primary.length > 0 ? primary : planLines;
     const { minX, minY, maxX, maxY } = computePlanBoundingBoxLegacy(bboxSource);
     // width = east span, height = north span (matches OBB halfE/halfN).
     const stickerW = maxY - minY;
@@ -778,7 +846,7 @@ export default function App() {
 
     setVisualAlignmentItem({
       id: "plan-editing-group",
-      lines: lines,
+      lines: planLines,
       x: 0,
       y: 0,
       rotation: 0,
@@ -801,7 +869,9 @@ export default function App() {
         const t = transformVisualDxfPoint(north, east, item);
         return { north: t.north, east: t.east };
       };
-      setLines((prev) => transformPlanLinesGeometry(prev, transformPt));
+      // Routed through commitManipulationLines so a pending metric DXF's drag lands on its
+      // own rawLines — writing `lines` here would move every OTHER file in the batch instead.
+      commitManipulationLines(transformPt);
     }
     setIsPlanEditingMode(false);
     setVisualAlignmentItem(null);
@@ -837,7 +907,8 @@ export default function App() {
   function handleFitToReferencePoints(
     refList: Array<{ lat: number; lon: number }>
   ) {
-    if (lines.length === 0) {
+    const target = getManipulationTarget();
+    if (target.lines.length === 0) {
       Alert.alert("No plan", "Upload a DXF plan before fitting to reference points.");
       return;
     }
@@ -856,7 +927,7 @@ export default function App() {
     let item = visualAlignmentItem?.id === "plan-editing-group" ? visualAlignmentItem : null;
     let anchor = visualAlignmentAnchor;
     if (!item || !isPlanEditingMode) {
-      const all = sanitizePlanLines(lines);
+      const all = sanitizePlanLines(target.lines);
       const primary = all.filter(
         (l) =>
           l.layer !== "extension" &&
@@ -946,7 +1017,9 @@ export default function App() {
       return;
     }
 
-    const { minX, minY, maxX, maxY } = computeLineBoundingBox(lines);
+    const target = getManipulationTarget();
+    const planLines = target.lines;
+    const { minX, minY, maxX, maxY } = computeLineBoundingBox(planLines);
     const dxfCorners = [
       { x: minX, y: minY },
       { x: maxX, y: minY },
@@ -964,9 +1037,58 @@ export default function App() {
     } else if (alignedRefPoints[0]) {
       originDxfNorth = alignedRefPoints[0].dxf_y;
       originDxfEast = alignedRefPoints[0].dxf_x;
-    } else if (lines.length > 0) {
-      originDxfNorth = (lines[0].from?.x ?? 0) - 2;
-      originDxfEast = (lines[0].from?.y ?? 0) - 2;
+    } else if (planLines.length > 0) {
+      originDxfNorth = (planLines[0].from?.x ?? 0) - 2;
+      originDxfEast = (planLines[0].from?.y ?? 0) - 2;
+    }
+
+    /**
+     * Per-file metric DXF (multi-file batch): CAPTURE ONLY.
+     *
+     * Its geometry lives in pendingDxfAlignment, so the local bake below would transform
+     * `lines` — where this file is not — and flip the whole batch to alignment: "verified"
+     * while other files are still pending. Publishing extractedCorners instead hands the
+     * placement to AlignDxfPanel's Fix Alignment, which solves against this file's own
+     * rawLines and merges via commitDxfFileAlignment onto sharedOriginGps.
+     *
+     * Deliberately does NOT touch alignedRefPoints / verifiedAlignmentRequest: in a mixed
+     * batch those already describe the shared origin, and repointing them here would
+     * re-project every committed file under this DXF's placement.
+     */
+    if (target.fileId) {
+      const item = visualAlignmentItem;
+      // Bake the placement into the pending file's own rawLines and retire the sticker.
+      // Leaving the sticker up instead would drop the plan back to its design-frame
+      // position the moment plan-editing exits: `isPlacedItemActive` needs either an edit
+      // mode or a non-empty alignedRefPoints, and this branch has neither. Baking keeps the
+      // plan drawn exactly where it was placed, under the still-live visualAlignmentAnchor.
+      commitManipulationLines((north, east) => transformVisualDxfPoint(north, east, item));
+
+      // Corners must be reported in the SAME frame as the geometry they pair with — the
+      // baked one — or Fix Alignment solves a transform that is then applied a second time
+      // on top of the bake. Placed corners + identity sticker gives that pairing.
+      const placedCorners = dxfCorners.map((corner) => {
+        const t = transformVisualDxfPoint(corner.x, corner.y, item);
+        return { x: t.north, y: t.east };
+      });
+      const capturedLLA = buildVisualAlignmentRefPoints(
+        placedCorners,
+        { x: 0, y: 0, rotation: 0, scale: 1 },
+        baseLat,
+        baseLon,
+        originDxfNorth,
+        originDxfEast
+      );
+      console.log(
+        `[Align DXF] Captured placement for pending file ${target.fileId}:`,
+        JSON.stringify(capturedLLA)
+      );
+      setExtractedCorners(capturedLLA);
+      setVisualAlignmentItem(null);
+      setIsVisualAlignmentMode(false);
+      setIsPlanEditingMode(false);
+      setMultiPointPlacementPhase("captured");
+      return;
     }
 
     // Local app-planned DXF: plan-trajectory sends NED vertices as-is about origin_gps.
@@ -4596,6 +4718,7 @@ export default function App() {
                             setPendingDxfAlignment={setPendingDxfAlignment}
                             sharedOriginGps={sharedOriginGps}
                             onBeginLocalImportBatch={handleBeginLocalImportBatch}
+                            onAlignContextChange={handleAlignContextChange}
                             onCommitDxfFileAlignment={commitDxfFileAlignment}
                             onLocalCsvParsed={handleLocalCsvParsed}
                             onLocalDxfParsed={handleLocalDxfParsed}
@@ -6181,6 +6304,7 @@ function SectionPages(props: {
   >;
   sharedOriginGps?: [number, number] | null;
   onBeginLocalImportBatch?: () => void;
+  onAlignContextChange?: (ctx: { fileId: string | null; displayLines: PlanLine[] }) => void;
   onCommitDxfFileAlignment?: (
     fileId: string,
     alignedLines: PlanLine[],
@@ -7488,6 +7612,35 @@ function PlanPreview({
     [mapSourceLines, applyLayerVisibility]
   );
 
+  /**
+   * Static geometry the map draws underneath an active sticker.
+   *
+   * The sticker's own lines must drop out (they'd ghost in the design frame beneath the
+   * placed copy) — but nothing else should. That distinction only shows up with a pending
+   * metric DXF, where the sticker holds ONE file while `lines` still carries the rest of an
+   * already-verified batch; aligning against a CSV you can no longer see is guesswork.
+   * When the sticker holds the whole plan (rover / single-file flow) every id matches and
+   * this collapses to empty — identical to the unconditional [] it replaces.
+   */
+  const placedItemLineIds = useMemo(() => {
+    if (!isPlacedItemActive || !visualAlignmentItem) return null;
+    return new Set(visualAlignmentItem.lines.map((l) => l.id));
+  }, [isPlacedItemActive, visualAlignmentItem]);
+
+  const staticMapLines = useMemo(() => {
+    const base = autoOriginEnabled && mapSourceLines ? filteredMapSourceLines : filtered;
+    if (!isPlacedItemActive) return base;
+    if (!placedItemLineIds) return [];
+    return base.filter((l) => !placedItemLineIds.has(l.id));
+  }, [
+    autoOriginEnabled,
+    mapSourceLines,
+    filteredMapSourceLines,
+    filtered,
+    isPlacedItemActive,
+    placedItemLineIds,
+  ]);
+
   const filteredPlanSignature = useMemo(() => {
     const len = filtered.length;
     if (len === 0) return '0';
@@ -8223,13 +8376,7 @@ function PlanPreview({
               pos_n: telemetryPosN,
               pos_e: telemetryPosE,
             } as any}
-            lines={
-              isPlacedItemActive
-                ? []
-                : autoOriginEnabled && mapSourceLines
-                  ? filteredMapSourceLines
-                  : filtered
-            }
+            lines={staticMapLines}
             alignedRefPoints={alignedRefPoints}
             autoOriginReference={autoOriginReference}
             mapGeometryFrame={mapGeometryFrame}

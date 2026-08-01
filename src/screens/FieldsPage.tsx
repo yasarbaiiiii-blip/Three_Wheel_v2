@@ -20,6 +20,10 @@ import { TemplatePanel } from "../components/fields/panels/TemplatePanel";
 import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPreviewStep";
 import { useFieldsWorkflow } from "../hooks/useFieldsWorkflow";
 import { designObbFromLines } from "../utils/planResizeHandles";
+import {
+  shouldRenderAlignCard,
+  type FieldsStepSlice,
+} from "../utils/fieldsStepSlicing";
 import { DXF_PLANNER } from "../config/featureFlags";
 import {
   applyCsvOrderToPlanLines,
@@ -199,6 +203,14 @@ export type FieldsPageProps = {
   >;
   sharedOriginGps?: [number, number] | null;
   onBeginLocalImportBatch?: () => void;
+  /**
+   * Tells App which pending metric DXF the Align step is manipulating, and the exact
+   * composed line set the map is drawing for it. A metric DXF is held OUT of `lines`
+   * until Fix Alignment, so without this every plan-manipulation handler in App (Move /
+   * Rotate Plan, Fit to Reference Points, Visual Alignment) reads `lines` and finds the
+   * pending geometry missing.
+   */
+  onAlignContextChange?: (ctx: { fileId: string | null; displayLines: PlanLine[] }) => void;
   onCommitDxfFileAlignment?: (
     fileId: string,
     alignedLines: PlanLine[],
@@ -292,6 +304,7 @@ export function FieldsPage(props: FieldsPageProps) {
     setPendingDxfAlignment,
     sharedOriginGps = null,
     onBeginLocalImportBatch,
+    onAlignContextChange,
     onCommitDxfFileAlignment,
     onLocalCsvParsed,
     onLocalDxfParsed,
@@ -699,6 +712,18 @@ export function FieldsPage(props: FieldsPageProps) {
     selectedPending,
     activeStep,
   ]);
+
+  /**
+   * Keep App's plan-manipulation handlers pointed at the geometry actually on screen.
+   * `selectedPending` is the only case where the plan being aligned is NOT in `lines`;
+   * reporting null otherwise leaves the rover/committed flows on their existing path.
+   */
+  React.useEffect(() => {
+    onAlignContextChange?.({
+      fileId: selectedPending ? effectiveAlignFileId : null,
+      displayLines: mapDisplayLines,
+    });
+  }, [onAlignContextChange, selectedPending, effectiveAlignFileId, mapDisplayLines]);
 
   const setPendingAlignLines = useCallback(
     (updater: React.SetStateAction<PlanLine[]>) => {
@@ -1215,9 +1240,7 @@ export function FieldsPage(props: FieldsPageProps) {
    * - dxfTop: Upload + Templates + Align (scrollable)
    * - dxfPathOrder: Path Order & Load (flex fill, own list scroll)
    */
-  function renderFieldsSteps(
-    slice: "csvUpload" | "csvPathOrder" | "csvScroll" | "dxfTop" | "dxfPathOrder" | "localDxfTop"
-  ) {
+  function renderFieldsSteps(slice: FieldsStepSlice) {
     const showUpload =
       slice === "csvUpload" || slice === "dxfTop" || slice === "localDxfTop";
     const showCsvPathOrder = slice === "csvPathOrder";
@@ -1233,7 +1256,6 @@ export function FieldsPage(props: FieldsPageProps) {
      */
     const showTemplatesStep =
       (slice === "csvScroll" && isLocalFlow) || (slice === "dxfTop" && !isLocalFlow);
-    const showDxfAlign = slice === "dxfTop" || slice === "localDxfTop";
     const showDxfPathOrder = slice === "dxfPathOrder" && !isLocalDxfFlow;
     const activeCsvForSend = activeCsvPreview;
     // Multi-file / local app batch: single Path Order card once every file is verified.
@@ -1248,6 +1270,10 @@ export function FieldsPage(props: FieldsPageProps) {
     // Only a file that's actually pending gets an Align card — selecting an already-verified
     // file (its pendingDxfAlignment entry is gone) would otherwise fall back to a blank,
     // generic "Align DXF" panel with no indication it's already done.
+    //
+    // NOTE: unlike every other show* flag here this one carries no `slice` term — it answers
+    // "does this batch need aligning", not "does Align belong in this pass". Only ever feed
+    // it to shouldRenderAlignCard(), which adds the slice gate.
     const showAlignForBatch =
       hasLocalBatch &&
       (hasPendingAlignment ||
@@ -1405,7 +1431,7 @@ export function FieldsPage(props: FieldsPageProps) {
           </FieldsStepCard>
           ) : null}
 
-          {/* (local DXF Align is rendered via showDxfAlign below) */}
+          {/* (local DXF Align is rendered via shouldRenderAlignCard below) */}
 
           {/* Local multi-file batch + single CSV/DXF: Path Order once alignment gate passes. */}
           {(showLocalBatchPathOrder ||
@@ -1559,8 +1585,12 @@ export function FieldsPage(props: FieldsPageProps) {
           </FieldsStepCard>
           ) : null}
 
-          {/* Align DXF — rover DXF, local metric DXF, or multi-file pending file */}
-          {((showDxfAlign && isDxfPath) || showAlignForBatch) && (
+          {/* Align DXF — rover DXF, local metric DXF, or multi-file pending file. */}
+          {shouldRenderAlignCard({
+            slice,
+            isDxfPath: !!isDxfPath,
+            needsBatchAlignment: showAlignForBatch,
+          }) && (
           <FieldsStepCard
             stepNumber={stepNo.align}
             title={
