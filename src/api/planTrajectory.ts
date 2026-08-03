@@ -89,6 +89,12 @@ export type PlanTrajectoryResponse = PathPlanResponse & {
 export const MUST_HIT_COLLINEAR_TOL_DEG = 1.0;
 
 /**
+ * Max path error (m) for must-hit thinning vs the full polyline chord.
+ * Derived from paint budget: min(15 mm, 0.1 × PAINT_ERROR_BUDGET_M).
+ */
+export const MUST_HIT_PATH_ERROR_M = 0.015;
+
+/**
  * Endpoints plus every interior point where the polyline actually turns.
  * Mirrors the rover simplifier's retention rule (heading change accumulated
  * from the last retained point), so collinear interpolation between survey

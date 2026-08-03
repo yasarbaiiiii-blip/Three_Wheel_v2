@@ -91,6 +91,11 @@ const DEFAULTS: Required<RoadMarkingPathOptions> = {
  */
 export const R_MIN_ROVER_M = 0.5;
 export const CORNER_TOLERANCE_M = 0.15;
+/**
+ * Max paint error (m) we may spend replacing operator stakes with clean primitives.
+ * Single policy constant for dense deviation, corner cut, and flat-arc bow flatten.
+ */
+export const PAINT_ERROR_BUDGET_M = 0.15;
 /** Classify as sparse waypoints when point count is at or below this. */
 export const SPARSE_MAX_POINTS = 15;
 /** Classify as dense only when point count is at least this. */
@@ -195,6 +200,14 @@ export function sparseArcResidualGateM(surveyRmsM?: number | null): number {
 
 export type PointSequenceClass = "dense-survey" | "sparse-waypoints";
 
+export type CornerClass = "clean" | "tight" | "sharp" | "reversal";
+
+export type SourceCorner = {
+  atIndex: number;
+  turnDeg: number;
+  class: CornerClass;
+};
+
 export type FittedPathResult = {
   samples: RoadMarkingNedPoint[];
   mode: "dense-fit" | "waypoint-fillet" | "degraded-fillet" | "sparse-arc";
@@ -207,6 +220,8 @@ export type FittedPathResult = {
     maxJointTurnDeg: number;
     lengthRatio: number;
     maxSourceDeviationM: number;
+    /** Interior corners classified on the source polyline (Track C). */
+    corners?: SourceCorner[];
   };
 };
 
@@ -1791,6 +1806,68 @@ export type PathPrimitive =
   | { kind: "line"; i0: number; i1: number }
   | { kind: "arc"; i0: number; i1: number; circle: Circle };
 
+/** Min |turn| (deg) to treat an interior vertex as a corner candidate. */
+const CORNER_CLASSIFY_MIN_TURN_DEG = 30;
+
+/**
+ * Classify interior vertices by turning angle (Track C1).
+ * Open paths: indices 1..n-2 only.
+ */
+export function classifySourceCorners(points: RoadMarkingNedPoint[]): SourceCorner[] {
+  const out: SourceCorner[] = [];
+  if (points.length < 3) return out;
+  for (let i = 1; i < points.length - 1; i++) {
+    const turnDeg = Math.abs(turningAngleDeg(points[i - 1], points[i], points[i + 1]));
+    if (turnDeg < CORNER_CLASSIFY_MIN_TURN_DEG) continue;
+    let cls: CornerClass;
+    if (turnDeg >= 150) cls = "reversal";
+    else if (turnDeg >= 100) cls = "sharp";
+    else if (turnDeg >= 60) cls = "tight";
+    else cls = "clean";
+    out.push({ atIndex: i, turnDeg, class: cls });
+  }
+  return out;
+}
+
+/**
+ * Post-pass: convert ARC primitives whose bow (max chord residual) is within
+ * `bowBudgetM` into LINE (flat giant-R arcs).
+ */
+export function flattenArcsByBow(
+  points: RoadMarkingNedPoint[],
+  prims: PathPrimitive[],
+  bowBudgetM: number
+): PathPrimitive[] {
+  return prims.map((p) => {
+    if (p.kind !== "arc") return p;
+    const a = points[p.i0];
+    const b = points[p.i1];
+    if (!a || !b) return p;
+    const abN = b.north - a.north;
+    const abE = b.east - a.east;
+    const len2 = abN * abN + abE * abE;
+    let maxBow = 0;
+    for (let i = p.i0; i <= p.i1; i++) {
+      const pt = points[i];
+      if (!pt) continue;
+      let t =
+        len2 < 1e-18
+          ? 0
+          : ((pt.north - a.north) * abN + (pt.east - a.east) * abE) / len2;
+      t = Math.max(0, Math.min(1, t));
+      const d = Math.hypot(
+        pt.north - (a.north + abN * t),
+        pt.east - (a.east + abE * t)
+      );
+      if (d > maxBow) maxBow = d;
+    }
+    if (maxBow <= bowBudgetM) {
+      return { kind: "line" as const, i0: p.i0, i1: p.i1 };
+    }
+    return p;
+  });
+}
+
 /**
  * Greedy longest line/arc segmentation using Hyper for arcs.
  * Does not tessellate — keeps primitives so joints can be filleted first.
@@ -2646,6 +2723,7 @@ function buildRoadMarkingFittedPathDirected(
             maxJointTurnDeg: maxTurningAngleDeg(arcSamples),
             lengthRatio: srcLen > 1e-9 ? arcLen / srcLen : 1,
             maxSourceDeviationM: maxSourceDeviationM(source, arcSamples),
+            corners: classifySourceCorners(source),
           },
         };
       }
@@ -2672,6 +2750,7 @@ function buildRoadMarkingFittedPathDirected(
         maxJointTurnDeg: maxTurningAngleDeg(wp.samples),
         lengthRatio: srcLen > 1e-9 ? fitLen / srcLen : 1,
         maxSourceDeviationM: maxSourceDeviationM(source, wp.samples),
+        corners: classifySourceCorners(source),
       },
     };
   }

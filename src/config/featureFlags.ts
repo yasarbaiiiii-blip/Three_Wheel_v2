@@ -69,3 +69,19 @@ export type DxfPlannerMode = "app" | "rover";
  * Flip to `"rover"` only to restore the legacy upload → entities flow.
  */
 export const DXF_PLANNER: DxfPlannerMode = "app";
+
+/**
+ * Path primitives V2 rollout (PATH_PRIMITIVES_EXECUTION_PLAN).
+ *
+ * - `"off"`: legacy greedy segment + 1° must-hit
+ * - `"must_hit"`: Track A only (error-budget must-hit)
+ * - `"segment"`: Track A + top-down segment + refuse
+ * - `"full"`: + corner primitive + sharp handling
+ */
+export type PathPrimitivesV2Mode = "off" | "must_hit" | "segment" | "full";
+export const PATH_PRIMITIVES_V2: PathPrimitivesV2Mode = "full";
+
+/** True when top-down segmentation (Track B) is active. */
+export function pathPrimitivesV2TopDownSegment(): boolean {
+  return PATH_PRIMITIVES_V2 === "segment" || PATH_PRIMITIVES_V2 === "full";
+}
