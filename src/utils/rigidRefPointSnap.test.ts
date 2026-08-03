@@ -171,6 +171,35 @@ describe("applyRigidPlanSnap", () => {
     expect(out.lock).toBeNull();
     expect(out.guide).not.toBeNull();
   });
+
+  /**
+   * Regression: dragging the plan close to imported CSV reference points used to run a
+   * SIMILARITY solve (scale = refSpacing / planEdge) and blend the sticker toward it, so the
+   * plan visibly resized as it approached the refs — and the commit baked that scale in.
+   * Approaching refs may pin and rotate, never resize; only Fit to Reference Points may.
+   */
+  it("never rescales while approaching refs spaced differently than the plan edge", () => {
+    // 10 m square plan, two refs 12 m apart (a similarity fit would want scale 1.2).
+    // Sweep the whole approach: outside guide → guide → soft band → hard pin.
+    const refs = [ref(0, 0, 1, 1), ref(0, 12, 1, 2)];
+    for (const gap of [2.0, 1.2, 0.7, 0.4, 0.2, 0.05, 0]) {
+      const out = applyRigidPlanSnap({
+        itemId: "plan-editing-group",
+        newX: gap,
+        newY: 0,
+        newRotation: 0,
+        // Pinch would like to grow it too — irrelevant, scale is frozen for the gesture.
+        newScale: 1.35,
+        candidates,
+        refs,
+        originDxfNorth: 0,
+        originDxfEast: 0,
+        lock: null,
+        gestureStartScale: 1,
+      });
+      expect(out.scale, `gap ${gap} m must not rescale the plan`).toBe(1);
+    }
+  });
 });
 
 describe("bestSecondaryRotationDeg size gate", () => {

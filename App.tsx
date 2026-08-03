@@ -902,7 +902,8 @@ export default function App() {
 
   /**
    * One-tap similarity fit onto CSV/manual reference points (translate + rotate + scale).
-   * Uses the same pure solver as the magnet drag; enters Move Plan if needed.
+   * The ONLY drag-free path that may rescale the plan — the Move / Rotate Plan magnet is
+   * rigid (see MapViewNative.applyPointSnap). Enters Move Plan if needed.
    */
   function handleFitToReferencePoints(
     refList: Array<{ lat: number; lon: number }>

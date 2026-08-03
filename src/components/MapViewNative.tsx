@@ -67,12 +67,10 @@ import {
 import { type LocalMeters } from "../utils/refPointSnap";
 import { computeShapeSnapPoints } from "../utils/planShapeSnapPoints";
 import {
+  applyRigidPlanSnap,
+  type RigidSnapLock,
   type SnapRefPoint,
 } from "../utils/rigidRefPointSnap";
-import {
-  applySimilarityPlanSnap,
-  type SimilaritySnapLock,
-} from "../utils/similarityRefPointSnap";
 import {
   applyAxisResize,
   designObbFromLines,
@@ -455,9 +453,10 @@ export function MapViewNative(props: MapViewProps) {
   // position from accumulated delta (avoids floating-point drift from incremental additions).
   const dragStartPositionsRef = useRef<Record<string, { x: number; y: number; rotation: number; scale: number }>>({});
 
-  // Multi-Point Fit similarity lock (whole gesture). Dual-ref attach freezes scale+rot;
-  // single-ref re-pins translation while rotating. Cleared at drag begin/end only.
-  const snapLockRef = useRef<SimilaritySnapLock | null>(null);
+  // Multi-Point Fit rigid lock: which plan feature is currently pinned onto which ref point.
+  // Translate + rotate only — the lock never carries a scale-to-fit. Cleared at drag
+  // begin/end only; reported to the parent as "attached" on commit.
+  const snapLockRef = useRef<RigidSnapLock | null>(null);
 
   // Resize-mode session: edge-midpoint axis resize only (n/e/s/w).
   // startCursor is the HANDLE world position (not the finger). Finger motion is applied
@@ -487,7 +486,7 @@ export function MapViewNative(props: MapViewProps) {
   /** Fire onPlanAttached at most once per gesture. */
   const notifiedAttachRef = useRef(false);
 
-  // Magnet / dual-ref lock is for drag & rotate only — clear when entering resize.
+  // Magnet / ref-point lock is for drag & rotate only — clear when entering resize.
   useEffect(() => {
     if (planPlacementPhase === "resizing") {
       snapLockRef.current = null;
@@ -1760,7 +1759,16 @@ export function MapViewNative(props: MapViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [placedItemsSig, planPlacementPhase, projectionOrigin, buildRotateHandlesFC, dragPreview]);
 
-  // Multi-Point Fit similarity snap (scale-to-fit dual-ref). Pure math; MapView applies result.
+  /**
+   * Multi-Point Fit ref-point magnet for drag / rotate. Pure math; MapView applies the result.
+   *
+   * RIGID by design: translate + rotate only, scale frozen at the gesture-start value.
+   * Dragging the plan near reference points must never resize it — a similarity (scale-to-fit)
+   * magnet here silently rescaled the plan the moment a corner came within ~0.75 m of a ref,
+   * and baked that scale on finger-up. Scale changes belong to exactly two explicit user
+   * actions: "Fit to Reference Points" (App.handleFitToReferencePoints, which runs the
+   * similarity solver on demand) and the edge-handle resize phase.
+   */
   const applyPointSnap = useCallback(
     (
       itemId: string,
@@ -1790,7 +1798,7 @@ export function MapViewNative(props: MapViewProps) {
         dragStartPositionsRef.current[itemId]?.scale ??
         (Number.isFinite(newScale) && newScale > 0 ? newScale : 1);
 
-      const result = applySimilarityPlanSnap({
+      const result = applyRigidPlanSnap({
         itemId,
         newX,
         newY,
@@ -1800,19 +1808,25 @@ export function MapViewNative(props: MapViewProps) {
         refs: snapRefLocalPoints,
         originDxfNorth: projectionOrigin.originDxfNorth,
         originDxfEast: projectionOrigin.originDxfEast,
-        lock: snapLockRef.current,
+        // Re-acquired from the free pose every frame rather than held for the whole gesture,
+        // so a near miss never glues the plan to a ref point (same free-drag feel as before,
+        // minus the scale-to-fit). Guide line at 1.5 m, translation pin at 0.3 m.
+        lock: null,
         gestureStartScale,
-        // Soft re-approach only — never freeze the whole gesture on a pin.
-        holdLock: false,
       });
       snapLockRef.current = result.lock;
       return {
         x: result.x,
         y: result.y,
         rotation: result.rotation,
-        scale: result.scale,
+        // Invariant, not a pass-through: the sticker's scale is fixed for the whole
+        // drag/rotate gesture. Enforced here as well as in the snapper so swapping the
+        // snapper again cannot reintroduce magnet-driven resizing.
+        scale: itemId === "plan-editing-group" ? gestureStartScale : result.scale,
         guide: result.guide,
-        attached: result.attached,
+        // A plan feature is pinned onto a ref point. Drives the parent's placing → attached
+        // transition (same move UX either way — see MultiPointPlacementPhase).
+        attached: result.lock != null,
       };
     },
     [planEditingSnapCandidates, projectionOrigin, snapRefLocalPoints]
@@ -1838,8 +1852,8 @@ export function MapViewNative(props: MapViewProps) {
 
       if (!placedItems) return;
 
-      // Attached still allows free drag (light magnet + break-away). Only resizing
-      // switches to handle mode. Never freeze the plan mid-gesture.
+      // Attached still allows free drag (the magnet re-acquires each frame, so pulling away
+      // simply releases). Only resizing switches to handle mode; never freeze mid-gesture.
       let activeGuide: { point: SnapRefPoint; anchor: LocalMeters } | null = null;
       const shifted: PlacedItem[] = [];
 
@@ -1885,7 +1899,8 @@ export function MapViewNative(props: MapViewProps) {
           continue;
         }
 
-        // placing + attached: free drag with light similarity magnet (attach only on commit)
+        // placing + attached: free drag with a rigid ref-point magnet (translate + rotate;
+        // scale is frozen for the gesture). Attach is reported only on commit.
         const newX = start.x + dE;
         const newY = start.y + dN;
         const newRotation = start.rotation + rotDeg;
@@ -2033,7 +2048,7 @@ export function MapViewNative(props: MapViewProps) {
           const newRotation = start.rotation + finalRotDeg;
           const newScale = start.scale * finalScaleF;
           const snapped = applyPointSnap(item.id, newX, newY, newRotation, newScale);
-          // Attach UI only on finger-up when dual-fit residual is tight — never mid-drag freeze.
+          // Attach UI only on finger-up while a feature is pinned — never a mid-drag freeze.
           if (snapped.attached && item.id === "plan-editing-group") {
             becameAttached = {
               x: snapped.x,

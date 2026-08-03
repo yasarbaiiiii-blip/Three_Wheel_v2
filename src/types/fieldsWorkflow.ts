@@ -7,8 +7,9 @@ export type PlanManipulationMode = "idle" | "scale" | "drag" | "rotate" | "resiz
 /**
  * Multi-Point Fit placement lifecycle after Move/Rotate Plan:
  * - idle: not editing
- * - placing: drag/rotate; magnetic similarity scale-to-fit toward refs; Resize available
- * - attached: dual-ref attach acquired (same move UX as placing; Resize available)
+ * - placing: drag/rotate with a rigid ref-point magnet (translate + rotate only — never
+ *   scale-to-fit; scale changes only via Fit to Reference Points or Resize); Resize available
+ * - attached: a plan feature is pinned onto a ref point (same move UX as placing; Resize available)
  * - resizing: edge-midpoint arrows only; drag/rotate off; Done returns to placing
  * - captured: Use This Position completed
  */
