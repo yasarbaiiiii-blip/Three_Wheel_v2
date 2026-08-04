@@ -165,6 +165,8 @@ import {
   filterCanvasLinesByMissionVisibility,
   tagLinesWithMissionLayer,
 } from "./src/utils/missionLayerLines";
+import { recoverCornersAfterHydration } from "./src/utils/cornerLifecycle";
+import { SHARP_CORNER_MODE } from "./src/config/featureFlags";
 import { MissionLayerStartModal } from "./src/components/fields/MissionLayerStartModal";
 import * as pathApi from "./src/api/pathApi";
 import { generateTemplateLines, ShapeType, ArcType } from "./src/utils/shapeTemplates";
@@ -3094,16 +3096,25 @@ export default function App() {
         }
 
         // Recover mission-layer identity lost when hydration strips file-prefixed
-        // ids, so M-Layers visibility toggles keep affecting the map post-Start.
+        // ids, so M-Layers visibility toggles keep affecting the map post-Start —
+        // including each layer's extension run-ups/run-outs, not just its marks.
         const layerCatalog = buildMissionLayerLegCatalog(
           appPlannedStartSnapshot?.paintedLines ?? [],
           uploadedFiles,
-          missionLayers
+          missionLayers,
+          appPlannedStartSnapshot?.extensionConfig
         );
         const missionLayerTaggedLines = tagLinesWithMissionLayer(hydrated.lines, layerCatalog);
+        // Recover corner class / teardrop-vs-pivot so Path Order + map still show
+        // corners after densified hydrate (same catalog pattern as mission layers).
+        const cornerTaggedLines = recoverCornersAfterHydration(
+          missionLayerTaggedLines,
+          appPlannedStartSnapshot?.paintedLines ?? [],
+          appPlannedStartSnapshot?.sharpCornerMode ?? SHARP_CORNER_MODE
+        );
 
         setAlignedRefPoints(hydrated.alignedRefPoints);
-        setLines(sanitizePlanLines(missionLayerTaggedLines));
+        setLines(sanitizePlanLines(cornerTaggedLines));
         setSelectedLineId(hydrated.selectedLineId);
         setVisualAlignmentItem(null);
         setIsVisualAlignmentMode(false);

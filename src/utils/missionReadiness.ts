@@ -9,6 +9,11 @@
  */
 
 import type { PlanLine } from "../types/plan";
+import {
+  countCornerClasses,
+  formatCornerCountsSummary,
+  type CornerClassCounts,
+} from "./cornerLifecycle";
 import type { CsvPathOrderEntry } from "./missionPathOrder";
 import { resolveOrderedPaintedLines, selectMarkPlanLines } from "./missionPathOrder";
 
@@ -20,6 +25,10 @@ export type LineFitMeta = {
   warnings: string[];
   mode?: string;
   maxJointTurnDeg?: number;
+  /** Classified corners on this line (source or recovered post-hydrate). */
+  cornerCounts?: CornerClassCounts;
+  /** Compact summary e.g. "2 clean · 1 sharp". */
+  cornersSummary?: string | null;
 };
 
 export type CsvSendReadiness = {
@@ -56,6 +65,9 @@ export function getLineFitMeta(line: PlanLine): LineFitMeta {
     typeof geom?.max_joint_turn_deg === "number" && Number.isFinite(geom.max_joint_turn_deg)
       ? geom.max_joint_turn_deg
       : undefined;
+  const rawCorners = Array.isArray(geom?.corners) ? geom.corners : [];
+  const cornerCounts = countCornerClasses(rawCorners);
+  const cornersSummary = formatCornerCountsSummary(cornerCounts);
   return {
     lineId: line.id,
     label: line.label || line.id,
@@ -63,6 +75,8 @@ export function getLineFitMeta(line: PlanLine): LineFitMeta {
     warnings,
     mode,
     maxJointTurnDeg,
+    cornerCounts: cornerCounts.total > 0 ? cornerCounts : undefined,
+    cornersSummary,
   };
 }
 
@@ -159,11 +173,19 @@ export function evaluateCsvSendReadiness(opts: {
   }
 
   // Advisory geometry warnings on painted paths that are still paintable
+  // (includes corner summary strings from the fitter / post-hydrate recovery).
   for (const line of painted) {
     const m = getLineFitMeta(line);
     if (!m.paintable) continue;
     for (const w of m.warnings) {
       advisory.push(`${m.label}: ${w}`);
+    }
+    // Structured corner chip when corners exist but no warning string yet (legacy lines).
+    if (
+      m.cornersSummary &&
+      !m.warnings.some((w) => /corner/i.test(w))
+    ) {
+      advisory.push(`"${m.label}": ${m.cornersSummary}`);
     }
   }
 

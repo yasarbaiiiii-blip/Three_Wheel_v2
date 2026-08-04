@@ -389,8 +389,13 @@ export function CsvPathOrderStep({
             }
 
             const paint = item.entry.paint !== false;
-            const blocked = !getLineFitMeta(item.line).paintable;
+            const fitMeta = getLineFitMeta(item.line);
+            const blocked = !fitMeta.paintable;
             const lengthM = getLineLengthM(item.line);
+            const cornersChip = fitMeta.cornersSummary;
+            const hasSharp =
+              (fitMeta.cornerCounts?.sharp ?? 0) > 0 ||
+              (fitMeta.cornerCounts?.reversal ?? 0) > 0;
 
             return (
               <ScaleDecorator>
@@ -438,18 +443,32 @@ export function CsvPathOrderStep({
                   >
                     {item.badge}
                   </Text>
-                  <Text
-                    style={{
-                      flex: 1,
-                      color: blocked ? FIELDS_COLORS.danger : FIELDS_COLORS.textMain,
-                      fontSize: 13,
-                      fontWeight: "600",
-                    }}
-                    numberOfLines={1}
-                  >
-                    {item.line.label}
-                    {blocked ? " · bad" : ""}
-                  </Text>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text
+                      style={{
+                        color: blocked ? FIELDS_COLORS.danger : FIELDS_COLORS.textMain,
+                        fontSize: 13,
+                        fontWeight: "600",
+                      }}
+                      numberOfLines={1}
+                    >
+                      {item.line.label}
+                      {blocked ? " · bad" : ""}
+                    </Text>
+                    {cornersChip ? (
+                      <Text
+                        style={{
+                          color: hasSharp ? FIELDS_COLORS.warning : FIELDS_COLORS.textDim,
+                          fontSize: 10,
+                          fontWeight: "600",
+                          marginTop: 1,
+                        }}
+                        numberOfLines={1}
+                      >
+                        {cornersChip}
+                      </Text>
+                    ) : null}
+                  </View>
                   {lengthM != null && lengthM > 0 ? (
                     <Text
                       style={{

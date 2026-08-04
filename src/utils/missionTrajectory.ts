@@ -20,6 +20,7 @@
  */
 
 import type { PlanLine } from "../types/plan";
+import { SHARP_CORNER_MODE, type SharpCornerMode } from "../config/featureFlags";
 import { projectGpsToLocalMeters } from "./geoProjection";
 import {
   buildExtendedMarkChain,
@@ -31,6 +32,11 @@ import {
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
 } from "./missionExtensions";
+import {
+  buildTeardropTravelPoints,
+  R_MIN_ROVER_M,
+  type SourceCorner,
+} from "./roadMarkingCsvPath";
 
 /** [north_m, east_m] — explicit NED pair for the plan-trajectory payload. */
 export type NedPair = [number, number];
@@ -116,6 +122,11 @@ export type BuildTrajectoryOpts = {
    * errors so the operator never drives without a fresh approach fix.
    */
   requireEntryTransit?: boolean;
+  /**
+   * Override {@link SHARP_CORNER_MODE} for tests / mission config.
+   * Default teardrop; pivot is opt-in after rover bench.
+   */
+  sharpCornerMode?: SharpCornerMode;
 };
 
 export type BuildTrajectoryResult = {
@@ -170,6 +181,139 @@ function isFinitePair(n: number, e: number): boolean {
 
 function distM(a: NedPair, b: NedPair): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
+}
+
+/** Match densified samples to a classified corner vertex (m). */
+const SHARP_CORNER_MATCH_M = 0.75;
+
+type GeometryCorner = Pick<
+  SourceCorner,
+  "class" | "undrivable" | "north" | "east" | "turnDeg"
+>;
+
+function sharpCornersFromLine(line: PlanLine): GeometryCorner[] {
+  const raw = line.entity?.geometry?.corners;
+  if (!Array.isArray(raw)) return [];
+  const out: GeometryCorner[] = [];
+  for (const c of raw) {
+    if (!c || typeof c !== "object") continue;
+    const cls = (c as { class?: string }).class;
+    const undrivable = (c as { undrivable?: boolean }).undrivable === true;
+    if (cls !== "sharp" && !undrivable) continue;
+    const north = Number((c as { north?: number }).north);
+    const east = Number((c as { east?: number }).east);
+    if (!Number.isFinite(north) || !Number.isFinite(east)) continue;
+    out.push({
+      class: "sharp",
+      undrivable: true,
+      north,
+      east,
+      turnDeg: Number((c as { turnDeg?: number }).turnDeg) || 90,
+    });
+  }
+  return out;
+}
+
+/**
+ * Split a continuous mark polyline at sharp corners, inserting TRAVEL
+ * teardrop (or near-zero pivot) so paint lifts while the rover reorients.
+ * Clean/tight corners stay continuous MARK (fillet already in samples).
+ */
+export function expandMarkRunsForSharpCorners(
+  points: NedPair[],
+  corners: GeometryCorner[],
+  markSpeed: number,
+  travelSpeed: number,
+  label: string | undefined,
+  mode: SharpCornerMode
+): TrajectoryRun[] {
+  if (points.length < 2 || corners.length === 0) {
+    const run: TrajectoryRun = { kind: "mark", points, speed_m_s: markSpeed };
+    if (label) run.label = label;
+    return [run];
+  }
+
+  const splitIdxs: number[] = [];
+  for (const c of corners) {
+    let bestI = -1;
+    let bestD = Infinity;
+    for (let i = 1; i < points.length - 1; i++) {
+      const d = distM(points[i], [c.north, c.east]);
+      if (d < bestD) {
+        bestD = d;
+        bestI = i;
+      }
+    }
+    if (bestI > 0 && bestI < points.length - 1 && bestD <= SHARP_CORNER_MATCH_M) {
+      splitIdxs.push(bestI);
+    }
+  }
+  const unique = [...new Set(splitIdxs)].sort((a, b) => a - b);
+  if (unique.length === 0) {
+    const run: TrajectoryRun = { kind: "mark", points, speed_m_s: markSpeed };
+    if (label) run.label = label;
+    return [run];
+  }
+
+  const runs: TrajectoryRun[] = [];
+  let start = 0;
+  for (const si of unique) {
+    const markPts = points.slice(start, si + 1);
+    if (markPts.length >= 2) {
+      const markRun: TrajectoryRun = {
+        kind: "mark",
+        points: markPts,
+        speed_m_s: markSpeed,
+      };
+      if (label) markRun.label = label;
+      runs.push(markRun);
+    }
+
+    const prev = points[Math.max(0, si - 1)];
+    const vertex = points[si];
+    const next = points[Math.min(points.length - 1, si + 1)];
+    let travelPts: NedPair[];
+    if (mode === "pivot") {
+      // Near-zero TRAVEL: stay at the vertex (rover must honor as in-place rotate).
+      const dn = next[0] - vertex[0];
+      const de = next[1] - vertex[1];
+      const len = Math.hypot(dn, de) || 1;
+      const eps = 0.02;
+      travelPts = [
+        vertex,
+        [vertex[0] + (dn / len) * eps, vertex[1] + (de / len) * eps],
+        vertex,
+      ];
+    } else {
+      const td = buildTeardropTravelPoints(
+        { north: vertex[0], east: vertex[1] },
+        { north: prev[0], east: prev[1] },
+        { north: next[0], east: next[1] },
+        R_MIN_ROVER_M
+      );
+      travelPts = td.map((p) => [p.north, p.east] as NedPair);
+    }
+    if (travelPts.length >= 2) {
+      runs.push({
+        kind: "travel",
+        points: travelPts,
+        speed_m_s: travelSpeed,
+        label: mode === "pivot" ? "sharp-corner-pivot" : "sharp-corner-teardrop",
+      });
+    }
+    start = si;
+  }
+  const tail = points.slice(start);
+  if (tail.length >= 2) {
+    const markRun: TrajectoryRun = {
+      kind: "mark",
+      points: tail,
+      speed_m_s: markSpeed,
+    };
+    if (label) markRun.label = label;
+    runs.push(markRun);
+  }
+  return runs;
 }
 
 export type ResolvedRoverNed =
@@ -910,6 +1054,46 @@ export function buildTrajectory(
         runs.push(buildInterGroupTravel(g, groups[i + 1], travelSpeed, null));
       }
     }
+  }
+
+  // Sharp corners: expand continuous MARK polylines into MARK→TRAVEL→MARK
+  // (teardrop default, or near-zero pivot when opted in). Clean/tight stay continuous.
+  const sharpMode = opts.sharpCornerMode ?? SHARP_CORNER_MODE;
+  const allSharp = acceptedLines.flatMap(sharpCornersFromLine);
+  if (allSharp.length > 0) {
+    const expanded: TrajectoryRun[] = [];
+    for (const run of runs) {
+      if (run.kind !== "mark") {
+        expanded.push(run);
+        continue;
+      }
+      const onRun = allSharp.filter((c) =>
+        run.points.some(
+          (p) => distM(p, [c.north, c.east]) <= SHARP_CORNER_MATCH_M
+        )
+      );
+      if (onRun.length === 0) {
+        expanded.push(run);
+        continue;
+      }
+      const parts = expandMarkRunsForSharpCorners(
+        run.points,
+        onRun,
+        markSpeed,
+        travelSpeed,
+        run.label,
+        sharpMode
+      );
+      if (parts.length > 1) {
+        warnings.push(
+          `Sharp corner(s) on "${run.label ?? "mark"}": inserted ${
+            parts.filter((p) => p.kind === "travel").length
+          } ${sharpMode} TRAVEL leg(s).`
+        );
+      }
+      expanded.push(...parts);
+    }
+    runs = expanded;
   }
 
   // Runtime entry (rover → first tip) — after PRE/AFT/connectors so we can fold

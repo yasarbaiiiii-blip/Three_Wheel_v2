@@ -37,6 +37,8 @@ import {
   hydrateStagedMissionForMap,
   isStagedHydrationLineId,
 } from "../../../utils/stagedMissionHydration";
+import { recoverCornersAfterHydration } from "../../../utils/cornerLifecycle";
+import { SHARP_CORNER_MODE } from "../../../config/featureFlags";
 import { buildSurveyCsvExport, type SurveyCsvExport } from "../../../utils/surveyCsvExport";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
@@ -288,7 +290,9 @@ export function CsvStageAndLoadPanel({
       stagedInspection?: pathApi.StagedMissionResponse;
     },
     allowLoad: boolean,
-    preSendExtensionLines: PlanLine[] = []
+    preSendExtensionLines: PlanLine[] = [],
+    /** Pre-send painted marks (still carry geometry.corners) for lifecycle recovery. */
+    sourcePaintedLines: PlanLine[] = []
   ) => {
     const plan = result.plan;
     setStaged({ missionId: result.missionId, plan });
@@ -318,8 +322,14 @@ export function CsvStageAndLoadPanel({
       extensionLines: preSendExtensionLines,
     });
     if (hydrated) {
+      // Recover corner class / execution mode lost when densified ids replace source lines.
+      const cornerTagged = recoverCornersAfterHydration(
+        hydrated.lines,
+        sourcePaintedLines,
+        SHARP_CORNER_MODE
+      );
       setAlignedRefPoints?.(hydrated.alignedRefPoints);
-      setLines(sanitizePlanLines(hydrated.lines));
+      setLines(sanitizePlanLines(cornerTagged));
       onSelectLine(hydrated.selectedLineId);
     }
 
@@ -390,6 +400,7 @@ export function CsvStageAndLoadPanel({
         groundTruthSource: isDxfLocal ? undefined : groundTruthSource,
         extensions: extCfg,
         includeEntryTransit: false,
+        sharpCornerMode: SHARP_CORNER_MODE,
       });
       if (built.runs.length === 0) {
         const detail = built.warnings.slice(0, 3).join("\n") || "No mark runs produced.";
@@ -398,6 +409,7 @@ export function CsvStageAndLoadPanel({
         return;
       }
       const preSendExtensions = buildCsvExtensionLines(appTrajectory.paintedLines, extCfg);
+      const sourcePainted = appTrajectory.paintedLines;
 
       const result = await planAndStageAppTrajectory(apiBaseUrl, {
         missionName: resolvedMissionName,
@@ -423,11 +435,12 @@ export function CsvStageAndLoadPanel({
       if (resolvedOriginGps) {
         onAppPlannedStartSnapshot?.(
           buildAppPlannedStartSnapshot({
-            paintedLines: appTrajectory.paintedLines,
+            paintedLines: sourcePainted,
             extensionConfig: extCfg,
             originGps: resolvedOriginGps,
             missionName: resolvedMissionName,
             groundTruthSource: isDxfLocal ? undefined : groundTruthSource,
+            sharpCornerMode: SHARP_CORNER_MODE,
           })
         );
       }
@@ -439,7 +452,8 @@ export function CsvStageAndLoadPanel({
           stagedInspection: result.stagedInspection,
         },
         result.echoVerification == null || result.echoVerification.ok,
-        preSendExtensions
+        preSendExtensions,
+        sourcePainted
       );
     } catch (err) {
       const message = err instanceof Error && err.message ? err.message : "Could not send the path.";

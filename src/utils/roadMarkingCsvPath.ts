@@ -202,10 +202,24 @@ export type PointSequenceClass = "dense-survey" | "sparse-waypoints";
 
 export type CornerClass = "clean" | "tight" | "sharp" | "reversal";
 
+/**
+ * Classified interior corner on a source polyline (Track C).
+ * `radiusM` / `cutM` come from {@link waypointCornerRadiusM} when a geometric
+ * fillet is possible; null when the turn is a hard reversal or unfittable.
+ */
 export type SourceCorner = {
   atIndex: number;
   turnDeg: number;
   class: CornerClass;
+  /** Selected fillet radius (m), or null when no fillet. */
+  radiusM: number | null;
+  /** Corner cut / miss distance (m), or null when no fillet. */
+  cutM: number | null;
+  overBudget: boolean;
+  undrivable: boolean;
+  /** Source vertex NED (for trajectory split / lifecycle matching). */
+  north: number;
+  east: number;
 };
 
 export type FittedPathResult = {
@@ -1335,6 +1349,10 @@ export function buildSparseArcSamples(
 /**
  * Fillet radius at a waypoint corner from paint budget + leg budget + rover floor.
  * Returns null when no geometric fillet is possible.
+ *
+ * Single sizing policy for sparse (`buildWaypointFilletPath`) and dense
+ * (`tessellatePrimitivesWithJointFillets`) pipelines — do not re-derive radius
+ * from `filletRadiusFraction` alone at call sites.
  */
 export function waypointCornerRadiusM(
   turnDeg: number,
@@ -1382,6 +1400,68 @@ export function waypointCornerRadiusM(
 }
 
 /**
+ * Map turn + leg geometry to a drivability class using the same budgets as
+ * {@link waypointCornerRadiusM}. Reversal threshold is {@link MAX_INTERIOR_TURN_DEG}.
+ */
+export function classifyCornerDrivability(
+  turnDeg: number,
+  legInM: number,
+  legOutM: number,
+  opts?: { rMinM?: number; cornerTolM?: number; maxFilletM?: number }
+): Omit<SourceCorner, "atIndex" | "north" | "east"> {
+  const absTurn = Math.abs(turnDeg);
+  if (absTurn >= MAX_INTERIOR_TURN_DEG) {
+    return {
+      turnDeg: absTurn,
+      class: "reversal",
+      radiusM: null,
+      cutM: null,
+      overBudget: true,
+      undrivable: true,
+    };
+  }
+  const info = waypointCornerRadiusM(absTurn, legInM, legOutM, opts);
+  if (!info) {
+    return {
+      turnDeg: absTurn,
+      class: "sharp",
+      radiusM: null,
+      cutM: null,
+      overBudget: true,
+      undrivable: true,
+    };
+  }
+  if (info.undrivable) {
+    return {
+      turnDeg: absTurn,
+      class: "sharp",
+      radiusM: info.r,
+      cutM: info.missM,
+      overBudget: info.overBudget,
+      undrivable: true,
+    };
+  }
+  if (info.overBudget) {
+    return {
+      turnDeg: absTurn,
+      class: "tight",
+      radiusM: info.r,
+      cutM: info.missM,
+      overBudget: true,
+      undrivable: false,
+    };
+  }
+  return {
+    turnDeg: absTurn,
+    class: "clean",
+    radiusM: info.r,
+    cutM: info.missM,
+    overBudget: false,
+    undrivable: false,
+  };
+}
+
+/**
  * Sparse-waypoint pipeline: preserve every vertex, straight legs + geometric fillets only.
  * Never estimates noise, never deletes points, never invents arcs from data.
  */
@@ -1424,11 +1504,11 @@ export function buildWaypointFilletPath(
     });
 
     if (!radiusInfo) {
+      // Unfittable = sharp (or near-reversal handled by classify); leave vertex for teardrop.
       out.push(cur);
       warnings.push(
-        `Corner at vertex ${i + 1}: too tight for a circular fillet — left sharp (turn ${turn.toFixed(1)}°).`
+        `Corner at vertex ${i + 1}: too tight for a circular fillet — left sharp (turn ${turn.toFixed(1)}°; teardrop TRAVEL at Send).`
       );
-      paintable = false;
       continue;
     }
 
@@ -1438,10 +1518,12 @@ export function buildWaypointFilletPath(
       );
     }
     if (radiusInfo.undrivable) {
+      // Best-effort geometric fillet still applied for a smooth preview path.
+      // Trajectory build may also insert MARK→TRAVEL(teardrop)→MARK using
+      // geometry.corners metadata — do not mark the whole path non-paintable.
       warnings.push(
-        `Corner at vertex ${i + 1}: radius ${radiusInfo.r.toFixed(3)} m is below rover minimum ${R_MIN_ROVER_M} m.`
+        `Corner at vertex ${i + 1}: radius ${radiusInfo.r.toFixed(3)} m is below rover minimum ${R_MIN_ROVER_M} m — sharp (teardrop available at Send).`
       );
-      paintable = false;
     }
 
     const uIn = unit(sub(cur, prev));
@@ -1453,8 +1535,7 @@ export function buildWaypointFilletPath(
     const fillet = geometricFilletFromTangents(cur, uIn, uOut, radiusInfo.r, opts.sampleSpacingM);
     if (!fillet) {
       out.push(cur);
-      warnings.push(`Corner at vertex ${i + 1}: fillet construction failed.`);
-      paintable = false;
+      warnings.push(`Corner at vertex ${i + 1}: fillet construction failed — left sharp.`);
       continue;
     }
     for (let k = 0; k < fillet.samples.length; k++) {
@@ -1810,23 +1891,133 @@ export type PathPrimitive =
 const CORNER_CLASSIFY_MIN_TURN_DEG = 30;
 
 /**
- * Classify interior vertices by turning angle (Track C1).
- * Open paths: indices 1..n-2 only.
+ * Classify interior vertices by drivability (Track C1).
+ * Open paths: indices 1..n-2 only. Uses paint budget + leg budget + rover floor
+ * via {@link classifyCornerDrivability} — not bare angle buckets.
  */
-export function classifySourceCorners(points: RoadMarkingNedPoint[]): SourceCorner[] {
+export function classifySourceCorners(
+  points: RoadMarkingNedPoint[],
+  opts?: { rMinM?: number; cornerTolM?: number; maxFilletM?: number }
+): SourceCorner[] {
   const out: SourceCorner[] = [];
   if (points.length < 3) return out;
   for (let i = 1; i < points.length - 1; i++) {
     const turnDeg = Math.abs(turningAngleDeg(points[i - 1], points[i], points[i + 1]));
     if (turnDeg < CORNER_CLASSIFY_MIN_TURN_DEG) continue;
-    let cls: CornerClass;
-    if (turnDeg >= 150) cls = "reversal";
-    else if (turnDeg >= 100) cls = "sharp";
-    else if (turnDeg >= 60) cls = "tight";
-    else cls = "clean";
-    out.push({ atIndex: i, turnDeg, class: cls });
+    const legIn = dist(points[i - 1], points[i]);
+    const legOut = dist(points[i], points[i + 1]);
+    const d = classifyCornerDrivability(turnDeg, legIn, legOut, opts);
+    out.push({
+      atIndex: i,
+      north: points[i].north,
+      east: points[i].east,
+      ...d,
+    });
   }
   return out;
+}
+
+/**
+ * Operator-facing summary lines for classified corners (fit_warnings / UI).
+ */
+export function formatCornerWarnings(corners: SourceCorner[]): string[] {
+  if (corners.length === 0) return [];
+  const counts: Record<CornerClass, number> = {
+    clean: 0,
+    tight: 0,
+    sharp: 0,
+    reversal: 0,
+  };
+  for (const c of corners) counts[c.class] += 1;
+  const parts: string[] = [];
+  if (counts.clean) parts.push(`${counts.clean} clean`);
+  if (counts.tight) parts.push(`${counts.tight} tight`);
+  if (counts.sharp) parts.push(`${counts.sharp} sharp`);
+  if (counts.reversal) parts.push(`${counts.reversal} reversal`);
+  const summary = `Corners: ${corners.length} (${parts.join(", ")})`;
+  const detail: string[] = [summary];
+  for (const c of corners) {
+    if (c.class === "clean") continue;
+    const cut =
+      c.cutM != null ? `, cut ${(c.cutM * 100).toFixed(0)} cm` : "";
+    const r = c.radiusM != null ? `, r=${c.radiusM.toFixed(2)} m` : "";
+    detail.push(
+      `  · vertex ${c.atIndex + 1}: ${c.class} (${c.turnDeg.toFixed(0)}°${r}${cut})`
+    );
+  }
+  return detail;
+}
+
+/**
+ * Short TRAVEL loop at R_min that reorients from arrival to departure heading
+ * and returns to the vertex (MARK→TRAVEL→MARK teardrop for sharp corners).
+ * Start and end are the vertex so travel-touch rules hold.
+ */
+export function buildTeardropTravelPoints(
+  vertex: RoadMarkingNedPoint,
+  prev: RoadMarkingNedPoint,
+  next: RoadMarkingNedPoint,
+  rMin: number = R_MIN_ROVER_M,
+  sampleSpacingM: number = 0.15
+): RoadMarkingNedPoint[] {
+  const dIn = dist(prev, vertex);
+  const dOut = dist(vertex, next);
+  if (dIn < 1e-9 || dOut < 1e-9) {
+    return [vertex, vertex];
+  }
+  const uIn = unit(sub(vertex, prev));
+  const uOut = unit(sub(next, vertex));
+  if (!uIn || !uOut) return [vertex, vertex];
+
+  const cross = uIn.north * uOut.east - uIn.east * uOut.north;
+  const dot = uIn.north * uOut.north + uIn.east * uOut.east;
+  let turn = Math.atan2(cross, dot);
+  if (Math.abs(turn) < 1e-3) {
+    // Nearly straight — tiny lateral nudge so the run still has ≥2 distinct points.
+    return [
+      vertex,
+      { north: vertex.north + uOut.north * 0.05, east: vertex.east + uOut.east * 0.05 },
+      vertex,
+    ];
+  }
+
+  // Prefer the shorter exterior reorient when the interior fold is very sharp.
+  if (Math.abs(turn) > Math.PI) {
+    turn = turn > 0 ? turn - 2 * Math.PI : turn + 2 * Math.PI;
+  }
+
+  // Circle center to the left of arrival for CCW (positive) turn.
+  const left = { north: -uIn.east, east: uIn.north };
+  const sign = turn >= 0 ? 1 : -1;
+  const center = {
+    north: vertex.north + sign * left.north * rMin,
+    east: vertex.east + sign * left.east * rMin,
+  };
+
+  // Match angleOf / sampleArc convention: atan2(north − c, east − c).
+  const ang0 = Math.atan2(vertex.north - center.north, vertex.east - center.east);
+  const sweep = turn;
+  const arcLen = Math.abs(sweep) * rMin;
+  const steps = Math.max(4, Math.ceil(arcLen / Math.max(0.05, sampleSpacingM)));
+  const pts: RoadMarkingNedPoint[] = [{ ...vertex }];
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const a = ang0 + sweep * t;
+    // Inverse of atan2(n, e): n = r·sin(a)? Wait — atan2(n, e) means
+    // cos(a) aligns with east, sin(a) with north.
+    pts.push({
+      north: center.north + rMin * Math.sin(a),
+      east: center.east + rMin * Math.cos(a),
+    });
+  }
+  // Close back to vertex for mark-touch rules.
+  if (dist(pts[pts.length - 1], vertex) > 0.02) {
+    pts.push({ ...vertex });
+  } else {
+    pts[pts.length - 1] = { ...vertex };
+  }
+  if (pts.length < 2) pts.push({ ...vertex });
+  return pts;
 }
 
 /**
@@ -2303,19 +2494,31 @@ export function tessellatePrimitivesWithJointFillets(
 
     const lenPrev = primitiveLength(points, prev);
     const lenNext = primitiveLength(points, next);
-    // Leave half of each primitive for the other joint / body.
+    // Leave ~half of each primitive for the other joint / body (same 45% as sparse).
     const budget = 0.45 * Math.min(lenPrev, lenNext);
-    let r = Math.min(
-      options.maxFilletRadiusM,
-      options.filletRadiusFraction * Math.min(lenPrev, lenNext)
-    );
+    const fractionCap = options.filletRadiusFraction * Math.min(lenPrev, lenNext);
+
+    // Radius policy:
+    // - Real corners (≥ CORNER_CLASSIFY_MIN_TURN_DEG): same paint+leg+R_min formula as
+    //   sparse `buildWaypointFilletPath` so dense/sparse agree on squares & zig-zags.
+    // - Mild residual joints on a dense fit: keep the fraction×leg cap so paint-ceil
+    //   cannot invent a multi-metre fillet that over-trims short arcs (field_test_02).
+    const radiusInfo = waypointCornerRadiusM(turn, lenPrev, lenNext, {
+      rMinM: R_MIN_ROVER_M,
+      cornerTolM: CORNER_TOLERANCE_M,
+      maxFilletM: options.maxFilletRadiusM,
+    });
+    let r: number;
+    if (turn >= CORNER_CLASSIFY_MIN_TURN_DEG && radiusInfo) {
+      r = radiusInfo.r;
+    } else if (radiusInfo) {
+      r = Math.min(radiusInfo.r, Math.max(fractionCap, 0.05));
+    } else {
+      r = Math.min(options.maxFilletRadiusM, Math.max(fractionCap, 0.05));
+    }
 
     // Data-aware radius: when neither neighbor is already a fitted arc, prefer a corner
-    // radius the raw survey points actually support over the pure tangent/segment-length
-    // heuristic above, which has no relationship to the real curvature and can visibly
-    // pull the path away from where the source data placed the corner. Only ever shrinks
-    // r (never grows it), so this can only make the fillet MORE faithful to the data, never
-    // less conservative than the existing heuristic.
+    // radius the raw survey points actually support. Only ever shrinks r (never grows it).
     if (
       prev.kind === "line" &&
       next.kind === "line" &&
@@ -2345,13 +2548,7 @@ export function tessellatePrimitivesWithJointFillets(
       r = budget / Math.tan(turnRad / 2);
       offset = budget;
     }
-    // A joint that already cleared the MIN_VISIBLE_TURN_DEG gate above is a genuinely visible
-    // turn — never leave it completely unrounded just because the geometrically-derived
-    // offset happens to land marginally under MIN_FILLET_OFFSET_M (a tight per-joint budget,
-    // or a data-aware radius fit across a real corner rather than real curvature, both push r
-    // — and so offset — down). Floor the offset up to the minimum instead of skipping,
-    // as long as it still fits the budget; only a truly degenerate turn or an
-    // impossibly-tight budget still falls through to skip.
+    // Visible turn: never leave completely unrounded when a tiny floor still fits the budget.
     if (turnRad > 1e-6 && offset < MIN_FILLET_OFFSET_M && MIN_FILLET_OFFSET_M <= budget) {
       offset = MIN_FILLET_OFFSET_M;
       r = offset / Math.tan(turnRad / 2);
@@ -2712,18 +2909,24 @@ function buildRoadMarkingFittedPathDirected(
       const arcValidation = validateFittedPath(source, arcSamples, { waypointMode: true });
       if (arcValidation.ok && arcSamples.length >= 2) {
         const arcLen = polylineLengthM(arcSamples);
+        const corners = classifySourceCorners(source, { maxFilletM: opts.maxFilletRadiusM });
+        for (const w of formatCornerWarnings(corners)) warnings.push(w);
+        const hasReversal = corners.some((c) => c.class === "reversal");
+        if (hasReversal) {
+          warnings.push("Path has a reversal corner — fix the survey or skip this path before Send.");
+        }
         return {
           samples: arcSamples,
           mode: "sparse-arc",
           warnings,
-          paintable: true,
+          paintable: !hasReversal,
           quality: {
             class: "sparse-waypoints",
             toleranceM: arcFit.gateM,
             maxJointTurnDeg: maxTurningAngleDeg(arcSamples),
             lengthRatio: srcLen > 1e-9 ? arcLen / srcLen : 1,
             maxSourceDeviationM: maxSourceDeviationM(source, arcSamples),
-            corners: classifySourceCorners(source),
+            corners,
           },
         };
       }
@@ -2738,19 +2941,26 @@ function buildRoadMarkingFittedPathDirected(
     if (!v.ok) {
       warnings.push(`Waypoint path validation: ${v.reasons.join("; ")}`);
     }
+    const corners = classifySourceCorners(source, { maxFilletM: opts.maxFilletRadiusM });
+    for (const w of formatCornerWarnings(corners)) warnings.push(w);
+    const hasReversal = corners.some((c) => c.class === "reversal");
+    if (hasReversal) {
+      warnings.push("Path has a reversal corner — fix the survey or skip this path before Send.");
+    }
     const fitLen = polylineLengthM(wp.samples);
     return {
       samples: wp.samples,
       mode: "waypoint-fillet",
       warnings,
-      paintable: wp.paintable && v.ok,
+      // Sharp corners stay paintable (teardrop at trajectory); only reversal / validation fail.
+      paintable: wp.paintable && v.ok && !hasReversal,
       quality: {
         class: "sparse-waypoints",
         toleranceM: CORNER_TOLERANCE_M,
         maxJointTurnDeg: maxTurningAngleDeg(wp.samples),
         lengthRatio: srcLen > 1e-9 ? fitLen / srcLen : 1,
         maxSourceDeviationM: maxSourceDeviationM(source, wp.samples),
-        corners: classifySourceCorners(source),
+        corners,
       },
     };
   }
@@ -2825,6 +3035,16 @@ function buildRoadMarkingFittedPathDirected(
     );
   }
 
+  const corners = classifySourceCorners(source, {
+    maxFilletM: opts.maxFilletRadiusM,
+  });
+  for (const w of formatCornerWarnings(corners)) warnings.push(w);
+  // Reversal blocks paint; sharp is handled as teardrop at trajectory time.
+  if (corners.some((c) => c.class === "reversal")) {
+    paintable = false;
+    warnings.push("Path has a reversal corner — fix the survey or skip this path before Send.");
+  }
+
   const fitLen = polylineLengthM(fitted);
   return {
     samples: fitted,
@@ -2837,6 +3057,7 @@ function buildRoadMarkingFittedPathDirected(
       maxJointTurnDeg: maxTurn,
       lengthRatio: srcLen > 1e-9 ? fitLen / srcLen : 1,
       maxSourceDeviationM: maxSourceDeviationM(source, fitted),
+      corners,
     },
   };
 }

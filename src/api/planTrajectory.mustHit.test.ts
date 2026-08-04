@@ -66,10 +66,9 @@ describe("collinearAwareMustHitIndices", () => {
     expect(collinearAwareMustHitIndices(points)).toEqual([0, 2, 4]);
   });
 
-  it("gentle curves accumulate turn from the last declared point", () => {
-    // 0.6 deg per step — each step is below the tolerance, but the turn
-    // accumulates, so interior points must still be declared (this is what
-    // protects arcs from being chorded).
+  it("gentle curves keep a sparse must-hit set within path-error budget", () => {
+    // Dense arc-like chain: path-error thinning must keep more than endpoints
+    // but far fewer than every sample (angle-only 1° gate used to keep almost all).
     const points: [number, number][] = [];
     let heading = 0;
     let n = 0;
@@ -83,10 +82,12 @@ describe("collinearAwareMustHitIndices", () => {
     const declared = collinearAwareMustHitIndices(points);
     expect(declared[0]).toBe(0);
     expect(declared[declared.length - 1]).toBe(points.length - 1);
-    expect(declared.length).toBeGreaterThan(4);
+    expect(declared.length).toBeGreaterThan(2);
+    expect(declared.length).toBeLessThan(points.length);
   });
 
-  it("turns at exactly the tolerance are not declared; just above are", () => {
+  it("tiny heading wiggles under path-error budget are not declared", () => {
+    // 1.5° on 1 m legs: lateral miss is well under 15 mm — endpoints only.
     const mk = (deg: number): [number, number][] => {
       const rad = (deg * Math.PI) / 180;
       return [
@@ -96,7 +97,7 @@ describe("collinearAwareMustHitIndices", () => {
       ];
     };
     expect(collinearAwareMustHitIndices(mk(MUST_HIT_COLLINEAR_TOL_DEG * 0.99))).toEqual([0, 2]);
-    expect(collinearAwareMustHitIndices(mk(MUST_HIT_COLLINEAR_TOL_DEG * 1.5))).toEqual([0, 1, 2]);
+    expect(collinearAwareMustHitIndices(mk(MUST_HIT_COLLINEAR_TOL_DEG * 1.5))).toEqual([0, 2]);
   });
 
   it("coincident duplicate points do not crash and are not declared", () => {

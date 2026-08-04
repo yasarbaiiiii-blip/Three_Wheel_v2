@@ -984,6 +984,7 @@ function buildPlanLineForGroup(
   const first = preview_points[0];
   const last = preview_points[preview_points.length - 1];
   const length_m = measurePreviewLengthM(preview_points);
+  const corners = fitted.quality.corners ?? [];
 
   return {
     id,
@@ -1011,6 +1012,19 @@ function buildPlanLineForGroup(
         fit_warnings: fitted.warnings,
         max_joint_turn_deg: fitted.quality.maxJointTurnDeg,
         length_ratio: fitted.quality.lengthRatio,
+        max_source_deviation_m: fitted.quality.maxSourceDeviationM,
+        /** First-class corner metadata (Track C1) — survives Path Order / Send. */
+        corners: corners.map((c) => ({
+          atIndex: c.atIndex,
+          turnDeg: c.turnDeg,
+          class: c.class,
+          radiusM: c.radiusM,
+          cutM: c.cutM,
+          overBudget: c.overBudget,
+          undrivable: c.undrivable,
+          north: c.north,
+          east: c.east,
+        })),
       },
       preview_points,
     },

@@ -78,50 +78,97 @@ export type PlanTrajectoryResponse = PathPlanResponse & {
 };
 
 /**
- * Interior points are declared only where the heading turns by more than this,
- * accumulated from the last declared point. The rover's own simplifier keeps
- * any vertex with >= 5 deg of accumulated turn regardless of declarations
- * (rpp_controller_node._simplify_path_for_profile, collinear_tol_deg=5.0), so
- * 1 deg protects every shape-bearing point with 5x margin while leaving
- * exactly-collinear densification fill (0.000 deg) thinnable — which is what
- * restores the rover's >= 0.52 m lookahead on straight lines.
+ * Legacy heading gate (deg). Kept for tests/docs; production must-hit thinning
+ * uses {@link MUST_HIT_PATH_ERROR_M} (chord / path error), not this angle.
+ * Large heading jumps are still force-kept as a secondary belt (see below).
  */
 export const MUST_HIT_COLLINEAR_TOL_DEG = 1.0;
 
 /**
- * Max path error (m) for must-hit thinning vs the full polyline chord.
+ * Max path error (m) for must-hit thinning vs the retained polyline chord.
  * Derived from paint budget: min(15 mm, 0.1 × PAINT_ERROR_BUDGET_M).
+ * Dense curves sampled at 0.35 m routinely turn >1° per step; an angle-only
+ * gate over-declares every sample and collapses pure-pursuit lookahead.
  */
 export const MUST_HIT_PATH_ERROR_M = 0.015;
 
+/** Force-keep any vertex whose instantaneous turn exceeds this (deg). */
+const MUST_HIT_FORCE_TURN_DEG = 25;
+
+function pointToSegmentDistM(
+  p: [number, number],
+  a: [number, number],
+  b: [number, number]
+): number {
+  const ab0 = b[0] - a[0];
+  const ab1 = b[1] - a[1];
+  const len2 = ab0 * ab0 + ab1 * ab1;
+  if (len2 < 1e-18) return Math.hypot(p[0] - a[0], p[1] - a[1]);
+  let t = ((p[0] - a[0]) * ab0 + (p[1] - a[1]) * ab1) / len2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p[0] - (a[0] + ab0 * t), p[1] - (a[1] + ab1 * t));
+}
+
 /**
- * Endpoints plus every interior point where the polyline actually turns.
- * Mirrors the rover simplifier's retention rule (heading change accumulated
- * from the last retained point), so collinear interpolation between survey
- * vertices is never declared must-hit.
+ * Endpoints plus the fewest interior points so the retained polyline stays
+ * within {@link MUST_HIT_PATH_ERROR_M} of every skipped sample (Douglas–Peucker
+ * style). Also force-keeps hard corners ({@link MUST_HIT_FORCE_TURN_DEG}).
+ *
+ * Collinear densification fill is never declared; real curves get a sparse
+ * set of shape-bearing vertices so pure-pursuit lookahead is not collapsed.
  */
 export function collinearAwareMustHitIndices(points: [number, number][]): number[] {
   const n = points.length;
   if (n <= 2) return points.map((_, i) => i);
-  const out: number[] = [0];
-  let anchor = 0;
+
+  const keep = new Set<number>([0, n - 1]);
+
+  // Force-keep hard corners (independent of path-error recursion).
   for (let i = 1; i < n - 1; i++) {
-    const ux = points[i][0] - points[anchor][0];
-    const uy = points[i][1] - points[anchor][1];
+    const ux = points[i][0] - points[i - 1][0];
+    const uy = points[i][1] - points[i - 1][1];
     const vx = points[i + 1][0] - points[i][0];
     const vy = points[i + 1][1] - points[i][1];
-    // Coincident points have no heading — skip, keeping the current anchor.
-    if (Math.hypot(ux, uy) < 1e-9 || Math.hypot(vx, vy) < 1e-9) continue;
+    const lu = Math.hypot(ux, uy);
+    const lv = Math.hypot(vx, vy);
+    if (lu < 1e-9 || lv < 1e-9) continue;
     const turnDeg = Math.abs(
       (Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy) * 180) / Math.PI
     );
-    if (turnDeg > MUST_HIT_COLLINEAR_TOL_DEG) {
-      out.push(i);
-      anchor = i;
+    if (turnDeg > MUST_HIT_FORCE_TURN_DEG) keep.add(i);
+  }
+
+  function farthest(i0: number, i1: number): { idx: number; d: number } {
+    let bestIdx = -1;
+    let bestD = 0;
+    for (let i = i0 + 1; i < i1; i++) {
+      const d = pointToSegmentDistM(points[i], points[i0], points[i1]);
+      if (d > bestD) {
+        bestD = d;
+        bestIdx = i;
+      }
+    }
+    return { idx: bestIdx, d: bestD };
+  }
+
+  function simplify(i0: number, i1: number): void {
+    if (i1 - i0 <= 1) return;
+    const { idx, d } = farthest(i0, i1);
+    if (idx < 0) return;
+    if (d > MUST_HIT_PATH_ERROR_M) {
+      keep.add(idx);
+      simplify(i0, idx);
+      simplify(idx, i1);
     }
   }
-  out.push(n - 1);
-  return out;
+
+  // Recurse between sorted seeds so force-kept corners partition the chain.
+  const seeds = Array.from(keep).sort((a, b) => a - b);
+  for (let s = 0; s < seeds.length - 1; s++) {
+    simplify(seeds[s], seeds[s + 1]);
+  }
+
+  return Array.from(keep).sort((a, b) => a - b);
 }
 
 export function trajectoryRunsToPayload(runs: TrajectoryRun[]): PlanTrajectoryRunPayload[] {

@@ -170,6 +170,36 @@ describe("missionLayerLines", () => {
     expect(tagged.find((l) => l.id === "rover-transit-1")?.missionLayerId).toBeUndefined();
   });
 
+  it("recovers mission-layer identity on hydrated extension legs via their parent mark", () => {
+    const layers = createLayerForFile([], "fa");
+    const l1 = layers[0];
+
+    const painted = [
+      { ...mark("north__a1"), from: { id: 1, x: 0, y: 0 }, to: { id: 2, x: 10, y: 0 } },
+    ];
+    const extConfig = { enabled: true, preM: 1, aftM: 1, perLine: false };
+    const catalog = buildMissionLayerLegCatalog(painted, files, layers, extConfig);
+
+    // Hydrated extension legs (post-stage ids like the real round trip mints), same
+    // geometry as the pre/aft run-ups `buildCsvExtensionLines` computed above.
+    const hydrated: PlanLine[] = [
+      {
+        ...mark("rover-ext-pre-1"),
+        layer: "extension",
+        from: { id: 1, x: -1, y: 0 },
+        to: { id: 2, x: 0, y: 0 },
+      },
+      {
+        ...mark("rover-ext-aft-1"),
+        layer: "extension",
+        from: { id: 1, x: 10, y: 0 },
+        to: { id: 2, x: 11, y: 0 },
+      },
+    ];
+    const tagged = tagLinesWithMissionLayer(hydrated, catalog);
+    expect(tagged.every((l) => l.missionLayerId === l1.id)).toBe(true);
+  });
+
   it("hides hydrated lines by recovered missionLayerId when their layer is invisible", () => {
     let layers = createLayerForFile([], "fa");
     layers = createLayerForFile(layers, "fb");

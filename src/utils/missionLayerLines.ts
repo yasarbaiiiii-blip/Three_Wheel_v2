@@ -10,6 +10,7 @@ import {
   type AppPlannedStartSnapshot,
 } from "./appPlannedStartSnapshot";
 import { sortedMissionLayers } from "./missionLayerAssignment";
+import { buildCsvExtensionLines, type CsvExtensionConfig } from "./missionExtensions";
 
 const PREFIX_SEP = "__";
 
@@ -172,12 +173,28 @@ export type MissionLayerLeg = {
  */
 const LAYER_MATCH_MAX_DIST_M = 1.0;
 
-/** Catalog of source-line geometry keyed by mission layer, built while ids still
- * carry their file prefix (i.e. from the frozen Send-time snapshot). */
+/** `ext-pre-<parentId>` / `ext-aft-<parentId>` → `<parentId>` (see makeExtensionPlanLine). */
+function parentLineIdFromExtensionId(extensionId: string): string | null {
+  if (extensionId.startsWith("ext-pre-")) return extensionId.slice("ext-pre-".length);
+  if (extensionId.startsWith("ext-aft-")) return extensionId.slice("ext-aft-".length);
+  return null;
+}
+
+/**
+ * Catalog of source-line geometry keyed by mission layer, built while ids still
+ * carry their file prefix (i.e. from the frozen Send-time snapshot).
+ *
+ * Also folds in PRE/AFT extension legs when `extensionConfig` is supplied — an
+ * extension's own id carries no file prefix (`ext-pre-<parentId>`), so it's
+ * attributed to whichever mark line it extends instead. Without this, hidden
+ * mission layers left their extension run-ups/run-outs stuck always-visible on
+ * the map after Send/Start, since nothing in the catalog could ever match them.
+ */
 export function buildMissionLayerLegCatalog(
   paintedLines: PlanLine[],
   uploadedFiles: UploadedFileEntry[],
-  layers: MissionLayer[]
+  layers: MissionLayer[],
+  extensionConfig?: Partial<CsvExtensionConfig> | null
 ): MissionLayerLeg[] {
   const out: MissionLayerLeg[] = [];
   for (const line of paintedLines) {
@@ -190,6 +207,21 @@ export function buildMissionLayerLegCatalog(
       toNorth: line.to.x,
       toEast: line.to.y,
     });
+  }
+
+  if (extensionConfig) {
+    for (const ext of buildCsvExtensionLines(paintedLines, extensionConfig)) {
+      const parentId = parentLineIdFromExtensionId(String(ext.id));
+      const layer = parentId ? layerForLineId(parentId, uploadedFiles, layers) : null;
+      if (!layer) continue;
+      out.push({
+        layerId: layer.id,
+        fromNorth: ext.from.x,
+        fromEast: ext.from.y,
+        toNorth: ext.to.x,
+        toEast: ext.to.y,
+      });
+    }
   }
   return out;
 }

@@ -6,6 +6,7 @@
  * never be re-planned. Start always rebuilds from this snapshot + live telemetry.
  */
 
+import { SHARP_CORNER_MODE, type SharpCornerMode } from "../config/featureFlags";
 import type { PlanLine } from "../types/plan";
 import { planAndStageAppTrajectory, type CsvStageResult } from "./missionStaging";
 import {
@@ -25,6 +26,8 @@ export type AppPlannedStartSnapshot = {
   originGps: [number, number];
   missionName: string;
   groundTruthSource?: GroundTruthSourcePoint[];
+  /** Sharp-corner TRAVEL mode frozen at Send (teardrop default / pivot opt-in). */
+  sharpCornerMode?: SharpCornerMode;
   capturedAtMs: number;
 };
 
@@ -39,6 +42,7 @@ export function buildAppPlannedStartSnapshot(args: {
   originGps: [number, number];
   missionName: string;
   groundTruthSource?: GroundTruthSourcePoint[];
+  sharpCornerMode?: SharpCornerMode;
 }): AppPlannedStartSnapshot {
   return {
     paintedLines: clonePlanLinesForSnapshot(args.paintedLines),
@@ -50,6 +54,7 @@ export function buildAppPlannedStartSnapshot(args: {
     groundTruthSource: args.groundTruthSource
       ? args.groundTruthSource.map((g) => ({ ...g }))
       : undefined,
+    sharpCornerMode: args.sharpCornerMode ?? SHARP_CORNER_MODE,
     capturedAtMs: Date.now(),
   };
 }
@@ -104,6 +109,7 @@ export async function restageAppTrajectoryWithLiveEntry(
     originGps: snap.originGps,
     includeEntryTransit: true,
     requireEntryTransit: true,
+    sharpCornerMode: snap.sharpCornerMode ?? SHARP_CORNER_MODE,
   });
 
   if (built.entryTransit?.error) {

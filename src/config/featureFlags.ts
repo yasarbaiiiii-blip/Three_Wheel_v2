@@ -85,3 +85,11 @@ export const PATH_PRIMITIVES_V2: PathPrimitivesV2Mode = "full";
 export function pathPrimitivesV2TopDownSegment(): boolean {
   return PATH_PRIMITIVES_V2 === "segment" || PATH_PRIMITIVES_V2 === "full";
 }
+
+/**
+ * How sharp (undrivable fillet) corners are executed at trajectory build:
+ * - `"teardrop"` (default): MARK ends → short R_min TRAVEL loop → MARK resumes
+ * - `"pivot"`: near-zero TRAVEL (requires rover-side pivot support — bench first)
+ */
+export type SharpCornerMode = "teardrop" | "pivot";
+export const SHARP_CORNER_MODE: SharpCornerMode = "teardrop";
