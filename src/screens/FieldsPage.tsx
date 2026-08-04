@@ -222,6 +222,18 @@ export type FieldsPageProps = {
   onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
   onLocalDxfParsed?: (data: import("../utils/dxfLocalImport").LocalDxfResult) => void;
   onClearLocalCsv?: () => void;
+  /** Mission Layers (file groups) — distinct from CAD LayerVisibility. */
+  missionLayers?: import("../types/missionLayers").MissionLayer[];
+  controlModeActive?: boolean;
+  canUseMissionControl?: boolean;
+  pendingLayerAssignment?: { fileEntryId: string } | null;
+  onPendingLayerAssignment?: (v: { fileEntryId: string } | null) => void;
+  onAssignFileToNewLayer?: (fileEntryId: string) => void;
+  onAssignFileToLayer?: (fileEntryId: string, layerId: string) => void;
+  onUnassignFileFromLayer?: (fileEntryId: string) => void;
+  /** Map-only filtered geometry (mission-layer visibility). */
+  missionVisibleLines?: PlanLine[];
+  missionVisibleMapSourceLines?: PlanLine[];
 };
 
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
@@ -312,6 +324,16 @@ export function FieldsPage(props: FieldsPageProps) {
     onLocalCsvParsed,
     onLocalDxfParsed,
     onClearLocalCsv,
+    missionLayers = [],
+    controlModeActive = false,
+    canUseMissionControl = false,
+    pendingLayerAssignment = null,
+    onPendingLayerAssignment,
+    onAssignFileToNewLayer,
+    onAssignFileToLayer,
+    onUnassignFileFromLayer,
+    missionVisibleLines,
+    missionVisibleMapSourceLines,
   } = props;
 
   const [selectedUploadedFileId, setSelectedUploadedFileId] = useState<string | null>(null);
@@ -693,8 +715,10 @@ export function FieldsPage(props: FieldsPageProps) {
 
   /** Map shows committed mission lines + selected (or sole) pending metric DXF. */
   const mapDisplayLines = useMemo(() => {
+    // Prefer mission-layer-filtered geometry for committed marks when provided.
+    const committedBase = missionVisibleLines ?? lines;
     const pendingIds = Object.keys(pendingDxfAlignment);
-    if (pendingIds.length === 0) return lines;
+    if (pendingIds.length === 0) return committedBase;
     let pendingRaw: PlanLine[] = [];
     if (selectedUploadedFileId && pendingDxfAlignment[selectedUploadedFileId]) {
       pendingRaw = pendingDxfAlignment[selectedUploadedFileId].rawLines;
@@ -704,12 +728,13 @@ export function FieldsPage(props: FieldsPageProps) {
     } else if (activeStep === "align" && selectedPending) {
       pendingRaw = selectedPending.rawLines;
     }
-    if (pendingRaw.length === 0) return lines;
-    const boundary = lines.filter((l) => l.layer === "virtual_boundary");
-    const committed = lines.filter((l) => l.layer !== "virtual_boundary");
+    if (pendingRaw.length === 0) return committedBase;
+    const boundary = committedBase.filter((l) => l.layer === "virtual_boundary");
+    const committed = committedBase.filter((l) => l.layer !== "virtual_boundary");
     return [...boundary, ...committed, ...pendingRaw];
   }, [
     lines,
+    missionVisibleLines,
     pendingDxfAlignment,
     selectedUploadedFileId,
     selectedPending,
@@ -908,7 +933,7 @@ export function FieldsPage(props: FieldsPageProps) {
       <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
         {renderPlanPreview({
           lines: mapDisplayLines,
-          mapSourceLines,
+          mapSourceLines: missionVisibleMapSourceLines ?? mapSourceLines,
           autoOriginReference,
           mapGeometryFrame,
           autoOriginEnabled,
@@ -1378,6 +1403,13 @@ export function FieldsPage(props: FieldsPageProps) {
               selectedUploadedFileId={selectedUploadedFileId}
               onSelectUploadedFile={handleSelectUploadedFile}
               onBeginLocalImportBatch={onBeginLocalImportBatch}
+              missionLayers={missionLayers}
+              controlModeActive={controlModeActive && canUseMissionControl}
+              pendingLayerAssignment={pendingLayerAssignment}
+              onPendingLayerAssignment={onPendingLayerAssignment}
+              onAssignFileToNewLayer={onAssignFileToNewLayer}
+              onAssignFileToLayer={onAssignFileToLayer}
+              onUnassignFileFromLayer={onUnassignFileFromLayer}
               onLocalDxfParsed={(data) => {
                 onLocalDxfParsed?.(data);
                 setShowMapInteraction(true);

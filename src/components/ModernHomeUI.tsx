@@ -4,7 +4,7 @@ import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform, Moda
 import { GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps, withSpring, withTiming, cancelAnimation, Easing, runOnJS, Keyframe } from "react-native-reanimated";
 import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText, Path, Polyline } from "react-native-svg";
-import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check, Pencil, Undo2, Layers, ChevronRight, Ruler, Spline } from "lucide-react-native";
+import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check, Pencil, Undo2, Layers, ChevronRight, Ruler, Spline, LayoutList } from "lucide-react-native";
 import { ManualJoystick } from "./ManualJoystick";
 import { Compass } from "./Compass";
 import { Navbar } from "./Navbar";
@@ -13,6 +13,8 @@ import { MapView } from "./MapView";
 import { canAcquireJoystick as canAcquireJoystickForState } from "../utils/joystickFrontendSafety";
 import { getPlanLineSegmentKind, isSegmentKindVisible } from "../utils/curveGeometry";
 import * as pathApi from "../api/pathApi";
+import { MissionLayerPills } from "./fields/MissionLayerPills";
+import { nonEmptyMissionLayers } from "../utils/missionLayerAssignment";
 
 // Using 127.0.0.1:5001 as fallback if window location is unavailable
 const getApiBase = () => {
@@ -633,6 +635,13 @@ export default function ModernHomeUI(props) {
     onResetNorth, resetNorthCount, autoOrigin, onToggleAutoOrigin,
     currentPage = "home",
     renderSectionContent,
+    missionLayers = [],
+    controlModeActive = false,
+    canUseMissionControl = false,
+    onToggleControlMode,
+    onToggleMissionLayerVisibility,
+    missionVisibleLines,
+    missionVisibleMapSourceLines,
   } = props;
 
   const isHomePage = currentPage === "home";
@@ -722,11 +731,14 @@ export default function ModernHomeUI(props) {
     }
     return Array.from(kinds).sort();
   }, [lines]);
+  // Prefer mission-layer-filtered geometry for the Mapbox map when provided.
+  const mapLinesForDisplay = missionVisibleLines ?? lines;
+  const mapSourceForDisplay = missionVisibleMapSourceLines ?? mapSourceLines;
   const mapSourceLinesRaw = visualAlignmentItem
     ? []
-    : autoOriginEnabled && mapSourceLines
-      ? mapSourceLines
-      : lines;
+    : autoOriginEnabled && mapSourceForDisplay
+      ? mapSourceForDisplay
+      : mapLinesForDisplay;
   const visibleMapLines = useMemo(
     () =>
       mapSourceLinesRaw.filter((line) => {
@@ -1474,9 +1486,54 @@ export default function ModernHomeUI(props) {
                   </View>
                 )}
               </View>
+
+              {/* Mission Layers control — same chrome as Layers, separate feature */}
+              <View style={styles.mapToolsDivider} />
+              <Pressable
+                style={({ pressed }) => [
+                  styles.focusToolBtnGrouped,
+                  controlModeActive && { backgroundColor: COLORS.accentMuted },
+                  pressed && styles.focusToolBtnPressed,
+                  !canUseMissionControl && { opacity: 0.45 },
+                ]}
+                onPress={() => {
+                  if (isHomePage) setShowMarkMenu(false);
+                  setShowLayersMenu(false);
+                  onToggleControlMode?.();
+                }}
+                accessibilityLabel="Control mission layers"
+                accessibilityState={{ disabled: !canUseMissionControl, selected: !!controlModeActive }}
+              >
+                <LayoutList
+                  color={controlModeActive ? COLORS.accentBrand : canUseMissionControl ? COLORS.accentBrand : COLORS.textDim}
+                  size={18}
+                  strokeWidth={2.2}
+                />
+                <Text
+                  style={[
+                    styles.focusToolLabel,
+                    controlModeActive && { color: COLORS.accentBrand },
+                    !canUseMissionControl && { color: COLORS.textDim },
+                  ]}
+                >
+                  Control
+                </Text>
+              </Pressable>
             </>
           )}
         </View>
+
+        {/* Mission layer visibility pills — sit under the tool strip when layers exist */}
+        {(isHomePage || isFieldsPage) &&
+        nonEmptyMissionLayers(missionLayers).length > 0 &&
+        onToggleMissionLayerVisibility ? (
+          <View style={{ marginTop: 8, alignSelf: "flex-start" }}>
+            <MissionLayerPills
+              layers={missionLayers}
+              onToggle={onToggleMissionLayerVisibility}
+            />
+          </View>
+        ) : null}
       </AnimatedReanimated.View>
     );
   };

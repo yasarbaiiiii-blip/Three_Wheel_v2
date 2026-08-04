@@ -6,7 +6,9 @@ import { Plus, Upload, X } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
 import { DXF_PLANNER } from "../../../config/featureFlags";
+import type { MissionLayer } from "../../../types/missionLayers";
 import type { ImportedPlan } from "../../../types/plan";
+import { layerForFile, nonEmptyMissionLayers, sortedMissionLayers } from "../../../utils/missionLayerAssignment";
 import {
   CSV_EXT_AFT_FLOOR_M,
   CSV_EXT_MAX_M,
@@ -82,6 +84,14 @@ type UploadAndPreviewStepProps = {
    * combine cleanly without residual geometry from a prior mission.
    */
   onBeginLocalImportBatch?: () => void;
+  /** Mission Layers assignment (Control mode). */
+  missionLayers?: MissionLayer[];
+  controlModeActive?: boolean;
+  pendingLayerAssignment?: { fileEntryId: string } | null;
+  onPendingLayerAssignment?: (v: { fileEntryId: string } | null) => void;
+  onAssignFileToNewLayer?: (fileEntryId: string) => void;
+  onAssignFileToLayer?: (fileEntryId: string, layerId: string) => void;
+  onUnassignFileFromLayer?: (fileEntryId: string) => void;
 };
 
 const MAX_IMPORT_ATTEMPTS = 3;
@@ -223,6 +233,13 @@ export function UploadAndPreviewStep({
   onSelectUploadedFile,
   selectedUploadedFileId = null,
   onBeginLocalImportBatch,
+  missionLayers = [],
+  controlModeActive = false,
+  pendingLayerAssignment = null,
+  onPendingLayerAssignment,
+  onAssignFileToNewLayer,
+  onAssignFileToLayer,
+  onUnassignFileFromLayer,
 }: UploadAndPreviewStepProps) {
   /** Last failed batch (for Retry). Single-file rover uploads use length 1. */
   const [pickedFiles, setPickedFiles] = useState<DocumentPicker.DocumentPickerAsset[]>([]);
@@ -968,6 +985,11 @@ export function UploadAndPreviewStep({
           {/* Per-file status list (multi-type batch) */}
           {uploadedFiles.length > 0 ? (
             <View style={{ gap: 6 }}>
+              {controlModeActive ? (
+                <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, marginBottom: 2 }}>
+                  Control mode — tap + to assign a file to a mission layer
+                </Text>
+              ) : null}
               {uploadedFiles.map((f) => {
                 const selected = selectedUploadedFileId === f.id;
                 const verified = f.status === "verified";
@@ -979,55 +1001,241 @@ export function UploadAndPreviewStep({
                     : f.isGeographic
                       ? "dxf · geo"
                       : "dxf · metric";
+                const assigned = layerForFile(missionLayers, f.id);
+                const pendingHere = pendingLayerAssignment?.fileEntryId === f.id;
+                const existingLayers = sortedMissionLayers(missionLayers);
                 return (
-                  <Pressable
-                    key={f.id}
-                    onPress={() => onSelectUploadedFile?.(f.id)}
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      gap: 8,
-                      paddingVertical: 8,
-                      paddingHorizontal: 10,
-                      borderRadius: 8,
-                      borderWidth: 1,
-                      borderColor: selected ? FIELDS_COLORS.stepActive : FIELDS_COLORS.panelBorder,
-                      backgroundColor: FIELDS_COLORS.surfaceSolid,
-                    }}
-                  >
-                    <View style={{ flex: 1, minWidth: 0 }}>
-                      <Text
-                        style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}
-                        numberOfLines={1}
-                      >
-                        {f.fileName}
-                      </Text>
-                      <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, marginTop: 1 }}>
-                        {kindLabel}
-                      </Text>
-                    </View>
-                    <View
+                  <View key={f.id} style={{ gap: 6 }}>
+                    <Pressable
+                      onPress={() => onSelectUploadedFile?.(f.id)}
                       style={{
-                        paddingHorizontal: 8,
-                        paddingVertical: 3,
-                        borderRadius: 999,
-                        backgroundColor: verified ? "rgba(16,185,129,0.15)" : "rgba(245,158,11,0.18)",
+                        flexDirection: "row",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 8,
+                        paddingVertical: 8,
+                        paddingHorizontal: 10,
+                        borderRadius: 8,
+                        borderWidth: 1,
+                        borderColor: selected
+                          ? FIELDS_COLORS.stepActive
+                          : pendingHere
+                            ? FIELDS_COLORS.accentBorder
+                            : FIELDS_COLORS.panelBorder,
+                        backgroundColor: FIELDS_COLORS.surfaceSolid,
                       }}
                     >
-                      <Text
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text
+                          style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}
+                          numberOfLines={1}
+                        >
+                          {f.fileName}
+                        </Text>
+                        <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, marginTop: 1 }}>
+                          {kindLabel}
+                          {assigned ? ` · mission layer ${assigned.number}` : ""}
+                        </Text>
+                      </View>
+                      {controlModeActive ? (
+                        <Pressable
+                          onPress={(e) => {
+                            e?.stopPropagation?.();
+                            if (assigned) {
+                              // Second tap on badge opens reassignment chips
+                              onPendingLayerAssignment?.(
+                                pendingHere ? null : { fileEntryId: f.id }
+                              );
+                              return;
+                            }
+                            if (existingLayers.length === 0) {
+                              onAssignFileToNewLayer?.(f.id);
+                              return;
+                            }
+                            onPendingLayerAssignment?.(
+                              pendingHere ? null : { fileEntryId: f.id }
+                            );
+                          }}
+                          accessibilityLabel={
+                            assigned
+                              ? `Mission layer ${assigned.number}`
+                              : "Assign to mission layer"
+                          }
+                          style={{
+                            minWidth: 32,
+                            height: 28,
+                            paddingHorizontal: 8,
+                            borderRadius: 8,
+                            alignItems: "center",
+                            justifyContent: "center",
+                            backgroundColor: assigned
+                              ? FIELDS_COLORS.accentMuted
+                              : FIELDS_COLORS.stepActive,
+                            borderWidth: 1,
+                            borderColor: assigned
+                              ? FIELDS_COLORS.accentBorder
+                              : FIELDS_COLORS.stepActive,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color: assigned
+                                ? FIELDS_COLORS.accentBrand
+                                : FIELDS_COLORS.accentText,
+                              fontWeight: "900",
+                              fontSize: assigned ? 12 : 16,
+                              lineHeight: assigned ? 14 : 18,
+                            }}
+                          >
+                            {assigned ? String(assigned.number) : "+"}
+                          </Text>
+                        </Pressable>
+                      ) : assigned ? (
+                        <View
+                          style={{
+                            minWidth: 28,
+                            height: 24,
+                            paddingHorizontal: 7,
+                            borderRadius: 7,
+                            alignItems: "center",
+                            justifyContent: "center",
+                            backgroundColor: FIELDS_COLORS.accentMuted,
+                            borderWidth: 1,
+                            borderColor: FIELDS_COLORS.accentBorder,
+                            marginRight: 4,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color: FIELDS_COLORS.accentBrand,
+                              fontWeight: "900",
+                              fontSize: 11,
+                            }}
+                          >
+                            {assigned.number}
+                          </Text>
+                        </View>
+                      ) : null}
+                      <View
                         style={{
-                          color: verified ? FIELDS_COLORS.success : FIELDS_COLORS.warning,
-                          fontSize: 10,
-                          fontWeight: "800",
+                          paddingHorizontal: 8,
+                          paddingVertical: 3,
+                          borderRadius: 999,
+                          backgroundColor: verified
+                            ? "rgba(16,185,129,0.15)"
+                            : "rgba(245,158,11,0.18)",
                         }}
                       >
-                        {verified ? "Verified" : "Needs Alignment"}
-                      </Text>
-                    </View>
-                  </Pressable>
+                        <Text
+                          style={{
+                            color: verified ? FIELDS_COLORS.success : FIELDS_COLORS.warning,
+                            fontSize: 10,
+                            fontWeight: "800",
+                          }}
+                        >
+                          {verified ? "Verified" : "Needs Alignment"}
+                        </Text>
+                      </View>
+                    </Pressable>
+
+                    {controlModeActive && pendingHere ? (
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          flexWrap: "wrap",
+                          gap: 6,
+                          paddingLeft: 4,
+                        }}
+                      >
+                        {existingLayers.map((layer) => {
+                          const isCurrent = assigned?.id === layer.id;
+                          return (
+                            <Pressable
+                              key={layer.id}
+                              onPress={() => onAssignFileToLayer?.(f.id, layer.id)}
+                              style={{
+                                paddingHorizontal: 10,
+                                paddingVertical: 6,
+                                borderRadius: 999,
+                                backgroundColor: isCurrent
+                                  ? FIELDS_COLORS.accentBrand
+                                  : FIELDS_COLORS.surfaceSolid,
+                                borderWidth: 1,
+                                borderColor: isCurrent
+                                  ? FIELDS_COLORS.accentBrand
+                                  : FIELDS_COLORS.panelBorder,
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  color: isCurrent
+                                    ? FIELDS_COLORS.accentText
+                                    : FIELDS_COLORS.textMain,
+                                  fontSize: 11,
+                                  fontWeight: "700",
+                                }}
+                              >
+                                Layer {layer.number}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                        <Pressable
+                          onPress={() => onAssignFileToNewLayer?.(f.id)}
+                          style={{
+                            paddingHorizontal: 10,
+                            paddingVertical: 6,
+                            borderRadius: 999,
+                            backgroundColor: FIELDS_COLORS.cardSolid,
+                            borderWidth: 1,
+                            borderColor: FIELDS_COLORS.stepActive,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color: FIELDS_COLORS.stepActive,
+                              fontSize: 11,
+                              fontWeight: "700",
+                            }}
+                          >
+                            + New layer
+                          </Text>
+                        </Pressable>
+                        {assigned ? (
+                          <Pressable
+                            onPress={() => onUnassignFileFromLayer?.(f.id)}
+                            style={{
+                              paddingHorizontal: 10,
+                              paddingVertical: 6,
+                              borderRadius: 999,
+                              backgroundColor: FIELDS_COLORS.dangerMuted,
+                              borderWidth: 1,
+                              borderColor: FIELDS_COLORS.dangerBorder,
+                            }}
+                          >
+                            <Text
+                              style={{
+                                color: FIELDS_COLORS.danger,
+                                fontSize: 11,
+                                fontWeight: "700",
+                              }}
+                            >
+                              Unassign
+                            </Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
+                    ) : null}
+                  </View>
                 );
               })}
+              {controlModeActive && nonEmptyMissionLayers(missionLayers).length > 0 ? (
+                <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, marginTop: 2 }}>
+                  {nonEmptyMissionLayers(missionLayers).length} mission layer
+                  {nonEmptyMissionLayers(missionLayers).length === 1 ? "" : "s"} · Start will let you
+                  pick which to run
+                </Text>
+              ) : null}
             </View>
           ) : null}
 

@@ -145,6 +145,25 @@ import {
   restageAppTrajectoryWithLiveEntry,
   type AppPlannedStartSnapshot,
 } from "./src/utils/appPlannedStartSnapshot";
+import { buildCsvExtensionLines } from "./src/utils/missionExtensions";
+import type { MissionLayer } from "./src/types/missionLayers";
+import {
+  applyMissionTerminalOutcome,
+  createLayerForFile,
+  assignFileToLayer,
+  markLayersStarted,
+  nonEmptyMissionLayers,
+  outcomeFromMissionStateTransition,
+  pruneMissingFiles,
+  toggleMissionLayerVisibility,
+  unassignFile,
+} from "./src/utils/missionLayerAssignment";
+import {
+  buildLayerScopedStartSnapshot,
+  countUnassignedFiles,
+  filterCanvasLinesByMissionVisibility,
+} from "./src/utils/missionLayerLines";
+import { MissionLayerStartModal } from "./src/components/fields/MissionLayerStartModal";
 import * as pathApi from "./src/api/pathApi";
 import { generateTemplateLines, ShapeType, ArcType } from "./src/utils/shapeTemplates";
 import { generateAlphabetLines, generateNumberLines, FontStyle, AlphabetType, NumberType } from "./src/utils/characterTemplates";
@@ -1299,6 +1318,20 @@ export default function App() {
   uploadedFilesRef.current = uploadedFiles;
   const sharedOriginGpsRef = useRef<[number, number] | null>(null);
   sharedOriginGpsRef.current = sharedOriginGps;
+
+  /** Mission Layers (file groups) — distinct from CAD LayerVisibility. */
+  const [missionLayers, setMissionLayers] = useState<MissionLayer[]>([]);
+  const [controlModeActive, setControlModeActive] = useState(false);
+  const [pendingLayerAssignment, setPendingLayerAssignment] = useState<{
+    fileEntryId: string;
+  } | null>(null);
+  const runningLayerIdsRef = useRef<string[]>([]);
+  const runningMissionIdRef = useRef<string | null>(null);
+  const [layerStartPicker, setLayerStartPicker] = useState<{
+    layers: MissionLayer[];
+    unassignedCount: number;
+  } | null>(null);
+  const layerStartPickerResolveRef = useRef<((ids: string[] | null) => void) | null>(null);
   const [loadedPathInspection, setLoadedPathInspection] = useState<missionApi.LoadedPathResponse | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   const [extensionsEnabled, setExtensionsEnabled] = useState(false);
@@ -1390,11 +1423,56 @@ export default function App() {
 
   const mapSourceLines = useMemo(() => sanitizePlanLines(lines), [lines]);
 
+  /** Drop stale file ids from mission layers when the upload batch shrinks. */
+  useEffect(() => {
+    const ids = new Set(uploadedFiles.map((f) => f.id));
+    setMissionLayers((prev) => {
+      if (prev.length === 0) return prev;
+      const next = pruneMissingFiles(prev, ids);
+      // Avoid re-render loops when nothing changed
+      const same =
+        next.length === prev.length &&
+        next.every(
+          (l, i) =>
+            l.id === prev[i].id &&
+            l.fileEntryIds.length === prev[i].fileEntryIds.length &&
+            l.fileEntryIds.every((id, j) => id === prev[i].fileEntryIds[j])
+        );
+      return same ? prev : next;
+    });
+  }, [uploadedFiles]);
+
+  const canUseMissionControl = useMemo(
+    () =>
+      uploadedFiles.length > 0 && uploadedFiles.every((f) => f.isGeographic),
+    [uploadedFiles]
+  );
+
   const displayedLines = useMemo(() => {
     const base = mapSourceLines;
     if (!autoOriginEligible || !autoOriginReference) return base;
     return applyAutoOriginShift(base, autoOriginReference);
   }, [mapSourceLines, autoOriginEligible, autoOriginReference]);
+
+  /** Map/canvas lines with mission-layer visibility applied (CAD filters still apply later). */
+  const missionVisibleDisplayedLines = useMemo(
+    () =>
+      filterCanvasLinesByMissionVisibility(
+        displayedLines,
+        uploadedFiles,
+        missionLayers
+      ),
+    [displayedLines, uploadedFiles, missionLayers]
+  );
+  const missionVisibleMapSourceLines = useMemo(
+    () =>
+      filterCanvasLinesByMissionVisibility(
+        mapSourceLines,
+        uploadedFiles,
+        missionLayers
+      ),
+    [mapSourceLines, uploadedFiles, missionLayers]
+  );
 
   const mapGeometryFrame = useMemo(
     () =>
@@ -1771,9 +1849,25 @@ export default function App() {
   useEffect(() => {
     if (telemetrySnapshot) {
       const currentState = telemetrySnapshot.mission_state;
+      const terminal = outcomeFromMissionStateTransition(prevMissionState, currentState);
+      if (terminal && runningLayerIdsRef.current.length > 0) {
+        const ids = [...runningLayerIdsRef.current];
+        setMissionLayers((prev) => applyMissionTerminalOutcome(prev, ids, terminal));
+        if (terminal === "completed") {
+          runningLayerIdsRef.current = [];
+          runningMissionIdRef.current = null;
+        } else {
+          // stopped — keep refs cleared so a later idle does not re-apply
+          runningLayerIdsRef.current = [];
+          runningMissionIdRef.current = null;
+        }
+      }
       if (prevMissionState === "running" && (currentState === "idle" || currentState === "completed")) {
         setTimeout(() => {
-          Alert.alert("Mission Completed", "The rover has successfully finished the mission.");
+          if (currentState === "completed") {
+            Alert.alert("Mission Completed", "The rover has successfully finished the mission.");
+          }
+          // idle after running is stop/abort — do not claim success
         }, 500);
       }
       setPrevMissionState(currentState ?? null);
@@ -1837,6 +1931,9 @@ export default function App() {
     setLocalDxfMeta(null);
     setUploadedFiles([]);
     uploadedFilesRef.current = [];
+    setMissionLayers([]);
+    setControlModeActive(false);
+    setPendingLayerAssignment(null);
     setPendingDxfAlignment({});
     setSharedOriginGps(null);
     sharedOriginGpsRef.current = null;
@@ -2907,7 +3004,7 @@ export default function App() {
 
   async function loadMissionOnBackend(
     requestedStagedMissionId?: string,
-    opts?: { hideRuntimeEntryLine?: boolean }
+    opts?: { hideRuntimeEntryLine?: boolean; extensionLines?: PlanLine[] | null }
   ) {
     const requestedMissionId = requestedStagedMissionId?.trim() || stagedMissionId?.trim() || "";
     const hasExplicitMissionId = Boolean(requestedStagedMissionId?.trim());
@@ -2988,6 +3085,7 @@ export default function App() {
         // Geometry + origin atomically from the staged artifact (same path as recovery + CSV panel).
         const hydrated = hydrateStagedMissionForMap(stagedArtifact, {
           hideRuntimeEntryLine: opts?.hideRuntimeEntryLine,
+          extensionLines: opts?.extensionLines,
         });
         if (!hydrated) {
           throw new Error(`Staged mission ${missionId} has no drawable waypoints for map preview.`);
@@ -3143,6 +3241,9 @@ export default function App() {
   function handleBeginLocalImportBatch() {
     setUploadedFiles([]);
     uploadedFilesRef.current = [];
+    setMissionLayers([]);
+    setControlModeActive(false);
+    setPendingLayerAssignment(null);
     setPendingDxfAlignment({});
     setSharedOriginGps(null);
     sharedOriginGpsRef.current = null;
@@ -3425,6 +3526,9 @@ export default function App() {
     setGeoOriginDxf(null);
     setUploadedFiles([]);
     uploadedFilesRef.current = [];
+    setMissionLayers([]);
+    setControlModeActive(false);
+    setPendingLayerAssignment(null);
     setPendingDxfAlignment({});
     setSharedOriginGps(null);
     sharedOriginGpsRef.current = null;
@@ -3447,6 +3551,35 @@ export default function App() {
     }));
   }
 
+  function handleAssignFileToNewLayer(fileEntryId: string) {
+    setMissionLayers((prev) => createLayerForFile(prev, fileEntryId));
+    setPendingLayerAssignment(null);
+  }
+
+  function handleAssignFileToLayer(fileEntryId: string, layerId: string) {
+    setMissionLayers((prev) => assignFileToLayer(prev, fileEntryId, layerId));
+    setPendingLayerAssignment(null);
+  }
+
+  function handleUnassignFileFromLayer(fileEntryId: string) {
+    setMissionLayers((prev) => unassignFile(prev, fileEntryId));
+    setPendingLayerAssignment(null);
+  }
+
+  function handleToggleMissionLayerVisibility(layerId: string) {
+    setMissionLayers((prev) => toggleMissionLayerVisibility(prev, layerId));
+  }
+
+  function promptMissionLayerStartSelection(
+    candidates: MissionLayer[],
+    unassignedCount: number
+  ): Promise<string[] | null> {
+    return new Promise((resolve) => {
+      layerStartPickerResolveRef.current = resolve;
+      setLayerStartPicker({ layers: candidates, unassignedCount });
+    });
+  }
+
   async function startLoadedMission() {
     if (!apiBaseUrl || !importedPlan || lines.length === 0) {
       return;
@@ -3457,6 +3590,33 @@ export default function App() {
       showToast("Start blocked", "Release the joystick lease before starting.", "error");
       return;
     }
+
+    // Mission-layer Start selection (before expensive reconcile / restage).
+    const startableLayers = nonEmptyMissionLayers(missionLayers);
+    let selectedStartLayerIds: string[] | null = null;
+    if (missionLayers.length > 0 && startableLayers.length === 0) {
+      Alert.alert(
+        "No mission layers ready",
+        "Files are not assigned to any mission layer. Open Control and assign files, or clear empty layers."
+      );
+      showToast("Start blocked", "Assign files to a mission layer first.", "error");
+      return;
+    }
+    if (startableLayers.length >= 2) {
+      const unassigned = countUnassignedFiles(uploadedFiles, missionLayers);
+      const picked = await promptMissionLayerStartSelection(startableLayers, unassigned);
+      if (picked == null) {
+        return;
+      }
+      if (picked.length === 0) {
+        showToast("Start blocked", "Select at least one mission layer.", "error");
+        return;
+      }
+      selectedStartLayerIds = picked;
+    } else if (startableLayers.length === 1) {
+      selectedStartLayerIds = [startableLayers[0].id];
+    }
+    // length === 0 and no missionLayers → full snapshot (today's behaviour)
 
     // Step 1: Re-fetch backend mission status to reconcile local workflow state
     // before evaluating the start gate. setWorkflowStep() below only takes
@@ -3600,8 +3760,23 @@ export default function App() {
             }
           : null;
 
+        // Scope the frozen Send snapshot to selected mission layers (if any).
+        let startSnapshot = appPlannedStartSnapshot;
+        if (selectedStartLayerIds && selectedStartLayerIds.length > 0) {
+          const scoped = buildLayerScopedStartSnapshot(
+            appPlannedStartSnapshot,
+            uploadedFiles,
+            missionLayers,
+            selectedStartLayerIds
+          );
+          if (!scoped.ok) {
+            throw new Error(scoped.error);
+          }
+          startSnapshot = scoped.snapshot;
+        }
+
         const restaged = await restageAppTrajectoryWithLiveEntry(apiBaseUrl, {
-          snapshot: appPlannedStartSnapshot,
+          snapshot: startSnapshot,
           roverPose: livePose,
         });
         if (!restaged.success) {
@@ -3636,6 +3811,7 @@ export default function App() {
         setMissionActionBusy(false);
         const loadedOk = await loadMissionOnBackend(restaged.missionId, {
           hideRuntimeEntryLine: restaged.entryIncluded === true,
+          extensionLines: buildCsvExtensionLines(startSnapshot.paintedLines, startSnapshot.extensionConfig),
         });
         setMissionActionBusy(true);
         if (!loadedOk) {
@@ -3667,6 +3843,16 @@ export default function App() {
       }
       setMissionRunning(true);
       setWorkflowStep("started", "verified");
+      if (selectedStartLayerIds && selectedStartLayerIds.length > 0) {
+        runningLayerIdsRef.current = [...selectedStartLayerIds];
+        runningMissionIdRef.current = startMissionId;
+        setMissionLayers((prev) =>
+          markLayersStarted(prev, selectedStartLayerIds!, startMissionId, Date.now())
+        );
+      } else {
+        runningLayerIdsRef.current = [];
+        runningMissionIdRef.current = startMissionId;
+      }
       if (!isStagedStart && !isAppPlannedStart && autoOrigin && autoOriginReference) {
         const planStart = getPlanStartPoint(displayedLines);
         console.log("[CANVAS] start-anchor", JSON.stringify({
@@ -3701,6 +3887,13 @@ export default function App() {
         ? error as ReturnType<typeof classifyMissionError>
         : null;
       setWorkflowStep("started", "failed");
+      runningLayerIdsRef.current = [];
+      runningMissionIdRef.current = null;
+      if (selectedStartLayerIds && selectedStartLayerIds.length > 0) {
+        setMissionLayers((prev) =>
+          applyMissionTerminalOutcome(prev, selectedStartLayerIds!, "failed")
+        );
+      }
       logAction("START_FAILED", {
         fileName: importedPlan.fileName,
         error: error instanceof Error ? error.message : String(error),
@@ -4049,6 +4242,9 @@ export default function App() {
       setLocalDxfMeta(null);
       setUploadedFiles([]);
       uploadedFilesRef.current = [];
+      setMissionLayers([]);
+      setControlModeActive(false);
+      setPendingLayerAssignment(null);
       setPendingDxfAlignment({});
       setSharedOriginGps(null);
       sharedOriginGpsRef.current = null;
@@ -4592,6 +4788,8 @@ export default function App() {
                   onSelectPath={previewSelectedPath}
                   lines={displayedLines}
                   mapSourceLines={mapSourceLines}
+                  missionVisibleLines={missionVisibleDisplayedLines}
+                  missionVisibleMapSourceLines={missionVisibleMapSourceLines}
                   autoOriginReference={autoOriginReference}
                   mapGeometryFrame={mapGeometryFrame}
                   autoOriginEnabled={autoOriginEligible}
@@ -4613,6 +4811,22 @@ export default function App() {
                   onOpenPasswordChange={() => setPasswordChangeOpen(true)}
                   layerVisibility={layerVisibility}
                   setLayerVisibility={setLayerVisibility}
+                  missionLayers={missionLayers}
+                  controlModeActive={controlModeActive}
+                  canUseMissionControl={canUseMissionControl}
+                  onToggleControlMode={() => {
+                    if (!canUseMissionControl) {
+                      showToast(
+                        "Control unavailable",
+                        "Mission Layers need a GPS-anchored import batch.",
+                        "warning"
+                      );
+                      return;
+                    }
+                    setControlModeActive((v) => !v);
+                    setPendingLayerAssignment(null);
+                  }}
+                  onToggleMissionLayerVisibility={handleToggleMissionLayerVisibility}
                   onStopPlan={stopMissionOnBackend}
                   onClearMission={clearResidentMissionOnBackend}
                   onStartPlan={startLoadedMission}
@@ -4825,6 +5039,16 @@ export default function App() {
                             onLocalCsvParsed={handleLocalCsvParsed}
                             onLocalDxfParsed={handleLocalDxfParsed}
                             onClearLocalCsv={handleClearLocalCsv}
+                            missionLayers={missionLayers}
+                            controlModeActive={controlModeActive}
+                            canUseMissionControl={canUseMissionControl}
+                            pendingLayerAssignment={pendingLayerAssignment}
+                            onPendingLayerAssignment={setPendingLayerAssignment}
+                            onAssignFileToNewLayer={handleAssignFileToNewLayer}
+                            onAssignFileToLayer={handleAssignFileToLayer}
+                            onUnassignFileFromLayer={handleUnassignFileFromLayer}
+                            missionVisibleLines={missionVisibleDisplayedLines}
+                            missionVisibleMapSourceLines={missionVisibleMapSourceLines}
                           />
                         )
                       : undefined
@@ -4890,6 +5114,23 @@ export default function App() {
         </SafeAreaInsetsContext.Consumer>
       </SafeAreaProvider>
       <FloatingEStop visible={isFloatingEStopEnabled} onEStop={estopVehicle} />
+      <MissionLayerStartModal
+        visible={layerStartPicker != null}
+        layers={layerStartPicker?.layers ?? []}
+        unassignedCount={layerStartPicker?.unassignedCount ?? 0}
+        onCancel={() => {
+          const resolve = layerStartPickerResolveRef.current;
+          layerStartPickerResolveRef.current = null;
+          setLayerStartPicker(null);
+          resolve?.(null);
+        }}
+        onConfirm={(ids) => {
+          const resolve = layerStartPickerResolveRef.current;
+          layerStartPickerResolveRef.current = null;
+          setLayerStartPicker(null);
+          resolve?.(ids);
+        }}
+      />
     </GestureHandlerRootView>
   );
 }
@@ -5088,6 +5329,14 @@ type HomeViewProps = {
   onStartVisualAlignment?: () => void;
   onConfirmVisualAlignment?: () => void;
   visualAlignmentAnchor?: { originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null;
+  /** Mission Layers (file groups) — distinct from CAD LayerVisibility. */
+  missionLayers?: MissionLayer[];
+  controlModeActive?: boolean;
+  canUseMissionControl?: boolean;
+  onToggleControlMode?: () => void;
+  onToggleMissionLayerVisibility?: (layerId: string) => void;
+  missionVisibleLines?: PlanLine[];
+  missionVisibleMapSourceLines?: PlanLine[];
 };
 
 function HomeView(props: HomeViewProps) {
@@ -5480,8 +5729,8 @@ function HomeView(props: HomeViewProps) {
       resetNorthCount={props.resetNorthCount}
       renderPlanPreview={page === "home" ? () => (
         <PlanPreview
-          lines={lines}
-          mapSourceLines={mapSourceLines}
+          lines={props.missionVisibleLines ?? lines}
+          mapSourceLines={props.missionVisibleMapSourceLines ?? mapSourceLines}
           autoOriginReference={autoOriginReference}
           mapGeometryFrame={mapGeometryFrame}
           autoOriginEnabled={autoOriginEnabled}
@@ -6417,6 +6666,18 @@ function SectionPages(props: {
   onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
   onLocalDxfParsed?: (data: LocalDxfResult) => void;
   onClearLocalCsv?: () => void;
+  missionLayers?: MissionLayer[];
+  controlModeActive?: boolean;
+  canUseMissionControl?: boolean;
+  pendingLayerAssignment?: { fileEntryId: string } | null;
+  onPendingLayerAssignment?: React.Dispatch<
+    React.SetStateAction<{ fileEntryId: string } | null>
+  >;
+  onAssignFileToNewLayer?: (fileEntryId: string) => void;
+  onAssignFileToLayer?: (fileEntryId: string, layerId: string) => void;
+  onUnassignFileFromLayer?: (fileEntryId: string) => void;
+  missionVisibleLines?: PlanLine[];
+  missionVisibleMapSourceLines?: PlanLine[];
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
 
