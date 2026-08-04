@@ -2905,7 +2905,10 @@ export default function App() {
     return classifyMissionError(res.status, detail);
   }
 
-  async function loadMissionOnBackend(requestedStagedMissionId?: string) {
+  async function loadMissionOnBackend(
+    requestedStagedMissionId?: string,
+    opts?: { hideRuntimeEntryLine?: boolean }
+  ) {
     const requestedMissionId = requestedStagedMissionId?.trim() || stagedMissionId?.trim() || "";
     const hasExplicitMissionId = Boolean(requestedStagedMissionId?.trim());
     const isStagedLoad = requestedMissionId !== "";
@@ -2983,7 +2986,9 @@ export default function App() {
         }
 
         // Geometry + origin atomically from the staged artifact (same path as recovery + CSV panel).
-        const hydrated = hydrateStagedMissionForMap(stagedArtifact);
+        const hydrated = hydrateStagedMissionForMap(stagedArtifact, {
+          hideRuntimeEntryLine: opts?.hideRuntimeEntryLine,
+        });
         if (!hydrated) {
           throw new Error(`Staged mission ${missionId} has no drawable waypoints for map preview.`);
         }
@@ -3629,7 +3634,9 @@ export default function App() {
         // Temporarily clear busy so nested load can set it, or call load APIs inline.
         // loadMissionOnBackend manages its own busy flag — drop ours first to avoid stuck UI.
         setMissionActionBusy(false);
-        const loadedOk = await loadMissionOnBackend(restaged.missionId);
+        const loadedOk = await loadMissionOnBackend(restaged.missionId, {
+          hideRuntimeEntryLine: restaged.entryIncluded === true,
+        });
         setMissionActionBusy(true);
         if (!loadedOk) {
           throw new Error(

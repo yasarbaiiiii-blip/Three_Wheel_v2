@@ -172,6 +172,14 @@ export type HydrateStagedMissionOpts = {
    * hydrate (artifact only has spray_flags — no third run type).
    */
   extensionLines?: PlanLine[] | null;
+  /**
+   * Drop the leading transit run from the map preview. Set only when this
+   * hydrate follows a live runtime-entry restage (rover → first tip) — that
+   * run's start point moves with the rover on every Start, which reads as
+   * plan geometry changing rather than an approach manoeuvre. The rover still
+   * drives it; only the map drawing is suppressed.
+   */
+  hideRuntimeEntryLine?: boolean;
 };
 
 export function hydrateStagedMissionForMap(
@@ -193,6 +201,13 @@ export function hydrateStagedMissionForMap(
 
   if (opts?.extensionLines && opts.extensionLines.length > 0) {
     lines = relabelHydratedLinesWithExtensions(lines, opts.extensionLines);
+  }
+
+  // The runtime-entry leg is always folded into the very first run (see
+  // foldEntryTransitIntoRuns), so it always lands here as rover-transit-1.
+  if (opts?.hideRuntimeEntryLine && lines[0]?.id === "rover-transit-1") {
+    lines = lines.slice(1);
+    if (lines.length === 0) return null;
   }
 
   // Always derive origin from the same artifact as geometry — never leave the
