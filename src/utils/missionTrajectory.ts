@@ -20,6 +20,7 @@
  */
 
 import type { PlanLine } from "../types/plan";
+import { projectGpsToLocalMeters } from "./geoProjection";
 import {
   buildExtendedMarkChain,
   edgeEntryPoint,
@@ -60,6 +61,31 @@ export type GroundTruthSourcePoint = {
   lon: number;
 };
 
+/**
+ * Live rover pose used to build the runtime-entry travel leg at Send.
+ * Prefer lat/lon when origin_gps is known (mission frame). Never treat EKF
+ * pos_n/pos_e as mission NED when origin_gps is set.
+ */
+export type RoverPoseForEntry = {
+  pos_n?: number | null;
+  pos_e?: number | null;
+  lat?: number | null;
+  lon?: number | null;
+  gps_fix?: number | null;
+  pose_age_ms?: number | null;
+};
+
+export type EntryTransitInfo = {
+  /** True when a leading entry segment was folded into runs. */
+  included: boolean;
+  lengthM?: number;
+  source?: "gps_origin" | "local_ned";
+  /** Soft skip / non-fatal reason (Send may continue without entry). */
+  skipReason?: string;
+  /** Hard failure — caller should block Send. */
+  error?: string;
+};
+
 export type BuildTrajectoryOpts = {
   markSpeedMs: number;
   travelSpeedMs: number;
@@ -73,12 +99,30 @@ export type BuildTrajectoryOpts = {
    * (see docs/CSV_EXTENSIONS_EXECUTION_PLAN.md). Spray-off by construction.
    */
   extensions?: Partial<CsvExtensionConfig> | null;
+  /**
+   * When set, attempt a leading runtime-entry travel: rover → first tip.
+   * Requires {@link originGps} for GPS_SURVEYED-correct projection.
+   */
+  roverPose?: RoverPoseForEntry | null;
+  /** Mission origin [lat, lon] — same as plan-trajectory origin_gps. */
+  originGps?: [number, number] | null;
+  /**
+   * When true (default if roverPose is provided), apply entry transit.
+   * Set false to keep buildTrajectory pure mark/travel without approach.
+   */
+  includeEntryTransit?: boolean;
+  /**
+   * When true (Start path), soft skips other than "already at tip" become hard
+   * errors so the operator never drives without a fresh approach fix.
+   */
+  requireEntryTransit?: boolean;
 };
 
 export type BuildTrajectoryResult = {
   runs: TrajectoryRun[];
   groundTruth: SurveyGroundTruthPoint[];
   warnings: string[];
+  entryTransit?: EntryTransitInfo;
 };
 
 /**
@@ -90,6 +134,23 @@ export const MARK_CONTIGUOUS_GAP_M = 0.05;
 
 /** Match survey lat/lon rows onto fitted NED points within this distance (m). */
 export const GROUND_TRUTH_MATCH_M = 0.05;
+
+/** Skip entry when already this close to the first tip (same as join tol). */
+export const ENTRY_TRANSIT_SKIP_M = MARK_CONTIGUOUS_GAP_M;
+
+/**
+ * Hard cap on entry length (m). Longer almost always means wrong frame or bad fix —
+ * block Send rather than stage a multi-hundred-metre deadhead by accident.
+ */
+export const ENTRY_TRANSIT_MAX_M = 250;
+
+/** Soft-skip when pose age is older than this (ms). */
+export const ENTRY_TRANSIT_POSE_AGE_MAX_MS = 5000;
+
+/** Minimum GPS fix type for lat/lon → origin_gps projection (3D fix). */
+export const ENTRY_TRANSIT_MIN_GPS_FIX = 3;
+
+export const ENTRY_TRANSIT_LABEL = "entry-transit";
 
 /**
  * Layers that may become mark runs. Unknown layers fail toward **not** painting
@@ -109,6 +170,225 @@ function isFinitePair(n: number, e: number): boolean {
 
 function distM(a: NedPair, b: NedPair): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
+}
+
+export type ResolvedRoverNed =
+  | { ok: true; north: number; east: number; source: "gps_origin" | "local_ned" }
+  | { ok: false; reason: string };
+
+/**
+ * Resolve live rover pose into mission NED.
+ *
+ * - With origin_gps: project lat/lon about that origin (mission frame). Never use
+ *   EKF pos_n/pos_e here — different origin in the field.
+ * - Without origin_gps: LOCAL_NED only — use pos_n/pos_e when finite.
+ */
+export function resolveRoverNedInMissionFrame(
+  pose: RoverPoseForEntry | null | undefined,
+  originGps: [number, number] | null | undefined
+): ResolvedRoverNed {
+  if (pose == null) {
+    return { ok: false, reason: "No rover pose available for runtime entry." };
+  }
+
+  const age = pose.pose_age_ms;
+  if (typeof age === "number" && Number.isFinite(age) && age > ENTRY_TRANSIT_POSE_AGE_MAX_MS) {
+    return {
+      ok: false,
+      reason: `Rover pose is stale (${Math.round(age)} ms > ${ENTRY_TRANSIT_POSE_AGE_MAX_MS} ms).`,
+    };
+  }
+
+  const hasOrigin =
+    originGps != null &&
+    Number.isFinite(originGps[0]) &&
+    Number.isFinite(originGps[1]);
+
+  if (hasOrigin) {
+    const lat = pose.lat;
+    const lon = pose.lon;
+    const fix = pose.gps_fix;
+    if (
+      !Number.isFinite(lat) ||
+      !Number.isFinite(lon) ||
+      fix == null ||
+      fix < ENTRY_TRANSIT_MIN_GPS_FIX
+    ) {
+      return {
+        ok: false,
+        reason:
+          "Need GPS fix ≥ 3 with lat/lon to place runtime entry in the mission origin frame.",
+      };
+    }
+    const ned = projectGpsToLocalMeters(lat as number, lon as number, originGps![0], originGps![1]);
+    if (!Number.isFinite(ned.north) || !Number.isFinite(ned.east)) {
+      return { ok: false, reason: "GPS → mission NED projection produced non-finite coordinates." };
+    }
+    return { ok: true, north: ned.north, east: ned.east, source: "gps_origin" };
+  }
+
+  // LOCAL_NED: plan and EKF share the local frame by construction (or auto-origin).
+  if (Number.isFinite(pose.pos_n) && Number.isFinite(pose.pos_e)) {
+    return {
+      ok: true,
+      north: pose.pos_n as number,
+      east: pose.pos_e as number,
+      source: "local_ned",
+    };
+  }
+
+  return {
+    ok: false,
+    reason: "No origin_gps and no finite local NED (pos_n/pos_e) for runtime entry.",
+  };
+}
+
+/**
+ * Fold rover → firstTip into the leading run.
+ * If the first run is already travel (pre-ext), join into one travel run.
+ * If the first run is mark, prepend a dedicated entry travel run.
+ */
+export function foldEntryTransitIntoRuns(
+  runs: TrajectoryRun[],
+  roverNed: NedPair,
+  travelSpeedMs: number
+): { runs: TrajectoryRun[]; lengthM: number } {
+  if (runs.length === 0) {
+    return { runs, lengthM: 0 };
+  }
+  const first = runs[0];
+  const firstTip = first.points[0];
+  const lengthM = distM(roverNed, firstTip);
+
+  if (first.kind === "travel") {
+    const points = joinPolylines([[roverNed, firstTip], first.points]);
+    const next = runs.slice();
+    next[0] = {
+      ...first,
+      points,
+      speed_m_s: travelSpeedMs,
+      label: ENTRY_TRANSIT_LABEL,
+    };
+    return { runs: next, lengthM };
+  }
+
+  const entry: TrajectoryRun = {
+    kind: "travel",
+    points: [roverNed, firstTip],
+    speed_m_s: travelSpeedMs,
+    label: ENTRY_TRANSIT_LABEL,
+  };
+  return { runs: [entry, ...runs], lengthM };
+}
+
+/**
+ * Apply runtime-entry policy to a finished mark/travel run list.
+ * Soft skips return skipReason; hard distance failures set error.
+ */
+export function applyEntryTransit(
+  runs: TrajectoryRun[],
+  opts: {
+    roverPose?: RoverPoseForEntry | null;
+    originGps?: [number, number] | null;
+    travelSpeedMs: number;
+    includeEntryTransit?: boolean;
+    /** Soft skip → hard error except already-at-tip (Start Mission path). */
+    requireEntryTransit?: boolean;
+  }
+): { runs: TrajectoryRun[]; entryTransit: EntryTransitInfo; warnings: string[] } {
+  const warnings: string[] = [];
+  const require = opts.requireEntryTransit === true;
+
+  const softOrHard = (msg: string): EntryTransitInfo => {
+    if (require) {
+      warnings.push(msg);
+      return { included: false, error: msg };
+    }
+    warnings.push(msg);
+    return { included: false, skipReason: msg };
+  };
+
+  if (opts.includeEntryTransit === false) {
+    return {
+      runs,
+      entryTransit: { included: false, skipReason: "Runtime entry disabled." },
+      warnings,
+    };
+  }
+
+  if (opts.roverPose == null) {
+    return {
+      runs,
+      entryTransit: softOrHard(
+        "No rover pose available for runtime entry. Wait for live GPS, then Start again."
+      ),
+      warnings,
+    };
+  }
+
+  if (runs.length === 0) {
+    return {
+      runs,
+      entryTransit: softOrHard("No trajectory runs to attach entry to."),
+      warnings,
+    };
+  }
+
+  const resolved = resolveRoverNedInMissionFrame(opts.roverPose, opts.originGps);
+  if (!resolved.ok) {
+    return {
+      runs,
+      entryTransit: softOrHard(`Runtime entry blocked: ${resolved.reason}`),
+      warnings,
+    };
+  }
+
+  const roverNed: NedPair = [resolved.north, resolved.east];
+  const firstTip = runs[0].points[0];
+  const lengthM = distM(roverNed, firstTip);
+
+  if (lengthM <= ENTRY_TRANSIT_SKIP_M) {
+    const skipReason = `Already within ${ENTRY_TRANSIT_SKIP_M} m of mission start — entry omitted.`;
+    warnings.push(skipReason);
+    return {
+      runs,
+      entryTransit: {
+        included: false,
+        lengthM,
+        source: resolved.source,
+        skipReason,
+      },
+      warnings,
+    };
+  }
+
+  if (lengthM > ENTRY_TRANSIT_MAX_M) {
+    const error =
+      `Runtime entry is ${lengthM.toFixed(1)} m (max ${ENTRY_TRANSIT_MAX_M} m). ` +
+      `Check GPS fix and that the rover is near the plan — likely wrong frame or bad position.`;
+    warnings.push(error);
+    return {
+      runs,
+      entryTransit: {
+        included: false,
+        lengthM,
+        source: resolved.source,
+        error,
+      },
+      warnings,
+    };
+  }
+
+  const folded = foldEntryTransitIntoRuns(runs, roverNed, opts.travelSpeedMs);
+  return {
+    runs: folded.runs,
+    entryTransit: {
+      included: true,
+      lengthM: folded.lengthM,
+      source: resolved.source,
+    },
+    warnings,
+  };
 }
 
 /**
@@ -526,7 +806,7 @@ export function buildTrajectory(
   }
 
   const extCfg = normalizeCsvExtensionConfig(opts.extensions);
-  const runs: TrajectoryRun[] = [];
+  let runs: TrajectoryRun[] = [];
 
   // The extended chain is the same decomposition the map preview draws (per-edge in
   // per-line mode, whole-path otherwise), so what the operator confirmed is what the rover
@@ -632,6 +912,23 @@ export function buildTrajectory(
     }
   }
 
+  // Runtime entry (rover → first tip) — after PRE/AFT/connectors so we can fold
+  // into the leading pre-ext travel as one continuous deadhead run.
+  // Prefer building this at Start (requireEntryTransit) with live pose; Send usually omits it.
+  let entryTransit: EntryTransitInfo | undefined;
+  if (opts.roverPose != null || opts.includeEntryTransit === true) {
+    const applied = applyEntryTransit(runs, {
+      roverPose: opts.roverPose,
+      originGps: opts.originGps,
+      travelSpeedMs: travelSpeed,
+      includeEntryTransit: opts.includeEntryTransit,
+      requireEntryTransit: opts.requireEntryTransit,
+    });
+    runs = applied.runs;
+    entryTransit = applied.entryTransit;
+    for (const w of applied.warnings) warnings.push(w);
+  }
+
   const adjacent = findAdjacentMarkViolation(runs);
   if (adjacent) {
     // Should be unreachable; fail loud so we never ship a 422 payload.
@@ -646,5 +943,5 @@ export function buildTrajectory(
 
   const groundTruth = attachGroundTruth(runs, opts.groundTruthSource);
 
-  return { runs, groundTruth, warnings };
+  return { runs, groundTruth, warnings, entryTransit };
 }

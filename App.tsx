@@ -141,6 +141,10 @@ import {
   runningMissionMismatch,
   verifyStagedLoadedMission,
 } from "./src/api/missionContract";
+import {
+  restageAppTrajectoryWithLiveEntry,
+  type AppPlannedStartSnapshot,
+} from "./src/utils/appPlannedStartSnapshot";
 import * as pathApi from "./src/api/pathApi";
 import { generateTemplateLines, ShapeType, ArcType } from "./src/utils/shapeTemplates";
 import { generateAlphabetLines, generateNumberLines, FontStyle, AlphabetType, NumberType } from "./src/utils/characterTemplates";
@@ -1264,6 +1268,12 @@ export default function App() {
   const [stagedPlanResult, setStagedPlanResult] = useState<StagedPlanResultState | null>(null);
   const [stagedMissionInspection, setStagedMissionInspection] = useState<pathApi.StagedMissionResponse | null>(null);
   const [stagedMissionId, setStagedMissionId] = useState<string | null>(null);
+  /**
+   * Source geometry from last successful app-planned Send. Start Mission restages
+   * from this + live rover pose so entry is always X→A from current position.
+   */
+  const [appPlannedStartSnapshot, setAppPlannedStartSnapshot] =
+    useState<AppPlannedStartSnapshot | null>(null);
   /** Local-only CSV preview (Select File .csv never hits backend path APIs). */
   const [localCsvPreview, setLocalCsvPreview] = useState<LocalPointCsvResult | null>(null);
   /**
@@ -1582,6 +1592,8 @@ export default function App() {
       setStagedPlanResult(null);
       setStagedMissionInspection(null);
       setStagedMissionId(null);
+      // Geometry / order change invalidates frozen Send snapshot (must re-Send).
+      setAppPlannedStartSnapshot(null);
     }
     setLoadedPathInspection(null);
     setMissionLoaded(false);
@@ -3419,6 +3431,7 @@ export default function App() {
     setStagedPlanResult(null);
     setStagedMissionInspection(null);
     setStagedMissionId(null);
+    setAppPlannedStartSnapshot(null);
     setStagedWorkflow((prev) => ({
       ...prev,
       alignment: "pending",
@@ -3554,6 +3567,7 @@ export default function App() {
       autoOrigin,
       isStagedStart,
       stagedMissionId: isStagedStart ? getLoadedMissionId(loadedPathInspection) : null,
+      hasAppPlannedSnapshot: appPlannedStartSnapshot != null,
     });
     setMissionActionBusy(true);
     try {
@@ -3562,13 +3576,83 @@ export default function App() {
         localCsvPreview != null ||
         importedPlan.fileType === "csv" ||
         !!importedPlan.fileName?.toLowerCase().endsWith(".csv");
+      // Local DXF app-planned missions also use the snapshot + live entry path.
+      const isAppPlannedStart = appPlannedStartSnapshot != null;
+
+      let startMissionId = isStagedStart ? stagedMissionId : null;
+
+      // Every Start: rebuild entry from live rover pose (X→A, then later Y→A, …).
+      if (isAppPlannedStart && appPlannedStartSnapshot) {
+        showToast("Approach", "Building runtime entry from current rover position…", "info");
+        const livePose = telemetrySnapshot
+          ? {
+              pos_n: telemetrySnapshot.pos_n,
+              pos_e: telemetrySnapshot.pos_e,
+              lat: telemetrySnapshot.lat,
+              lon: telemetrySnapshot.lon,
+              gps_fix: telemetrySnapshot.gps_fix,
+              pose_age_ms: telemetrySnapshot.pose_age_ms,
+            }
+          : null;
+
+        const restaged = await restageAppTrajectoryWithLiveEntry(apiBaseUrl, {
+          snapshot: appPlannedStartSnapshot,
+          roverPose: livePose,
+        });
+        if (!restaged.success) {
+          throw new Error(restaged.error);
+        }
+
+        setStagedMissionId(restaged.missionId);
+        if (restaged.stagedInspection) {
+          setStagedMissionInspection(restaged.stagedInspection);
+        }
+        setWorkflowStep("staged", "verified");
+        const n = (v: unknown): number | null =>
+          typeof v === "number" && Number.isFinite(v) ? v : null;
+        setStagedPlanResult({
+          missionId: restaged.missionId,
+          numWaypoints: n(restaged.plan.num_waypoints),
+          numSegments: n(restaged.plan.num_segments),
+          totalLengthM: n(restaged.plan.total_length_m),
+          markLengthM: n(restaged.plan.mark_length_m),
+          transitLengthM: n(restaged.plan.transit_length_m),
+          estimatedPaintL: n(restaged.plan.mission_summary?.estimated_paint_l),
+          estimatedRuntimeS: n(restaged.plan.mission_summary?.estimated_runtime_s),
+          rmseM: n(restaged.plan.mission_summary?.rmse_m),
+          warnings: Array.isArray(restaged.plan.warnings)
+            ? restaged.plan.warnings.filter((w): w is string => typeof w === "string")
+            : [],
+        });
+
+        // Load the freshly staged mission (with live entry) to the controller.
+        // Temporarily clear busy so nested load can set it, or call load APIs inline.
+        // loadMissionOnBackend manages its own busy flag — drop ours first to avoid stuck UI.
+        setMissionActionBusy(false);
+        const loadedOk = await loadMissionOnBackend(restaged.missionId);
+        setMissionActionBusy(true);
+        if (!loadedOk) {
+          throw new Error(
+            "Trajectory restaged with live entry but load to controller failed. Fix load, then Start again."
+          );
+        }
+
+        startMissionId = restaged.missionId;
+        logAction("START_LIVE_ENTRY", {
+          missionId: restaged.missionId,
+          entryIncluded: restaged.entryIncluded,
+          entryLengthM: restaged.entryLengthM ?? null,
+        });
+      }
+
       const startPayload = buildMissionStartPayload({
-        stagedMissionId,
-        stagedVerified: isStagedStart,
+        stagedMissionId: startMissionId,
+        stagedVerified: isAppPlannedStart || isStagedStart,
         fileName: importedPlan.fileName,
         autoOrigin,
         // Phase 5: CSV has no meaningful path_name reload — refuse the fallback.
-        requireStagedMission: isCsvMission,
+        // App-planned DXF/CSV with snapshot also require staged mission_id after restage.
+        requireStagedMission: isCsvMission || isAppPlannedStart,
       });
       const res = await missionApi.startMission(apiBaseUrl, startPayload);
       if (!res.ok) {
@@ -3576,7 +3660,7 @@ export default function App() {
       }
       setMissionRunning(true);
       setWorkflowStep("started", "verified");
-      if (!isStagedStart && autoOrigin && autoOriginReference) {
+      if (!isStagedStart && !isAppPlannedStart && autoOrigin && autoOriginReference) {
         const planStart = getPlanStartPoint(displayedLines);
         console.log("[CANVAS] start-anchor", JSON.stringify({
           capturedOrigin: {
@@ -3593,8 +3677,17 @@ export default function App() {
         }));
       }
       void refreshTelemetryPanel();
-      logAction("START_SUCCESS", { fileName: importedPlan.fileName, autoOrigin });
-      Alert.alert("Started", `${importedPlan.fileName} started on the rover.`);
+      logAction("START_SUCCESS", {
+        fileName: importedPlan.fileName,
+        autoOrigin,
+        missionId: startMissionId,
+        liveEntry: isAppPlannedStart,
+      });
+      const entryNote =
+        isAppPlannedStart
+          ? " Approach path was built from the rover's current position."
+          : "";
+      Alert.alert("Started", `${importedPlan.fileName} started on the rover.${entryNote}`);
       showToast("Mission running", `${importedPlan.fileName} is now active.`, "success");
     } catch (error) {
       const missionError = error && typeof error === "object" && "kind" in error
@@ -4688,6 +4781,7 @@ export default function App() {
                             setStagedMissionId={setStagedMissionId}
                             loadedPathInspection={loadedPathInspection}
                             onInvalidateWorkflow={invalidateStagedWorkflowFrom}
+                            onAppPlannedStartSnapshot={setAppPlannedStartSnapshot}
                             alignedRefPoints={alignedRefPoints}
                             setAlignedRefPoints={setAlignedRefPoints}
                             mapViewEnabled={mapViewEnabled}
@@ -6228,6 +6322,7 @@ function SectionPages(props: {
   setStagedMissionId: React.Dispatch<React.SetStateAction<string | null>>;
   loadedPathInspection: missionApi.LoadedPathResponse | null;
   onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
+  onAppPlannedStartSnapshot?: (snapshot: AppPlannedStartSnapshot) => void;
   onNav: (page: Page) => void;
   extensionsEnabled?: boolean;
   setExtensionsEnabled?: React.Dispatch<React.SetStateAction<boolean>>;

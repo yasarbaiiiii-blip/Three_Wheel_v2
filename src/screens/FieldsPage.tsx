@@ -109,6 +109,8 @@ export type FieldsPageProps = {
   setStagedMissionId: React.Dispatch<React.SetStateAction<string | null>>;
   loadedPathInspection: missionApi.LoadedPathResponse | null;
   onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
+  /** Frozen painted geometry from successful Send — Start restages with live entry. */
+  onAppPlannedStartSnapshot?: (snapshot: import("../utils/appPlannedStartSnapshot").AppPlannedStartSnapshot) => void;
   alignedRefPoints?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
   setAlignedRefPoints?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>>;
   mapViewEnabled?: boolean;
@@ -272,6 +274,7 @@ export function FieldsPage(props: FieldsPageProps) {
     setStagedMissionId,
     loadedPathInspection,
     onInvalidateWorkflow,
+    onAppPlannedStartSnapshot,
     alignedRefPoints = [],
     setAlignedRefPoints,
     mapViewEnabled = true,
@@ -1515,6 +1518,19 @@ export function FieldsPage(props: FieldsPageProps) {
                             ? (verifiedAlignmentRequest.origin_gps as [number, number])
                             : null)
                         }
+                        roverPose={
+                          telemetrySnapshot
+                            ? {
+                                pos_n: telemetrySnapshot.pos_n,
+                                pos_e: telemetrySnapshot.pos_e,
+                                lat: telemetrySnapshot.lat,
+                                lon: telemetrySnapshot.lon,
+                                gps_fix: telemetrySnapshot.gps_fix,
+                                pose_age_ms: telemetrySnapshot.pose_age_ms,
+                              }
+                            : null
+                        }
+                        onAppPlannedStartSnapshot={onAppPlannedStartSnapshot}
                         missionName={
                           hasLocalBatch || isLocalDxfFlow
                             ? localDxfMeta?.fileName ??

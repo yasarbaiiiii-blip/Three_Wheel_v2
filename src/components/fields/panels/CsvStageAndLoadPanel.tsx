@@ -23,7 +23,14 @@ import {
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
 } from "../../../utils/csvExtensions";
-import { buildTrajectory } from "../../../utils/csvTrajectory";
+import {
+  buildAppPlannedStartSnapshot,
+  type AppPlannedStartSnapshot,
+} from "../../../utils/appPlannedStartSnapshot";
+import {
+  buildTrajectory,
+  type RoverPoseForEntry,
+} from "../../../utils/csvTrajectory";
 import type { LocalPointCsvResult } from "../../../utils/localPointCsv";
 import { sanitizePlanLines } from "../../../utils/pathWorkflow";
 import {
@@ -59,6 +66,16 @@ type CsvStageAndLoadPanelProps = {
    * When set, overrides CSV anchor.
    */
   originGps?: [number, number] | null;
+  /**
+   * Live rover pose (unused for entry on Send — entry is rebuilt at Start).
+   * Kept optional for future preview; Start reads App telemetry.
+   */
+  roverPose?: RoverPoseForEntry | null;
+  /**
+   * Called after a successful app-planned Send so Start can restage with a
+   * fresh runtime entry from the live rover pose (original geometry, not densified).
+   */
+  onAppPlannedStartSnapshot?: (snapshot: AppPlannedStartSnapshot) => void;
   /** Mission name stem for plan-trajectory (defaults from CSV/DXF file name). */
   missionName?: string | null;
   /** Parse/import warnings for readiness (DXF local warnings). */
@@ -116,6 +133,8 @@ export function CsvStageAndLoadPanel({
   pathOrder = null,
   extensionConfig = null,
   originGps = null,
+  roverPose: _roverPose = null,
+  onAppPlannedStartSnapshot,
   missionName = null,
   parseWarnings = [],
   setLines,
@@ -128,6 +147,7 @@ export function CsvStageAndLoadPanel({
   onLoadSelectedPath,
   missionActionBusy,
 }: CsvStageAndLoadPanelProps) {
+  void _roverPose;
   const extCfg = useMemo(
     () => normalizeCsvExtensionConfig(extensionConfig),
     [extensionConfig]
@@ -362,12 +382,14 @@ export function CsvStageAndLoadPanel({
     try {
       // CSV: paintedLines are frontend-fitted from survey points.
       // DXF: paintedLines are the real entity paths from parseLocalDxf (already baked
-      // through Align when metric). buildTrajectory only packs vertices into mark/travel runs.
+      // through Align when metric). buildTrajectory packs vertices into mark/travel runs.
+      // Runtime entry is NOT built here — Start Mission restages with live pose every time.
       const built = buildTrajectory(appTrajectory.paintedLines, {
         markSpeedMs: 0.35,
         travelSpeedMs: 0.5,
         groundTruthSource: isDxfLocal ? undefined : groundTruthSource,
         extensions: extCfg,
+        includeEntryTransit: false,
       });
       if (built.runs.length === 0) {
         const detail = built.warnings.slice(0, 3).join("\n") || "No mark runs produced.";
@@ -395,6 +417,19 @@ export function CsvStageAndLoadPanel({
           `Failed at step "${CSV_STAGE_STEP_LABELS[result.failedStep ?? "planTrajectory"]}"\n\n${message}`
         );
         return;
+      }
+
+      // Freeze source geometry after success — map hydration will replace lines with densified path.
+      if (resolvedOriginGps) {
+        onAppPlannedStartSnapshot?.(
+          buildAppPlannedStartSnapshot({
+            paintedLines: appTrajectory.paintedLines,
+            extensionConfig: extCfg,
+            originGps: resolvedOriginGps,
+            missionName: resolvedMissionName,
+            groundTruthSource: isDxfLocal ? undefined : groundTruthSource,
+          })
+        );
       }
 
       await applyStagedSuccess(
