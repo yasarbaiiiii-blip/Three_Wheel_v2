@@ -26,6 +26,13 @@ export interface PlanLine {
   entity?: DxfEntity;
   /** Set when the client classifies a leg as extension pre/aft vs inter-shape transit. */
   segmentRole?: PlanSegmentRole;
+  /**
+   * Mission Layer this line belongs to, recovered by geometry matching after a
+   * stage/hydrate round trip strips the file-prefixed id (see tagLinesWithMissionLayer
+   * in missionLayerLines.ts). Absent on freshly-imported lines, which resolve their
+   * layer via lineIdPrefix instead.
+   */
+  missionLayerId?: string | null;
 }
 
 export interface DxfPoint {

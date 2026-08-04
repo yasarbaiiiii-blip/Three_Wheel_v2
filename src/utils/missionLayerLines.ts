@@ -131,6 +131,10 @@ export function buildLayerScopedStartSnapshot(
  *   (CAD LayerVisibility still applies elsewhere).
  * - Unassigned files (no mission layer): always visible.
  * - When no mission layers exist: identity.
+ *
+ * A line's layer resolves in two ways: via its file-prefixed id (fresh, not-yet-staged
+ * import lines), or via `line.missionLayerId` (staged/hydrated lines — see
+ * tagLinesWithMissionLayer — whose ids like `rover-path-3` no longer carry a prefix).
  */
 export function filterCanvasLinesByMissionVisibility(
   lines: PlanLine[],
@@ -145,9 +149,103 @@ export function filterCanvasLinesByMissionVisibility(
   if (hiddenLayerIds.size === 0) return lines;
 
   return lines.filter((line) => {
+    const layerId = line.missionLayerId ?? layerForLineId(line.id, uploadedFiles, layers)?.id ?? null;
+    if (!layerId) return true;
+    return !hiddenLayerIds.has(layerId);
+  });
+}
+
+/** Geometry sample used to recover mission-layer identity after hydration strips ids. */
+export type MissionLayerLeg = {
+  layerId: string;
+  fromNorth: number;
+  fromEast: number;
+  toNorth: number;
+  toEast: number;
+};
+
+/**
+ * Tolerance for matching a hydrated (possibly merged) run to its source layer's line.
+ * Generous vs EXTENSION_ENDPOINT_MATCH_EPS_M (0.05 m) because hydration merges
+ * several contiguous same-layer source lines into one continuous polyline, so we
+ * match by nearest source segment rather than requiring exact endpoint equality.
+ */
+const LAYER_MATCH_MAX_DIST_M = 1.0;
+
+/** Catalog of source-line geometry keyed by mission layer, built while ids still
+ * carry their file prefix (i.e. from the frozen Send-time snapshot). */
+export function buildMissionLayerLegCatalog(
+  paintedLines: PlanLine[],
+  uploadedFiles: UploadedFileEntry[],
+  layers: MissionLayer[]
+): MissionLayerLeg[] {
+  const out: MissionLayerLeg[] = [];
+  for (const line of paintedLines) {
     const layer = layerForLineId(line.id, uploadedFiles, layers);
-    if (!layer) return true;
-    return !hiddenLayerIds.has(layer.id);
+    if (!layer) continue;
+    out.push({
+      layerId: layer.id,
+      fromNorth: line.from.x,
+      fromEast: line.from.y,
+      toNorth: line.to.x,
+      toEast: line.to.y,
+    });
+  }
+  return out;
+}
+
+function pointToSegmentDistanceM(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+): number {
+  const abx = bx - ax;
+  const aby = by - ay;
+  const lenSq = abx * abx + aby * aby;
+  if (lenSq <= 1e-12) return Math.hypot(px - ax, py - ay);
+  let t = ((px - ax) * abx + (py - ay) * aby) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + t * abx;
+  const cy = ay + t * aby;
+  return Math.hypot(px - cx, py - cy);
+}
+
+/**
+ * Recover mission-layer identity on hydrated map lines (ids like `rover-path-3`,
+ * `staged-line-9`) that lost their file-prefix through the stage/hydrate round trip —
+ * without this, M-Layers visibility toggles silently stop affecting the map the
+ * moment a mission is Sent or Started. Matches each line's midpoint to the nearest
+ * catalogued source leg; lines with no nearby match (e.g. runtime entry, synthetic
+ * transit) are left untagged and stay always-visible, same as before this pass.
+ */
+export function tagLinesWithMissionLayer(
+  lines: PlanLine[],
+  catalog: MissionLayerLeg[]
+): PlanLine[] {
+  if (catalog.length === 0) return lines;
+  return lines.map((line) => {
+    const fn = line.from?.x;
+    const fe = line.from?.y;
+    const tn = line.to?.x;
+    const te = line.to?.y;
+    if (fn == null || fe == null || tn == null || te == null) return line;
+    const midN = (fn + tn) / 2;
+    const midE = (fe + te) / 2;
+
+    let bestLayerId: string | null = null;
+    let bestD = Infinity;
+    for (const leg of catalog) {
+      const d = pointToSegmentDistanceM(midN, midE, leg.fromNorth, leg.fromEast, leg.toNorth, leg.toEast);
+      if (d < bestD) {
+        bestD = d;
+        bestLayerId = leg.layerId;
+      }
+    }
+    if (bestLayerId == null || bestD > LAYER_MATCH_MAX_DIST_M) return line;
+    return { ...line, missionLayerId: bestLayerId };
   });
 }
 

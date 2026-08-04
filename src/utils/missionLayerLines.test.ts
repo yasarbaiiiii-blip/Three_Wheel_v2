@@ -10,9 +10,11 @@ import {
 } from "./missionLayerAssignment";
 import {
   buildLayerScopedStartSnapshot,
+  buildMissionLayerLegCatalog,
   fileForLineId,
   filterCanvasLinesByMissionVisibility,
   filterPaintedLinesForLayers,
+  tagLinesWithMissionLayer,
   unassignedFileIds,
 } from "./missionLayerLines";
 
@@ -138,5 +140,49 @@ describe("missionLayerLines", () => {
   it("lists unassigned files", () => {
     const layers = createLayerForFile([], "fa");
     expect(unassignedFileIds(files, layers)).toEqual(["fb", "fc"]);
+  });
+
+  it("recovers mission-layer identity on hydrated (unprefixed) lines by nearest geometry", () => {
+    let layers = createLayerForFile([], "fa");
+    layers = createLayerForFile(layers, "fb");
+    const l1 = layers.find((l) => l.fileEntryIds.includes("fa"))!;
+    const l2 = layers.find((l) => l.fileEntryIds.includes("fb"))!;
+
+    // Source (pre-stage) geometry — still carries the file prefix.
+    const painted = [
+      { ...mark("north__a1"), from: { id: 1, x: 0, y: 0 }, to: { id: 2, x: 10, y: 0 } },
+      { ...mark("south__b1"), from: { id: 1, x: 100, y: 100 }, to: { id: 2, x: 110, y: 100 } },
+    ];
+    const catalog = buildMissionLayerLegCatalog(painted, files, layers);
+
+    // Hydrated (post-stage) geometry: ids like the real round trip mints (no file
+    // prefix), same coordinates give or take densification noise.
+    const hydrated: PlanLine[] = [
+      { ...mark("rover-path-1"), from: { id: 1, x: 0.02, y: -0.01 }, to: { id: 2, x: 10, y: 0 } },
+      { ...mark("rover-path-2"), from: { id: 1, x: 100, y: 100 }, to: { id: 2, x: 110.03, y: 100 } },
+      { ...mark("rover-transit-1"), from: { id: 1, x: 50, y: 50 }, to: { id: 2, x: 60, y: 60 } },
+    ];
+
+    const tagged = tagLinesWithMissionLayer(hydrated, catalog);
+    expect(tagged.find((l) => l.id === "rover-path-1")?.missionLayerId).toBe(l1.id);
+    expect(tagged.find((l) => l.id === "rover-path-2")?.missionLayerId).toBe(l2.id);
+    // Far from both source legs — left untagged rather than forced onto a wrong layer.
+    expect(tagged.find((l) => l.id === "rover-transit-1")?.missionLayerId).toBeUndefined();
+  });
+
+  it("hides hydrated lines by recovered missionLayerId when their layer is invisible", () => {
+    let layers = createLayerForFile([], "fa");
+    layers = createLayerForFile(layers, "fb");
+    layers = layers.map((l) =>
+      l.fileEntryIds.includes("fb") ? { ...l, visible: false } : l
+    );
+    const l2 = layers.find((l) => l.fileEntryIds.includes("fb"))!;
+
+    const hydrated: PlanLine[] = [
+      { ...mark("rover-path-1"), missionLayerId: null },
+      { ...mark("rover-path-2"), missionLayerId: l2.id },
+    ];
+    const visible = filterCanvasLinesByMissionVisibility(hydrated, files, layers);
+    expect(visible.map((l) => l.id)).toEqual(["rover-path-1"]);
   });
 });

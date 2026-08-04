@@ -160,8 +160,10 @@ import {
 } from "./src/utils/missionLayerAssignment";
 import {
   buildLayerScopedStartSnapshot,
+  buildMissionLayerLegCatalog,
   countUnassignedFiles,
   filterCanvasLinesByMissionVisibility,
+  tagLinesWithMissionLayer,
 } from "./src/utils/missionLayerLines";
 import { MissionLayerStartModal } from "./src/components/fields/MissionLayerStartModal";
 import * as pathApi from "./src/api/pathApi";
@@ -3091,8 +3093,17 @@ export default function App() {
           throw new Error(`Staged mission ${missionId} has no drawable waypoints for map preview.`);
         }
 
+        // Recover mission-layer identity lost when hydration strips file-prefixed
+        // ids, so M-Layers visibility toggles keep affecting the map post-Start.
+        const layerCatalog = buildMissionLayerLegCatalog(
+          appPlannedStartSnapshot?.paintedLines ?? [],
+          uploadedFiles,
+          missionLayers
+        );
+        const missionLayerTaggedLines = tagLinesWithMissionLayer(hydrated.lines, layerCatalog);
+
         setAlignedRefPoints(hydrated.alignedRefPoints);
-        setLines(sanitizePlanLines(hydrated.lines));
+        setLines(sanitizePlanLines(missionLayerTaggedLines));
         setSelectedLineId(hydrated.selectedLineId);
         setVisualAlignmentItem(null);
         setIsVisualAlignmentMode(false);
