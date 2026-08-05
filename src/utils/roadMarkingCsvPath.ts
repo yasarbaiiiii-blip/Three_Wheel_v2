@@ -1462,7 +1462,18 @@ export function classifyCornerDrivability(
 }
 
 /**
- * Sparse-waypoint pipeline: preserve every vertex, straight legs + geometric fillets only.
+ * Sparse-waypoint pipeline: preserve every vertex, straight legs + geometric fillets only
+ * below the corner line — never above it.
+ *
+ * A turn at or above {@link SPARSE_ARC_CORNER_TURN_DEG} is a genuine design corner (the same
+ * line {@link trySparseArcFit}'s gate 1 uses: "a vertex that turns this hard is a corner, full
+ * stop") and renders sharp — the rover stops and pivots in place at a waypoint turn rather
+ * than needing a matching physical turning radius, so a sharp corner is correct, not a
+ * fallback. A turn below that line is not a corner at all; it is one vertex of a coarse
+ * curve/ring approximation (e.g. a 40-point survey of a roundabout that missed
+ * {@link trySparseArcFit}'s stricter residual gate) and still gets a small fillet so the
+ * curve reads as smooth instead of faceted.
+ *
  * Never estimates noise, never deletes points, never invents arcs from data.
  */
 export function buildWaypointFilletPath(
@@ -1483,18 +1494,21 @@ export function buildWaypointFilletPath(
   }
 
   const out: RoadMarkingNedPoint[] = [pts[0]];
-  let paintable = true;
+  const paintable = true;
 
   for (let i = 1; i < pts.length - 1; i++) {
     const prev = pts[i - 1];
     const cur = pts[i];
     const next = pts[i + 1];
     const turn = Math.abs(turningAngleDeg(prev, cur, next));
-    if (turn < MIN_VISIBLE_TURN_DEG) {
+
+    // Genuine corner: sharp, no fillet attempted.
+    if (turn >= SPARSE_ARC_CORNER_TURN_DEG || turn < MIN_VISIBLE_TURN_DEG) {
       out.push(cur);
       continue;
     }
 
+    // Below the corner line: still a curve vertex, not a corner — soften it as before.
     const dPrev = dist(prev, cur);
     const dNext = dist(cur, next);
     const radiusInfo = waypointCornerRadiusM(turn, dPrev, dNext, {
@@ -1504,26 +1518,8 @@ export function buildWaypointFilletPath(
     });
 
     if (!radiusInfo) {
-      // Unfittable = sharp (or near-reversal handled by classify); leave vertex for teardrop.
       out.push(cur);
-      warnings.push(
-        `Corner at vertex ${i + 1}: too tight for a circular fillet — left sharp (turn ${turn.toFixed(1)}°; teardrop TRAVEL at Send).`
-      );
       continue;
-    }
-
-    if (radiusInfo.overBudget) {
-      warnings.push(
-        `Corner at vertex ${i + 1}: miss ${radiusInfo.missM.toFixed(3)} m exceeds paint budget ${CORNER_TOLERANCE_M} m (r=${radiusInfo.r.toFixed(3)} m).`
-      );
-    }
-    if (radiusInfo.undrivable) {
-      // Best-effort geometric fillet still applied for a smooth preview path.
-      // Trajectory build may also insert MARK→TRAVEL(teardrop)→MARK using
-      // geometry.corners metadata — do not mark the whole path non-paintable.
-      warnings.push(
-        `Corner at vertex ${i + 1}: radius ${radiusInfo.r.toFixed(3)} m is below rover minimum ${R_MIN_ROVER_M} m — sharp (teardrop available at Send).`
-      );
     }
 
     const uIn = unit(sub(cur, prev));
@@ -1535,7 +1531,6 @@ export function buildWaypointFilletPath(
     const fillet = geometricFilletFromTangents(cur, uIn, uOut, radiusInfo.r, opts.sampleSpacingM);
     if (!fillet) {
       out.push(cur);
-      warnings.push(`Corner at vertex ${i + 1}: fillet construction failed — left sharp.`);
       continue;
     }
     for (let k = 0; k < fillet.samples.length; k++) {

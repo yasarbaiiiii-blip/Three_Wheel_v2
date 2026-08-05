@@ -39,7 +39,7 @@ describe("CSV geometry robustness", () => {
     expect(classifyPointSequence(ring).class).toBe("dense-survey");
   });
 
-  it("softens sparse 90° corners instead of returning raw polyline", () => {
+  it("keeps sharp sparse 90° corners as raw vertices (rover pivots in place)", () => {
     // mission.csv class: 3-point L
     const mission = [
       { north: 0, east: 0 },
@@ -48,8 +48,10 @@ describe("CSV geometry robustness", () => {
     ];
     const fitted = buildRoadMarkingFittedPath(mission);
     expect(fitted.mode).toBe("waypoint-fillet");
-    expect(fitted.samples.length).toBeGreaterThan(3);
-    expect(maxTurningAngleDeg(fitted.samples)).toBeLessThan(45);
+    // A 90° turn is a genuine corner (>= SPARSE_ARC_CORNER_TURN_DEG) — no fillet inserted,
+    // so the vertex count is unchanged from the raw input.
+    expect(fitted.samples.length).toBe(3);
+    expect(maxTurningAngleDeg(fitted.samples)).toBeCloseTo(90, 0);
     // I1 endpoints
     expect(fitted.samples[0].north).toBeCloseTo(0, 3);
     expect(fitted.samples[0].east).toBeCloseTo(0, 3);
@@ -57,7 +59,7 @@ describe("CSV geometry robustness", () => {
     expect(fitted.samples[fitted.samples.length - 1].east).toBeCloseTo(1, 3);
   });
 
-  it("preserves 2x2 square extent and fillets corners", () => {
+  it("preserves 2x2 square extent with sharp (unfilleted) corners", () => {
     const square = [
       { north: 0, east: 0 },
       { north: 0, east: 2 },
@@ -65,7 +67,8 @@ describe("CSV geometry robustness", () => {
       { north: 2, east: 0 },
     ];
     const out = buildRoadMarkingPreviewPoints(square);
-    expect(maxTurningAngleDeg(out)).toBeLessThan(50);
+    // 90° waypoint corners stay sharp — the rover pivots in place instead of driving an arc.
+    expect(maxTurningAngleDeg(out)).toBeCloseTo(90, 0);
     const srcLen = polylineLengthM(square);
     const outLen = polylineLengthM(out);
     expect(outLen / srcLen).toBeGreaterThan(0.75);

@@ -92,4 +92,4 @@ export function pathPrimitivesV2TopDownSegment(): boolean {
  * - `"pivot"`: near-zero TRAVEL (requires rover-side pivot support — bench first)
  */
 export type SharpCornerMode = "teardrop" | "pivot";
-export const SHARP_CORNER_MODE: SharpCornerMode = "teardrop";
+export const SHARP_CORNER_MODE: SharpCornerMode = "pivot";

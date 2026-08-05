@@ -71,10 +71,18 @@ export function formatCornerCountsSummary(counts: CornerClassCounts): string | n
 function executionModeFor(
   cls: CornerClass,
   undrivable: boolean,
+  overBudget: boolean,
   sharpMode: SharpCornerMode
 ): CornerExecutionMode {
   if (cls === "reversal") return "blocked";
-  if (cls === "sharp" || undrivable) {
+  // Gate on the actual constraint violation (undrivable / over the paint
+  // budget), not just the coarse angle bucket — a 90° turn classifies as
+  // "tight" (60-99°), not "sharp" (100-149°), but with short-enough legs it
+  // still can't hold a fillet inside the paint budget without clamping to the
+  // rover's floor (overBudget). That corner needs the same teardrop/pivot
+  // treatment as a "sharp" one; using the class alone left every "tight"
+  // corner painted straight through the budget overrun, unconditionally.
+  if (cls === "sharp" || undrivable || overBudget) {
     return sharpMode === "pivot" ? "pivot" : "teardrop";
   }
   return "paint-through";
@@ -132,7 +140,7 @@ export function buildCornerCatalog(
         cutM: c.cutM,
         overBudget: c.overBudget,
         undrivable: c.undrivable,
-        executionMode: executionModeFor(c.class, c.undrivable, sharpMode),
+        executionMode: executionModeFor(c.class, c.undrivable, c.overBudget, sharpMode),
         sourceLineId: line.id,
         sourceLabel: line.label || line.id,
       });
@@ -287,6 +295,12 @@ export function tagLinesWithCorners(
       ...cornerNotes.filter((w) => !w.startsWith("Corners:")),
     ];
 
+    // Hydrated lines carry no `paintable` flag of their own (the backend round trip
+    // has no such field) — without this, a reversal corner recovered post-hydrate
+    // would show as drivable again the moment a mission is re-inspected after Send.
+    const hasReversal = unique.some((c) => c.class === "reversal");
+    const paintable = hasReversal ? false : (prevGeom.paintable as boolean | undefined) !== false;
+
     const entity = line.entity
       ? {
           ...line.entity,
@@ -294,6 +308,7 @@ export function tagLinesWithCorners(
             ...prevGeom,
             corners: cornersPayload,
             fit_warnings,
+            paintable,
           },
         }
       : {
@@ -306,6 +321,7 @@ export function tagLinesWithCorners(
           geometry: {
             corners: cornersPayload,
             fit_warnings,
+            paintable,
             road_marking: true,
           },
           preview_points: samples,

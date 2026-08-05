@@ -82,12 +82,39 @@ describe("cornerLifecycle", () => {
     const catalog = buildCornerCatalog([source], "teardrop");
     expect(catalog).toHaveLength(2);
     expect(catalog.find((c) => c.class === "sharp")?.executionMode).toBe("teardrop");
-    expect(catalog.find((c) => c.class === "tight")?.executionMode).toBe("paint-through");
+    // "tight" (e.g. a 90° square corner) still exceeds the paint budget at
+    // this leg length (overBudget: true) — it needs the same teardrop
+    // treatment as "sharp", not silent paint-through, regardless of the
+    // coarser angle-bucket label.
+    expect(catalog.find((c) => c.class === "tight")?.executionMode).toBe("teardrop");
   });
 
   it("pivot mode marks sharp corners as pivot execution", () => {
     const catalog = buildCornerCatalog([source], "pivot");
     expect(catalog.find((c) => c.class === "sharp")?.executionMode).toBe("pivot");
+    expect(catalog.find((c) => c.class === "tight")?.executionMode).toBe("pivot");
+  });
+
+  it("leaves a tight corner painted through when it stays inside budget", () => {
+    const withinBudget = markLine("file__path-2", [
+      { north: 0, east: 0 },
+      { north: 0, east: 20 },
+      { north: 20, east: 20 },
+    ], [
+      {
+        atIndex: 1,
+        turnDeg: 90,
+        class: "tight",
+        radiusM: 3,
+        cutM: 0.09,
+        overBudget: false,
+        undrivable: false,
+        north: 0,
+        east: 20,
+      },
+    ]);
+    const catalog = buildCornerCatalog([withinBudget], "teardrop");
+    expect(catalog[0]?.executionMode).toBe("paint-through");
   });
 
   it("recovers corners onto densified hydrated ids by geometry", () => {
@@ -123,6 +150,59 @@ describe("cornerLifecycle", () => {
 
     const transit = tagged.find((l) => l.id === "rover-transit-1")!;
     expect(transit.entity?.geometry?.corners ?? []).toEqual([]);
+  });
+
+  it("marks a hydrated line non-paintable when a recovered corner is a reversal", () => {
+    const reversalSource = markLine(
+      "file__path-2",
+      [
+        { north: 20, east: 0 },
+        { north: 25, east: 0 },
+        { north: 20.2, east: 0.1 },
+      ],
+      [
+        {
+          atIndex: 1,
+          turnDeg: 162,
+          class: "reversal",
+          radiusM: 0.5,
+          cutM: 0.3,
+          overBudget: true,
+          undrivable: false,
+          north: 25,
+          east: 0,
+        },
+      ]
+    );
+
+    // Hydrated (post-stage) geometry has no `paintable` field of its own — the
+    // backend round trip never carries one.
+    const hydrated: PlanLine = {
+      ...markLine("rover-path-9", [
+        { north: 20, east: 0 },
+        { north: 25, east: 0 },
+        { north: 20.2, east: 0.1 },
+      ]),
+      entity: {
+        entity_id: "rover-path-9",
+        entity_type: "LWPOLYLINE",
+        layer: "MARK",
+        color: 7,
+        is_mark: true,
+        length_m: 10,
+        geometry: { closed: false, road_marking: true, corners: [] },
+        preview_points: [
+          { north: 20, east: 0 },
+          { north: 25, east: 0 },
+          { north: 20.2, east: 0.1 },
+        ],
+      },
+    };
+
+    const tagged = recoverCornersAfterHydration([hydrated], [reversalSource], "teardrop");
+    const line = tagged.find((l) => l.id === "rover-path-9")!;
+    expect(line.entity?.geometry?.paintable).toBe(false);
+    expect(getLineFitMeta(line).paintable).toBe(false);
   });
 
   it("leaves lines unmatched when far from catalog", () => {

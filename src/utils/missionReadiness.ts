@@ -59,15 +59,20 @@ export function getLineFitMeta(line: PlanLine): LineFitMeta {
   const warnings = Array.isArray(rawWarnings)
     ? rawWarnings.filter((w): w is string => typeof w === "string" && w.trim() !== "")
     : [];
-  const paintable = geom?.paintable === false ? false : true;
+  const rawCorners = Array.isArray(geom?.corners) ? geom.corners : [];
+  const cornerCounts = countCornerClasses(rawCorners);
+  const cornersSummary = formatCornerCountsSummary(cornerCounts);
   const mode = typeof geom?.fit_mode === "string" ? geom.fit_mode : undefined;
   const maxJointTurnDeg =
     typeof geom?.max_joint_turn_deg === "number" && Number.isFinite(geom.max_joint_turn_deg)
       ? geom.max_joint_turn_deg
       : undefined;
-  const rawCorners = Array.isArray(geom?.corners) ? geom.corners : [];
-  const cornerCounts = countCornerClasses(rawCorners);
-  const cornersSummary = formatCornerCountsSummary(cornerCounts);
+  // A reversal corner (150°+) is classified "blocked" execution mode (cornerLifecycle.ts)
+  // but that tag was never consulted anywhere — fold it into `paintable` here so it rides
+  // the same, already-tested Send-readiness / Path Order blocking every other non-paintable
+  // path already goes through, instead of needing a second parallel gate.
+  const hasReversal = cornerCounts.reversal > 0;
+  const paintable = geom?.paintable === false || hasReversal ? false : true;
   return {
     lineId: line.id,
     label: line.label || line.id,
