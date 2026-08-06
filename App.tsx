@@ -258,6 +258,7 @@ import type {
 } from "./src/types/uploadedFiles";
 import {
   applyCsvOrderToPlanLines,
+  chainMarkLinesByGeometry,
   defaultPathOrder,
   selectMarkPlanLines,
 } from "./src/utils/csvPathOrder";
@@ -3308,7 +3309,9 @@ export default function App() {
       // Standalone NED: replace-style single file (legacy Auto Origin path).
       setLocalCsvPreview(data);
       setLocalDxfMeta(null);
-      const previewLines = localCsvPointsToPlanLines(data.points);
+      const previewLines = chainMarkLinesByGeometry(
+        localCsvPointsToPlanLines(data.points)
+      );
       const transitLines = buildCsvTransitLines(previewLines);
       setLines(sanitizePlanLines([...previewLines, ...transitLines]));
       setSelectedLineId(previewLines[0]?.id ?? null);
@@ -3336,7 +3339,9 @@ export default function App() {
     const prefix = allocateLineIdPrefix(data.fileName, used);
     const fileId = `${prefix}-csv`;
 
-    const previewLines = localCsvPointsToPlanLines(data.points);
+    const previewLines = chainMarkLinesByGeometry(
+      localCsvPointsToPlanLines(data.points)
+    );
     const transitLines = buildCsvTransitLines(previewLines);
     const integrated = integrateAnchoredLines(
       [...previewLines, ...transitLines],
@@ -3395,9 +3400,12 @@ export default function App() {
     const prefix = allocateLineIdPrefix(data.fileName, used);
     const fileId = `${prefix}-dxf`;
 
-    const markLines = data.lines.filter(
+    // Seed continuous walk + reverse back-facing strokes so auto transit follows
+    // the curve instead of zig-zagging DXF entity order (chainMarkLinesByGeometry).
+    const markLinesRaw = data.lines.filter(
       (l) => l.layer !== "transit" && l.layer !== "extension"
     );
+    const markLines = chainMarkLinesByGeometry(markLinesRaw);
     const order = defaultPathOrder(selectMarkPlanLines(markLines));
     const withTransit = applyCsvOrderToPlanLines(markLines, order, {
       enabled: false,

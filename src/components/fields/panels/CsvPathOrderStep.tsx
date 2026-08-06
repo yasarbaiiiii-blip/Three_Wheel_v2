@@ -19,6 +19,8 @@ import {
   buildCsvTransitPreviews,
   buildOrderedTrajectory,
   defaultPathOrder,
+  detectCurveDirectionWarnings,
+  detectDegenerateEntityWarnings,
   detectReversalWarnings,
   resolveOrderedPaintedLines,
   selectMarkPlanLines,
@@ -220,9 +222,17 @@ export function CsvPathOrderStep({
     [markLines, order, extensionConfig]
   );
   const reversals = useMemo(() => detectReversalWarnings(painted), [painted]);
+  const curveDirectionWarnings = useMemo(
+    () => detectCurveDirectionWarnings(painted),
+    [painted]
+  );
+  const degenerateEntityWarnings = useMemo(
+    () => detectDegenerateEntityWarnings(painted),
+    [painted]
+  );
   const transitPreviews = useMemo(
-    () => buildCsvTransitPreviews(markLines, order),
-    [markLines, order]
+    () => buildCsvTransitPreviews(markLines, order, extensionConfig),
+    [markLines, order, extensionConfig]
   );
   const extensionPreviews = useMemo(
     () => buildCsvExtensionPreviews(painted, extensionConfig),
@@ -285,6 +295,39 @@ export function CsvPathOrderStep({
           ) : null}
         </Text>
       ) : null}
+
+      {/*
+        Curves are never reversed by chainMarkLinesByGeometry (would break their
+        analytic PRE/AFT tangents) — when an arc's authored rotation direction fights the
+        walk, the app is forced into an avoidable detour it cannot fix on its own. Surface
+        it here so the operator can re-author the arc in the source DXF.
+      */}
+      {curveDirectionWarnings.length > 0
+        ? curveDirectionWarnings.map((w) => (
+            <Text
+              key={w.lineId}
+              style={{ color: FIELDS_COLORS.warning, fontSize: 10, fontWeight: "600" }}
+            >
+              {`⚠ ${w.label}: curve direction adds ~${w.wastedM.toFixed(1)} m of avoidable transit — consider reversing it in the source DXF`}
+            </Text>
+          ))
+        : null}
+
+      {/*
+        Entities this short paint almost nothing but still cost a full transit round-trip
+        to visit (confirmed on a real file: two entities under 5cm added ~11m of pure
+        overhead). Flag them so the operator can Skip in the list above.
+      */}
+      {degenerateEntityWarnings.length > 0
+        ? degenerateEntityWarnings.map((w) => (
+            <Text
+              key={w.lineId}
+              style={{ color: FIELDS_COLORS.warning, fontSize: 10, fontWeight: "600" }}
+            >
+              {`⚠ ${w.label}: only ${(w.lengthM * 100).toFixed(1)} cm long — Skip it above to remove its transit cost`}
+            </Text>
+          ))
+        : null}
 
       {/*
         Take the whole area the card gives us and let the list scroll inside it, rather than

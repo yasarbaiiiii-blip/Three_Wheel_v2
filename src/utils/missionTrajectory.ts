@@ -5,10 +5,10 @@
  * Does not touch the network.
  *
  * Critical invariant (backend validation rule 1): never emit two adjacent `mark` runs.
- * Preview helper `buildCsvTransitLines` skips gaps under 0.02 m (invisible on the map).
- * That leaves adjacent marks, which the backend rejects with 422. For trajectory we
- * **merge, don't bridge** any gap under MARK_CONTIGUOUS_GAP_M (0.05 m), matching backend
- * rules 2/3 endpoint-touch tolerance.
+ * Preview helper `buildCsvTransitLines` and trajectory merge share MARK_CONTIGUOUS_GAP_M
+ * (0.05 m): gaps under that threshold are treated as contiguous paint (no travel leg on
+ * the map and no separate travel run for the rover), matching backend rules 2/3
+ * endpoint-touch tolerance and avoiding a 422 from adjacent mark runs.
  *
  * Axis convention: run points are always [north_m, east_m]. Points are taken from
  * `entity.preview_points` (explicit north/east). Fallback from/to uses CSV convention

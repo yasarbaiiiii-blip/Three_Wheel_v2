@@ -453,6 +453,52 @@ describe("buildCsvTransitLines", () => {
     ];
     expect(buildCsvTransitLines(lines)).toHaveLength(0);
   });
+
+  it("skips a 3 cm gap (aligned with trajectory MARK_CONTIGUOUS_GAP_M = 0.05)", () => {
+    const lines = [
+      {
+        id: "a",
+        label: "A",
+        layer: "marking" as const,
+        from: { id: 1, x: 0, y: 0 },
+        to: { id: 2, x: 10, y: 0 },
+        width: 0.1,
+      },
+      {
+        id: "b",
+        label: "B",
+        layer: "marking" as const,
+        from: { id: 3, x: 10.03, y: 0 },
+        to: { id: 4, x: 20, y: 0 },
+        width: 0.1,
+      },
+    ];
+    expect(buildCsvTransitLines(lines)).toHaveLength(0);
+  });
+
+  it("still emits a transit for a 6 cm gap (above merge threshold)", () => {
+    const lines = [
+      {
+        id: "a",
+        label: "A",
+        layer: "marking" as const,
+        from: { id: 1, x: 0, y: 0 },
+        to: { id: 2, x: 10, y: 0 },
+        width: 0.1,
+      },
+      {
+        id: "b",
+        label: "B",
+        layer: "marking" as const,
+        from: { id: 3, x: 10.06, y: 0 },
+        to: { id: 4, x: 20, y: 0 },
+        width: 0.1,
+      },
+    ];
+    const transit = buildCsvTransitLines(lines);
+    expect(transit).toHaveLength(1);
+    expect(transit[0].entity?.length_m).toBeCloseTo(0.06, 5);
+  });
 });
 
 describe("survey quality warnings (Phase 6)", () => {

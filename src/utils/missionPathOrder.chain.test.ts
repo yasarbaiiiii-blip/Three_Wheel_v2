@@ -167,6 +167,44 @@ describe("chainMarkLinesByGeometry", () => {
     expect(placed.from).toMatchObject({ x: TR[0], y: TR[1] });
     expect(placed.to).toMatchObject({ x: TL[0], y: TL[1] });
   });
+
+  it("tries alternate seeds when the file-order start is a bad one (confirmed on field_test_01.DXF)", () => {
+    // Mirrors a real survey DXF: entity 0 ("lineA") is a line authored away from everything
+    // else, an ARC can only be entered at P3=(3,4) and exits at P1=(0,0), and "lineB" departs
+    // from that same P3. Seeding from lineA in its authored (file) direction strands the walk
+    // 24+ m from the arc's entry; seeding from lineA REVERSED (or from another entity) does not.
+    const p1: [number, number] = [0, 0];
+    const p2: [number, number] = [0, -20];
+    const p3: [number, number] = [3, 4];
+    const p4: [number, number] = [13, 4];
+    const lineA = seg("lineA", p1, p2); // file order: entity 0, authored P1→P2
+    const arc: PlanLine = {
+      ...seg("arc", p3, p1),
+      entity: { ...seg("arc", p3, p1).entity!, entity_type: "ARC" },
+    };
+    const lineB = seg("lineB", p3, p4);
+
+    const naiveTotal =
+      Math.hypot(p2[0] - p3[0], p2[1] - p3[1]) + // lineA(fwd) end → arc start
+      Math.hypot(p1[0] - p3[0], p1[1] - p3[1]); // arc end → lineB start
+    expect(naiveTotal).toBeCloseTo(29.19, 2); // sanity-check the "before" baseline
+
+    const chained = chainMarkLinesByGeometry([lineA, lineB, arc]);
+    let total = 0;
+    for (let i = 0; i < chained.length - 1; i++) {
+      const a = chained[i].entity!.preview_points!;
+      const b = chained[i + 1].entity!.preview_points!;
+      total += Math.hypot(
+        b[0].north - a[a.length - 1].north,
+        b[0].east - a[a.length - 1].east
+      );
+    }
+    expect(total).toBeLessThan(15); // well below the naive 29.19 m
+    // The arc itself must never be reversed, regardless of which seed won.
+    const placedArc = chained.find((l) => l.id === "arc")!;
+    expect(placedArc.from).toMatchObject({ x: p3[0], y: p3[1] });
+    expect(placedArc.to).toMatchObject({ x: p1[0], y: p1[1] });
+  });
 });
 
 describe("reversePlanLineDirection", () => {

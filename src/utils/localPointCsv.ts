@@ -20,6 +20,7 @@
  */
 
 import { metresPerDegreePx4, projectGpsToLocalMeters } from "./geoProjection";
+import { MARK_CONTIGUOUS_GAP_M } from "./missionTrajectory";
 import { splitCsvCells } from "./refPointsCsv";
 import {
   buildRoadMarkingFittedPath,
@@ -1080,8 +1081,12 @@ function csvTransitLineId(i: number): string {
   return `local-csv-transit-${i}`;
 }
 
-/** Below this gap (m), two consecutive group paths already touch — no connector needed. */
-const CSV_TRANSIT_MIN_GAP_M = 0.02;
+/**
+ * Below this gap (m), two consecutive group paths already touch — no connector needed.
+ * Same threshold as trajectory merge (`MARK_CONTIGUOUS_GAP_M`) so the map/list never
+ * show a transit hop the rover will silently fold into continuous paint.
+ */
+const CSV_TRANSIT_MIN_GAP_M = MARK_CONTIGUOUS_GAP_M;
 
 /**
  * Straight, unsmoothed "transit" connector lines between consecutive CSV group paths —
