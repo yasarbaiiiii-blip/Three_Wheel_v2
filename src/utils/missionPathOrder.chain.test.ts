@@ -12,7 +12,11 @@ import { describe, expect, it } from "vitest";
 
 import type { PlanLine } from "../types/plan";
 import { buildCsvExtensionLines, buildExtensionTransitLines } from "./missionExtensions";
-import { chainMarkLinesByGeometry, reversePlanLineDirection } from "./missionPathOrder";
+import {
+  chainMarkLinesByGeometry,
+  chainMarkLinesFromSeed,
+  reversePlanLineDirection,
+} from "./missionPathOrder";
 
 function seg(id: string, a: [number, number], b: [number, number]): PlanLine {
   return {
@@ -204,6 +208,75 @@ describe("chainMarkLinesByGeometry", () => {
     const placedArc = chained.find((l) => l.id === "arc")!;
     expect(placedArc.from).toMatchObject({ x: p3[0], y: p3[1] });
     expect(placedArc.to).toMatchObject({ x: p1[0], y: p1[1] });
+  });
+});
+
+describe("chainMarkLinesFromSeed", () => {
+  const square = [
+    seg("bottom", BL, BR),
+    seg("right", BR, TR),
+    seg("top", TR, TL),
+    seg("left", TL, BL),
+  ];
+
+  it("chains forward from an operator-picked seed, not the auto-optimized one", () => {
+    // "top" seeded from its authored `from` (TR) — walk should still find the
+    // nearest-endpoint perimeter order starting there, same algorithm as the
+    // auto-chain, just pinned to a different start.
+    const chained = chainMarkLinesFromSeed(square, "top", false);
+    expect(chained[0].id).toBe("top");
+    expect(chained[0].from).toMatchObject({ x: TR[0], y: TR[1] });
+    expect(chained.map((l) => l.id)).toEqual(["top", "left", "bottom", "right"]);
+  });
+
+  it("seeds from the line's `to` end when seedFromEnd is true (line-like only)", () => {
+    const chained = chainMarkLinesFromSeed(square, "top", true);
+    expect(chained[0].id).toBe("top");
+    // Reversed: authored TR→TL becomes TL→TR.
+    expect(chained[0].from).toMatchObject({ x: TL[0], y: TL[1] });
+    expect(chained[0].to).toMatchObject({ x: TR[0], y: TR[1] });
+  });
+
+  it("never reverses a curved seed even when seedFromEnd is requested", () => {
+    const arc: PlanLine = {
+      ...seg("arc", TR, TL),
+      entity: {
+        ...seg("arc", TR, TL).entity!,
+        entity_type: "ARC",
+        geometry: { startAngle: 0, endAngle: 90 },
+      },
+    };
+    const lines = [seg("bottom", BL, BR), seg("right", BR, TR), arc, seg("left", TL, BL)];
+    const chained = chainMarkLinesFromSeed(lines, "arc", true);
+    expect(chained[0].id).toBe("arc");
+    // Authored direction preserved — seedFromEnd is a no-op on curves.
+    expect(chained[0].from).toMatchObject({ x: TR[0], y: TR[1] });
+    expect(chained[0].to).toMatchObject({ x: TL[0], y: TL[1] });
+  });
+
+  it("keeps unplaceable marks and non-mark lines appended, not lost", () => {
+    const boundary: PlanLine = { ...seg("vbox", BL, BR), id: "vbox", layer: "virtual_boundary" };
+    const noGeometry: PlanLine = {
+      ...seg("stray", BL, BR),
+      id: "stray",
+      entity: { ...seg("stray", BL, BR).entity!, preview_points: [] },
+      from: undefined as any,
+      to: undefined as any,
+    };
+    const chained = chainMarkLinesFromSeed([...square, noGeometry, boundary], "bottom", false);
+    expect(chained.map((l) => l.id)).toEqual([
+      "bottom",
+      "right",
+      "top",
+      "left",
+      "stray",
+      "vbox",
+    ]);
+  });
+
+  it("no-ops (returns marks/others unchanged) when the seed id is not a placeable mark", () => {
+    const chained = chainMarkLinesFromSeed(square, "does-not-exist", false);
+    expect(chained.map((l) => l.id)).toEqual(square.map((l) => l.id));
   });
 });
 

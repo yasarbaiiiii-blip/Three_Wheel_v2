@@ -9,6 +9,7 @@ import {
   dampenOppositeJogs,
   maxOppositeTurnPairDeg,
   maxTurningAngleDeg,
+  polylineLengthM,
   rejectPathSpikes,
   segmentIntoPrimitives,
   turningAngleDeg,
@@ -18,10 +19,13 @@ import {
   dropNegligibleArcs,
   absorbSandwichedCornerArcs,
   splitIntoOpenPathGroups,
+  splitFittedPathAtAnchor,
+  splitRoadMarkingPathAtAnchor,
   tessellatePrimitivesWithJointFillets,
   type RoadMarkingNedPoint,
   type PathPrimitive,
 } from "./roadMarkingCsvPath";
+import type { PlanLine } from "../types/plan";
 
 /** Deterministic pseudo-noise so fixtures are reproducible without Math.random. */
 function detNoise(i: number, mag: number): number {
@@ -1055,5 +1059,178 @@ describe("preview sampling stays bounded", () => {
     const out = buildRoadMarkingPreviewPoints(ring);
     expect(out.length).toBeGreaterThan(150);
     expect(out.length).toBeLessThan(400);
+  });
+});
+
+describe("splitFittedPathAtAnchor", () => {
+  // 10 m straight line, one sample per metre: (0,0) .. (10,0).
+  const straight: RoadMarkingNedPoint[] = Array.from({ length: 11 }, (_, i) => ({
+    north: i,
+    east: 0,
+  }));
+
+  it("splits mid-path into a near arm and a far arm, both anchor-first", () => {
+    // Anchor at (3,0): near = start side (3 m, shorter), far = end side (7 m, longer).
+    const split = splitFittedPathAtAnchor(straight, 3, 0);
+    expect(split).not.toBeNull();
+    expect(split!.near).not.toBeNull();
+    const near = split!.near!;
+    expect(near[0]).toEqual({ north: 3, east: 0 });
+    expect(near[near.length - 1]).toEqual({ north: 0, east: 0 });
+    expect(split!.far[0]).toEqual({ north: 3, east: 0 });
+    expect(split!.far[split!.far.length - 1]).toEqual({ north: 10, east: 0 });
+    expect(polylineLengthM(near)).toBeCloseTo(3, 6);
+    expect(polylineLengthM(split!.far)).toBeCloseTo(7, 6);
+  });
+
+  it("picks the shorter side as near regardless of which end it is", () => {
+    // Anchor at (8,0): near = end side (2 m, shorter), far = start side (8 m, longer).
+    const split = splitFittedPathAtAnchor(straight, 8, 0);
+    expect(split).not.toBeNull();
+    expect(split!.near).not.toBeNull();
+    const near = split!.near!;
+    expect(polylineLengthM(near)).toBeCloseTo(2, 6);
+    expect(near[near.length - 1]).toEqual({ north: 10, east: 0 });
+    expect(polylineLengthM(split!.far)).toBeCloseTo(8, 6);
+    expect(split!.far[split!.far.length - 1]).toEqual({ north: 0, east: 0 });
+  });
+
+  it("anchor at the current start leaves the path unchanged (near: null)", () => {
+    const split = splitFittedPathAtAnchor(straight, 0, 0);
+    expect(split).not.toBeNull();
+    expect(split!.near).toBeNull();
+    expect(split!.far).toEqual(straight);
+  });
+
+  it("anchor at the current end reverses the whole path (near: null)", () => {
+    const split = splitFittedPathAtAnchor(straight, 10, 0);
+    expect(split).not.toBeNull();
+    expect(split!.near).toBeNull();
+    expect(split!.far).toEqual(straight.slice().reverse());
+    expect(split!.far[0]).toEqual({ north: 10, east: 0 });
+    expect(split!.far[split!.far.length - 1]).toEqual({ north: 0, east: 0 });
+  });
+
+  it("allows an anchor very close to (but not exactly at) an end", () => {
+    // Fine-grained line, one sample every 5 cm: (0,0) .. (1,0).
+    const fine: RoadMarkingNedPoint[] = Array.from({ length: 21 }, (_, i) => ({
+      north: i * 0.05,
+      east: 0,
+    }));
+    // Anchor 5 cm from the start — used to be rejected under the old 0.5 m
+    // minimum-arm policy; any non-endpoint sample must now be selectable.
+    const split = splitFittedPathAtAnchor(fine, 0.05, 0);
+    expect(split).not.toBeNull();
+    expect(split!.near).not.toBeNull();
+    expect(polylineLengthM(split!.near!)).toBeCloseTo(0.05, 6);
+    expect(polylineLengthM(split!.far)).toBeCloseTo(0.95, 6);
+  });
+
+  it("returns null for a degenerate (under 2 point) path", () => {
+    expect(splitFittedPathAtAnchor([{ north: 0, east: 0 }], 0, 0)).toBeNull();
+    expect(splitFittedPathAtAnchor([], 0, 0)).toBeNull();
+  });
+
+  it("splits evenly down the middle without favoring either arm", () => {
+    // Anchor exactly at the midpoint (5,0): both arms are 5 m — near/far order is
+    // deterministic (far wins ties via <=) but neither arm may be dropped.
+    const split = splitFittedPathAtAnchor(straight, 5, 0);
+    expect(split).not.toBeNull();
+    expect(split!.near).not.toBeNull();
+    expect(polylineLengthM(split!.near!)).toBeCloseTo(5, 6);
+    expect(polylineLengthM(split!.far)).toBeCloseTo(5, 6);
+  });
+});
+
+describe("splitRoadMarkingPathAtAnchor", () => {
+  function makeLine(points: RoadMarkingNedPoint[]): PlanLine {
+    return {
+      id: "local-csv-path",
+      label: "CSV path (11 pts)",
+      layer: "marking",
+      from: { id: 1, x: points[0].north, y: points[0].east },
+      to: { id: 2, x: points[points.length - 1].north, y: points[points.length - 1].east },
+      width: 0.1,
+      is_mark: true,
+      entity: {
+        entity_id: "local-csv-path",
+        entity_type: "LWPOLYLINE",
+        layer: "MARK",
+        color: 7,
+        is_mark: true,
+        length_m: polylineLengthM(points),
+        geometry: {
+          closed: false,
+          road_marking: true,
+          vertexCount: points.length,
+          corners: [{ atIndex: 3, turnDeg: 45, class: "clean" }],
+        },
+        preview_points: points,
+      },
+    } as PlanLine;
+  }
+
+  const straight: RoadMarkingNedPoint[] = Array.from({ length: 11 }, (_, i) => ({
+    north: i,
+    east: 0,
+  }));
+
+  it("produces two distinct, non-colliding PlanLine ids", () => {
+    const result = splitRoadMarkingPathAtAnchor(makeLine(straight), 3, 0);
+    expect(result).not.toBeNull();
+    expect(result!.near).not.toBeNull();
+    const near = result!.near!;
+    expect(near.id).not.toBe(result!.far.id);
+    expect(near.id).not.toMatch(/^local-csv-transit-/);
+    expect(result!.far.id).not.toMatch(/^local-csv-transit-/);
+  });
+
+  it("both arms start at the anchor and stay marked as mark geometry", () => {
+    const result = splitRoadMarkingPathAtAnchor(makeLine(straight), 3, 0);
+    expect(result).not.toBeNull();
+    expect(result!.near).not.toBeNull();
+    const near = result!.near!;
+    expect(near.from).toEqual({ id: 1, x: 3, y: 0 });
+    expect(result!.far.from).toEqual({ id: 1, x: 3, y: 0 });
+    expect(near.is_mark).toBe(true);
+    expect(result!.far.is_mark).toBe(true);
+    expect(near.layer).toBe("marking");
+    expect(result!.far.layer).toBe("marking");
+  });
+
+  it("drops stale corner metadata rather than mislabeling it", () => {
+    const result = splitRoadMarkingPathAtAnchor(makeLine(straight), 3, 0);
+    expect(result).not.toBeNull();
+    expect(result!.near).not.toBeNull();
+    expect(result!.near!.entity?.geometry.corners).toEqual([]);
+    expect(result!.far.entity?.geometry.corners).toEqual([]);
+  });
+
+  it("returns null when the line has no preview geometry", () => {
+    const bare = { ...makeLine(straight), entity: undefined };
+    expect(splitRoadMarkingPathAtAnchor(bare, 3, 0)).toBeNull();
+  });
+
+  it("anchor at the current start returns near: null and an unchanged far line", () => {
+    const result = splitRoadMarkingPathAtAnchor(makeLine(straight), 0, 0);
+    expect(result).not.toBeNull();
+    expect(result!.near).toBeNull();
+    expect(result!.far.from).toEqual({ id: 1, x: 0, y: 0 });
+    expect(result!.far.to).toEqual({ id: 2, x: 10, y: 0 });
+  });
+
+  it("anchor at the current end returns near: null and a reversed far line", () => {
+    const result = splitRoadMarkingPathAtAnchor(makeLine(straight), 10, 0);
+    expect(result).not.toBeNull();
+    expect(result!.near).toBeNull();
+    expect(result!.far.from).toEqual({ id: 1, x: 10, y: 0 });
+    expect(result!.far.to).toEqual({ id: 2, x: 0, y: 0 });
+  });
+
+  it("allows an anchor close to an end, producing a short but valid arm", () => {
+    const result = splitRoadMarkingPathAtAnchor(makeLine(straight), 1, 0);
+    expect(result).not.toBeNull();
+    expect(result!.near).not.toBeNull();
+    expect(result!.near!.from).toEqual({ id: 1, x: 1, y: 0 });
   });
 });

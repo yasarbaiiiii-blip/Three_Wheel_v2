@@ -132,4 +132,20 @@ export interface MapViewProps {
     rotation: number;
     scale: number;
   }) => void;
+
+  /**
+   * Anchor point selection (re-anchor a plan's start). Candidates are resolved by the
+   * caller — CSV raw survey rows (`entity.geometry.source_points`) or DXF entity
+   * endpoints — from the Anchor target's isolated lines only, never the whole plan.
+   */
+  anchorCandidates?: AnchorCandidatePoint[];
+  /** Fired when the operator taps a rendered anchor candidate dot. */
+  onAnchorCandidateSelect?: (candidate: AnchorCandidatePoint) => void;
 }
+
+export type AnchorCandidatePoint = {
+  lineId: string;
+  north: number;
+  east: number;
+  kind: "csv" | "dxf";
+};

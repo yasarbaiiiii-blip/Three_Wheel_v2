@@ -9,7 +9,7 @@ import {
   clonePlanLinesForSnapshot,
   type AppPlannedStartSnapshot,
 } from "./appPlannedStartSnapshot";
-import { sortedMissionLayers } from "./missionLayerAssignment";
+import { nonEmptyMissionLayers, sortedMissionLayers } from "./missionLayerAssignment";
 import { buildCsvExtensionLines, type CsvExtensionConfig } from "./missionExtensions";
 
 const PREFIX_SEP = "__";
@@ -154,6 +154,63 @@ export function filterCanvasLinesByMissionVisibility(
     if (!layerId) return true;
     return !hiddenLayerIds.has(layerId);
   });
+}
+
+// ── Anchor point selection: file/layer picker + target isolation ──────────────
+
+export type AnchorTarget =
+  | { kind: "file"; fileId: string }
+  | { kind: "layer"; layerId: string };
+
+export type AnchorTargetOption = { target: AnchorTarget; label: string };
+
+/**
+ * Population rule for the Anchor file/layer picker — "full layer or null": list
+ * mission layers only once EVERY uploaded file is assigned to one; otherwise list
+ * individual files. Local to the Anchor picker's own rendering — does not change
+ * the Start-flow "N files unassigned" warning or block imports.
+ */
+export function buildAnchorTargetOptions(
+  uploadedFiles: UploadedFileEntry[],
+  layers: MissionLayer[]
+): AnchorTargetOption[] {
+  const useLayers =
+    countUnassignedFiles(uploadedFiles, layers) === 0 && nonEmptyMissionLayers(layers).length > 0;
+
+  if (useLayers) {
+    return sortedMissionLayers(layers)
+      .filter((l) => l.fileEntryIds.length > 0)
+      .map((l) => ({
+        target: { kind: "layer" as const, layerId: l.id },
+        label: `Layer ${l.number} (${l.fileEntryIds.length} file${l.fileEntryIds.length === 1 ? "" : "s"})`,
+      }));
+  }
+
+  return uploadedFiles.map((f) => ({
+    target: { kind: "file" as const, fileId: f.id },
+    label: f.fileName,
+  }));
+}
+
+/**
+ * Isolate `lines` down to exactly one Anchor target's lines — a raw uploaded file
+ * (via `fileForLineId`) or a whole mission layer (via `layerForLineId`). Unlike
+ * `filterCanvasLinesByMissionVisibility` (whole-layer show/hide, unassigned files
+ * always visible), this solos exactly one target and nothing else. Drives only the
+ * temporary Anchor-selection map view — never a persisted `visible` flag.
+ */
+export function isolateLinesForAnchorTarget(
+  lines: PlanLine[],
+  uploadedFiles: UploadedFileEntry[],
+  layers: MissionLayer[],
+  target: AnchorTarget
+): PlanLine[] {
+  if (target.kind === "file") {
+    return lines.filter((line) => fileForLineId(line.id, uploadedFiles)?.id === target.fileId);
+  }
+  return lines.filter(
+    (line) => layerForLineId(line.id, uploadedFiles, layers)?.id === target.layerId
+  );
 }
 
 /** Geometry sample used to recover mission-layer identity after hydration strips ids. */

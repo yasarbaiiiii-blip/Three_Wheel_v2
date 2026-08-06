@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 
 import type { PlanLine } from "../types/plan";
 import type { UploadedFileEntry } from "../types/uploadedFiles";
+import { createEmptyMissionLayer } from "../types/missionLayers";
 import { buildAppPlannedStartSnapshot } from "./appPlannedStartSnapshot";
 import {
   createLayerForFile,
@@ -9,11 +10,13 @@ import {
   resetMissionLayerIdSeqForTests,
 } from "./missionLayerAssignment";
 import {
+  buildAnchorTargetOptions,
   buildLayerScopedStartSnapshot,
   buildMissionLayerLegCatalog,
   fileForLineId,
   filterCanvasLinesByMissionVisibility,
   filterPaintedLinesForLayers,
+  isolateLinesForAnchorTarget,
   tagLinesWithMissionLayer,
   unassignedFileIds,
 } from "./missionLayerLines";
@@ -214,5 +217,86 @@ describe("missionLayerLines", () => {
     ];
     const visible = filterCanvasLinesByMissionVisibility(hydrated, files, layers);
     expect(visible.map((l) => l.id)).toEqual(["rover-path-1"]);
+  });
+
+  describe("buildAnchorTargetOptions", () => {
+    it("lists individual files when no mission layers are in use", () => {
+      const options = buildAnchorTargetOptions(files, []);
+      expect(options).toEqual([
+        { target: { kind: "file", fileId: "fa" }, label: "fa.csv" },
+        { target: { kind: "file", fileId: "fb" }, label: "fb.csv" },
+        { target: { kind: "file", fileId: "fc" }, label: "fc.csv" },
+      ]);
+    });
+
+    it("lists individual files when any file is still unassigned (mixed state)", () => {
+      // fa assigned, fb/fc still unassigned — "full layer or null" falls back to files.
+      const layers = createLayerForFile([], "fa");
+      const options = buildAnchorTargetOptions(files, layers);
+      expect(options.every((o) => o.target.kind === "file")).toBe(true);
+      expect(options.map((o) => (o.target as { fileId: string }).fileId)).toEqual([
+        "fa",
+        "fb",
+        "fc",
+      ]);
+    });
+
+    it("lists layers only once every uploaded file is assigned to one", () => {
+      let layers = createLayerForFile([], "fa");
+      layers = createLayerForFile(layers, "fb");
+      const l1 = layers.find((l) => l.fileEntryIds.includes("fa"))!;
+      layers = assignFileToLayer(layers, "fc", l1.id);
+
+      const options = buildAnchorTargetOptions(files, layers);
+      expect(options.every((o) => o.target.kind === "layer")).toBe(true);
+      expect(options).toHaveLength(2);
+      expect(options[0].label).toContain("2 files"); // layer 1: fa + fc
+      expect(options[1].label).toContain("1 file"); // layer 2: fb
+    });
+
+    it("omits empty layers even when every file is otherwise assigned", () => {
+      let layers = createLayerForFile([], "fa");
+      layers = createLayerForFile(layers, "fb");
+      layers = createLayerForFile(layers, "fc");
+      layers = [...layers, createEmptyMissionLayer("ml-empty", 4, [])];
+
+      const options = buildAnchorTargetOptions(files, layers);
+      expect(options).toHaveLength(3);
+      expect(options.some((o) => o.target.kind === "layer" && o.target.layerId === "ml-empty")).toBe(
+        false
+      );
+    });
+  });
+
+  describe("isolateLinesForAnchorTarget", () => {
+    const lines = [mark("north__a1"), mark("north__a2"), mark("south__b1"), mark("strip__c1")];
+
+    it("isolates to a single file's lines via id prefix", () => {
+      const isolated = isolateLinesForAnchorTarget(lines, files, [], {
+        kind: "file",
+        fileId: "fa",
+      });
+      expect(isolated.map((l) => l.id)).toEqual(["north__a1", "north__a2"]);
+    });
+
+    it("isolates to a whole layer's lines across multiple files", () => {
+      let layers = createLayerForFile([], "fa");
+      const l1 = layers[0];
+      layers = assignFileToLayer(layers, "fc", l1.id);
+
+      const isolated = isolateLinesForAnchorTarget(lines, files, layers, {
+        kind: "layer",
+        layerId: l1.id,
+      });
+      expect(isolated.map((l) => l.id).sort()).toEqual(["north__a1", "north__a2", "strip__c1"]);
+    });
+
+    it("returns nothing for a target with no matching lines", () => {
+      const isolated = isolateLinesForAnchorTarget(lines, files, [], {
+        kind: "file",
+        fileId: "does-not-exist",
+      });
+      expect(isolated).toEqual([]);
+    });
   });
 });

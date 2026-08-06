@@ -155,19 +155,26 @@ import {
   nonEmptyMissionLayers,
   outcomeFromMissionStateTransition,
   pruneMissingFiles,
+  resolveVisibleStartLayerIds,
   toggleMissionLayerVisibility,
   unassignFile,
 } from "./src/utils/missionLayerAssignment";
 import {
+  buildAnchorTargetOptions,
   buildLayerScopedStartSnapshot,
   buildMissionLayerLegCatalog,
   countUnassignedFiles,
+  fileForLineId,
   filterCanvasLinesByMissionVisibility,
+  isolateLinesForAnchorTarget,
   tagLinesWithMissionLayer,
+  type AnchorTarget,
+  type AnchorTargetOption,
 } from "./src/utils/missionLayerLines";
+import { splitRoadMarkingPathAtAnchor } from "./src/utils/roadMarkingCsvPath";
+import type { AnchorCandidatePoint } from "./src/components/mapViewTypes";
 import { recoverCornersAfterHydration } from "./src/utils/cornerLifecycle";
 import { SHARP_CORNER_MODE } from "./src/config/featureFlags";
-import { MissionLayerStartModal } from "./src/components/fields/MissionLayerStartModal";
 import * as pathApi from "./src/api/pathApi";
 import { generateTemplateLines, ShapeType, ArcType } from "./src/utils/shapeTemplates";
 import { generateAlphabetLines, generateNumberLines, FontStyle, AlphabetType, NumberType } from "./src/utils/characterTemplates";
@@ -259,6 +266,7 @@ import type {
 import {
   applyCsvOrderToPlanLines,
   chainMarkLinesByGeometry,
+  chainMarkLinesFromSeed,
   defaultPathOrder,
   selectMarkPlanLines,
 } from "./src/utils/csvPathOrder";
@@ -1330,13 +1338,12 @@ export default function App() {
   const [pendingLayerAssignment, setPendingLayerAssignment] = useState<{
     fileEntryId: string;
   } | null>(null);
+  /** Anchor point selection (re-anchor a CSV/DXF plan's start) — Home page only. */
+  const [anchorSelectMode, setAnchorSelectMode] = useState(false);
+  const [anchorTarget, setAnchorTarget] = useState<AnchorTarget | null>(null);
+  const [pendingAnchor, setPendingAnchor] = useState<AnchorCandidatePoint | null>(null);
   const runningLayerIdsRef = useRef<string[]>([]);
   const runningMissionIdRef = useRef<string | null>(null);
-  const [layerStartPicker, setLayerStartPicker] = useState<{
-    layers: MissionLayer[];
-    unassignedCount: number;
-  } | null>(null);
-  const layerStartPickerResolveRef = useRef<((ids: string[] | null) => void) | null>(null);
   const [loadedPathInspection, setLoadedPathInspection] = useState<missionApi.LoadedPathResponse | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   const [extensionsEnabled, setExtensionsEnabled] = useState(false);
@@ -1447,9 +1454,16 @@ export default function App() {
     });
   }, [uploadedFiles]);
 
+  /**
+   * Every uploaded file has an established position — CSV is always verified
+   * immediately on import; DXF is verified either because the file was inherently
+   * geographic or because Fix Alignment has since anchored it (alignment sets
+   * `status: "verified"` but never flips `isGeographic`, so checking that flag
+   * alone wrongly excluded every aligned metric DXF from Mission Layers).
+   */
   const canUseMissionControl = useMemo(
     () =>
-      uploadedFiles.length > 0 && uploadedFiles.every((f) => f.isGeographic),
+      uploadedFiles.length > 0 && uploadedFiles.every((f) => f.status === "verified"),
     [uploadedFiles]
   );
 
@@ -1478,6 +1492,50 @@ export default function App() {
       ),
     [mapSourceLines, uploadedFiles, missionLayers]
   );
+
+  // ── Anchor point selection (re-anchor a CSV/DXF plan's start) — Home page only ──
+  /** At least one mark line exists; DXF lines must belong to an already-verified file. */
+  const anchorAvailable = useMemo(() => {
+    const marks = selectMarkPlanLines(lines);
+    return marks.some((line) => {
+      const file = fileForLineId(line.id, uploadedFiles);
+      if (!file) return true;
+      if (file.kind === "csv") return true;
+      return file.status === "verified";
+    });
+  }, [lines, uploadedFiles]);
+
+  const anchorTargetOptions = useMemo(
+    () => buildAnchorTargetOptions(uploadedFiles, missionLayers),
+    [uploadedFiles, missionLayers]
+  );
+
+  const isolatedAnchorLines = useMemo(() => {
+    if (!anchorTarget) return [];
+    return isolateLinesForAnchorTarget(lines, uploadedFiles, missionLayers, anchorTarget);
+  }, [lines, uploadedFiles, missionLayers, anchorTarget]);
+
+  /** Selectable dots for the map — CSV raw survey rows, DXF entity endpoints. */
+  const anchorCandidates = useMemo((): AnchorCandidatePoint[] => {
+    if (!anchorSelectMode || !anchorTarget) return [];
+    const marks = selectMarkPlanLines(isolatedAnchorLines);
+    const out: AnchorCandidatePoint[] = [];
+    for (const line of marks) {
+      const isCsv = line.entity?.geometry?.road_marking === true;
+      if (isCsv) {
+        const sourcePts = line.entity?.geometry?.source_points as
+          | { north: number; east: number }[]
+          | undefined;
+        const pts = sourcePts && sourcePts.length > 0 ? sourcePts : line.entity?.preview_points ?? [];
+        for (const p of pts) out.push({ lineId: line.id, north: p.north, east: p.east, kind: "csv" });
+        continue;
+      }
+      // DXF: entity endpoints only — matches chainMarkLinesFromSeed's seed granularity.
+      if (line.from) out.push({ lineId: line.id, north: line.from.x, east: line.from.y, kind: "dxf" });
+      if (line.to) out.push({ lineId: line.id, north: line.to.x, east: line.to.y, kind: "dxf" });
+    }
+    return out;
+  }, [anchorSelectMode, anchorTarget, isolatedAnchorLines]);
 
   const mapGeometryFrame = useMemo(
     () =>
@@ -1939,6 +1997,7 @@ export default function App() {
     setMissionLayers([]);
     setControlModeActive(false);
     setPendingLayerAssignment(null);
+    resetAnchorSelection();
     setPendingDxfAlignment({});
     setSharedOriginGps(null);
     sharedOriginGpsRef.current = null;
@@ -3267,6 +3326,7 @@ export default function App() {
     setMissionLayers([]);
     setControlModeActive(false);
     setPendingLayerAssignment(null);
+    resetAnchorSelection();
     setPendingDxfAlignment({});
     setSharedOriginGps(null);
     sharedOriginGpsRef.current = null;
@@ -3559,6 +3619,7 @@ export default function App() {
     setMissionLayers([]);
     setControlModeActive(false);
     setPendingLayerAssignment(null);
+    resetAnchorSelection();
     setPendingDxfAlignment({});
     setSharedOriginGps(null);
     sharedOriginGpsRef.current = null;
@@ -3600,14 +3661,94 @@ export default function App() {
     setMissionLayers((prev) => toggleMissionLayerVisibility(prev, layerId));
   }
 
-  function promptMissionLayerStartSelection(
-    candidates: MissionLayer[],
-    unassignedCount: number
-  ): Promise<string[] | null> {
-    return new Promise((resolve) => {
-      layerStartPickerResolveRef.current = resolve;
-      setLayerStartPicker({ layers: candidates, unassignedCount });
+  function resetAnchorSelection() {
+    setAnchorSelectMode(false);
+    setAnchorTarget(null);
+    setPendingAnchor(null);
+  }
+
+  function handleAnchorPress() {
+    if (protectedMissionResident) {
+      Alert.alert("Mission conflict", "Anchor selection is blocked while a protected surveyed mission is resident.");
+      return;
+    }
+    if (anchorSelectMode) {
+      resetAnchorSelection();
+      return;
+    }
+    setAnchorSelectMode(true);
+    setAnchorTarget(null);
+    setPendingAnchor(null);
+  }
+
+  function handleSelectAnchorTarget(target: AnchorTarget) {
+    setAnchorTarget(target);
+    setPendingAnchor(null);
+  }
+
+  function handleAnchorCandidateSelect(candidate: AnchorCandidatePoint) {
+    setPendingAnchor(candidate);
+  }
+
+  /**
+   * Apply the pending anchor: CSV lines split at the tapped point first (near arm
+   * anchor-first, far arm anchor-first), then the whole isolated target — the split
+   * arms plus any other lines in that file/layer — is re-chained from the anchor via
+   * the same nearest-endpoint walk import-time chaining already uses. Only the
+   * isolated target's lines are touched; everything else in `lines` is untouched.
+   */
+  function handleConfirmAnchor() {
+    if (!anchorTarget || !pendingAnchor) return;
+    if (protectedMissionResident) {
+      Alert.alert("Mission conflict", "Anchor selection is blocked while a protected surveyed mission is resident.");
+      resetAnchorSelection();
+      return;
+    }
+
+    const targetLines = isolateLinesForAnchorTarget(lines, uploadedFiles, missionLayers, anchorTarget);
+    const targetIds = new Set(targetLines.map((l) => l.id));
+    const seedLine = targetLines.find((l) => l.id === pendingAnchor.lineId);
+    if (!seedLine) {
+      resetAnchorSelection();
+      return;
+    }
+
+    let reordered = targetLines;
+    let seedId = pendingAnchor.lineId;
+
+    if (pendingAnchor.kind === "csv") {
+      const split = splitRoadMarkingPathAtAnchor(seedLine, pendingAnchor.north, pendingAnchor.east);
+      if (!split) {
+        showToast("Anchor failed", "That path has no usable geometry to re-anchor.", "error");
+        return;
+      }
+      // near === null: anchor was the path's own current start or end — `far` alone
+      // covers the whole path (unchanged, or fully reversed), no split/transit needed.
+      const seedArm = split.near ?? split.far;
+      reordered = targetLines.flatMap((l) => {
+        if (l.id !== seedLine.id) return [l];
+        return split.near ? [split.near, split.far] : [split.far];
+      });
+      seedId = seedArm.id;
+    }
+
+    const chained = chainMarkLinesFromSeed(reordered, seedId, false);
+
+    setLines((prev) => {
+      const untouched = prev.filter((l) => !targetIds.has(l.id));
+      return sanitizePlanLines([...chained, ...untouched]);
     });
+
+    // Anchor mutates geometry after any prior Send — staged mission / app-planned
+    // snapshot no longer match what's on the map. Same "plan changed, demote and
+    // re-verify" policy already used after any other batch/geometry change (plan
+    // Design §5) — reuses the existing demotion helper rather than hand-rolling a
+    // partial reset that could miss a consumer of stagedMissionId.
+    demoteWorkflowAfterBatchChange(false);
+    setAppPlannedStartSnapshot(null);
+    showToast("Anchor changed", "Plan changed — re-Send before Start.", "info");
+
+    resetAnchorSelection();
   }
 
   async function startLoadedMission() {
@@ -3621,32 +3762,39 @@ export default function App() {
       return;
     }
 
-    // Mission-layer Start selection (before expensive reconcile / restage).
-    const startableLayers = nonEmptyMissionLayers(missionLayers);
+    // Mission-layer Start selection — driven entirely by pill visibility now
+    // (missionLayers[].visible), same state MissionLayerPills toggles for map
+    // preview. No separate re-pick modal: what's visible is what runs.
     let selectedStartLayerIds: string[] | null = null;
-    if (missionLayers.length > 0 && startableLayers.length === 0) {
-      Alert.alert(
-        "No mission layers ready",
-        "Files are not assigned to any mission layer. Open Control and assign files, or clear empty layers."
-      );
-      showToast("Start blocked", "Assign files to a mission layer first.", "error");
+    const startResolution = resolveVisibleStartLayerIds(missionLayers);
+    if (startResolution.kind === "blocked") {
+      if (startResolution.reason === "no_layers_ready") {
+        Alert.alert(
+          "No mission layers ready",
+          "Files are not assigned to any mission layer. Open Control and assign files, or clear empty layers."
+        );
+        showToast("Start blocked", "Assign files to a mission layer first.", "error");
+      } else {
+        Alert.alert(
+          "No layers visible",
+          "Toggle at least one mission layer on under Control to start."
+        );
+        showToast("Start blocked", "No visible mission layers.", "error");
+      }
       return;
     }
-    if (startableLayers.length >= 2) {
+    if (startResolution.kind === "start") {
+      selectedStartLayerIds = startResolution.ids;
       const unassigned = countUnassignedFiles(uploadedFiles, missionLayers);
-      const picked = await promptMissionLayerStartSelection(startableLayers, unassigned);
-      if (picked == null) {
-        return;
+      if (unassigned > 0) {
+        showToast(
+          "Some files won't run",
+          `${unassigned} file${unassigned === 1 ? "" : "s"} not in any mission layer — will not run.`,
+          "info"
+        );
       }
-      if (picked.length === 0) {
-        showToast("Start blocked", "Select at least one mission layer.", "error");
-        return;
-      }
-      selectedStartLayerIds = picked;
-    } else if (startableLayers.length === 1) {
-      selectedStartLayerIds = [startableLayers[0].id];
     }
-    // length === 0 and no missionLayers → full snapshot (today's behaviour)
+    // kind === "legacy_full" → selectedStartLayerIds stays null (today's full-snapshot behaviour)
 
     // Step 1: Re-fetch backend mission status to reconcile local workflow state
     // before evaluating the start gate. setWorkflowStep() below only takes
@@ -4275,6 +4423,7 @@ export default function App() {
       setMissionLayers([]);
       setControlModeActive(false);
       setPendingLayerAssignment(null);
+      resetAnchorSelection();
       setPendingDxfAlignment({});
       setSharedOriginGps(null);
       sharedOriginGpsRef.current = null;
@@ -4848,7 +4997,7 @@ export default function App() {
                     if (!canUseMissionControl) {
                       showToast(
                         "Control unavailable",
-                        "Mission Layers need a GPS-anchored import batch.",
+                        "Finish aligning every uploaded file before assigning mission layers.",
                         "warning"
                       );
                       return;
@@ -5079,6 +5228,17 @@ export default function App() {
                             onUnassignFileFromLayer={handleUnassignFileFromLayer}
                             missionVisibleLines={missionVisibleDisplayedLines}
                             missionVisibleMapSourceLines={missionVisibleMapSourceLines}
+                            anchorAvailable={anchorAvailable}
+                            anchorSelectMode={anchorSelectMode}
+                            anchorTargetOptions={anchorTargetOptions}
+                            anchorTarget={anchorTarget}
+                            pendingAnchor={pendingAnchor}
+                            anchorCandidates={anchorCandidates}
+                            anchorIsolatedLines={isolatedAnchorLines}
+                            onAnchorPress={handleAnchorPress}
+                            onSelectAnchorTarget={handleSelectAnchorTarget}
+                            onAnchorCandidateSelect={handleAnchorCandidateSelect}
+                            onConfirmAnchor={handleConfirmAnchor}
                           />
                         )
                       : undefined
@@ -5144,23 +5304,6 @@ export default function App() {
         </SafeAreaInsetsContext.Consumer>
       </SafeAreaProvider>
       <FloatingEStop visible={isFloatingEStopEnabled} onEStop={estopVehicle} />
-      <MissionLayerStartModal
-        visible={layerStartPicker != null}
-        layers={layerStartPicker?.layers ?? []}
-        unassignedCount={layerStartPicker?.unassignedCount ?? 0}
-        onCancel={() => {
-          const resolve = layerStartPickerResolveRef.current;
-          layerStartPickerResolveRef.current = null;
-          setLayerStartPicker(null);
-          resolve?.(null);
-        }}
-        onConfirm={(ids) => {
-          const resolve = layerStartPickerResolveRef.current;
-          layerStartPickerResolveRef.current = null;
-          setLayerStartPicker(null);
-          resolve?.(ids);
-        }}
-      />
     </GestureHandlerRootView>
   );
 }
@@ -6708,6 +6851,18 @@ function SectionPages(props: {
   onUnassignFileFromLayer?: (fileEntryId: string) => void;
   missionVisibleLines?: PlanLine[];
   missionVisibleMapSourceLines?: PlanLine[];
+  /** Anchor point selection (re-anchor a CSV/DXF plan's start) — Fields only, before Send. */
+  anchorAvailable?: boolean;
+  anchorSelectMode?: boolean;
+  anchorTargetOptions?: AnchorTargetOption[];
+  anchorTarget?: AnchorTarget | null;
+  pendingAnchor?: AnchorCandidatePoint | null;
+  anchorCandidates?: AnchorCandidatePoint[];
+  anchorIsolatedLines?: PlanLine[];
+  onAnchorPress?: () => void;
+  onSelectAnchorTarget?: (target: AnchorTarget) => void;
+  onAnchorCandidateSelect?: (candidate: AnchorCandidatePoint) => void;
+  onConfirmAnchor?: () => void;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
 
@@ -7882,6 +8037,8 @@ function PlanPreview({
   resetNorthTrigger,
   hideRefocusControls = false,
   snapRefPoints,
+  anchorCandidates,
+  onAnchorCandidateSelect,
 }: {
   lines: PlanLine[];
   mapSourceLines?: PlanLine[];
@@ -7940,6 +8097,8 @@ function PlanPreview({
   resetNorthTrigger?: number;
   hideRefocusControls?: boolean;
   snapRefPoints?: { lat: number; lon: number }[];
+  anchorCandidates?: AnchorCandidatePoint[];
+  onAnchorCandidateSelect?: (candidate: AnchorCandidatePoint) => void;
 }) {
   const [visualSelected, setVisualSelected] = useState(true);
   const [boundarySelected, setBoundarySelected] = useState(true);
@@ -8771,6 +8930,8 @@ function PlanPreview({
               pos_e: telemetryPosE,
             } as any}
             lines={staticMapLines}
+            anchorCandidates={anchorCandidates}
+            onAnchorCandidateSelect={onAnchorCandidateSelect}
             alignedRefPoints={alignedRefPoints}
             autoOriginReference={autoOriginReference}
             mapGeometryFrame={mapGeometryFrame}

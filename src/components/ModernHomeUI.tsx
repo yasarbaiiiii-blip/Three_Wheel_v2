@@ -711,6 +711,8 @@ export default function ModernHomeUI(props) {
   // Mapbox map, which otherwise never saw `layerVisibility` at all.
   const [showLayersMenu, setShowLayersMenu] = useState(false);
   const [showLayersPlanSubmenu, setShowLayersPlanSubmenu] = useState(false);
+  // ── Control popover (mission-layer assignment + pills + Anchor) ──
+  const [showControlMenu, setShowControlMenu] = useState(false);
   const showRoverMarker = layerVisibility?.rover !== false;
   // Opt-in, unlike the flags around it: path length labels stay hidden until explicitly
   // enabled, so a dense plan reads as geometry rather than a wall of numbers.
@@ -1487,51 +1489,69 @@ export default function ModernHomeUI(props) {
                 )}
               </View>
 
-              {/* Mission Layers control — same chrome as Layers, separate feature */}
+              {/* Control popover — same chrome and tile style as Layers. Opens
+                  unconditionally whenever a plan is loaded; the Layers tile itself is
+                  gated by canUseMissionControl (dim + toast if pressed while gated). */}
               <View style={styles.mapToolsDivider} />
-              <Pressable
-                style={({ pressed }) => [
-                  styles.focusToolBtnGrouped,
-                  controlModeActive && { backgroundColor: COLORS.accentMuted },
-                  pressed && styles.focusToolBtnPressed,
-                  !canUseMissionControl && { opacity: 0.45 },
-                ]}
-                onPress={() => {
-                  if (isHomePage) setShowMarkMenu(false);
-                  setShowLayersMenu(false);
-                  onToggleControlMode?.();
-                }}
-                accessibilityLabel="Control mission layers"
-                accessibilityState={{ disabled: !canUseMissionControl, selected: !!controlModeActive }}
-              >
-                <LayoutList
-                  color={controlModeActive ? COLORS.accentBrand : canUseMissionControl ? COLORS.accentBrand : COLORS.textDim}
-                  size={18}
-                  strokeWidth={2.2}
-                />
-                <Text
-                  style={[
-                    styles.focusToolLabel,
-                    controlModeActive && { color: COLORS.accentBrand },
-                    !canUseMissionControl && { color: COLORS.textDim },
+              <View>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.focusToolBtnGrouped,
+                    showControlMenu && { backgroundColor: COLORS.accentMuted },
+                    pressed && styles.focusToolBtnPressed,
                   ]}
+                  onPress={() => {
+                    if (isHomePage) setShowMarkMenu(false);
+                    setShowLayersMenu(false);
+                    setShowControlMenu((v) => !v);
+                  }}
+                  accessibilityLabel="Control"
+                  accessibilityState={{ selected: showControlMenu }}
                 >
-                  Control
-                </Text>
-              </Pressable>
+                  <LayoutList
+                    color={showControlMenu ? COLORS.accentBrand : COLORS.accentBrand}
+                    size={18}
+                    strokeWidth={2.2}
+                  />
+                  <Text style={[styles.focusToolLabel, showControlMenu && { color: COLORS.accentBrand }]}>
+                    Control
+                  </Text>
+                </Pressable>
+
+                {showControlMenu && (
+                  <View
+                    style={[styles.menuPopover, { width: menuPopoverWidthFor(1, MENU_LAYER_TILE_W) }]}
+                  >
+                    <View style={styles.menuPopoverArrow} />
+                    <MenuSectionLabel label="Mission Control" />
+
+                    <View style={styles.menuTileRow}>
+                      <MenuLayerTile
+                        icon={LayoutList}
+                        label="Layers"
+                        checked={controlModeActive}
+                        onPress={() => onToggleControlMode?.()}
+                      />
+                    </View>
+                    {!canUseMissionControl ? (
+                      <Text style={[styles.menuEmptyText, { marginTop: 4 }]}>
+                        Finish aligning every uploaded file first.
+                      </Text>
+                    ) : null}
+                  </View>
+                )}
+              </View>
             </>
           )}
         </View>
 
-        {/* Mission layer visibility pills — sit under the tool strip when layers exist */}
+        {/* Mission layer visibility pills — sit under the tool strip when layers exist.
+            Same layer.visible state drives map preview AND Start execution. */}
         {(isHomePage || isFieldsPage) &&
         nonEmptyMissionLayers(missionLayers).length > 0 &&
         onToggleMissionLayerVisibility ? (
           <View style={{ marginTop: 8, alignSelf: "flex-start" }}>
-            <MissionLayerPills
-              layers={missionLayers}
-              onToggle={onToggleMissionLayerVisibility}
-            />
+            <MissionLayerPills layers={missionLayers} onToggle={onToggleMissionLayerVisibility} />
           </View>
         ) : null}
       </AnimatedReanimated.View>

@@ -976,6 +976,8 @@ function buildPlanLineForGroup(
           fit_mode: "degenerate",
           paintable: false,
           fit_warnings: ["Path degenerated to raw vertices after cleanup.", ...fitted.warnings],
+          /** Raw survey rows for this group — Anchor candidate points (see roadMarkingCsvPath.ts). */
+          source_points: rawNed.map((p) => ({ north: p.north, east: p.east })),
         },
         preview_points: fallback,
       },
@@ -1026,6 +1028,8 @@ function buildPlanLineForGroup(
           north: c.north,
           east: c.east,
         })),
+        /** Raw survey rows for this group — Anchor candidate points (see roadMarkingCsvPath.ts). */
+        source_points: rawNed.map((p) => ({ north: p.north, east: p.east })),
       },
       preview_points,
     },

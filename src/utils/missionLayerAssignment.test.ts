@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach } from "vitest";
 
+import { createEmptyMissionLayer } from "../types/missionLayers";
 import {
   applyMissionTerminalOutcome,
   assignFileToLayer,
@@ -11,6 +12,8 @@ import {
   outcomeFromMissionStateTransition,
   pruneMissingFiles,
   resetMissionLayerIdSeqForTests,
+  resolveVisibleStartLayerIds,
+  setMissionLayerVisibility,
   unassignFile,
 } from "./missionLayerAssignment";
 
@@ -87,5 +90,56 @@ describe("missionLayerAssignment", () => {
     expect(outcomeFromMissionStateTransition("running", "idle")).toBe("stopped");
     expect(outcomeFromMissionStateTransition("idle", "completed")).toBeNull();
     expect(outcomeFromMissionStateTransition("running", "running")).toBeNull();
+  });
+
+  describe("resolveVisibleStartLayerIds", () => {
+    it("returns legacy_full when no mission layers are in use", () => {
+      expect(resolveVisibleStartLayerIds([])).toEqual({ kind: "legacy_full" });
+    });
+
+    it("blocks with no_layers_ready when layers exist but none have files", () => {
+      const layers = [createEmptyMissionLayer("ml-1", 1, [])];
+      expect(resolveVisibleStartLayerIds(layers)).toEqual({
+        kind: "blocked",
+        reason: "no_layers_ready",
+      });
+    });
+
+    it("blocks with none_visible when every non-empty layer is hidden", () => {
+      let layers = createLayerForFile([], "f1");
+      const id = layers[0].id;
+      layers = setMissionLayerVisibility(layers, id, false);
+      expect(resolveVisibleStartLayerIds(layers)).toEqual({
+        kind: "blocked",
+        reason: "none_visible",
+      });
+    });
+
+    it("starts only the visible non-empty layers, ignoring hidden and empty ones", () => {
+      let layers = createLayerForFile([], "f1");
+      layers = createLayerForFile(layers, "f2");
+      const [hiddenId, visibleId] = layers.map((l) => l.id);
+      layers = setMissionLayerVisibility(layers, hiddenId, false);
+      // Empty layer with no files — must never appear in the start set.
+      layers = [...layers, createEmptyMissionLayer("ml-empty", 3, [])];
+
+      const result = resolveVisibleStartLayerIds(layers);
+      expect(result).toEqual({ kind: "start", ids: [visibleId] });
+    });
+
+    it("starts a single non-empty layer only when it is visible", () => {
+      let layers = createLayerForFile([], "f1");
+      const id = layers[0].id;
+      expect(resolveVisibleStartLayerIds(layers)).toEqual({
+        kind: "start",
+        ids: [id],
+      });
+
+      layers = setMissionLayerVisibility(layers, id, false);
+      expect(resolveVisibleStartLayerIds(layers)).toEqual({
+        kind: "blocked",
+        reason: "none_visible",
+      });
+    });
   });
 });

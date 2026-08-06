@@ -167,3 +167,31 @@ export function setMissionLayerVisibility(
 ): MissionLayer[] {
   return layers.map((l) => (l.id === layerId ? { ...l, visible } : l));
 }
+
+/**
+ * Which mission layers Start should run, derived from pill visibility alone —
+ * replaces the separate MissionLayerStartModal re-pick. Pill visibility now drives
+ * both map preview (filterCanvasLinesByMissionVisibility) and execution.
+ */
+export type ResolveVisibleStartResult =
+  | { kind: "legacy_full" }
+  | { kind: "blocked"; reason: "no_layers_ready" | "none_visible" }
+  | { kind: "start"; ids: string[] };
+
+export function resolveVisibleStartLayerIds(
+  layers: MissionLayer[]
+): ResolveVisibleStartResult {
+  const startable = nonEmptyMissionLayers(layers);
+  if (layers.length > 0 && startable.length === 0) {
+    return { kind: "blocked", reason: "no_layers_ready" };
+  }
+  if (startable.length === 0) {
+    // No mission layers in use at all — legacy full-snapshot behavior.
+    return { kind: "legacy_full" };
+  }
+  const visible = startable.filter((l) => l.visible);
+  if (visible.length === 0) {
+    return { kind: "blocked", reason: "none_visible" };
+  }
+  return { kind: "start", ids: visible.map((l) => l.id) };
+}

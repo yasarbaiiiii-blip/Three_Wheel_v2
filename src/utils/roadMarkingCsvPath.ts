@@ -16,6 +16,8 @@
  * Strictly no closed polygon / ring. DXF / other plan sources are not handled here.
  */
 
+import type { PlanLine } from "../types/plan";
+
 export type RoadMarkingNedPoint = {
   north: number;
   east: number;
@@ -3103,4 +3105,145 @@ export function maxOppositeTurnPairDeg(
     }
   }
   return maxPair;
+}
+
+// ── Anchor point selection (re-anchor a CSV plan's start point) ────────────────
+
+export type RoadMarkingAnchorSplit = {
+  /**
+   * Shorter arm, oriented anchor-first (anchor → nearer original end). `null` when
+   * the anchor is one of the path's own endpoints — there is no second arm to
+   * cover, `far` alone is the whole (possibly reversed) path.
+   */
+  near: RoadMarkingNedPoint[] | null;
+  /** Longer arm (or the whole path), oriented anchor-first. */
+  far: RoadMarkingNedPoint[];
+};
+
+/**
+ * Re-anchor a fitted polyline at the sample nearest the tapped point. Every sample
+ * is a valid anchor, including the path's own current start and end:
+ *
+ *  - Anchor at the current start: no real change — `far` is the path unchanged,
+ *    `near` is `null`.
+ *  - Anchor at the current end: the whole path simply runs the other way — `far`
+ *    is the path reversed, `near` is `null`.
+ *  - Anchor at an interior sample: split in two, both arms oriented anchor-first.
+ *    Painting the shorter arm first, then transiting back (unpainted) through the
+ *    anchor to paint the longer arm, is the minimum-travel way to fully cover an
+ *    open path from an interior start — the alternative order pays the backtrack
+ *    on the longer arm instead of the shorter one.
+ *
+ * Returns null only when there are fewer than 2 points to begin with.
+ */
+export function splitFittedPathAtAnchor(
+  points: RoadMarkingNedPoint[],
+  anchorNorth: number,
+  anchorEast: number
+): RoadMarkingAnchorSplit | null {
+  if (points.length < 2) return null;
+
+  const anchor: RoadMarkingNedPoint = { north: anchorNorth, east: anchorEast };
+  let bestIdx = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < points.length; i++) {
+    const d = dist(points[i], anchor);
+    if (d < bestDist) {
+      bestDist = d;
+      bestIdx = i;
+    }
+  }
+
+  // Anchor at the current start — already correct, nothing to reorder.
+  if (bestIdx === 0) {
+    return { near: null, far: points.slice() };
+  }
+  // Anchor at the current end — the whole path just runs the other way.
+  if (bestIdx === points.length - 1) {
+    return { near: null, far: points.slice().reverse() };
+  }
+
+  // start..anchor and anchor..end, both inclusive of the anchor sample.
+  const startArm = points.slice(0, bestIdx + 1);
+  const endArm = points.slice(bestIdx);
+
+  const startArmLenM = polylineLengthM(startArm);
+  const endArmLenM = polylineLengthM(endArm);
+
+  // Reverse the start-side arm so it reads anchor-first (start..anchor -> anchor..start).
+  // Not reusing missionPathOrder's reversePlanLineDirection here: it operates on a
+  // PlanLine and importing it would create a circular dependency (missionPathOrder ->
+  // missionTrajectory -> roadMarkingCsvPath). Working on the raw point array instead
+  // sidesteps that entirely and this module never touches PlanLine.
+  const startArmFromAnchor = startArm.slice().reverse();
+
+  return startArmLenM <= endArmLenM
+    ? { near: startArmFromAnchor, far: endArm }
+    : { near: endArm, far: startArmFromAnchor };
+}
+
+export type RoadMarkingAnchorSplitLines = { near: PlanLine | null; far: PlanLine };
+
+/** Build one split-arm PlanLine, reusing the source line's entity shape. */
+function buildAnchorArmPlanLine(
+  source: PlanLine,
+  idSuffix: "near" | "far",
+  points: RoadMarkingNedPoint[]
+): PlanLine {
+  const id = `${source.id}__anchor-${idSuffix}`;
+  const first = points[0];
+  const last = points[points.length - 1];
+  const length_m = polylineLengthM(points);
+  const sourceEntity = source.entity;
+  return {
+    ...source,
+    id,
+    label: `${source.label} (${idSuffix === "near" ? "A" : "B"})`,
+    from: { id: 1, x: first.north, y: first.east },
+    to: { id: 2, x: last.north, y: last.east },
+    entity: sourceEntity
+      ? {
+          ...sourceEntity,
+          entity_id: id,
+          length_m,
+          geometry: {
+            ...sourceEntity.geometry,
+            vertexCount: points.length,
+            // Corner atIndex values were computed against the pre-split polyline and
+            // no longer line up (and "near" may be reversed) — drop rather than
+            // mislabel. Re-anchoring an already-split line is out of v1 scope.
+            corners: [],
+            // Candidate points for a later anchor pick — the arm's own fitted samples
+            // stand in for raw survey rows here (re-anchoring a split line is v1
+            // out-of-scope, so this is never read as ground truth in practice).
+            source_points: points.map((p) => ({ north: p.north, east: p.east })),
+          },
+          preview_points: points,
+        }
+      : sourceEntity,
+  };
+}
+
+/**
+ * Re-anchor a fitted CSV road-marking PlanLine at the sample nearest the tapped
+ * point (see {@link splitFittedPathAtAnchor} for the three cases: unchanged,
+ * whole-path reversed, or split into two anchor-first arms).
+ *
+ * `near` is `null` when the anchor is the path's own current start or end — the
+ * whole plan is covered by `far` alone (unchanged or reversed), no second arm and
+ * no transit needed. Returns null only when the line has no usable preview geometry.
+ */
+export function splitRoadMarkingPathAtAnchor(
+  line: PlanLine,
+  anchorNorth: number,
+  anchorEast: number
+): RoadMarkingAnchorSplitLines | null {
+  const points = line.entity?.preview_points;
+  if (!points || points.length < 2) return null;
+  const split = splitFittedPathAtAnchor(points, anchorNorth, anchorEast);
+  if (!split) return null;
+  return {
+    near: split.near ? buildAnchorArmPlanLine(line, "near", split.near) : null,
+    far: buildAnchorArmPlanLine(line, "far", split.far),
+  };
 }

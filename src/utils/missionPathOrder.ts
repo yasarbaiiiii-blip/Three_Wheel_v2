@@ -428,6 +428,45 @@ export function chainMarkLinesByGeometry(lines: PlanLine[]): PlanLine[] {
   return [...bestChain, ...unplaceable, ...others];
 }
 
+/**
+ * Re-chain mark lines starting from an operator-picked seed (Anchor point selection),
+ * instead of `chainMarkLinesByGeometry`'s auto-optimized seed. Thin wrapper around the
+ * same `greedyChainFrom` walk that import-time chaining already uses — never exports
+ * the raw internal helper so callers stay on one supported entry point.
+ *
+ * `seedFromEnd` requests starting the seed line from its `to` end instead of `from`;
+ * forced false for curves and CSV road-marking lines (matches `isLineLikePlanLine`,
+ * the same rule the auto-chain already applies — their extension tangents / fitted
+ * geometry are authored in one direction and must never be silently reversed here).
+ *
+ * No-ops (returns `lines` marks/others unchanged) when `seedLineId` is not a
+ * placeable mark line in `lines` — defensive only; callers are expected to pass a
+ * seed that was itself sourced from this same line list.
+ */
+export function chainMarkLinesFromSeed(
+  lines: PlanLine[],
+  seedLineId: string,
+  seedFromEnd: boolean
+): PlanLine[] {
+  const marks = selectMarkPlanLines(lines);
+  const markIds = new Set(marks.map((m) => m.id));
+  const others = lines.filter((l) => !markIds.has(l.id));
+  if (marks.length < 2) return [...marks, ...others];
+
+  const placeable: PlanLine[] = [];
+  const unplaceable: PlanLine[] = [];
+  for (const line of marks) {
+    (lineEndpoints(line) ? placeable : unplaceable).push(line);
+  }
+
+  const seedIdx = placeable.findIndex((l) => l.id === seedLineId);
+  if (seedIdx < 0) return [...marks, ...others];
+
+  const seedReversed = seedFromEnd && isLineLikePlanLine(placeable[seedIdx]);
+  const chained = greedyChainFrom(placeable, seedIdx, seedReversed);
+  return [...chained, ...unplaceable, ...others];
+}
+
 export function reorderPathOrder(
   order: CsvPathOrderEntry[],
   fromIndex: number,

@@ -1232,8 +1232,8 @@ export function UploadAndPreviewStep({
               {controlModeActive && nonEmptyMissionLayers(missionLayers).length > 0 ? (
                 <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, marginTop: 2 }}>
                   {nonEmptyMissionLayers(missionLayers).length} mission layer
-                  {nonEmptyMissionLayers(missionLayers).length === 1 ? "" : "s"} · Start will let you
-                  pick which to run
+                  {nonEmptyMissionLayers(missionLayers).length === 1 ? "" : "s"} · Hidden mission
+                  layers are not started — toggle them under Control
                 </Text>
               ) : null}
             </View>

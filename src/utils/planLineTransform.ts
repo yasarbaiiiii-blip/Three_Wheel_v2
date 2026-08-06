@@ -33,6 +33,49 @@ function transformDxfPoint(pt: DxfPoint, transformPt: PlanPointTransform): DxfPo
 }
 
 /**
+ * Map the `north`/`east` fields of a loosely-typed geometry record (source_points
+ * rows, corner metadata) through `transformPt`, preserving every other field.
+ * Leaves the record untouched if it doesn't carry finite north/east.
+ */
+function transformNedRecord<T extends Record<string, unknown>>(
+  record: T,
+  transformPt: PlanPointTransform
+): T {
+  const north = record.north;
+  const east = record.east;
+  if (typeof north !== "number" || typeof east !== "number" || !Number.isFinite(north) || !Number.isFinite(east)) {
+    return record;
+  }
+  const next = transformPt(north, east);
+  return { ...record, north: next.north, east: next.east };
+}
+
+/**
+ * Bake `source_points` (raw CSV survey rows — Anchor candidates) and `corners`
+ * (fitter corner metadata — the map's corner-point layer) inside `geometry`, if
+ * present. Both are plain NED point arrays stored alongside, not derived from,
+ * `preview_points`, so they need their own pass through the same transform.
+ */
+function transformGeometryNedArrays(geometry: unknown, transformPt: PlanPointTransform): unknown {
+  if (!geometry || typeof geometry !== "object") return geometry;
+  const record = geometry as Record<string, unknown>;
+  const sourcePoints = record.source_points;
+  const corners = record.corners;
+  const nextSourcePoints = Array.isArray(sourcePoints)
+    ? sourcePoints.map((p) => transformNedRecord(p as Record<string, unknown>, transformPt))
+    : sourcePoints;
+  const nextCorners = Array.isArray(corners)
+    ? corners.map((c) => transformNedRecord(c as Record<string, unknown>, transformPt))
+    : corners;
+  if (nextSourcePoints === sourcePoints && nextCorners === corners) return geometry;
+  return {
+    ...record,
+    ...(Array.isArray(sourcePoints) ? { source_points: nextSourcePoints } : {}),
+    ...(Array.isArray(corners) ? { corners: nextCorners } : {}),
+  };
+}
+
+/**
  * Angle convention matches `curvePointAtAngle`:
  *   north = centerN + r * sin(α)
  *   east  = centerE + r * cos(α)
@@ -174,6 +217,8 @@ export function transformPlanLineGeometry(
       const nextCurve = transformCurveGeometry(curve, transformPt, line);
       geometry = writeCurveGeometry(entity, nextCurve);
     }
+
+    geometry = transformGeometryNedArrays(geometry, transformPt);
 
     const preview_points = Array.isArray(entity.preview_points)
       ? entity.preview_points.map((pt) => transformDxfPoint(pt, transformPt))

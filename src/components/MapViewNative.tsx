@@ -356,6 +356,8 @@ export function MapViewNative(props: MapViewProps) {
     snapRefPoints,
     planPlacementPhase = "idle",
     onPlanAttached,
+    anchorCandidates,
+    onAnchorCandidateSelect,
   } = props;
 
   const planPlacementPhaseRef = useRef<MultiPointPlacementPhase>(planPlacementPhase);
@@ -925,6 +927,44 @@ export function MapViewNative(props: MapViewProps) {
 
     return featureCollection(features);
   }, [onSelectPoint, mode, projectionOrigin, originSig, lines]);
+
+  // ── Anchor point selection: selectable candidate dots for the isolated target ──
+  // Caller (App) resolves the candidate list from the Anchor target's isolated
+  // lines only (CSV raw survey rows / DXF entity endpoints) — this component just
+  // renders whatever it's given and reports back which one was tapped.
+  const anchorCandidatesFC = useMemo((): GeoJSON.FeatureCollection => {
+    if (!anchorCandidates || anchorCandidates.length === 0 || !projectionOrigin) {
+      return featureCollection([]);
+    }
+    const features: GeoJSON.Feature[] = [];
+    for (const c of anchorCandidates) {
+      if (!Number.isFinite(c.north) || !Number.isFinite(c.east)) continue;
+      const gps = projectPlanNorthEastToGps(c.north, c.east, projectionOrigin);
+      features.push(
+        pointFeature(toMapboxCoord(gps.lat, gps.lon), {
+          lineId: c.lineId,
+          planNorth: c.north,
+          planEast: c.east,
+          kind: c.kind,
+        })
+      );
+    }
+    return featureCollection(features);
+  }, [anchorCandidates, projectionOrigin]);
+
+  const handleAnchorCandidatePress = useCallback(
+    (event: ShapeSourcePressEvent) => {
+      const f = event.features?.[0];
+      const props2 = (f?.properties ?? {}) as Record<string, unknown>;
+      const north = Number(props2.planNorth);
+      const east = Number(props2.planEast);
+      const lineId = String(props2.lineId ?? "");
+      const kind = props2.kind === "dxf" ? "dxf" : "csv";
+      if (!lineId || !Number.isFinite(north) || !Number.isFinite(east)) return;
+      onAnchorCandidateSelect?.({ lineId, north, east, kind });
+    },
+    [onAnchorCandidateSelect]
+  );
 
   // ── Fields selection: highlighted line(s) + corner points ──
   // `highlightedLines`, when provided, is an explicit, already-resolved set (e.g. every
@@ -2974,6 +3014,33 @@ export function MapViewNative(props: MapViewProps) {
               circleRadius: 16,
               circleColor: "#0ea5e9",
               circleOpacity: 0.001,
+            }}
+          />
+        </ShapeSource>
+
+        {/* ── Anchor point selection: visible, tappable candidate dots on the isolated target ── */}
+        <ShapeSource
+          id="anchor-candidates"
+          shape={anchorCandidatesFC}
+          onPress={handleAnchorCandidatePress}
+          hitbox={{ width: 40, height: 40 }}
+        >
+          <CircleLayer
+            id="anchor-candidates-halo"
+            style={{
+              circleRadius: 10,
+              circleColor: "#22c55e",
+              circleOpacity: 0.22,
+            }}
+          />
+          <CircleLayer
+            id="anchor-candidates-core"
+            style={{
+              circleRadius: 5,
+              circleColor: "#16a34a",
+              circleStrokeColor: "#ffffff",
+              circleStrokeWidth: 1.75,
+              circleOpacity: 1,
             }}
           />
         </ShapeSource>

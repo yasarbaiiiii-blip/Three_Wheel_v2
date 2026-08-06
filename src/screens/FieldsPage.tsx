@@ -13,6 +13,7 @@ import { FieldsClearBar } from "../components/fields/FieldsClearBar";
 import { MapPlanInteractionOverlay } from "../components/fields/MapPlanInteractionOverlay";
 import { FIELDS_COLORS } from "../components/fields/fieldsTheme";
 import { AlignDxfPanel } from "../components/fields/panels/AlignDxfPanel";
+import { AnchorPanel } from "../components/fields/panels/AnchorPanel";
 import { CsvPathOrderStep } from "../components/fields/panels/CsvPathOrderStep";
 import { CsvStageAndLoadPanel } from "../components/fields/panels/CsvStageAndLoadPanel";
 import { PathOrderAndSprayStep } from "../components/fields/panels/PathOrderAndSprayStep";
@@ -181,6 +182,10 @@ export type FieldsPageProps = {
     sketchMode?: boolean;
     showBoundaryPoints?: boolean;
     snapRefPoints?: { lat: number; lon: number }[];
+    anchorCandidates?: import("../components/mapViewTypes").AnchorCandidatePoint[];
+    onAnchorCandidateSelect?: (
+      candidate: import("../components/mapViewTypes").AnchorCandidatePoint
+    ) => void;
   }) => React.ReactNode;
   localCsvPreview?: LocalPointCsvResult | null;
   /**
@@ -234,6 +239,20 @@ export type FieldsPageProps = {
   /** Map-only filtered geometry (mission-layer visibility). */
   missionVisibleLines?: PlanLine[];
   missionVisibleMapSourceLines?: PlanLine[];
+  /** Anchor point selection (re-anchor a CSV/DXF plan's start) — before Send. */
+  anchorAvailable?: boolean;
+  anchorSelectMode?: boolean;
+  anchorTargetOptions?: import("../utils/missionLayerLines").AnchorTargetOption[];
+  anchorTarget?: import("../utils/missionLayerLines").AnchorTarget | null;
+  pendingAnchor?: import("../components/mapViewTypes").AnchorCandidatePoint | null;
+  anchorCandidates?: import("../components/mapViewTypes").AnchorCandidatePoint[];
+  anchorIsolatedLines?: PlanLine[];
+  onAnchorPress?: () => void;
+  onSelectAnchorTarget?: (target: import("../utils/missionLayerLines").AnchorTarget) => void;
+  onAnchorCandidateSelect?: (
+    candidate: import("../components/mapViewTypes").AnchorCandidatePoint
+  ) => void;
+  onConfirmAnchor?: () => void;
 };
 
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
@@ -334,6 +353,17 @@ export function FieldsPage(props: FieldsPageProps) {
     onUnassignFileFromLayer,
     missionVisibleLines,
     missionVisibleMapSourceLines,
+    anchorAvailable = false,
+    anchorSelectMode = false,
+    anchorTargetOptions = [],
+    anchorTarget = null,
+    pendingAnchor = null,
+    anchorCandidates = [],
+    anchorIsolatedLines = [],
+    onAnchorPress,
+    onSelectAnchorTarget,
+    onAnchorCandidateSelect,
+    onConfirmAnchor,
   } = props;
 
   const [selectedUploadedFileId, setSelectedUploadedFileId] = useState<string | null>(null);
@@ -932,8 +962,13 @@ export function FieldsPage(props: FieldsPageProps) {
       {/* Map preview — full screen background */}
       <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
         {renderPlanPreview({
-          lines: mapDisplayLines,
-          mapSourceLines: missionVisibleMapSourceLines ?? mapSourceLines,
+          lines: anchorSelectMode && anchorTarget ? anchorIsolatedLines : mapDisplayLines,
+          mapSourceLines:
+            anchorSelectMode && anchorTarget
+              ? anchorIsolatedLines
+              : missionVisibleMapSourceLines ?? mapSourceLines,
+          anchorCandidates: anchorSelectMode ? anchorCandidates : undefined,
+          onAnchorCandidateSelect,
           autoOriginReference,
           mapGeometryFrame,
           autoOriginEnabled,
@@ -1526,6 +1561,16 @@ export function FieldsPage(props: FieldsPageProps) {
                         paddingTop: 12,
                       }}
                     >
+                      <AnchorPanel
+                        anchorAvailable={anchorAvailable}
+                        anchorSelectMode={anchorSelectMode}
+                        anchorTargetOptions={anchorTargetOptions}
+                        anchorTarget={anchorTarget}
+                        pendingAnchor={pendingAnchor}
+                        onAnchorPress={onAnchorPress}
+                        onSelectAnchorTarget={onSelectAnchorTarget}
+                        onConfirmAnchor={onConfirmAnchor}
+                      />
                       <CsvStageAndLoadPanel
                         apiBaseUrl={apiBaseUrl}
                         sourceKind={

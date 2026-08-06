@@ -162,4 +162,43 @@ describe("transformPlanLineGeometry", () => {
     expect(next.entity!.extension_preview!.aft_points[0].north).toBeCloseTo(22, 9);
     expect(next.entity!.extension_preview!.aft_points[0].east).toBeCloseTo(7, 9);
   });
+
+  it("translates geometry.source_points and geometry.corners alongside preview_points", () => {
+    const line = makeStraightLine();
+    line.entity = {
+      entity_id: "e1",
+      entity_type: "LWPOLYLINE",
+      layer: "MARK",
+      color: 7,
+      is_mark: true,
+      length_m: 10,
+      geometry: {
+        road_marking: true,
+        source_points: [
+          { north: 10, east: 5, hrms_m: 0.02 },
+          { north: 20, east: 5, hrms_m: 0.02 },
+        ],
+        corners: [{ atIndex: 1, turnDeg: 45, class: "clean", north: 15, east: 5 }],
+      },
+      preview_points: [
+        { north: 10, east: 5 },
+        { north: 20, east: 5 },
+      ],
+    };
+    const next = transformPlanLineGeometry(line, translationTransform(3, -2));
+    const geom = next.entity!.geometry as Record<string, unknown>;
+    const sourcePoints = geom.source_points as Array<{ north: number; east: number; hrms_m: number }>;
+    const corners = geom.corners as Array<{ north: number; east: number; class: string }>;
+
+    expect(sourcePoints[0].north).toBeCloseTo(13, 9);
+    expect(sourcePoints[0].east).toBeCloseTo(3, 9);
+    expect(sourcePoints[1].north).toBeCloseTo(23, 9);
+    expect(sourcePoints[1].east).toBeCloseTo(3, 9);
+    // Non-geometric fields survive untouched.
+    expect(sourcePoints[0].hrms_m).toBe(0.02);
+
+    expect(corners[0].north).toBeCloseTo(18, 9);
+    expect(corners[0].east).toBeCloseTo(3, 9);
+    expect(corners[0].class).toBe("clean");
+  });
 });
