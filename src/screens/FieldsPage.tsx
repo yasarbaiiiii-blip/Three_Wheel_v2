@@ -1587,6 +1587,8 @@ export function FieldsPage(props: FieldsPageProps) {
                         }
                         mapPinCount={localCsvMapPins?.length ?? null}
                         lines={lines}
+                        missionLayers={missionLayers}
+                        uploadedFiles={uploadedFiles}
                         pathOrder={csvPathOrder}
                         extensionConfig={csvExtensionConfig}
                         originGps={

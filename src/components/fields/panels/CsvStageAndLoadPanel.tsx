@@ -5,6 +5,8 @@ import type * as pathApi from "../../../api/pathApi";
 import { CSV_PLANNER } from "../../../config/featureFlags";
 import type { StagedPlanResultState, StagedWorkflowStatus, StagedWorkflowStep } from "../../../types/fieldsWorkflow";
 import type { PlanLine } from "../../../types/plan";
+import type { MissionLayer } from "../../../types/missionLayers";
+import type { UploadedFileEntry } from "../../../types/uploadedFiles";
 import {
   CSV_STAGE_STEP_LABELS,
   planAndStageAppTrajectory,
@@ -34,6 +36,10 @@ import {
 import type { LocalPointCsvResult } from "../../../utils/localPointCsv";
 import { sanitizePlanLines } from "../../../utils/pathWorkflow";
 import {
+  buildMissionLayerLegCatalog,
+  tagLinesWithMissionLayer,
+} from "../../../utils/missionLayerLines";
+import {
   hydrateStagedMissionForMap,
   isStagedHydrationLineId,
 } from "../../../utils/stagedMissionHydration";
@@ -59,6 +65,13 @@ type CsvStageAndLoadPanelProps = {
   mapPinCount?: number | null;
   /** Current map plan lines (CSV fitted marks / DXF entity paths + transit). */
   lines?: PlanLine[];
+  /**
+   * Mission layers + their file assignments — needed to recover mission-layer
+   * identity on the densified lines Send draws, so M-Layer pill visibility
+   * keeps affecting the map right after Send (not just after a later Load).
+   */
+  missionLayers?: MissionLayer[];
+  uploadedFiles?: UploadedFileEntry[];
   /** Operator order/paint from CsvPathOrderStep; defaults to all marks painted in list order. */
   pathOrder?: CsvPathOrderEntry[] | null;
   /** Local PRE/AFT config for app-planned trajectory (spray-off travel runs). */
@@ -132,6 +145,8 @@ export function CsvStageAndLoadPanel({
   localCsvPreview = null,
   mapPinCount: _mapPinCount = null,
   lines = [],
+  missionLayers = [],
+  uploadedFiles = [],
   pathOrder = null,
   extensionConfig = null,
   originGps = null,
@@ -322,9 +337,19 @@ export function CsvStageAndLoadPanel({
       extensionLines: preSendExtensionLines,
     });
     if (hydrated) {
+      // Recover mission-layer identity lost when hydration strips file-prefixed
+      // ids, so M-Layer pill visibility keeps affecting the map right after Send
+      // (same recovery App.tsx's staged-Load path already does post-Start).
+      const layerCatalog = buildMissionLayerLegCatalog(
+        sourcePaintedLines,
+        uploadedFiles,
+        missionLayers,
+        extCfg
+      );
+      const missionLayerTagged = tagLinesWithMissionLayer(hydrated.lines, layerCatalog);
       // Recover corner class / execution mode lost when densified ids replace source lines.
       const cornerTagged = recoverCornersAfterHydration(
-        hydrated.lines,
+        missionLayerTagged,
         sourcePaintedLines,
         SHARP_CORNER_MODE
       );
@@ -509,7 +534,9 @@ export function CsvStageAndLoadPanel({
           plan: result.plan,
           stagedInspection: result.stagedInspection,
         },
-        true
+        true,
+        [],
+        lines
       );
     } catch (err) {
       const message = err instanceof Error && err.message ? err.message : "Could not send the path.";

@@ -1473,24 +1473,43 @@ export default function App() {
     return applyAutoOriginShift(base, autoOriginReference);
   }, [mapSourceLines, autoOriginEligible, autoOriginReference]);
 
+  /**
+   * Geometry catalog to recover mission-layer identity on hydrated (post-Send/Load)
+   * lines whose ids no longer carry a file prefix (see tagLinesWithMissionLayer).
+   * Rebuilt reactively off current mission-layer state — not just once at the Send/Load
+   * callback — so assigning a file to a layer (or creating one) AFTER Send still lets
+   * the M-Layer pill affect the map, instead of only working for layers that already
+   * existed at the moment Send/Load ran.
+   */
+  const missionLayerLegCatalog = useMemo(
+    () =>
+      buildMissionLayerLegCatalog(
+        appPlannedStartSnapshot?.paintedLines ?? [],
+        uploadedFiles,
+        missionLayers,
+        appPlannedStartSnapshot?.extensionConfig
+      ),
+    [appPlannedStartSnapshot, uploadedFiles, missionLayers]
+  );
+
   /** Map/canvas lines with mission-layer visibility applied (CAD filters still apply later). */
   const missionVisibleDisplayedLines = useMemo(
     () =>
       filterCanvasLinesByMissionVisibility(
-        displayedLines,
+        tagLinesWithMissionLayer(displayedLines, missionLayerLegCatalog),
         uploadedFiles,
         missionLayers
       ),
-    [displayedLines, uploadedFiles, missionLayers]
+    [displayedLines, uploadedFiles, missionLayers, missionLayerLegCatalog]
   );
   const missionVisibleMapSourceLines = useMemo(
     () =>
       filterCanvasLinesByMissionVisibility(
-        mapSourceLines,
+        tagLinesWithMissionLayer(mapSourceLines, missionLayerLegCatalog),
         uploadedFiles,
         missionLayers
       ),
-    [mapSourceLines, uploadedFiles, missionLayers]
+    [mapSourceLines, uploadedFiles, missionLayers, missionLayerLegCatalog]
   );
 
   // ── Anchor point selection (re-anchor a CSV/DXF plan's start) — Home page only ──
