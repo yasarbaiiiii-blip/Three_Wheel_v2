@@ -146,6 +146,8 @@ export type FieldsPageProps = {
   renderPlanPreview: (props: {
     lines: PlanLine[];
     mapSourceLines?: PlanLine[];
+    /** Live drag-time Offset preview overlay — null unless actively dragging the compass dial. */
+    ghostLines?: PlanLine[] | null;
     autoOriginReference?: AutoOriginReference | null;
     mapGeometryFrame?: MapGeometryFrame;
     autoOriginEnabled?: boolean;
@@ -264,6 +266,9 @@ export type FieldsPageProps = {
   onOffsetTargetChange?: (target: import("../utils/missionLayerLines").AnchorTarget) => void;
   offsetResetAvailable?: boolean;
   onResetOffset?: () => void;
+  onOffsetDragStateChange?: (dragging: boolean) => void;
+  /** Live drag-time preview of the whole plan post-Apply — null unless actively dragging the dial. */
+  offsetPreviewLines?: PlanLine[] | null;
 };
 
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
@@ -385,6 +390,8 @@ export function FieldsPage(props: FieldsPageProps) {
     onOffsetTargetChange,
     offsetResetAvailable = false,
     onResetOffset,
+    onOffsetDragStateChange,
+    offsetPreviewLines = null,
   } = props;
 
   const [selectedUploadedFileId, setSelectedUploadedFileId] = useState<string | null>(null);
@@ -984,6 +991,7 @@ export function FieldsPage(props: FieldsPageProps) {
       <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
         {renderPlanPreview({
           lines: anchorSelectMode && anchorTarget ? anchorIsolatedLines : mapDisplayLines,
+          ghostLines: offsetPreviewLines,
           mapSourceLines:
             anchorSelectMode && anchorTarget
               ? anchorIsolatedLines
@@ -1502,6 +1510,7 @@ export function FieldsPage(props: FieldsPageProps) {
               onOffsetTargetChange={onOffsetTargetChange}
               offsetResetAvailable={offsetResetAvailable}
               onResetOffset={onResetOffset}
+              onOffsetDragStateChange={onOffsetDragStateChange}
               onCsvExtensionConfigChange={(next) => {
                 setCsvExtensionConfig(next);
                 setLines((prev) => {

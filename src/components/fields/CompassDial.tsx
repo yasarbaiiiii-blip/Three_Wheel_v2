@@ -35,6 +35,12 @@ export type CompassDialProps = {
   onBearingChange: (deg: number) => void;
   size?: number;
   disabled?: boolean;
+  /**
+   * Fired true on touch-down, false when the drag finalizes (release, cancel,
+   * or failed recognition). Not fired by the degree TextInput's manual edits —
+   * only an actual dial drag counts as "dragging."
+   */
+  onDragStateChange?: (dragging: boolean) => void;
 };
 
 const NEEDLE_COLOR = "#8b5cf6";
@@ -47,6 +53,7 @@ export function CompassDial({
   onBearingChange,
   size = 140,
   disabled = false,
+  onDragStateChange,
 }: CompassDialProps) {
   const cx = size / 2;
   const r = size / 2 - 10;
@@ -73,12 +80,16 @@ export function CompassDial({
         .enabled(!disabled)
         .minDistance(0)
         .onBegin((e) => {
+          if (onDragStateChange) runOnJS(onDragStateChange)(true);
           runOnJS(emitFromTouch)(e.x, e.y);
         })
         .onUpdate((e) => {
           runOnJS(emitFromTouch)(e.x, e.y);
+        })
+        .onFinalize(() => {
+          if (onDragStateChange) runOnJS(onDragStateChange)(false);
         }),
-    [disabled, emitFromTouch]
+    [disabled, emitFromTouch, onDragStateChange]
   );
 
   return (

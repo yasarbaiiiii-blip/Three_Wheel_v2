@@ -307,6 +307,7 @@ export function MapViewNative(props: MapViewProps) {
   const {
     telemetrySnapshot,
     lines,
+    ghostLines,
     alignedRefPoints,
     visible,
     showRover = true,
@@ -744,6 +745,24 @@ export function MapViewNative(props: MapViewProps) {
     }
     return featureCollection(features);
   }, [lines, originSig, mode]);
+
+  // ── Offset ghost preview: live drag-only, never committed, not mode-gated ──
+  // Offset only exists in Fields, so `ghostLines` is simply never populated when
+  // the map is in "templates" mode — no explicit gate needed here.
+  const ghostLinesFC = useMemo(() => {
+    if (!projectionOrigin || !ghostLines || ghostLines.length === 0) {
+      return featureCollection([]);
+    }
+    const features: GeoJSON.Feature[] = [];
+    for (const line of ghostLines) {
+      const segs = projectPlanLineToGpsSegments(line, projectionOrigin);
+      if (segs.length >= 2) {
+        const coords = segs.map(([lat, lon]) => toMapboxCoord(lat, lon));
+        features.push(lineFeature(coords, { id: line.id }));
+      }
+    }
+    return featureCollection(features);
+  }, [ghostLines, originSig]);
 
   // ── Rover start pin: exact first vertex of the start travel segment.
   // Uses the same GPS projection as the drawn plan stroke so the red pin sits on
@@ -2996,6 +3015,26 @@ export function MapViewNative(props: MapViewProps) {
               lineWidth: 2.5,
               lineDasharray: [2, 1],
               lineOpacity: 0.95,
+            }}
+          />
+        </ShapeSource>
+
+        {/* ── Offset ghost preview: live drag-only, gone on release, never committed ── */}
+        <ShapeSource
+          id="offset-ghost-lines"
+          shape={ghostLinesFC}
+          maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
+          tolerance={PLAN_SOURCE_TOLERANCE}
+        >
+          <LineLayer
+            id="offset-ghost-lines-layer"
+            style={{
+              lineColor: "#8b5cf6",
+              lineWidth: 2,
+              lineOpacity: 0.6,
+              lineDasharray: [2, 2],
+              lineCap: "round",
+              lineJoin: "round",
             }}
           />
         </ShapeSource>

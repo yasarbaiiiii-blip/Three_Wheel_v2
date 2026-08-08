@@ -271,7 +271,8 @@ import {
   defaultPathOrder,
   selectMarkPlanLines,
 } from "./src/utils/csvPathOrder";
-import { normalizeBearingDeg, offsetPlanLines } from "./src/utils/planOffset";
+import { normalizeBearingDeg } from "./src/utils/planOffset";
+import { computeOffsetResultLines } from "./src/utils/planOffsetApply";
 import { sanitizeUploadFileName } from "./src/utils/surveyCsvExport";
 import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
 import { rehydrateAlignedPlanLines } from "./src/utils/rehydrateAlignedPlan";
@@ -1351,6 +1352,17 @@ export default function App() {
   const [offsetTarget, setOffsetTarget] = useState<AnchorTarget | null>({ kind: "universal" });
   /** Deep clone of `lines` taken just before the FIRST Offset Apply this session. Reset restores it, then clears to null. */
   const [preOffsetSnapshot, setPreOffsetSnapshot] = useState<PlanLine[] | null>(null);
+  /**
+   * Live drag-time ghost preview while dragging the Offset compass dial.
+   * offsetBearingRef always holds the latest raw-sample bearing (updated every
+   * touch sample); the RAF-coalesced recompute reads it at fire time, never a
+   * stale value captured in a closure at schedule time — see
+   * scheduleOffsetGhostFrame below for why this matters.
+   */
+  const offsetBearingRef = useRef(offsetBearingDeg);
+  const isDraggingOffsetDialRef = useRef(false);
+  const offsetGhostRafRef = useRef<number | null>(null);
+  const [offsetPreviewLines, setOffsetPreviewLines] = useState<PlanLine[] | null>(null);
   const runningLayerIdsRef = useRef<string[]>([]);
   const runningMissionIdRef = useRef<string | null>(null);
   const [loadedPathInspection, setLoadedPathInspection] = useState<missionApi.LoadedPathResponse | null>(null);
@@ -3788,6 +3800,65 @@ export default function App() {
   }
 
   /**
+   * RAF-coalesced recompute of the Offset ghost preview. `offsetBearingDeg`
+   * updates at raw native-touch-sample rate (60-120Hz) while dragging the
+   * compass dial — fine for the cheap needle-rotation render, but running the
+   * full isolate+shift+merge+sanitize pipeline on every one of those samples
+   * would saturate the JS thread the same way an uncoalesced Align sticker drag
+   * would (see MapViewNative.tsx's own pendingDragDeltaRef/previewRafRef
+   * pattern, which this mirrors). Every sample writes the cheap
+   * offsetBearingRef and requests at most one frame; the frame reads the ref
+   * at fire time, so it always uses the latest sample even if several arrived
+   * while a frame was already pending — never a value captured stale in a
+   * closure at schedule time.
+   */
+  const scheduleOffsetGhostFrame = useCallback(() => {
+    if (offsetGhostRafRef.current !== null) return; // single-flight
+    offsetGhostRafRef.current = requestAnimationFrame(() => {
+      offsetGhostRafRef.current = null;
+      if (!isDraggingOffsetDialRef.current || protectedMissionResident) return;
+      const scopeTarget = offsetTarget ?? { kind: "universal" as const };
+      const baseLines =
+        alignContextRef.current.displayLines.length > 0 ? alignContextRef.current.displayLines : lines;
+      const result = computeOffsetResultLines(
+        baseLines,
+        uploadedFiles,
+        missionLayers,
+        scopeTarget,
+        offsetDistanceM,
+        offsetBearingRef.current
+      );
+      setOffsetPreviewLines(result.ok ? result.lines : null);
+    });
+  }, [offsetTarget, offsetDistanceM, uploadedFiles, missionLayers, lines, protectedMissionResident]);
+
+  const handleOffsetBearingChange = useCallback(
+    (deg: number) => {
+      offsetBearingRef.current = deg;
+      setOffsetBearingDeg(deg);
+      if (isDraggingOffsetDialRef.current) scheduleOffsetGhostFrame();
+    },
+    [scheduleOffsetGhostFrame]
+  );
+
+  const handleOffsetDragStateChange = useCallback((dragging: boolean) => {
+    isDraggingOffsetDialRef.current = dragging;
+    if (!dragging) {
+      if (offsetGhostRafRef.current !== null) {
+        cancelAnimationFrame(offsetGhostRafRef.current);
+        offsetGhostRafRef.current = null;
+      }
+      setOffsetPreviewLines(null); // gone the instant the drag ends
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (offsetGhostRafRef.current !== null) cancelAnimationFrame(offsetGhostRafRef.current);
+    };
+  }, []);
+
+  /**
    * Shift the selected scope (a file, a mission layer, or the whole plan) toward
    * an absolute compass bearing by `offsetDistanceM`. One-shot bake into `lines`
    * (like Move/Rotate Plan and Anchor) — not a live-as-you-type field. Safe to
@@ -3802,27 +3873,30 @@ export default function App() {
     }
 
     const scopeTarget = offsetTarget ?? { kind: "universal" as const };
-    const targetLines = isolateLinesForAnchorTarget(lines, uploadedFiles, missionLayers, scopeTarget);
+    const result = computeOffsetResultLines(
+      lines,
+      uploadedFiles,
+      missionLayers,
+      scopeTarget,
+      offsetDistanceM,
+      offsetBearingDeg
+    );
 
-    const marks = selectMarkPlanLines(targetLines);
-    if (marks.length === 0) {
-      showToast("No plan to offset", "Upload and paint a plan before applying an offset.", "error");
+    if (!result.ok) {
+      if (result.reason === "no-marks") {
+        showToast("No plan to offset", "Upload and paint a plan before applying an offset.", "error");
+      } else if (result.reason === "invalid-offset") {
+        showToast("Can't offset", "Enter a valid distance and bearing.", "error");
+      }
+      // "zero-distance": silent no-op, same as before.
       return;
     }
-
-    const shifted = offsetPlanLines(targetLines, offsetDistanceM, offsetBearingDeg);
-    if (!shifted) {
-      showToast("Can't offset", "Enter a valid distance and bearing.", "error");
-      return;
-    }
-    if (offsetDistanceM === 0) return;
 
     if (!preOffsetSnapshot) {
       setPreOffsetSnapshot(clonePlanLinesForSnapshot(lines));
     }
 
-    const shiftedById = new Map(shifted.map((l) => [l.id, l]));
-    setLines((prev) => sanitizePlanLines(prev.map((l) => shiftedById.get(l.id) ?? l)));
+    setLines(result.lines);
     demoteWorkflowAfterBatchChange(false);
     setAppPlannedStartSnapshot(null);
     showToast(
@@ -5345,13 +5419,15 @@ export default function App() {
                             offsetDistanceM={offsetDistanceM}
                             offsetBearingDeg={offsetBearingDeg}
                             onOffsetDistanceChange={setOffsetDistanceM}
-                            onOffsetBearingChange={setOffsetBearingDeg}
+                            onOffsetBearingChange={handleOffsetBearingChange}
                             onApplyOffset={handleApplyOffset}
                             offsetTargetOptions={anchorTargetOptions}
                             offsetTarget={offsetTarget}
                             onOffsetTargetChange={setOffsetTarget}
                             offsetResetAvailable={preOffsetSnapshot != null}
                             onResetOffset={handleResetOffset}
+                            onOffsetDragStateChange={handleOffsetDragStateChange}
+                            offsetPreviewLines={offsetPreviewLines}
                           />
                         )
                       : undefined
@@ -6987,6 +7063,8 @@ function SectionPages(props: {
   onOffsetTargetChange?: (target: AnchorTarget) => void;
   offsetResetAvailable?: boolean;
   onResetOffset?: () => void;
+  onOffsetDragStateChange?: (dragging: boolean) => void;
+  offsetPreviewLines?: PlanLine[] | null;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
 
@@ -8110,6 +8188,7 @@ function pickNearestPoint(
 
 function PlanPreview({
   lines,
+  ghostLines = null,
   mapSourceLines,
   autoOriginReference = null,
   mapGeometryFrame = "NONE",
@@ -8165,6 +8244,7 @@ function PlanPreview({
   onAnchorCandidateSelect,
 }: {
   lines: PlanLine[];
+  ghostLines?: PlanLine[] | null;
   mapSourceLines?: PlanLine[];
   autoOriginReference?: AutoOriginReference | null;
   mapGeometryFrame?: MapGeometryFrame;
@@ -9054,6 +9134,7 @@ function PlanPreview({
               pos_e: telemetryPosE,
             } as any}
             lines={staticMapLines}
+            ghostLines={ghostLines}
             anchorCandidates={anchorCandidates}
             onAnchorCandidateSelect={onAnchorCandidateSelect}
             alignedRefPoints={alignedRefPoints}

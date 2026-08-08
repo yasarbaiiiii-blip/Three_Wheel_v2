@@ -15,6 +15,12 @@ export interface MapViewProps {
   styleURL?: string;
   telemetrySnapshot: TelemetrySnapshot | null;
   lines: PlanLine[];
+  /**
+   * Live drag-time Offset preview — the whole plan as it would look right after
+   * Apply, shown only while the operator is actively dragging the Offset compass
+   * dial. Rendered as a separate dashed overlay, never mixed into `lines`.
+   */
+  ghostLines?: PlanLine[] | null;
   alignedRefPoints: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
   visible: boolean;
   /** Layers filter: whether the rover marker itself is drawn. Defaults to visible when omitted. */
