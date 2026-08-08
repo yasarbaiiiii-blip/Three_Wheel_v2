@@ -94,14 +94,14 @@ type UploadAndPreviewStepProps = {
   onAssignFileToLayer?: (fileEntryId: string, layerId: string) => void;
   onUnassignFileFromLayer?: (fileEntryId: string) => void;
   /**
-   * Offset plan left/right (whole-plan rigid shift, relative to its own travel
-   * direction). Parent (App.tsx) owns the state and bakes the shift into `lines`
-   * on Apply — this component only renders the control.
+   * Offset plan (whole-plan rigid shift toward an absolute compass bearing).
+   * Parent (App.tsx) owns the state and bakes the shift into `lines` on Apply
+   * — this component only renders the control.
    */
   offsetDistanceM?: number;
-  offsetDirection?: "left" | "right";
+  offsetBearingDeg?: number;
   onOffsetDistanceChange?: (m: number) => void;
-  onOffsetDirectionChange?: (d: "left" | "right") => void;
+  onOffsetBearingChange?: (deg: number) => void;
   onApplyOffset?: () => void;
 };
 
@@ -252,9 +252,9 @@ export function UploadAndPreviewStep({
   onAssignFileToLayer,
   onUnassignFileFromLayer,
   offsetDistanceM = 0,
-  offsetDirection = "right",
+  offsetBearingDeg = 0,
   onOffsetDistanceChange,
-  onOffsetDirectionChange,
+  onOffsetBearingChange,
   onApplyOffset,
 }: UploadAndPreviewStepProps) {
   /** Last failed batch (for Retry). Single-file rover uploads use length 1. */
@@ -1475,9 +1475,9 @@ export function UploadAndPreviewStep({
       <PlanOffsetCard
         visible={showOffsetCard}
         offsetDistanceM={offsetDistanceM}
-        offsetDirection={offsetDirection}
+        offsetBearingDeg={offsetBearingDeg}
         onOffsetDistanceChange={onOffsetDistanceChange ?? (() => {})}
-        onOffsetDirectionChange={onOffsetDirectionChange ?? (() => {})}
+        onOffsetBearingChange={onOffsetBearingChange ?? (() => {})}
         onApplyOffset={onApplyOffset ?? (() => {})}
       />
 

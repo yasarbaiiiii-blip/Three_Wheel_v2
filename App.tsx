@@ -268,11 +268,9 @@ import {
   chainMarkLinesByGeometry,
   chainMarkLinesFromSeed,
   defaultPathOrder,
-  resolveOrderedPaintedLines,
   selectMarkPlanLines,
-  type CsvPathOrderEntry,
 } from "./src/utils/csvPathOrder";
-import { offsetPlanLines, type LateralDirection } from "./src/utils/planOffset";
+import { normalizeBearingDeg, offsetPlanLines } from "./src/utils/planOffset";
 import { sanitizeUploadFileName } from "./src/utils/surveyCsvExport";
 import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
 import { rehydrateAlignedPlanLines } from "./src/utils/rehydrateAlignedPlan";
@@ -746,23 +744,6 @@ export default function App() {
   const handleAlignContextChange = useCallback(
     (ctx: { fileId: string | null; displayLines: PlanLine[] }) => {
       alignContextRef.current = ctx;
-    },
-    []
-  );
-
-  /**
-   * Operator path order, published by FieldsPage — App.tsx doesn't own `csvPathOrder`
-   * (that's FieldsPage-local state), but Offset needs to know which marks are
-   * currently painted, and in what order, to compute the plan's travel direction.
-   * A ref for the same reason as alignContextRef: only needs to be current at the
-   * moment handleApplyOffset fires, not on every render.
-   */
-  const pathOrderContextRef = useRef<{ csvPathOrder: CsvPathOrderEntry[] | null }>({
-    csvPathOrder: null,
-  });
-  const handlePathOrderContextChange = useCallback(
-    (ctx: { csvPathOrder: CsvPathOrderEntry[] | null }) => {
-      pathOrderContextRef.current = ctx;
     },
     []
   );
@@ -1362,8 +1343,8 @@ export default function App() {
   const [anchorSelectMode, setAnchorSelectMode] = useState(false);
   const [anchorTarget, setAnchorTarget] = useState<AnchorTarget | null>(null);
   const [pendingAnchor, setPendingAnchor] = useState<AnchorCandidatePoint | null>(null);
-  /** Offset plan left/right (whole-plan rigid shift, relative to its own travel direction). */
-  const [offsetDirection, setOffsetDirection] = useState<LateralDirection>("right");
+  /** Offset plan (whole-plan rigid shift toward an absolute compass bearing). */
+  const [offsetBearingDeg, setOffsetBearingDeg] = useState<number>(0);
   const [offsetDistanceM, setOffsetDistanceM] = useState<number>(0);
   const runningLayerIdsRef = useRef<string[]>([]);
   const runningMissionIdRef = useRef<string | null>(null);
@@ -3809,16 +3790,10 @@ export default function App() {
       showToast("No plan to offset", "Upload and paint a plan before applying an offset.", "error");
       return;
     }
-    const order = pathOrderContextRef.current.csvPathOrder ?? defaultPathOrder(marks);
-    const painted = resolveOrderedPaintedLines(lines, order);
 
-    const next = offsetPlanLines(lines, painted, offsetDistanceM, offsetDirection);
+    const next = offsetPlanLines(lines, offsetDistanceM, offsetBearingDeg);
     if (!next) {
-      showToast(
-        "Can't offset",
-        "Could not determine this plan's direction of travel (closed loop, or too few points).",
-        "error"
-      );
+      showToast("Can't offset", "Enter a valid distance and bearing.", "error");
       return;
     }
     if (offsetDistanceM === 0) return;
@@ -3828,7 +3803,7 @@ export default function App() {
     setAppPlannedStartSnapshot(null);
     showToast(
       "Plan offset",
-      `Shifted ${offsetDistanceM.toFixed(2)} m ${offsetDirection}. Plan changed — re-Send before Start.`,
+      `Shifted ${offsetDistanceM.toFixed(2)} m at ${Math.round(normalizeBearingDeg(offsetBearingDeg))}°. Plan changed — re-Send before Start.`,
       "info"
     );
     setOffsetDistanceM(0);
@@ -5297,7 +5272,6 @@ export default function App() {
                             sharedOriginGps={sharedOriginGps}
                             onBeginLocalImportBatch={handleBeginLocalImportBatch}
                             onAlignContextChange={handleAlignContextChange}
-                            onPathOrderContextChange={handlePathOrderContextChange}
                             onCommitDxfFileAlignment={commitDxfFileAlignment}
                             onLocalCsvParsed={handleLocalCsvParsed}
                             onLocalDxfParsed={handleLocalDxfParsed}
@@ -5324,9 +5298,9 @@ export default function App() {
                             onAnchorCandidateSelect={handleAnchorCandidateSelect}
                             onConfirmAnchor={handleConfirmAnchor}
                             offsetDistanceM={offsetDistanceM}
-                            offsetDirection={offsetDirection}
+                            offsetBearingDeg={offsetBearingDeg}
                             onOffsetDistanceChange={setOffsetDistanceM}
-                            onOffsetDirectionChange={setOffsetDirection}
+                            onOffsetBearingChange={setOffsetBearingDeg}
                             onApplyOffset={handleApplyOffset}
                           />
                         )
@@ -6952,13 +6926,12 @@ function SectionPages(props: {
   onSelectAnchorTarget?: (target: AnchorTarget) => void;
   onAnchorCandidateSelect?: (candidate: AnchorCandidatePoint) => void;
   onConfirmAnchor?: () => void;
-  /** Offset plan left/right (whole-plan rigid shift) — Fields Upload step. */
+  /** Offset plan (whole-plan rigid shift toward an absolute compass bearing) — Fields Upload step. */
   offsetDistanceM?: number;
-  offsetDirection?: LateralDirection;
+  offsetBearingDeg?: number;
   onOffsetDistanceChange?: (m: number) => void;
-  onOffsetDirectionChange?: (d: LateralDirection) => void;
+  onOffsetBearingChange?: (deg: number) => void;
   onApplyOffset?: () => void;
-  onPathOrderContextChange?: (ctx: { csvPathOrder: CsvPathOrderEntry[] | null }) => void;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
 

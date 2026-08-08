@@ -1,31 +1,30 @@
 /**
- * Offset plan left/right — whole-plan rigid shift, relative to the plan's own
- * start->end travel direction (AB-line / CNC-cutter-compensation convention).
+ * Offset plan — whole-plan rigid shift toward an absolute compass bearing.
  * Fields Upload step, same slot as the Enable Extension card. Presentational
  * only: parent (App.tsx) owns the state and bakes the shift into `lines` on
  * Apply — see planOffset.ts for the geometry and handleApplyOffset in App.tsx.
  */
 import React, { useEffect, useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
-import { ArrowLeft, ArrowRight } from "lucide-react-native";
 
+import { CompassDial } from "../CompassDial";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 export type PlanOffsetCardProps = {
   visible: boolean;
   offsetDistanceM: number;
-  offsetDirection: "left" | "right";
+  offsetBearingDeg: number;
   onOffsetDistanceChange: (m: number) => void;
-  onOffsetDirectionChange: (d: "left" | "right") => void;
+  onOffsetBearingChange: (deg: number) => void;
   onApplyOffset: () => void;
 };
 
 export function PlanOffsetCard({
   visible,
   offsetDistanceM,
-  offsetDirection,
+  offsetBearingDeg,
   onOffsetDistanceChange,
-  onOffsetDirectionChange,
+  onOffsetBearingChange,
   onApplyOffset,
 }: PlanOffsetCardProps) {
   /** Draft string mirrors offsetDistanceM (kept in sync so a post-Apply reset to 0 shows). */
@@ -49,75 +48,17 @@ export function PlanOffsetCard({
         overflow: "hidden",
       }}
     >
-      <View style={{ padding: 12, gap: 10 }}>
+      <View style={{ padding: 12, gap: 12 }}>
         <View>
           <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "800" }}>
             Offset Plan
           </Text>
           <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-            Shift the whole plan left or right of its own travel direction. Local only —
-            not saved to the rover.
+            Drag the dial to aim, then set a distance. Local only — not saved to the rover.
           </Text>
         </View>
 
-        <View style={{ flexDirection: "row", gap: 8 }}>
-          <Pressable
-            onPress={() => onOffsetDirectionChange("left")}
-            accessibilityRole="button"
-            accessibilityState={{ selected: offsetDirection === "left" }}
-            style={{
-              flex: 1,
-              height: 36,
-              borderRadius: 6,
-              borderWidth: 1,
-              borderColor: offsetDirection === "left" ? "#8b5cf6" : FIELDS_COLORS.panelBorder,
-              backgroundColor: offsetDirection === "left" ? "#8b5cf6" : FIELDS_COLORS.cardSolid,
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 6,
-            }}
-          >
-            <ArrowLeft size={14} color={offsetDirection === "left" ? "#fff" : FIELDS_COLORS.textMuted} />
-            <Text
-              style={{
-                color: offsetDirection === "left" ? "#fff" : FIELDS_COLORS.textMuted,
-                fontSize: 12,
-                fontWeight: "700",
-              }}
-            >
-              Left
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={() => onOffsetDirectionChange("right")}
-            accessibilityRole="button"
-            accessibilityState={{ selected: offsetDirection === "right" }}
-            style={{
-              flex: 1,
-              height: 36,
-              borderRadius: 6,
-              borderWidth: 1,
-              borderColor: offsetDirection === "right" ? "#8b5cf6" : FIELDS_COLORS.panelBorder,
-              backgroundColor: offsetDirection === "right" ? "#8b5cf6" : FIELDS_COLORS.cardSolid,
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 6,
-            }}
-          >
-            <Text
-              style={{
-                color: offsetDirection === "right" ? "#fff" : FIELDS_COLORS.textMuted,
-                fontSize: 12,
-                fontWeight: "700",
-              }}
-            >
-              Right
-            </Text>
-            <ArrowRight size={14} color={offsetDirection === "right" ? "#fff" : FIELDS_COLORS.textMuted} />
-          </Pressable>
-        </View>
+        <CompassDial bearingDeg={offsetBearingDeg} onBearingChange={onOffsetBearingChange} />
 
         <View style={{ flexDirection: "row", gap: 8, alignItems: "flex-end" }}>
           <View style={{ flex: 1, gap: 3 }}>
