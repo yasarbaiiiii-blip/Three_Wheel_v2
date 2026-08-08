@@ -103,6 +103,11 @@ type UploadAndPreviewStepProps = {
   onOffsetDistanceChange?: (m: number) => void;
   onOffsetBearingChange?: (deg: number) => void;
   onApplyOffset?: () => void;
+  offsetTargetOptions?: import("../../../utils/missionLayerLines").AnchorTargetOption[];
+  offsetTarget?: import("../../../utils/missionLayerLines").AnchorTarget | null;
+  onOffsetTargetChange?: (target: import("../../../utils/missionLayerLines").AnchorTarget) => void;
+  offsetResetAvailable?: boolean;
+  onResetOffset?: () => void;
 };
 
 const MAX_IMPORT_ATTEMPTS = 3;
@@ -256,6 +261,11 @@ export function UploadAndPreviewStep({
   onOffsetDistanceChange,
   onOffsetBearingChange,
   onApplyOffset,
+  offsetTargetOptions = [],
+  offsetTarget = null,
+  onOffsetTargetChange,
+  offsetResetAvailable = false,
+  onResetOffset,
 }: UploadAndPreviewStepProps) {
   /** Last failed batch (for Retry). Single-file rover uploads use length 1. */
   const [pickedFiles, setPickedFiles] = useState<DocumentPicker.DocumentPickerAsset[]>([]);
@@ -1479,6 +1489,11 @@ export function UploadAndPreviewStep({
         onOffsetDistanceChange={onOffsetDistanceChange ?? (() => {})}
         onOffsetBearingChange={onOffsetBearingChange ?? (() => {})}
         onApplyOffset={onApplyOffset ?? (() => {})}
+        offsetTargetOptions={offsetTargetOptions}
+        offsetTarget={offsetTarget}
+        onOffsetTargetChange={onOffsetTargetChange ?? (() => {})}
+        offsetResetAvailable={offsetResetAvailable}
+        onResetOffset={onResetOffset ?? (() => {})}
       />
 
       {protectedResident && (

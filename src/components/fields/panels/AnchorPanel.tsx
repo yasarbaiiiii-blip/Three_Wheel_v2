@@ -8,6 +8,7 @@ import { Check, Crosshair, X } from "lucide-react-native";
 
 import type { AnchorTarget, AnchorTargetOption } from "../../../utils/missionLayerLines";
 import type { AnchorCandidatePoint } from "../../mapViewTypes";
+import { PlanTargetDropdown } from "../PlanTargetDropdown";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 type AnchorPanelProps = {
@@ -69,7 +70,7 @@ export function AnchorPanel({
               : anchorTarget
                 ? "Tap a point on the map to set the new start."
                 : anchorSelectMode
-                  ? "Choose which file or layer to anchor."
+                  ? "Choose which file, layer, or whole plan to anchor."
                   : anchorAvailable
                     ? "Change where this plan starts."
                     : "Load a plan to change its start point."}
@@ -105,38 +106,14 @@ export function AnchorPanel({
         )}
       </View>
 
-      {anchorSelectMode && !anchorTarget ? (
-        <View style={{ paddingHorizontal: 12, paddingBottom: 12, gap: 6 }}>
-          {anchorTargetOptions.length === 0 ? (
-            <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11 }}>No plan loaded.</Text>
-          ) : (
-            anchorTargetOptions.map((opt) => {
-              const key = opt.target.kind === "file" ? opt.target.fileId : opt.target.layerId;
-              return (
-                <Pressable
-                  key={key}
-                  onPress={() => onSelectAnchorTarget?.(opt.target)}
-                  accessibilityRole="button"
-                  style={{
-                    height: 36,
-                    paddingHorizontal: 10,
-                    borderRadius: 8,
-                    justifyContent: "center",
-                    backgroundColor: FIELDS_COLORS.cardSolid,
-                    borderWidth: 1,
-                    borderColor: FIELDS_COLORS.panelBorder,
-                  }}
-                >
-                  <Text
-                    numberOfLines={1}
-                    style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "600" }}
-                  >
-                    {opt.label}
-                  </Text>
-                </Pressable>
-              );
-            })
-          )}
+      {anchorSelectMode ? (
+        <View style={{ paddingHorizontal: 12, paddingBottom: 12 }}>
+          <PlanTargetDropdown
+            options={anchorTargetOptions}
+            value={anchorTarget}
+            onChange={(target) => onSelectAnchorTarget?.(target)}
+            placeholder="Choose file, layer, or whole plan"
+          />
         </View>
       ) : null}
 

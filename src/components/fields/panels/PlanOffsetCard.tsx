@@ -7,7 +7,9 @@
 import React, { useEffect, useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 
+import type { AnchorTarget, AnchorTargetOption } from "../../../utils/missionLayerLines";
 import { CompassDial } from "../CompassDial";
+import { PlanTargetDropdown } from "../PlanTargetDropdown";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 export type PlanOffsetCardProps = {
@@ -17,6 +19,11 @@ export type PlanOffsetCardProps = {
   onOffsetDistanceChange: (m: number) => void;
   onOffsetBearingChange: (deg: number) => void;
   onApplyOffset: () => void;
+  offsetTargetOptions: AnchorTargetOption[];
+  offsetTarget: AnchorTarget | null;
+  onOffsetTargetChange: (target: AnchorTarget) => void;
+  offsetResetAvailable: boolean;
+  onResetOffset: () => void;
 };
 
 export function PlanOffsetCard({
@@ -26,6 +33,11 @@ export function PlanOffsetCard({
   onOffsetDistanceChange,
   onOffsetBearingChange,
   onApplyOffset,
+  offsetTargetOptions,
+  offsetTarget,
+  onOffsetTargetChange,
+  offsetResetAvailable,
+  onResetOffset,
 }: PlanOffsetCardProps) {
   /** Draft string mirrors offsetDistanceM (kept in sync so a post-Apply reset to 0 shows). */
   const [draft, setDraft] = useState(() => String(offsetDistanceM));
@@ -57,6 +69,14 @@ export function PlanOffsetCard({
             Drag the dial to aim, then set a distance. Local only — not saved to the rover.
           </Text>
         </View>
+
+        <PlanTargetDropdown
+          options={offsetTargetOptions}
+          value={offsetTarget}
+          onChange={onOffsetTargetChange}
+          placeholder="Whole Plan"
+          label="Offset scope"
+        />
 
         <CompassDial bearingDeg={offsetBearingDeg} onBearingChange={onOffsetBearingChange} />
 
@@ -110,6 +130,33 @@ export function PlanOffsetCard({
             <Text style={{ color: "#fff", fontSize: 12, fontWeight: "700" }}>Apply Offset</Text>
           </Pressable>
         </View>
+
+        <Pressable
+          onPress={onResetOffset}
+          disabled={!offsetResetAvailable}
+          accessibilityRole="button"
+          accessibilityState={{ disabled: !offsetResetAvailable }}
+          style={{
+            height: 36,
+            borderRadius: 6,
+            alignItems: "center",
+            justifyContent: "center",
+            borderWidth: 1,
+            borderColor: offsetResetAvailable ? FIELDS_COLORS.panelBorder : "transparent",
+            backgroundColor: offsetResetAvailable ? FIELDS_COLORS.surfaceSolid : FIELDS_COLORS.pillSecondary,
+            opacity: offsetResetAvailable ? 1 : 0.5,
+          }}
+        >
+          <Text
+            style={{
+              color: offsetResetAvailable ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted,
+              fontSize: 12,
+              fontWeight: "700",
+            }}
+          >
+            Reset to Before Offset
+          </Text>
+        </Pressable>
       </View>
     </View>
   );

@@ -142,6 +142,7 @@ import {
   verifyStagedLoadedMission,
 } from "./src/api/missionContract";
 import {
+  clonePlanLinesForSnapshot,
   restageAppTrajectoryWithLiveEntry,
   type AppPlannedStartSnapshot,
 } from "./src/utils/appPlannedStartSnapshot";
@@ -1346,6 +1347,10 @@ export default function App() {
   /** Offset plan (whole-plan rigid shift toward an absolute compass bearing). */
   const [offsetBearingDeg, setOffsetBearingDeg] = useState<number>(0);
   const [offsetDistanceM, setOffsetDistanceM] = useState<number>(0);
+  /** Which scope Apply/Reset act on. Defaults to universal so unscoped behavior is unchanged. */
+  const [offsetTarget, setOffsetTarget] = useState<AnchorTarget | null>({ kind: "universal" });
+  /** Deep clone of `lines` taken just before the FIRST Offset Apply this session. Reset restores it, then clears to null. */
+  const [preOffsetSnapshot, setPreOffsetSnapshot] = useState<PlanLine[] | null>(null);
   const runningLayerIdsRef = useRef<string[]>([]);
   const runningMissionIdRef = useRef<string | null>(null);
   const [loadedPathInspection, setLoadedPathInspection] = useState<missionApi.LoadedPathResponse | null>(null);
@@ -1758,6 +1763,9 @@ export default function App() {
       setStagedMissionId(null);
       // Geometry / order change invalidates frozen Send snapshot (must re-Send).
       setAppPlannedStartSnapshot(null);
+      // Same reasoning: Offset's reset baseline is now stale too (e.g. Fix Alignment
+      // baked a transform into `lines` after the baseline was captured).
+      setPreOffsetSnapshot(null);
     }
     setLoadedPathInspection(null);
     setMissionLoaded(false);
@@ -3655,6 +3663,8 @@ export default function App() {
     setStagedMissionInspection(null);
     setStagedMissionId(null);
     setAppPlannedStartSnapshot(null);
+    setPreOffsetSnapshot(null);
+    setOffsetTarget({ kind: "universal" }); // stale file/layer scope would no longer exist
     setStagedWorkflow((prev) => ({
       ...prev,
       alignment: "pending",
@@ -3769,36 +3779,50 @@ export default function App() {
     // partial reset that could miss a consumer of stagedMissionId.
     demoteWorkflowAfterBatchChange(false);
     setAppPlannedStartSnapshot(null);
+    // Offset's reset baseline predates this edit — restoring it now would silently
+    // discard the anchor change just made.
+    setPreOffsetSnapshot(null);
     showToast("Anchor changed", "Plan changed — re-Send before Start.", "info");
 
     resetAnchorSelection();
   }
 
   /**
-   * Shift the whole plan left/right of its own start->end travel direction by
-   * `offsetDistanceM`. One-shot bake into `lines` (like Move/Rotate Plan and
-   * Anchor) — not a live-as-you-type field. Safe to press repeatedly: a pure
-   * translation composes exactly, so two 0.3 m nudges equal one 0.6 m nudge.
+   * Shift the selected scope (a file, a mission layer, or the whole plan) toward
+   * an absolute compass bearing by `offsetDistanceM`. One-shot bake into `lines`
+   * (like Move/Rotate Plan and Anchor) — not a live-as-you-type field. Safe to
+   * press repeatedly: a pure translation composes exactly, so two 0.3 m nudges
+   * equal one 0.6 m nudge. Captures a pre-offset baseline on the first Apply so
+   * Reset can undo back to it later (see handleResetOffset).
    */
   function handleApplyOffset() {
     if (protectedMissionResident) {
       Alert.alert("Mission conflict", "Offset is blocked while a protected surveyed mission is resident.");
       return;
     }
-    const marks = selectMarkPlanLines(lines);
+
+    const scopeTarget = offsetTarget ?? { kind: "universal" as const };
+    const targetLines = isolateLinesForAnchorTarget(lines, uploadedFiles, missionLayers, scopeTarget);
+
+    const marks = selectMarkPlanLines(targetLines);
     if (marks.length === 0) {
       showToast("No plan to offset", "Upload and paint a plan before applying an offset.", "error");
       return;
     }
 
-    const next = offsetPlanLines(lines, offsetDistanceM, offsetBearingDeg);
-    if (!next) {
+    const shifted = offsetPlanLines(targetLines, offsetDistanceM, offsetBearingDeg);
+    if (!shifted) {
       showToast("Can't offset", "Enter a valid distance and bearing.", "error");
       return;
     }
     if (offsetDistanceM === 0) return;
 
-    setLines(sanitizePlanLines(next));
+    if (!preOffsetSnapshot) {
+      setPreOffsetSnapshot(clonePlanLinesForSnapshot(lines));
+    }
+
+    const shiftedById = new Map(shifted.map((l) => [l.id, l]));
+    setLines((prev) => sanitizePlanLines(prev.map((l) => shiftedById.get(l.id) ?? l)));
     demoteWorkflowAfterBatchChange(false);
     setAppPlannedStartSnapshot(null);
     showToast(
@@ -3807,6 +3831,27 @@ export default function App() {
       "info"
     );
     setOffsetDistanceM(0);
+  }
+
+  /** Restore the plan to how it looked before the first Offset Apply this session. */
+  function handleResetOffset() {
+    if (protectedMissionResident) {
+      Alert.alert("Mission conflict", "Offset reset is blocked while a protected surveyed mission is resident.");
+      return;
+    }
+    if (!preOffsetSnapshot) return;
+
+    setLines(sanitizePlanLines(preOffsetSnapshot));
+    demoteWorkflowAfterBatchChange(false);
+    setAppPlannedStartSnapshot(null);
+    setPreOffsetSnapshot(null);
+    setOffsetDistanceM(0);
+    setOffsetBearingDeg(0);
+    showToast(
+      "Offset reset",
+      "Plan restored to its position before the first offset. Plan changed — re-Send before Start.",
+      "info"
+    );
   }
 
   async function startLoadedMission() {
@@ -5302,6 +5347,11 @@ export default function App() {
                             onOffsetDistanceChange={setOffsetDistanceM}
                             onOffsetBearingChange={setOffsetBearingDeg}
                             onApplyOffset={handleApplyOffset}
+                            offsetTargetOptions={anchorTargetOptions}
+                            offsetTarget={offsetTarget}
+                            onOffsetTargetChange={setOffsetTarget}
+                            offsetResetAvailable={preOffsetSnapshot != null}
+                            onResetOffset={handleResetOffset}
                           />
                         )
                       : undefined
@@ -6932,6 +6982,11 @@ function SectionPages(props: {
   onOffsetDistanceChange?: (m: number) => void;
   onOffsetBearingChange?: (deg: number) => void;
   onApplyOffset?: () => void;
+  offsetTargetOptions?: AnchorTargetOption[];
+  offsetTarget?: AnchorTarget | null;
+  onOffsetTargetChange?: (target: AnchorTarget) => void;
+  offsetResetAvailable?: boolean;
+  onResetOffset?: () => void;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
 

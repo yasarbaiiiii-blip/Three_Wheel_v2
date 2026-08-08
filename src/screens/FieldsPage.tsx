@@ -259,6 +259,11 @@ export type FieldsPageProps = {
   onOffsetDistanceChange?: (m: number) => void;
   onOffsetBearingChange?: (deg: number) => void;
   onApplyOffset?: () => void;
+  offsetTargetOptions?: import("../utils/missionLayerLines").AnchorTargetOption[];
+  offsetTarget?: import("../utils/missionLayerLines").AnchorTarget | null;
+  onOffsetTargetChange?: (target: import("../utils/missionLayerLines").AnchorTarget) => void;
+  offsetResetAvailable?: boolean;
+  onResetOffset?: () => void;
 };
 
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
@@ -375,6 +380,11 @@ export function FieldsPage(props: FieldsPageProps) {
     onOffsetDistanceChange,
     onOffsetBearingChange,
     onApplyOffset,
+    offsetTargetOptions = [],
+    offsetTarget = null,
+    onOffsetTargetChange,
+    offsetResetAvailable = false,
+    onResetOffset,
   } = props;
 
   const [selectedUploadedFileId, setSelectedUploadedFileId] = useState<string | null>(null);
@@ -1487,6 +1497,11 @@ export function FieldsPage(props: FieldsPageProps) {
               onOffsetDistanceChange={onOffsetDistanceChange}
               onOffsetBearingChange={onOffsetBearingChange}
               onApplyOffset={onApplyOffset}
+              offsetTargetOptions={offsetTargetOptions}
+              offsetTarget={offsetTarget}
+              onOffsetTargetChange={onOffsetTargetChange}
+              offsetResetAvailable={offsetResetAvailable}
+              onResetOffset={onResetOffset}
               onCsvExtensionConfigChange={(next) => {
                 setCsvExtensionConfig(next);
                 setLines((prev) => {

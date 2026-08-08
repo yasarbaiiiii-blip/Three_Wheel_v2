@@ -220,9 +220,16 @@ describe("missionLayerLines", () => {
   });
 
   describe("buildAnchorTargetOptions", () => {
-    it("lists individual files when no mission layers are in use", () => {
+    it("returns just the universal option for an empty plan", () => {
+      expect(buildAnchorTargetOptions([], [])).toEqual([
+        { target: { kind: "universal" }, label: "Whole Plan" },
+      ]);
+    });
+
+    it("lists individual files (after Whole Plan) when no mission layers are in use", () => {
       const options = buildAnchorTargetOptions(files, []);
       expect(options).toEqual([
+        { target: { kind: "universal" }, label: "Whole Plan" },
         { target: { kind: "file", fileId: "fa" }, label: "fa.csv" },
         { target: { kind: "file", fileId: "fb" }, label: "fb.csv" },
         { target: { kind: "file", fileId: "fc" }, label: "fc.csv" },
@@ -233,8 +240,9 @@ describe("missionLayerLines", () => {
       // fa assigned, fb/fc still unassigned — "full layer or null" falls back to files.
       const layers = createLayerForFile([], "fa");
       const options = buildAnchorTargetOptions(files, layers);
-      expect(options.every((o) => o.target.kind === "file")).toBe(true);
-      expect(options.map((o) => (o.target as { fileId: string }).fileId)).toEqual([
+      const rest = options.slice(1);
+      expect(rest.every((o) => o.target.kind === "file")).toBe(true);
+      expect(rest.map((o) => (o.target as { fileId: string }).fileId)).toEqual([
         "fa",
         "fb",
         "fc",
@@ -248,10 +256,11 @@ describe("missionLayerLines", () => {
       layers = assignFileToLayer(layers, "fc", l1.id);
 
       const options = buildAnchorTargetOptions(files, layers);
-      expect(options.every((o) => o.target.kind === "layer")).toBe(true);
-      expect(options).toHaveLength(2);
-      expect(options[0].label).toContain("2 files"); // layer 1: fa + fc
-      expect(options[1].label).toContain("1 file"); // layer 2: fb
+      const rest = options.slice(1);
+      expect(rest.every((o) => o.target.kind === "layer")).toBe(true);
+      expect(options).toHaveLength(3);
+      expect(options[1].label).toContain("2 files"); // layer 1: fa + fc
+      expect(options[2].label).toContain("1 file"); // layer 2: fb
     });
 
     it("omits empty layers even when every file is otherwise assigned", () => {
@@ -261,7 +270,7 @@ describe("missionLayerLines", () => {
       layers = [...layers, createEmptyMissionLayer("ml-empty", 4, [])];
 
       const options = buildAnchorTargetOptions(files, layers);
-      expect(options).toHaveLength(3);
+      expect(options).toHaveLength(4);
       expect(options.some((o) => o.target.kind === "layer" && o.target.layerId === "ml-empty")).toBe(
         false
       );
@@ -297,6 +306,11 @@ describe("missionLayerLines", () => {
         fileId: "does-not-exist",
       });
       expect(isolated).toEqual([]);
+    });
+
+    it("returns the full unfiltered lines for a universal target", () => {
+      const isolated = isolateLinesForAnchorTarget(lines, files, [], { kind: "universal" });
+      expect(isolated).toBe(lines);
     });
   });
 });
