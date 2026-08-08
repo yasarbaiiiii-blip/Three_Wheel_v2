@@ -253,6 +253,13 @@ export type FieldsPageProps = {
     candidate: import("../components/mapViewTypes").AnchorCandidatePoint
   ) => void;
   onConfirmAnchor?: () => void;
+  /** Offset plan left/right (whole-plan rigid shift) — Upload step, before Path Order. */
+  offsetDistanceM?: number;
+  offsetDirection?: import("../utils/planOffset").LateralDirection;
+  onOffsetDistanceChange?: (m: number) => void;
+  onOffsetDirectionChange?: (d: import("../utils/planOffset").LateralDirection) => void;
+  onApplyOffset?: () => void;
+  onPathOrderContextChange?: (ctx: { csvPathOrder: CsvPathOrderEntry[] | null }) => void;
 };
 
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
@@ -364,6 +371,12 @@ export function FieldsPage(props: FieldsPageProps) {
     onSelectAnchorTarget,
     onAnchorCandidateSelect,
     onConfirmAnchor,
+    offsetDistanceM = 0,
+    offsetDirection = "right",
+    onOffsetDistanceChange,
+    onOffsetDirectionChange,
+    onApplyOffset,
+    onPathOrderContextChange,
   } = props;
 
   const [selectedUploadedFileId, setSelectedUploadedFileId] = useState<string | null>(null);
@@ -782,6 +795,11 @@ export function FieldsPage(props: FieldsPageProps) {
       displayLines: mapDisplayLines,
     });
   }, [onAlignContextChange, selectedPending, effectiveAlignFileId, mapDisplayLines]);
+
+  /** Publish the operator's path order so App.tsx's Offset action knows which marks are painted. */
+  React.useEffect(() => {
+    onPathOrderContextChange?.({ csvPathOrder });
+  }, [onPathOrderContextChange, csvPathOrder]);
 
   const setPendingAlignLines = useCallback(
     (updater: React.SetStateAction<PlanLine[]>) => {
@@ -1471,6 +1489,11 @@ export function FieldsPage(props: FieldsPageProps) {
               }}
               csvExtensionConfig={csvExtensionConfig}
               extensionStatus={extensionStatus}
+              offsetDistanceM={offsetDistanceM}
+              offsetDirection={offsetDirection}
+              onOffsetDistanceChange={onOffsetDistanceChange}
+              onOffsetDirectionChange={onOffsetDirectionChange}
+              onApplyOffset={onApplyOffset}
               onCsvExtensionConfigChange={(next) => {
                 setCsvExtensionConfig(next);
                 setLines((prev) => {

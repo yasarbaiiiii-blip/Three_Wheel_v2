@@ -27,6 +27,7 @@ import {
 } from "../../../utils/localPointCsv";
 import type { UploadedFileEntry } from "../../../types/uploadedFiles";
 import { FIELDS_COLORS } from "../fieldsTheme";
+import { PlanOffsetCard } from "./PlanOffsetCard";
 
 type UploadAndPreviewStepProps = {
   apiBaseUrl: string;
@@ -92,6 +93,16 @@ type UploadAndPreviewStepProps = {
   onAssignFileToNewLayer?: (fileEntryId: string) => void;
   onAssignFileToLayer?: (fileEntryId: string, layerId: string) => void;
   onUnassignFileFromLayer?: (fileEntryId: string) => void;
+  /**
+   * Offset plan left/right (whole-plan rigid shift, relative to its own travel
+   * direction). Parent (App.tsx) owns the state and bakes the shift into `lines`
+   * on Apply — this component only renders the control.
+   */
+  offsetDistanceM?: number;
+  offsetDirection?: "left" | "right";
+  onOffsetDistanceChange?: (m: number) => void;
+  onOffsetDirectionChange?: (d: "left" | "right") => void;
+  onApplyOffset?: () => void;
 };
 
 const MAX_IMPORT_ATTEMPTS = 3;
@@ -240,6 +251,11 @@ export function UploadAndPreviewStep({
   onAssignFileToNewLayer,
   onAssignFileToLayer,
   onUnassignFileFromLayer,
+  offsetDistanceM = 0,
+  offsetDirection = "right",
+  onOffsetDistanceChange,
+  onOffsetDirectionChange,
+  onApplyOffset,
 }: UploadAndPreviewStepProps) {
   /** Last failed batch (for Retry). Single-file rover uploads use length 1. */
   const [pickedFiles, setPickedFiles] = useState<DocumentPicker.DocumentPickerAsset[]>([]);
@@ -348,6 +364,9 @@ export function UploadAndPreviewStep({
     onCsvExtensionConfigChange != null &&
     csvExtensionConfig != null &&
     !!importedPlan;
+  /** Offset lives in the same slot/conditions as Extension — both are whole-plan,
+   * client-side-only adjustments applied before Path Order/Send. */
+  const showOffsetCard = (showCsvExtension || showLocalDxfExtension) && onApplyOffset != null;
 
   // Backend path preview for rover DXF / waypoints only — never local CSV or local DXF.
   useEffect(() => {
@@ -1452,6 +1471,15 @@ export function UploadAndPreviewStep({
           ) : null}
         </View>
       ) : null}
+
+      <PlanOffsetCard
+        visible={showOffsetCard}
+        offsetDistanceM={offsetDistanceM}
+        offsetDirection={offsetDirection}
+        onOffsetDistanceChange={onOffsetDistanceChange ?? (() => {})}
+        onOffsetDirectionChange={onOffsetDirectionChange ?? (() => {})}
+        onApplyOffset={onApplyOffset ?? (() => {})}
+      />
 
       {protectedResident && (
         <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11 }}>
