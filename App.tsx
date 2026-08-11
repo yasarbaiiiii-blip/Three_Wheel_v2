@@ -146,6 +146,14 @@ import {
   restageAppTrajectoryWithLiveEntry,
   type AppPlannedStartSnapshot,
 } from "./src/utils/appPlannedStartSnapshot";
+import {
+  classifyLiveEntryStartRequirement,
+  entryPoseDrifted,
+  isAppPlannedMissionContext,
+  pickRoverPoseForEntry,
+  telemetryToRoverPoseForEntry,
+} from "./src/utils/liveEntryPose";
+import { resolveRoverNedInMissionFrame } from "./src/utils/missionTrajectory";
 import { buildCsvExtensionLines } from "./src/utils/missionExtensions";
 import type { MissionLayer } from "./src/types/missionLayers";
 import {
@@ -1244,6 +1252,31 @@ export default function App() {
   }, [showRefPointLabels]);
   const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
   const [telemetrySnapshot, setTelemetrySnapshot] = useState<TelemetrySnapshot | null>(null);
+  /**
+   * Always-current pose for Start live entry. Updated on every telemetry packet
+   * (including when React deadband skips setState) and on REST refresh.
+   */
+  const telemetrySnapshotRef = useRef<TelemetrySnapshot | null>(null);
+  const telemetryReceivedAtMsRef = useRef<number>(0);
+
+  const noteTelemetryForLiveEntry = useCallback(
+    (partial: {
+      pos_n?: number | null;
+      pos_e?: number | null;
+      lat?: number | null;
+      lon?: number | null;
+      gps_fix?: number | null;
+      pose_age_ms?: number | null;
+    }) => {
+      const prev = telemetrySnapshotRef.current;
+      telemetrySnapshotRef.current = {
+        ...(prev ?? {}),
+        ...partial,
+      } as TelemetrySnapshot;
+      telemetryReceivedAtMsRef.current = Date.now();
+    },
+    []
+  );
 
   // Latch first finite GPS after telemetry exists — must not run above this declaration.
   useEffect(() => {
@@ -2172,6 +2205,16 @@ export default function App() {
             console.warn("[SOCKET] reconcileTelemetry failed:", vjErr);
           }
 
+          // Always refresh live-entry pose cache — even when React deadband skips setState.
+          noteTelemetryForLiveEntry({
+            pos_n: data.pos_n,
+            pos_e: data.pos_e,
+            lat: data.lat,
+            lon: data.lon,
+            gps_fix: data.gps_fix,
+            pose_age_ms: data.pose_age_ms,
+          });
+
           setTelemetrySnapshot((prev) => {
             if (!prev) return data;
             // Optimize updates: only set state if keys have actually changed.
@@ -2970,7 +3013,7 @@ export default function App() {
       if (loadedRes) reconcileLoadedMission(loadedRes, statusRes);
       setMissionRunning(statusRes.state === "running");
 
-      setTelemetrySnapshot({
+      const nextTelemetry = {
         rpp_state: telemetryRes ? telemetryRes.rpp_state : statusRes.rpp_state,
         rpp_state_name: telemetryRes ? telemetryRes.rpp_state_name : statusRes.rpp_state_name,
         dist_to_goal_m: telemetryRes ? telemetryRes.dist_to_goal_m : statusRes.dist_to_goal,
@@ -3006,7 +3049,18 @@ export default function App() {
         projection_segment_index: telemetryRes?.projection_segment_index ?? null,
         gps_safety_ok: telemetryRes?.gps_safety_ok ?? null,
         manual_resume_required: telemetryRes?.manual_resume_required ?? null,
-      } as any);
+      } as any;
+      if (telemetryRes) {
+        noteTelemetryForLiveEntry({
+          pos_n: telemetryRes.pos_n,
+          pos_e: telemetryRes.pos_e,
+          lat: telemetryRes.lat,
+          lon: telemetryRes.lon,
+          gps_fix: telemetryRes.gps_fix,
+          pose_age_ms: telemetryRes.pose_age_ms,
+        });
+      }
+      setTelemetrySnapshot(nextTelemetry);
 
       if (statusRes.state === "paused") {
         setIsPaused(true);
@@ -4096,24 +4150,51 @@ export default function App() {
         localCsvPreview != null ||
         importedPlan.fileType === "csv" ||
         !!importedPlan.fileName?.toLowerCase().endsWith(".csv");
-      // Local DXF app-planned missions also use the snapshot + live entry path.
-      const isAppPlannedStart = appPlannedStartSnapshot != null;
+      // App-planned = CSV / multi-file batch / local DXF Send snapshot path.
+      // Do not treat bare densified rover-path-* lines as app-planned: backend-only
+      // staged missions hydrate the same way and must still Start after recovery.
+      const isAppPlannedMission = isAppPlannedMissionContext({
+        hasAppPlannedSnapshot: appPlannedStartSnapshot != null,
+        isCsvMission,
+        isLocalDxfAppPlanned: localDxfMeta != null || uploadedFiles.length > 0,
+        hasStagedHydrationLines: false,
+      });
+      const liveEntryClass = classifyLiveEntryStartRequirement({
+        hasAppPlannedSnapshot: appPlannedStartSnapshot != null,
+        isAppPlannedMission,
+      });
+      // Local DXF / CSV app-planned Start path — only when snapshot + restage succeed.
+      const isAppPlannedStart = liveEntryClass === "restage_with_live_entry";
+
+      if (liveEntryClass === "block_resend_required") {
+        throw new Error(
+          "Approach path cannot be rebuilt from the current map geometry. " +
+            "Re-Send the plan (Path Order & Load), then Start again so entry uses the rover's current position."
+        );
+      }
 
       let startMissionId = isStagedStart ? stagedMissionId : null;
 
-      // Every Start: rebuild entry from live rover pose (X→A, then later Y→A, …).
+      // Every app-planned Start: rebuild entry from a fresh rover pose (X→A, then Y→A, …).
       if (isAppPlannedStart && appPlannedStartSnapshot) {
         showToast("Approach", "Building runtime entry from current rover position…", "info");
-        const livePose = telemetrySnapshot
-          ? {
-              pos_n: telemetrySnapshot.pos_n,
-              pos_e: telemetrySnapshot.pos_e,
-              lat: telemetrySnapshot.lat,
-              lon: telemetrySnapshot.lon,
-              gps_fix: telemetrySnapshot.gps_fix,
-              pose_age_ms: telemetrySnapshot.pose_age_ms,
-            }
-          : null;
+
+        // Pose AFTER gate/dialogs — REST primary, timed socket cache fallback.
+        const restPoseRaw = await missionApi.fetchLatestTelemetryPose(apiBaseUrl);
+        if (restPoseRaw) {
+          noteTelemetryForLiveEntry(restPoseRaw);
+        }
+        const picked = pickRoverPoseForEntry({
+          restPose: telemetryToRoverPoseForEntry(restPoseRaw),
+          cachePose: telemetryToRoverPoseForEntry(telemetrySnapshotRef.current),
+          cacheReceivedAtMs: telemetryReceivedAtMsRef.current || null,
+          nowMs: Date.now(),
+        });
+        if (!picked.ok) {
+          throw new Error(picked.error);
+        }
+        let livePose = picked.pose;
+        let poseSource = picked.source;
 
         // Scope the frozen Send snapshot to selected mission layers (if any).
         let startSnapshot = appPlannedStartSnapshot;
@@ -4130,41 +4211,48 @@ export default function App() {
           startSnapshot = scoped.snapshot;
         }
 
-        const restaged = await restageAppTrajectoryWithLiveEntry(apiBaseUrl, {
+        const applyRestageUi = (
+          restaged: Extract<
+            Awaited<ReturnType<typeof restageAppTrajectoryWithLiveEntry>>,
+            { success: true }
+          >
+        ) => {
+          setStagedMissionId(restaged.missionId);
+          if (restaged.stagedInspection) {
+            setStagedMissionInspection(restaged.stagedInspection);
+          }
+          setWorkflowStep("staged", "verified");
+          const n = (v: unknown): number | null =>
+            typeof v === "number" && Number.isFinite(v) ? v : null;
+          setStagedPlanResult({
+            missionId: restaged.missionId,
+            numWaypoints: n(restaged.plan.num_waypoints),
+            numSegments: n(restaged.plan.num_segments),
+            totalLengthM: n(restaged.plan.total_length_m),
+            markLengthM: n(restaged.plan.mark_length_m),
+            transitLengthM: n(restaged.plan.transit_length_m),
+            estimatedPaintL: n(restaged.plan.mission_summary?.estimated_paint_l),
+            estimatedRuntimeS: n(restaged.plan.mission_summary?.estimated_runtime_s),
+            rmseM: n(restaged.plan.mission_summary?.rmse_m),
+            warnings: Array.isArray(restaged.plan.warnings)
+              ? restaged.plan.warnings.filter((w): w is string => typeof w === "string")
+              : [],
+          });
+        };
+
+        let restaged = await restageAppTrajectoryWithLiveEntry(apiBaseUrl, {
           snapshot: startSnapshot,
           roverPose: livePose,
         });
         if (!restaged.success) {
           throw new Error(restaged.error);
         }
-
-        setStagedMissionId(restaged.missionId);
-        if (restaged.stagedInspection) {
-          setStagedMissionInspection(restaged.stagedInspection);
-        }
-        setWorkflowStep("staged", "verified");
-        const n = (v: unknown): number | null =>
-          typeof v === "number" && Number.isFinite(v) ? v : null;
-        setStagedPlanResult({
-          missionId: restaged.missionId,
-          numWaypoints: n(restaged.plan.num_waypoints),
-          numSegments: n(restaged.plan.num_segments),
-          totalLengthM: n(restaged.plan.total_length_m),
-          markLengthM: n(restaged.plan.mark_length_m),
-          transitLengthM: n(restaged.plan.transit_length_m),
-          estimatedPaintL: n(restaged.plan.mission_summary?.estimated_paint_l),
-          estimatedRuntimeS: n(restaged.plan.mission_summary?.estimated_runtime_s),
-          rmseM: n(restaged.plan.mission_summary?.rmse_m),
-          warnings: Array.isArray(restaged.plan.warnings)
-            ? restaged.plan.warnings.filter((w): w is string => typeof w === "string")
-            : [],
-        });
+        applyRestageUi(restaged);
 
         // Load the freshly staged mission (with live entry) to the controller.
-        // Temporarily clear busy so nested load can set it, or call load APIs inline.
         // loadMissionOnBackend manages its own busy flag — drop ours first to avoid stuck UI.
         setMissionActionBusy(false);
-        const loadedOk = await loadMissionOnBackend(restaged.missionId, {
+        let loadedOk = await loadMissionOnBackend(restaged.missionId, {
           hideRuntimeEntryLine: restaged.entryIncluded === true,
           extensionLines: buildCsvExtensionLines(startSnapshot.paintedLines, startSnapshot.extensionConfig),
         });
@@ -4175,11 +4263,68 @@ export default function App() {
           );
         }
 
+        // Drift re-check: restage+load can take seconds; rebuild once if rover moved.
+        let driftRetry = false;
+        const usedNed = resolveRoverNedInMissionFrame(livePose, startSnapshot.originGps);
+        const restPoseRaw2 = await missionApi.fetchLatestTelemetryPose(apiBaseUrl);
+        if (restPoseRaw2) {
+          noteTelemetryForLiveEntry(restPoseRaw2);
+        }
+        const picked2 = pickRoverPoseForEntry({
+          restPose: telemetryToRoverPoseForEntry(restPoseRaw2),
+          cachePose: telemetryToRoverPoseForEntry(telemetrySnapshotRef.current),
+          cacheReceivedAtMs: telemetryReceivedAtMsRef.current || null,
+          nowMs: Date.now(),
+        });
+        if (picked2.ok && usedNed.ok) {
+          const latestNed = resolveRoverNedInMissionFrame(picked2.pose, startSnapshot.originGps);
+          if (
+            latestNed.ok &&
+            entryPoseDrifted(
+              [usedNed.north, usedNed.east],
+              [latestNed.north, latestNed.east]
+            )
+          ) {
+            driftRetry = true;
+            showToast("Approach", "Rover moved — rebuilding entry from new position…", "info");
+            livePose = picked2.pose;
+            poseSource = picked2.source;
+            restaged = await restageAppTrajectoryWithLiveEntry(apiBaseUrl, {
+              snapshot: startSnapshot,
+              roverPose: livePose,
+            });
+            if (!restaged.success) {
+              throw new Error(restaged.error);
+            }
+            applyRestageUi(restaged);
+            setMissionActionBusy(false);
+            loadedOk = await loadMissionOnBackend(restaged.missionId, {
+              hideRuntimeEntryLine: restaged.entryIncluded === true,
+              extensionLines: buildCsvExtensionLines(
+                startSnapshot.paintedLines,
+                startSnapshot.extensionConfig
+              ),
+            });
+            setMissionActionBusy(true);
+            if (!loadedOk) {
+              throw new Error(
+                "Trajectory restaged with live entry but load to controller failed. Fix load, then Start again."
+              );
+            }
+          }
+        }
+
         startMissionId = restaged.missionId;
         logAction("START_LIVE_ENTRY", {
           missionId: restaged.missionId,
           entryIncluded: restaged.entryIncluded,
           entryLengthM: restaged.entryLengthM ?? null,
+          poseSource,
+          lat: livePose.lat ?? null,
+          lon: livePose.lon ?? null,
+          gps_fix: livePose.gps_fix ?? null,
+          pose_age_ms: livePose.pose_age_ms ?? null,
+          driftRetry,
         });
       }
 
@@ -4190,7 +4335,8 @@ export default function App() {
         autoOrigin,
         // Phase 5: CSV has no meaningful path_name reload — refuse the fallback.
         // App-planned DXF/CSV with snapshot also require staged mission_id after restage.
-        requireStagedMission: isCsvMission || isAppPlannedStart,
+        // Also refuse for densified app-planned context that blocked without snapshot.
+        requireStagedMission: isCsvMission || isAppPlannedStart || isAppPlannedMission,
       });
       const res = await missionApi.startMission(apiBaseUrl, startPayload);
       if (!res.ok) {

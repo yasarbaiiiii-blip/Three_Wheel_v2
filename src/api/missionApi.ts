@@ -160,3 +160,57 @@ export async function fetchStagedMissionStatus(
     return null;
   }
 }
+
+/** Pose fields needed to build the runtime entry leg at Start. */
+export type LatestTelemetryPose = {
+  pos_n?: number | null;
+  pos_e?: number | null;
+  lat?: number | null;
+  lon?: number | null;
+  gps_fix?: number | null;
+  pose_age_ms?: number | null;
+};
+
+/**
+ * Fresh rover pose from GET /api/telemetry/latest.
+ * Returns null on network/HTTP failure so callers can fall back to a timed socket cache.
+ */
+export async function fetchLatestTelemetryPose(
+  apiBaseUrl: string
+): Promise<LatestTelemetryPose | null> {
+  try {
+    const res = await fetch(apiUrl(apiBaseUrl, "/api/telemetry/latest"), {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as Record<string, unknown>;
+    if (!data || typeof data !== "object") return null;
+
+    const num = (v: unknown): number | null =>
+      typeof v === "number" && Number.isFinite(v) ? v : null;
+
+    // Normalize common aliases (same as the socket telemetry handler).
+    const lat =
+      num(data.lat) ??
+      num(data.latitude) ??
+      num(data.gps_lat) ??
+      num(data.global_lat);
+    const lon =
+      num(data.lon) ??
+      num(data.longitude) ??
+      num(data.gps_lon) ??
+      num(data.global_lon);
+
+    return {
+      pos_n: num(data.pos_n),
+      pos_e: num(data.pos_e),
+      lat,
+      lon,
+      gps_fix: num(data.gps_fix),
+      pose_age_ms: num(data.pose_age_ms),
+    };
+  } catch {
+    return null;
+  }
+}
