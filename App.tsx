@@ -2,35 +2,14 @@ import "react-native-gesture-handler";
 import "./global.css";
 
 import { DXF_PLANNER, SMOKE_TEST_MAPBOX, SMOKE_TEST_CENTER } from "./src/config/featureFlags";
+import { installRuntimeGuards, yieldToUi } from "./src/utils/runtimeGuards";
+import { AppErrorBoundary } from "./src/components/AppErrorBoundary";
 
 // Mapbox token is applied on first map mount (MapViewNative / MapboxHelloMap),
 // not at app entry — keeps the connection screen off the Mapbox native JS path.
 
-// Release APK: log fatal JS errors instead of a silent process kill with no UI.
-// Does not catch native SIGSEGV, but catches handler/render throws that otherwise
-// look like "app closed when websocket connected".
-try {
-  const g = globalThis as typeof globalThis & {
-    ErrorUtils?: {
-      getGlobalHandler?: () => (error: Error, isFatal?: boolean) => void;
-      setGlobalHandler?: (handler: (error: Error, isFatal?: boolean) => void) => void;
-    };
-  };
-  const EU = g.ErrorUtils;
-  if (EU?.getGlobalHandler && EU?.setGlobalHandler) {
-    const prev = EU.getGlobalHandler();
-    EU.setGlobalHandler((error, isFatal) => {
-      console.error("[JS_FATAL]", isFatal, error?.message ?? error, error?.stack);
-      try {
-        prev?.(error, isFatal);
-      } catch {
-        /* ignore */
-      }
-    });
-  }
-} catch {
-  /* ignore */
-}
+// Process-level guards: log fatals + unhandled rejections (common "app closed" cause).
+installRuntimeGuards();
 
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -396,6 +375,15 @@ const MENU_ITEMS: Array<{ key: Page; label: string; icon: React.ReactNode }> = [
 ];
 
 export default function App() {
+  // Outer boundary: a render crash in any screen must not force-kill the APK.
+  return (
+    <AppErrorBoundary name="Root">
+      <AppRoot />
+    </AppErrorBoundary>
+  );
+}
+
+function AppRoot() {
   // TEMPORARY (Phase 0.1) on-device basemap smoke test. Flip SMOKE_TEST_MAPBOX
   // in src/config/featureFlags.ts to true, rebuild, and confirm satellite tiles
   // render. This early return is gated by a build-time constant so hook order
@@ -540,9 +528,12 @@ export default function App() {
       existingAnchor: visualAlignmentAnchor,
       stableFallbackOrigin:
         latchedPreviewGps ??
-        (Number.isFinite(telemetrySnapshot?.lat) && Number.isFinite(telemetrySnapshot?.lon)
-          ? { lat: telemetrySnapshot!.lat as number, lon: telemetrySnapshot!.lon as number }
-          : null),
+        (() => {
+          const snap = getTelemetrySnapshot();
+          return Number.isFinite(snap?.lat) && Number.isFinite(snap?.lon)
+            ? { lat: snap!.lat as number, lon: snap!.lon as number }
+            : null;
+        })(),
       // Raw design lines — same coords the map projects under AUTO_ORIGIN_RAW / fallback.
       // Must be the SAME list the map resolved its origin from, or the plan jumps the
       // instant the sticker appears: with a pending metric DXF the map draws FieldsPage's
@@ -797,8 +788,9 @@ export default function App() {
       { x: minX, y: maxY },
     ];
 
-    const baseLat = visualAlignmentAnchor?.originLat ?? alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 0;
-    const baseLon = visualAlignmentAnchor?.originLon ?? alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 0;
+    const liveGps = getTelemetrySnapshot();
+    const baseLat = visualAlignmentAnchor?.originLat ?? alignedRefPoints[0]?.lat ?? liveGps?.lat ?? 0;
+    const baseLon = visualAlignmentAnchor?.originLon ?? alignedRefPoints[0]?.lon ?? liveGps?.lon ?? 0;
 
     let originDxfNorth = 0;
     let originDxfEast = 0;
@@ -973,13 +965,22 @@ export default function App() {
       setActiveRefPointLabelIndex(null);
     }
   }, [showRefPointLabels]);
-  // High-frequency telemetry lives in an external store so deadband merge is shared
-  // and leaf UIs can subscribe without always re-rendering this entire App tree.
-  const telemetrySnapshot = useTelemetrySnapshot();
+  // Smoothness: do NOT subscribe AppRoot to full 10 Hz telemetry snapshots.
+  // High-frequency pose is read from the store inside HomeView/SectionPages.
+  // App only re-renders on coarse signals that change workflow/UI structure.
+  const missionStateLive = useTelemetrySelector((s) => s?.mission_state ?? null);
+  const backendJoystickActive = useTelemetrySelector((s) => s?.joystick_active === true);
+  const hasFiniteGpsFix = useTelemetrySelector(
+    (s) => Number.isFinite(s?.lat) && Number.isFinite(s?.lon)
+  );
+  const hasRoverNedPose = useTelemetrySelector(
+    (s) => s?.pos_n != null && s?.pos_e != null && Number.isFinite(s.pos_n) && Number.isFinite(s.pos_e)
+  );
+  // systemHealth updates rarely (armed/mode/etc.); safe for App-level props.
   const systemHealth = useSystemHealth();
   /**
    * Always-current pose for Start live entry. Updated on every telemetry packet
-   * (including when React deadband skips setState) and on REST refresh.
+   * (including when React deadband skips UI notify) and on REST refresh.
    */
   const telemetrySnapshotRef = useRef<TelemetrySnapshot | null>(null);
   const telemetryReceivedAtMsRef = useRef<number>(0);
@@ -993,7 +994,7 @@ export default function App() {
       gps_fix?: number | null;
       pose_age_ms?: number | null;
     }) => {
-      const prev = telemetrySnapshotRef.current;
+      const prev = telemetrySnapshotRef.current ?? getTelemetrySnapshot();
       telemetrySnapshotRef.current = {
         ...(prev ?? {}),
         ...partial,
@@ -1005,19 +1006,22 @@ export default function App() {
 
   // Latch first finite GPS after telemetry exists — must not run above this declaration.
   useEffect(() => {
-    if (latchedPreviewGps) return;
-    const lat = telemetrySnapshot?.lat;
-    const lon = telemetrySnapshot?.lon;
+    if (latchedPreviewGps || !hasFiniteGpsFix) return;
+    const snap = getTelemetrySnapshot();
+    const lat = snap?.lat;
+    const lon = snap?.lon;
     if (Number.isFinite(lat) && Number.isFinite(lon)) {
       setLatchedPreviewGps({ lat: lat as number, lon: lon as number });
     }
-  }, [telemetrySnapshot?.lat, telemetrySnapshot?.lon, latchedPreviewGps]);
+  }, [hasFiniteGpsFix, latchedPreviewGps]);
 
   const [activityFeed, setActivityFeed] = useState<ActivityEntry[]>([]);
   const [discoveryFeed, setDiscoveryFeed] = useState<DiscoveredRover[]>([]);
   const [telemetryError, setTelemetryError] = useState<string>("");
   const [telemetryLoading, setTelemetryLoading] = useState(false);
   const [missionActionBusy, setMissionActionBusy] = useState(false);
+  /** Prevents double-tap Start / re-entrant restage while a previous Start is in flight. */
+  const startInFlightRef = useRef(false);
   const [missionFileReady, setMissionFileReady] = useState(false);
   const [missionLoaded, setMissionLoaded] = useState(false);
   const [missionLoadedPanelOpenToken, setMissionLoadedPanelOpenToken] = useState(0);
@@ -1188,8 +1192,8 @@ export default function App() {
   }, [setPage]);
 
   useEffect(() => {
-    missionStateRef.current = telemetrySnapshot?.mission_state ?? null;
-  }, [telemetrySnapshot?.mission_state]);
+    missionStateRef.current = missionStateLive;
+  }, [missionStateLive]);
 
   useEffect(() => {
     if (!autoOriginEligible) {
@@ -1199,11 +1203,11 @@ export default function App() {
 
   useEffect(() => {
     if (!autoOriginEligible || autoOriginReference) return;
-    const captured = buildAutoOriginReference(sanitizePlanLines(lines), telemetrySnapshot);
+    const captured = buildAutoOriginReference(sanitizePlanLines(lines), getTelemetrySnapshot());
     if (captured) {
       setAutoOriginReference(captured);
     }
-  }, [autoOriginEligible, autoOriginReference, lines, telemetrySnapshot]);
+  }, [autoOriginEligible, autoOriginReference, lines, hasRoverNedPose]);
 
   useEffect(() => {
     if (!autoOriginReference) return;
@@ -1353,14 +1357,15 @@ export default function App() {
   // placement can be diagnosed against the drawn path's first point.
   useEffect(() => {
     if (!autoOriginEligible) return;
+    const snap = getTelemetrySnapshot();
     const first = getPlanStartPoint(sanitizePlanLines(lines));
     const rover =
-      telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
-        ? { n: telemetrySnapshot.pos_n, e: telemetrySnapshot.pos_e }
+      snap?.pos_n != null && snap?.pos_e != null
+        ? { n: snap.pos_n, e: snap.pos_e }
         : null;
     console.log("[CANVAS] frame", JSON.stringify({
       missionRunning,
-      missionState: telemetrySnapshot?.mission_state ?? null,
+      missionState: missionStateLive,
       autoOriginReference,
       planFirstPoint: first,
       roverTelemetry: rover,
@@ -1375,34 +1380,14 @@ export default function App() {
     autoOriginEligible,
     missionRunning,
     autoOriginReference,
-    telemetrySnapshot?.mission_state,
-    telemetrySnapshot?.pos_n,
-    telemetrySnapshot?.pos_e,
+    missionStateLive,
+    hasRoverNedPose,
     lines,
   ]);
 
-  const previewRoverPoint = useMemo(() => {
-    const telemetryPoint =
-      telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
-        ? { north: telemetrySnapshot.pos_n, east: telemetrySnapshot.pos_e }
-        : null;
-    const planStartPoint = getPlanStartPoint(displayedLines);
-
-    // ALWAYS use real telemetry when available, so the icon shows the true rover position
-    return telemetryPoint ?? planStartPoint;
-  }, [
-    displayedLines,
-    telemetrySnapshot?.pos_e,
-    telemetrySnapshot?.pos_n,
-  ]);
-
-  const frozenRoverPos = useMemo(() => {
-    if (telemetrySnapshot?.pos_n == null || telemetrySnapshot?.pos_e == null) {
-      return null;
-    }
-
-    return { n: telemetrySnapshot.pos_n, e: telemetrySnapshot.pos_e };
-  }, [telemetrySnapshot?.pos_n, telemetrySnapshot?.pos_e]);
+  // Fallback only (plan start). Live rover NED is applied in HomeView from the
+  // telemetry store so AppRoot does not re-render on every pose tick.
+  const previewRoverPoint = useMemo(() => getPlanStartPoint(displayedLines), [displayedLines]);
 
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectedWsRef = useRef(selectedWs);
@@ -1712,8 +1697,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (telemetrySnapshot) {
-      const currentState = telemetrySnapshot.mission_state;
+    if (missionStateLive != null || prevMissionState != null) {
+      const currentState = missionStateLive;
       const terminal = outcomeFromMissionStateTransition(prevMissionState, currentState);
       if (terminal && runningLayerIdsRef.current.length > 0) {
         const ids = [...runningLayerIdsRef.current];
@@ -1737,7 +1722,7 @@ export default function App() {
       }
       setPrevMissionState(currentState ?? null);
     }
-  }, [telemetrySnapshot?.mission_state, prevMissionState]);
+  }, [missionStateLive, prevMissionState]);
 
   useEffect(() => {
     selectedWsRef.current = selectedWs;
@@ -1944,6 +1929,8 @@ export default function App() {
           });
 
           applyTelemetryPacket(data as TelemetrySnapshot);
+          // Keep Start/live-entry ref aligned with store (full merged snapshot).
+          telemetrySnapshotRef.current = getTelemetrySnapshot() ?? (data as TelemetrySnapshot);
         } catch (err) {
           console.error("[SOCKET] telemetry handler crash suppressed:", err);
         }
@@ -2817,8 +2804,14 @@ export default function App() {
 
   async function loadMissionOnBackend(
     requestedStagedMissionId?: string,
-    opts?: { hideRuntimeEntryLine?: boolean; extensionLines?: PlanLine[] | null }
+    opts?: {
+      hideRuntimeEntryLine?: boolean;
+      extensionLines?: PlanLine[] | null;
+      /** When false, caller owns missionActionBusy (Start path). Default true. */
+      manageBusy?: boolean;
+    }
   ) {
+    const manageBusy = opts?.manageBusy !== false;
     const requestedMissionId = requestedStagedMissionId?.trim() || stagedMissionId?.trim() || "";
     const hasExplicitMissionId = Boolean(requestedStagedMissionId?.trim());
     const isStagedLoad = requestedMissionId !== "";
@@ -2853,12 +2846,12 @@ export default function App() {
     }
 
     logAction("LOAD_REQUEST", { apiBaseUrl, stagedMissionId: requestedMissionId || null, fileName: importedPlan?.fileName });
-    setMissionActionBusy(true);
+    if (manageBusy) setMissionActionBusy(true);
     // Invalidate any identity poll already in flight — its snapshot predates
     // this load and must not be allowed to overwrite the result below.
     missionIdentityGenerationRef.current += 1;
     try {
-      showToast("Load", `Loading path...`, "info");
+      if (manageBusy) showToast("Load", `Loading path...`, "info");
 
       if (isStagedLoad) {
         const missionId = requestedMissionId;
@@ -2994,7 +2987,7 @@ export default function App() {
       if (missionError?.status === 409) void refreshMissionIdentity();
       return false;
     } finally {
-      setMissionActionBusy(false);
+      if (manageBusy) setMissionActionBusy(false);
     }
   }
 
@@ -3638,17 +3631,31 @@ export default function App() {
     if (!apiBaseUrl || !importedPlan || lines.length === 0) {
       return;
     }
+    // Re-entrancy: double-taps + slow restage previously stacked starts and
+    // could leave the UI busy or race Mapbox/state updates into a hard close.
+    if (startInFlightRef.current || missionActionBusy) {
+      showToast("Start", "Start already in progress…", "info");
+      return;
+    }
 
-    if (virtualJoystick.joystickActive || telemetrySnapshot?.joystick_active) {
+    if (virtualJoystick.joystickActive || backendJoystickActive || getTelemetrySnapshot()?.joystick_active) {
       Alert.alert("Joystick active", "Release manual drive before starting a mission.");
       showToast("Start blocked", "Release the joystick lease before starting.", "error");
       return;
     }
 
+    startInFlightRef.current = true;
+    setMissionActionBusy(true);
+    // Paint busy state before any network / restage work (perceived lag).
+    showToast("Start", "Preparing mission…", "info");
+    await yieldToUi();
+
     // Mission-layer Start selection — driven entirely by pill visibility now
     // (missionLayers[].visible), same state MissionLayerPills toggles for map
     // preview. No separate re-pick modal: what's visible is what runs.
     let selectedStartLayerIds: string[] | null = null;
+    // Single try/finally so every early return still clears busy + in-flight flags.
+    try {
     const startResolution = resolveVisibleStartLayerIds(missionLayers);
     if (startResolution.kind === "blocked") {
       if (startResolution.reason === "no_layers_ready") {
@@ -3687,44 +3694,64 @@ export default function App() {
     // instead so a real confirmation isn't ignored by a stale read.
     let effectiveStagedWorkflow = stagedWorkflow;
     let effectiveLoadedInspection = loadedPathInspection;
+    const workflowAlreadyReady =
+      stagedWorkflow.staged === "verified" &&
+      stagedWorkflow.loaded === "verified" &&
+      Boolean(stagedMissionId);
     try {
-      const missionStatus = await missionApi.fetchMissionStatus(apiBaseUrl);
-      const stagedStatus = await missionApi.fetchStagedMissionStatus(apiBaseUrl, stagedMissionId);
+      // Parallel preflight (was sequential — main source of "Start lag" when
+      // already staged/loaded). When workflow is already verified, skip the
+      // extra loaded-path round-trip and only refresh mission status.
+      if (workflowAlreadyReady) {
+        const missionStatus = await missionApi.fetchMissionStatus(apiBaseUrl);
+        if (missionStatus.running_mission_id) {
+          setMissionRunning(true);
+        }
+        logAction("START_RECONCILE_FAST", {
+          missionState: missionStatus.state,
+          loadedMissionId: missionStatus.loaded_mission_id,
+          skippedDeepCheck: true,
+        });
+      } else {
+        const [missionStatus, stagedStatus] = await Promise.all([
+          missionApi.fetchMissionStatus(apiBaseUrl),
+          missionApi.fetchStagedMissionStatus(apiBaseUrl, stagedMissionId),
+        ]);
 
-      if (stagedStatus?.verified) {
-        effectiveStagedWorkflow = { ...effectiveStagedWorkflow, staged: "verified" };
-        setWorkflowStep("staged", "verified");
-      }
-      if (missionStatus.running_mission_id) {
-        // If a mission is already running, reconcile
-        setMissionRunning(true);
-      }
+        if (stagedStatus?.verified) {
+          effectiveStagedWorkflow = { ...effectiveStagedWorkflow, staged: "verified" };
+          setWorkflowStep("staged", "verified");
+        }
+        if (missionStatus.running_mission_id) {
+          setMissionRunning(true);
+        }
 
-      // Only upgrade "loaded" from a fresh check — never downgrade it here,
-      // that stays the background poll's job (reconcileLoadedMission).
-      if (
-        effectiveStagedWorkflow.staged === "verified" &&
-        stagedMissionId &&
-        effectiveStagedWorkflow.loaded !== "verified"
-      ) {
-        const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
-        if (loadedRes.ok) {
-          const loadedData = (await loadedRes.json()) as missionApi.LoadedPathResponse;
-          const verification = verifyStagedLoadedMission(loadedData, stagedMissionId);
-          if (verification.verified) {
-            effectiveStagedWorkflow = { ...effectiveStagedWorkflow, loaded: "verified" };
-            effectiveLoadedInspection = loadedData;
-            setWorkflowStep("loaded", "verified");
-            setLoadedPathInspection(loadedData);
+        // Only upgrade "loaded" from a fresh check — never downgrade it here,
+        // that stays the background poll's job (reconcileLoadedMission).
+        if (
+          effectiveStagedWorkflow.staged === "verified" &&
+          stagedMissionId &&
+          effectiveStagedWorkflow.loaded !== "verified"
+        ) {
+          const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
+          if (loadedRes.ok) {
+            const loadedData = (await loadedRes.json()) as missionApi.LoadedPathResponse;
+            const verification = verifyStagedLoadedMission(loadedData, stagedMissionId);
+            if (verification.verified) {
+              effectiveStagedWorkflow = { ...effectiveStagedWorkflow, loaded: "verified" };
+              effectiveLoadedInspection = loadedData;
+              setWorkflowStep("loaded", "verified");
+              setLoadedPathInspection(loadedData);
+            }
           }
         }
-      }
 
-      logAction("START_RECONCILE", {
-        missionState: missionStatus.state,
-        loadedMissionId: missionStatus.loaded_mission_id,
-        stagedVerified: stagedStatus?.verified,
-      });
+        logAction("START_RECONCILE", {
+          missionState: missionStatus.state,
+          loadedMissionId: missionStatus.loaded_mission_id,
+          stagedVerified: stagedStatus?.verified,
+        });
+      }
     } catch (reconcileErr) {
       // Non-fatal — proceed with existing local state if re-fetch fails
       console.warn("[START] Re-fetch failed, using cached workflow state:", reconcileErr);
@@ -3752,6 +3779,8 @@ export default function App() {
 
     if (!gateResult.allowed) {
       // Show dialog with force-start option — await user decision via promise wrapper
+      // Temporarily clear busy so the dialog is interactive; restore if force/retry continues.
+      setMissionActionBusy(false);
       const userChoice = await new Promise<"cancel" | "force" | "retry">((resolve) => {
         Alert.alert(
           "Cannot Start",
@@ -3780,6 +3809,8 @@ export default function App() {
 
       // userChoice === "force" — bypass the gate
       forceStart = true;
+      setMissionActionBusy(true);
+      await yieldToUi();
       logAction("FORCE_START", { reason: gateResult.message });
       showToast("Force starting", "Bypassing workflow verification.", "warning");
     }
@@ -3795,9 +3826,7 @@ export default function App() {
       stagedMissionId: isStagedStart ? getLoadedMissionId(loadedPathInspection) : null,
       hasAppPlannedSnapshot: appPlannedStartSnapshot != null,
     });
-    setMissionActionBusy(true);
-    try {
-      showToast(missionRunning ? "Stop" : "Start", missionRunning ? "Stopping mission..." : "Starting mission...", "info");
+      showToast("Start", "Starting mission…", "info");
       const isCsvMission =
         localCsvPreview != null ||
         importedPlan.fileType === "csv" ||
@@ -3902,13 +3931,12 @@ export default function App() {
         applyRestageUi(restaged);
 
         // Load the freshly staged mission (with live entry) to the controller.
-        // loadMissionOnBackend manages its own busy flag — drop ours first to avoid stuck UI.
-        setMissionActionBusy(false);
+        // Start owns the busy flag — avoid loadMissionOnBackend clearing it mid-flight.
         let loadedOk = await loadMissionOnBackend(restaged.missionId, {
           hideRuntimeEntryLine: restaged.entryIncluded === true,
           extensionLines: buildCsvExtensionLines(startSnapshot.paintedLines, startSnapshot.extensionConfig),
+          manageBusy: false,
         });
-        setMissionActionBusy(true);
         if (!loadedOk) {
           throw new Error(
             "Trajectory restaged with live entry but load to controller failed. Fix load, then Start again."
@@ -3949,15 +3977,14 @@ export default function App() {
               throw new Error(restaged.error);
             }
             applyRestageUi(restaged);
-            setMissionActionBusy(false);
             loadedOk = await loadMissionOnBackend(restaged.missionId, {
               hideRuntimeEntryLine: restaged.entryIncluded === true,
               extensionLines: buildCsvExtensionLines(
                 startSnapshot.paintedLines,
                 startSnapshot.extensionConfig
               ),
+              manageBusy: false,
             });
-            setMissionActionBusy(true);
             if (!loadedOk) {
               throw new Error(
                 "Trajectory restaged with live entry but load to controller failed. Fix load, then Start again."
@@ -4022,7 +4049,10 @@ export default function App() {
             : null,
         }));
       }
-      void refreshTelemetryPanel();
+      // Defer non-critical refresh so Start feels instant after backend ACK.
+      setTimeout(() => {
+        void refreshTelemetryPanel();
+      }, 0);
       logAction("START_SUCCESS", {
         fileName: importedPlan.fileName,
         autoOrigin,
@@ -4031,10 +4061,14 @@ export default function App() {
       });
       const entryNote =
         isAppPlannedStart
-          ? " Approach path was built from the rover's current position."
+          ? " Approach rebuilt from current rover position."
           : "";
-      Alert.alert("Started", `${importedPlan.fileName} started on the rover.${entryNote}`);
-      showToast("Mission running", `${importedPlan.fileName} is now active.`, "success");
+      // Toast only — a blocking Alert after Start freezes the HUD and feels like lag/crash.
+      showToast(
+        "Mission running",
+        `${importedPlan.fileName} is now active.${entryNote}`,
+        "success"
+      );
     } catch (error) {
       const missionError = error && typeof error === "object" && "kind" in error
         ? error as ReturnType<typeof classifyMissionError>
@@ -4053,10 +4087,12 @@ export default function App() {
       });
       const message = missionError?.message ?? (error instanceof Error ? error.message : "Could not start the mission.");
       const title = missionError?.title ?? "Start failed";
-      Alert.alert(title, message);
+      // Prefer toast for non-blocking UX; keep Alert only for failures that need attention.
       showToast(title, message, "error");
+      Alert.alert(title, message);
       if (missionError?.status === 409) void refreshMissionIdentity();
     } finally {
+      startInFlightRef.current = false;
       setMissionActionBusy(false);
     }
   }
@@ -4357,7 +4393,7 @@ export default function App() {
       selectedPathName,
       missionRunning,
       missionLoaded,
-      missionState: telemetrySnapshot?.mission_state ?? null,
+      missionState: missionStateLive ?? getTelemetrySnapshot()?.mission_state ?? null,
     });
     setMissionActionBusy(true);
     try {
@@ -4919,6 +4955,7 @@ export default function App() {
                   onOfflinePreview={enterOfflinePreview}
                 />
               ) : (
+                <AppErrorBoundary name="Home">
                 <HomeView
                   page={page}
                   autoOrigin={autoOrigin}
@@ -4996,7 +5033,7 @@ export default function App() {
                   missionLoadedPanelOpenToken={missionLoadedPanelOpenToken}
                   missionRunning={missionRunning}
                   systemHealth={systemHealth}
-                  telemetrySnapshot={telemetrySnapshot}
+                  telemetrySnapshot={null}
                   activityFeed={activityFeed}
                   discoveryFeed={discoveryFeed}
                   telemetryError={telemetryError}
@@ -5049,7 +5086,7 @@ export default function App() {
                           <SectionPages
                             title=""
                             onBack={() => setPage("home")}
-                            telemetrySnapshot={telemetrySnapshot}
+                            telemetrySnapshot={null}
                             missionRunning={missionRunning}
                             previewRoverPoint={previewRoverPoint}
                             page={page}
@@ -5231,6 +5268,7 @@ export default function App() {
                       : undefined
                   }
                 />
+                </AppErrorBoundary>
               )}
 
 
@@ -5500,12 +5538,15 @@ type HomeViewProps = {
 };
 
 function HomeView(props: HomeViewProps) {
+  // Live telemetry from store — same data as before, without re-rendering AppRoot every tick.
+  const liveTelemetry = useTelemetrySnapshot();
+  const liveHealth = useSystemHealth();
   const {
     page = "home",
     renderSectionContent,
     autoOrigin,
     onToggleAutoOrigin,
-    previewRoverPoint,
+    previewRoverPoint: previewRoverPointFallback,
     originShiftKey,
     mapSourceLines,
     autoOriginReference,
@@ -5539,8 +5580,8 @@ function HomeView(props: HomeViewProps) {
     missionFileReady,
     missionLoaded,
     missionRunning,
-    systemHealth,
-    telemetrySnapshot,
+    systemHealth: systemHealthProp,
+    telemetrySnapshot: telemetrySnapshotProp,
     activityFeed,
     discoveryFeed,
     telemetryError,
@@ -5596,6 +5637,14 @@ function HomeView(props: HomeViewProps) {
     recenterRoverCount = 0,
     recenterPlanCount = 0,
   } = props;
+
+  // Same values as the old App-driven props — sourced live so parent stays quiet.
+  const telemetrySnapshot = liveTelemetry ?? telemetrySnapshotProp;
+  const systemHealth = liveHealth ?? systemHealthProp;
+  const previewRoverPoint =
+    telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
+      ? { north: telemetrySnapshot.pos_n as number, east: telemetrySnapshot.pos_e as number }
+      : previewRoverPointFallback;
 
   const [sprayModalOpen, setSprayModalOpen] = useState(false);
   const [sprayTab, setSprayTab] = useState<"continuous" | "dashed" | "point">("continuous");
@@ -6865,6 +6914,13 @@ function SectionPages(props: {
   offsetPreviewLines?: PlanLine[] | null;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
+  // Live store so Fields/Templates map pose updates without re-rendering AppRoot.
+  const liveTelemetry = useTelemetrySnapshot();
+  const telemetrySnapshot = liveTelemetry ?? props.telemetrySnapshot;
+  const previewRoverPoint =
+    telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
+      ? { north: telemetrySnapshot.pos_n as number, east: telemetrySnapshot.pos_e as number }
+      : props.previewRoverPoint;
 
   return (
     <Suspense fallback={<ActivityIndicator />}>
@@ -6872,16 +6928,17 @@ function SectionPages(props: {
       {page === "fields" ? (
         <FieldsPage
           {...props}
+          previewRoverPoint={previewRoverPoint}
           onClearMission={props.onClearMission}
           renderPlanPreview={(previewProps) => (
             <PlanPreview
               {...previewProps}
               mapViewEnabled={mapViewEnabled}
-              telemetryPosN={props.telemetrySnapshot?.pos_n ?? null}
-              telemetryPosE={props.telemetrySnapshot?.pos_e ?? null}
-              telemetryPosLat={props.telemetrySnapshot?.lat ?? null}
-              telemetryPosLon={props.telemetrySnapshot?.lon ?? null}
-              telemetryPosAlt={props.telemetrySnapshot?.alt ?? null}
+              telemetryPosN={telemetrySnapshot?.pos_n ?? null}
+              telemetryPosE={telemetrySnapshot?.pos_e ?? null}
+              telemetryPosLat={telemetrySnapshot?.lat ?? null}
+              telemetryPosLon={telemetrySnapshot?.lon ?? null}
+              telemetryPosAlt={telemetrySnapshot?.alt ?? null}
               showRefPointLabels={props.showRefPointLabels}
               activeRefPointLabelIndex={props.activeRefPointLabelIndex}
               onToggleRefPointLabel={props.setActiveRefPointLabelIndex}
@@ -6904,16 +6961,17 @@ function SectionPages(props: {
       {page === "templates" ? (
         <TemplatesPage
           {...props}
+          previewRoverPoint={previewRoverPoint}
           renderPlanPreview={(previewProps) => (
             <PlanPreview
               {...previewProps}
               mapMode="templates"
               alignedRefPoints={props.alignedRefPoints}
-              telemetryPosN={props.telemetrySnapshot?.pos_n ?? null}
-              telemetryPosE={props.telemetrySnapshot?.pos_e ?? null}
-              telemetryPosLat={props.telemetrySnapshot?.lat ?? null}
-              telemetryPosLon={props.telemetrySnapshot?.lon ?? null}
-              telemetryPosAlt={props.telemetrySnapshot?.alt ?? null}
+              telemetryPosN={telemetrySnapshot?.pos_n ?? null}
+              telemetryPosE={telemetrySnapshot?.pos_e ?? null}
+              telemetryPosLat={telemetrySnapshot?.lat ?? null}
+              telemetryPosLon={telemetrySnapshot?.lon ?? null}
+              telemetryPosAlt={telemetrySnapshot?.alt ?? null}
               mapViewEnabled={mapViewEnabled}
               showRefPointLabels={props.showRefPointLabels}
               activeRefPointLabelIndex={props.activeRefPointLabelIndex}

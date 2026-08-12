@@ -57,17 +57,39 @@ export function setSystemHealth(
   emit(healthListeners);
 }
 
+/** Coalesce store notifications to one paint frame to reduce UI thrash under 10 Hz telemetry. */
+let telemetryEmitScheduled = false;
+let healthEmitScheduled = false;
+
+function scheduleTelemetryEmit() {
+  if (telemetryEmitScheduled) return;
+  telemetryEmitScheduled = true;
+  requestAnimationFrame(() => {
+    telemetryEmitScheduled = false;
+    emit(telemetryListeners);
+  });
+}
+
+function scheduleHealthEmit() {
+  if (healthEmitScheduled) return;
+  healthEmitScheduled = true;
+  requestAnimationFrame(() => {
+    healthEmitScheduled = false;
+    emit(healthListeners);
+  });
+}
+
 /** Apply a live socket/REST telemetry packet with deadband merge. */
 export function applyTelemetryPacket(data: TelemetrySnapshot) {
   const merged = mergeTelemetrySnapshot(telemetrySnapshot, data);
   if (merged !== telemetrySnapshot) {
     telemetrySnapshot = merged;
-    emit(telemetryListeners);
+    scheduleTelemetryEmit();
   }
   const health = mergeSystemHealthFromTelemetry(systemHealth, data);
   if (health !== systemHealth) {
     systemHealth = health;
-    emit(healthListeners);
+    scheduleHealthEmit();
   }
 }
 

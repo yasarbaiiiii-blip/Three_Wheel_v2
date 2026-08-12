@@ -409,12 +409,21 @@ const ESTOP_INIT_Y = ESTOP_HUD_H - ESTOP_RING_SIZE - 36;
 const AnimatedSvgCircle = AnimatedReanimated.createAnimatedComponent(SvgCircle);
 
 
-const MissionActionBtn = ({ icon: Icon, label, onPress, variant = "secondary", fullWidth = false, big = false }) => {
+const MissionActionBtn = ({
+  icon: Icon,
+  label,
+  onPress,
+  variant = "secondary",
+  fullWidth = false,
+  big = false,
+  disabled = false,
+}) => {
   const isPrimary = variant === "primary";
   const isDanger = variant === "danger";
   const isWarning = variant === "warning";
   return (
     <Pressable
+      disabled={disabled}
       style={[
         styles.missionActionBtn,
         fullWidth ? styles.missionActionFull : { flex: 1 },
@@ -423,6 +432,7 @@ const MissionActionBtn = ({ icon: Icon, label, onPress, variant = "secondary", f
         isDanger && styles.missionActionDanger,
         isWarning && styles.missionActionWarning,
         !isPrimary && !isDanger && !isWarning && styles.missionActionSecondary,
+        disabled && { opacity: 0.55 },
       ]}
       onPress={onPress}
     >
@@ -1939,10 +1949,19 @@ export default function ModernHomeUI(props) {
                   <View style={{ flex: 1 }}>
                     <MissionActionBtn
                       icon={missionRunning ? Square : Play}
-                      label={missionRunning ? "Stop Mission" : "Start Mission"}
+                      label={
+                        missionActionBusy
+                          ? missionRunning
+                            ? "Stopping…"
+                            : "Starting…"
+                          : missionRunning
+                            ? "Stop Mission"
+                            : "Start Mission"
+                      }
                       variant={missionRunning ? "danger" : "primary"}
                       fullWidth
                       big
+                      disabled={missionActionBusy}
                       onPress={missionRunning ? onStopPlan : onStartPlan}
                     />
                   </View>
