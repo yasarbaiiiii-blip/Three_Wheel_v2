@@ -33,6 +33,11 @@ import {
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useSharedValue, runOnJS } from "react-native-reanimated";
 
+import { initMapbox } from "../config/mapbox";
+
+// Apply token once when the native map module is actually needed (not at App entry).
+initMapbox();
+
 /**
  * Local mirror of the documented `OnPressEvent` (the type is not re-exported at
  * the package root in v10.3.1). Matches @rnmapbox/maps' OnPressEvent shape.

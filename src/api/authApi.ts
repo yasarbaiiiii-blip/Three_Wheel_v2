@@ -42,9 +42,13 @@ export function setAuthRuntime(args: {
   invalidSessionHandler = args.onInvalidSession ?? invalidSessionHandler;
 }
 
+/**
+ * Client no longer enforces wall-clock TTL from `expires_at`.
+ * Backend is the authority: HTTP 401 (authenticated fetch) or Socket `auth_revoked`.
+ * Returns true only when there is no usable token (callers treating "expired" as unusable).
+ */
 export function isSessionExpired(session: OperatorSession | null | undefined): boolean {
-  if (!session?.expires_at) return true;
-  return Date.parse(session.expires_at) <= Date.now();
+  return !session?.token;
 }
 
 export function sessionMatchesHost(
@@ -56,12 +60,12 @@ export function sessionMatchesHost(
   return Boolean(target && sessionHost && target === sessionHost);
 }
 
-/** True when a stored session can be reused for Socket.IO (same host, not expired). */
+/** True when a stored session can be reused for Socket.IO (same host; client does not check TTL). */
 export function canReuseSession(
   session: OperatorSession | null | undefined,
   baseUrl: string | null | undefined
 ): boolean {
-  return Boolean(session?.token && !isSessionExpired(session) && sessionMatchesHost(session, baseUrl));
+  return Boolean(session?.token && sessionMatchesHost(session, baseUrl));
 }
 
 export async function saveStoredSession(session: OperatorSession | null) {
@@ -87,8 +91,9 @@ export async function loadStoredSession(): Promise<OperatorSession | null> {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as OperatorSession;
-    if (!parsed.token || !parsed.expires_at) return null;
-    if (isSessionExpired(parsed)) return null;
+    // Token is required. expires_at may still be present from the backend for display/logging
+    // but is not used to discard the session on the client.
+    if (!parsed.token) return null;
     return parsed;
   } catch {
     return null;

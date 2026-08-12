@@ -11,9 +11,12 @@
  */
 import React from "react";
 import { StyleSheet, View } from "react-native";
-import Mapbox, { MapView, Camera } from "@rnmapbox/maps";
+import { MapView, Camera } from "@rnmapbox/maps";
 
-import { MAPBOX_STYLE_URL } from "../config/mapbox";
+import { initMapbox, MAPBOX_STYLE_URL } from "../config/mapbox";
+
+// Smoke-test map: init token when this lazy chunk loads, not at App entry.
+initMapbox();
 
 export interface MapboxHelloMapProps {
   /** [longitude, latitude] — Mapbox/GeoJSON order. */
@@ -34,10 +37,6 @@ export default function MapboxHelloMap({
     </View>
   );
 }
-
-// Ensure the default export's runtime token init path is referenced so the
-// module isn't tree-shaken in unusual bundler configs.
-void Mapbox;
 
 const styles = StyleSheet.create({
   container: { flex: 1 },

@@ -9,7 +9,7 @@
  * (URL/bundle allowlist + rate limits). Do NOT use a secret token (`sk.`) here.
  *
  * The token is applied at runtime via `Mapbox.setAccessToken()` (see
- * `initMapbox()` below), called once during app startup.
+ * `initMapbox()` below), called on first map mount (not App entry).
  *
  * Set the value in a local `.env` file (see `.env.example`):
  *   EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN=pk.xxxx…
