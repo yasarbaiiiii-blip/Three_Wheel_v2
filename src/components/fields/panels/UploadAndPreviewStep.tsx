@@ -25,6 +25,7 @@ import {
   parseLocalPointCsv,
   type LocalPointCsvResult,
 } from "../../../utils/localPointCsv";
+import { yieldToUi } from "../../../utils/runtimeGuards";
 import type { UploadedFileEntry } from "../../../types/uploadedFiles";
 import { FIELDS_COLORS } from "../fieldsTheme";
 import { PlanOffsetCard } from "./PlanOffsetCard";
@@ -411,6 +412,7 @@ export function UploadAndPreviewStep({
     setPickedFiles(files);
     setImportError(null);
     setIsUploading(true);
+    await yieldToUi();
     try {
       if (!append) {
         onBeginLocalImportBatch?.();

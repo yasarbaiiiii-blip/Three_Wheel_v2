@@ -317,6 +317,13 @@ export type RoadMarkingGroupKey = string | number | undefined;
 
 const JUMP_SPLIT_MIN_M = 5;
 const JUMP_SPLIT_SPACING_MULTIPLE = 20;
+/** Interior long-leg keep: both joins must stay under this (deg). First/last use MAX_INTERIOR_TURN_DEG. */
+const SPARSE_STRAIGHT_JOIN_DEG = 12;
+
+export type OpenPathGroupSplit = {
+  groups: RoadMarkingNedPoint[][];
+  warnings: string[];
+};
 
 function splitByGroupKey(
   points: RoadMarkingNedPoint[],
@@ -341,20 +348,105 @@ function splitByGroupKey(
   return groups;
 }
 
-/** Split wherever a jump is far larger than the group's own typical point spacing. */
-function splitByJumpDistance(points: RoadMarkingNedPoint[]): RoadMarkingNedPoint[][] {
-  if (points.length < 3) return [points];
+/** Absolute turning angle at `points[i]` (0 when `i` is an endpoint). */
+function turnAbsDegAt(points: RoadMarkingNedPoint[], i: number): number {
+  if (i <= 0 || i >= points.length - 1) return 0;
+  return Math.abs(turningAngleDeg(points[i - 1], points[i], points[i + 1]));
+}
+
+/**
+ * A long interval that is a sparsely sampled straight (operator 2-pt waypoint),
+ * not a GPS dropout between unrelated features.
+ *
+ * First/last legs of a file are kept unless the join is a reversal — that is the
+ * Madhavaram case (132 m approach, then a curve). Interior long legs stay only
+ * when both joins are nearly collinear.
+ */
+function isSparseStraightLeg(
+  points: RoadMarkingNedPoint[],
+  intervalEndIndex: number,
+  lengthM: number,
+  thresholdM: number
+): boolean {
+  if (lengthM <= thresholdM) return false;
+  const isFirst = intervalEndIndex === 1;
+  const isLast = intervalEndIndex === points.length - 1;
+  if (isFirst || isLast) {
+    const joinIdx = isFirst ? 1 : points.length - 2;
+    return turnAbsDegAt(points, joinIdx) < MAX_INTERIOR_TURN_DEG;
+  }
+  const turnLand = turnAbsDegAt(points, intervalEndIndex);
+  const turnTake = turnAbsDegAt(points, intervalEndIndex - 1);
+  return turnLand < SPARSE_STRAIGHT_JOIN_DEG && turnTake < SPARSE_STRAIGHT_JOIN_DEG;
+}
+
+/** Never emit a 1-point group — attach the singleton to the nearer neighbour. */
+function mergeSingletonGroups(groups: RoadMarkingNedPoint[][]): RoadMarkingNedPoint[][] {
+  if (groups.length <= 1) return groups.map((g) => g.slice());
+  const out = groups.map((g) => g.slice());
+  let i = 0;
+  while (i < out.length) {
+    if (out[i].length !== 1 || out.length === 1) {
+      i += 1;
+      continue;
+    }
+    const singleton = out[i][0];
+    const prev = i > 0 ? out[i - 1] : null;
+    const next = i + 1 < out.length ? out[i + 1] : null;
+    if (prev && next) {
+      const dPrev = dist(prev[prev.length - 1], singleton);
+      const dNext = dist(singleton, next[0]);
+      if (dNext <= dPrev) next.unshift(singleton);
+      else prev.push(singleton);
+    } else if (next) {
+      next.unshift(singleton);
+    } else if (prev) {
+      prev.push(singleton);
+    } else {
+      i += 1;
+      continue;
+    }
+    out.splice(i, 1);
+  }
+  return out;
+}
+
+/**
+ * Split wherever a jump is far larger than the group's own typical point spacing,
+ * except mixed-density sparse straights (long first/last waypoint legs, or an
+ * interior long collinear hop). Never returns a 1-point group.
+ */
+function splitByJumpDistance(points: RoadMarkingNedPoint[]): {
+  groups: RoadMarkingNedPoint[][];
+  warnings: string[];
+} {
+  if (points.length < 3) return { groups: [points], warnings: [] };
   const diffs: number[] = [];
   for (let i = 1; i < points.length; i++) diffs.push(dist(points[i - 1], points[i]));
   const sorted = diffs.slice().sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)] || 0.5;
   const threshold = Math.max(JUMP_SPLIT_MIN_M, JUMP_SPLIT_SPACING_MULTIPLE * median);
+  const warnings: string[] = [];
   const groups: RoadMarkingNedPoint[][] = [[points[0]]];
   for (let i = 1; i < points.length; i++) {
-    if (dist(points[i - 1], points[i]) > threshold) groups.push([]);
+    const lengthM = diffs[i - 1];
+    const over = lengthM > threshold;
+    if (over && isSparseStraightLeg(points, i, lengthM, threshold)) {
+      const where = i === 1 ? "start" : i === points.length - 1 ? "end" : "interior";
+      warnings.push(
+        `Kept a ${lengthM.toFixed(1)} m sparse straight at the ${where} (mixed-density survey).`
+      );
+      groups[groups.length - 1].push(points[i]);
+      continue;
+    }
+    if (over) groups.push([]);
     groups[groups.length - 1].push(points[i]);
   }
-  return groups;
+  const merged = mergeSingletonGroups(groups.filter((g) => g.length > 0));
+  if (merged.length > 1) {
+    warnings.push(`Split into ${merged.length} paths (gap larger than typical point spacing).`);
+  }
+  return { groups: merged, warnings };
 }
 
 /**
@@ -366,9 +458,9 @@ function splitByJumpDistance(points: RoadMarkingNedPoint[]): RoadMarkingNedPoint
  *     Rows sharing a key are never bridged with rows from a different key, however close.
  *  2. Within each key-group (or across the whole sequence when no keys are given at all),
  *     a jump far larger than that group's own typical point spacing also starts a new
- *     group. This catches multiple unrelated features bundled in one CSV with no name
- *     column, and a real GPS dropout mid-survey — showing two separate paths with a gap is
- *     the safe failure mode, not a fabricated straight line bridging missing data.
+ *     group — unless the long interval is a mixed-density sparse straight (first/last
+ *     waypoint leg, or an interior collinear hop). A split is never allowed to isolate a
+ *     single survey point (that used to drop pin 1 on a 132 m 2-pt approach + dense curve).
  *
  * Known limitation: two genuinely unrelated paths that happen to end/start close together
  * (below the jump threshold) with no group key will still be bridged. A real name/feature
@@ -379,13 +471,24 @@ export function splitIntoOpenPathGroups(
   points: RoadMarkingNedPoint[],
   groupKeys?: RoadMarkingGroupKey[]
 ): RoadMarkingNedPoint[][] {
-  if (points.length === 0) return [];
+  return splitIntoOpenPathGroupsDetailed(points, groupKeys).groups;
+}
+
+/** Same as {@link splitIntoOpenPathGroups} plus operator-facing grouping warnings. */
+export function splitIntoOpenPathGroupsDetailed(
+  points: RoadMarkingNedPoint[],
+  groupKeys?: RoadMarkingGroupKey[]
+): OpenPathGroupSplit {
+  if (points.length === 0) return { groups: [], warnings: [] };
   const byKey = splitByGroupKey(points, groupKeys);
   const out: RoadMarkingNedPoint[][] = [];
+  const warnings: string[] = [];
   for (const group of byKey) {
-    out.push(...splitByJumpDistance(group));
+    const split = splitByJumpDistance(group);
+    out.push(...split.groups);
+    warnings.push(...split.warnings);
   }
-  return out.filter((g) => g.length > 0);
+  return { groups: out.filter((g) => g.length > 0), warnings };
 }
 
 /** Max distance from points to the infinite line through first→last. */

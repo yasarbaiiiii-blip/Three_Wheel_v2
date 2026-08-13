@@ -52,6 +52,20 @@ export function isProtectedMissionResident(loaded: LoadedPathResponse | null): b
   );
 }
 
+/** After Load, rover geometry must not silently drop painted paths from a multi-file send. */
+export function verifyHydratedMarkCount(
+  expectedMarkCount: number,
+  loadedMarkCount: number
+): { ok: boolean; message: string | null } {
+  if (expectedMarkCount >= 2 && loadedMarkCount < expectedMarkCount) {
+    return {
+      ok: false,
+      message: `Load returned ${loadedMarkCount} painted path(s) but this mission has ${expectedMarkCount}. Re-Send the full batch so every file stays on the map.`,
+    };
+  }
+  return { ok: true, message: null };
+}
+
 export function verifyStagedLoadedMission(
   loaded: LoadedPathResponse,
   expectedMissionId: string,

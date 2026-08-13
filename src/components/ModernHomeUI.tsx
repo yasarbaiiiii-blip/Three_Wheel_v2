@@ -640,6 +640,7 @@ export default function ModernHomeUI(props) {
     virtualJoystick, onPausePlan, onResumePlan, isPaused = false, missionActionBusy = false,
     missionLoaded = false, missionLoadedPanelOpenToken = 0,
     mapViewEnabled = true, setMapViewEnabled, renderPlanPreview,
+    csvMapPins = null, showRefPointLabels = false,
     onFocusRover, onFocusPlan,
     recenterRoverCount, recenterPlanCount,
     onResetNorth, resetNorthCount, autoOrigin, onToggleAutoOrigin,
@@ -2022,8 +2023,8 @@ export default function ModernHomeUI(props) {
 
   return (
     <View style={styles.container}>
-      {/* Map / home canvas layer */}
-      {isHomePage ? (
+      {/* One native map for Home and Fields — do not unmount when opening Fields. */}
+      {isHomePage || isFieldsPage ? (
       <View style={{ ...StyleSheet.absoluteFillObject, zIndex: mapFullscreen ? 200 : 1, backgroundColor: COLORS.bgBase }}>
         {mapViewEnabled ? (
           <>
@@ -2067,6 +2068,8 @@ export default function ModernHomeUI(props) {
               onSelectPoint={props.onSelectPoint}
               onSelectLine={onSelectLine}
               selectedLineId={selectedLineId}
+              selectedPoints={csvMapPins ?? undefined}
+              showRefPointLabels={showRefPointLabels}
               onMapClickToMark={drawingMode === "click" ? handleMapClickToMark : undefined}
               drawnWaypoints={drawingMode !== "none" ? drawnPoints : undefined}
               manualDrawingEnabled={drawingMode === "manual"}

@@ -45,7 +45,6 @@ import {
   Animated,
   Dimensions,
   FlatList,
-  LogBox,
   Modal,
   PanResponder,
   Platform,
@@ -118,6 +117,7 @@ import {
   isProtectedMissionResident,
   runningMissionMismatch,
   verifyStagedLoadedMission,
+  verifyHydratedMarkCount,
 } from "./src/api/missionContract";
 import {
   clonePlanLinesForSnapshot,
@@ -179,7 +179,6 @@ import {
   setSystemHealth,
   setTelemetrySnapshot,
   useSystemHealth,
-  useTelemetrySelector,
   useTelemetrySnapshot,
 } from "./src/features/telemetry/telemetryStore";
 import type {
@@ -196,17 +195,30 @@ import {
   waitForSocketConnect,
 } from "./src/utils/socketConnect";
 import { rtkModeFromStatus } from "./src/utils/telemetryDeadband";
-import {
-  SwoziPage,
-  StatusPage,
-  PositioningPage,
-  SettingsPage,
-  HowToPage,
-  AboutPage,
-  linesToDxf,
-  lineLength,
-  lineAngle,
-} from "./src/screens/SecondaryPages";
+const SwoziPage = lazyDefault(
+  () => import("./src/screens/SecondaryPages").then((m) => ({ default: m.SwoziPage })),
+  "SwoziPage"
+);
+const StatusPage = lazyDefault(
+  () => import("./src/screens/SecondaryPages").then((m) => ({ default: m.StatusPage })),
+  "StatusPage"
+);
+const PositioningPage = lazyDefault(
+  () => import("./src/screens/SecondaryPages").then((m) => ({ default: m.PositioningPage })),
+  "PositioningPage"
+);
+const SettingsPage = lazyDefault(
+  () => import("./src/screens/SecondaryPages").then((m) => ({ default: m.SettingsPage })),
+  "SettingsPage"
+);
+const HowToPage = lazyDefault(
+  () => import("./src/screens/SecondaryPages").then((m) => ({ default: m.HowToPage })),
+  "HowToPage"
+);
+const AboutPage = lazyDefault(
+  () => import("./src/screens/SecondaryPages").then((m) => ({ default: m.AboutPage })),
+  "AboutPage"
+);
 import { getLineAnchorPoint, isFiniteNumber } from "./src/utils/planPreviewGeometry";
 import { getPlanStartPoint } from "./src/utils/planStartPoint";
 
@@ -245,7 +257,7 @@ import type {
   StagedWorkflowStep,
 } from "./src/types/fieldsWorkflow";
 import { INITIAL_STAGED_WORKFLOW_STATE } from "./src/types/fieldsWorkflow";
-import { MapView } from "./src/components/MapView";
+import { linesToDxf } from "./src/utils/dxfGenerator";
 import {
   buildPlanLineSvgPath,
   computePlanBoundingBoxLegacy,
@@ -278,6 +290,8 @@ import {
 import {
   buildCsvTransitLines,
   localCsvPointsToPlanLines,
+  localCsvToMapPins,
+  mergeLocalPointCsvResults,
   type LocalPointCsvResult,
 } from "./src/utils/localPointCsv";
 import {
@@ -314,7 +328,9 @@ import {
   resolveMapGeometryFrame,
 } from "./src/utils/mapGeometryProjection";
 
-LogBox.ignoreLogs(["Maximum update depth exceeded"]);
+function lineAngleDeg(line: PlanLine): number {
+  return (Math.atan2(line.to.y - line.from.y, line.to.x - line.from.x) * 180) / Math.PI;
+}
 
 type StagedStartGate = {
   isStagedWorkflow: boolean;
@@ -528,12 +544,9 @@ function AppRoot() {
       existingAnchor: visualAlignmentAnchor,
       stableFallbackOrigin:
         latchedPreviewGps ??
-        (() => {
-          const snap = getTelemetrySnapshot();
-          return Number.isFinite(snap?.lat) && Number.isFinite(snap?.lon)
-            ? { lat: snap!.lat as number, lon: snap!.lon as number }
-            : null;
-        })(),
+        (Number.isFinite(telemetrySnapshot?.lat) && Number.isFinite(telemetrySnapshot?.lon)
+          ? { lat: telemetrySnapshot!.lat as number, lon: telemetrySnapshot!.lon as number }
+          : null),
       // Raw design lines — same coords the map projects under AUTO_ORIGIN_RAW / fallback.
       // Must be the SAME list the map resolved its origin from, or the plan jumps the
       // instant the sticker appears: with a pending metric DXF the map draws FieldsPage's
@@ -788,9 +801,8 @@ function AppRoot() {
       { x: minX, y: maxY },
     ];
 
-    const liveGps = getTelemetrySnapshot();
-    const baseLat = visualAlignmentAnchor?.originLat ?? alignedRefPoints[0]?.lat ?? liveGps?.lat ?? 0;
-    const baseLon = visualAlignmentAnchor?.originLon ?? alignedRefPoints[0]?.lon ?? liveGps?.lon ?? 0;
+    const baseLat = visualAlignmentAnchor?.originLat ?? alignedRefPoints[0]?.lat ?? telemetrySnapshot?.lat ?? 0;
+    const baseLon = visualAlignmentAnchor?.originLon ?? alignedRefPoints[0]?.lon ?? telemetrySnapshot?.lon ?? 0;
 
     let originDxfNorth = 0;
     let originDxfEast = 0;
@@ -965,22 +977,13 @@ function AppRoot() {
       setActiveRefPointLabelIndex(null);
     }
   }, [showRefPointLabels]);
-  // Smoothness: do NOT subscribe AppRoot to full 10 Hz telemetry snapshots.
-  // High-frequency pose is read from the store inside HomeView/SectionPages.
-  // App only re-renders on coarse signals that change workflow/UI structure.
-  const missionStateLive = useTelemetrySelector((s) => s?.mission_state ?? null);
-  const backendJoystickActive = useTelemetrySelector((s) => s?.joystick_active === true);
-  const hasFiniteGpsFix = useTelemetrySelector(
-    (s) => Number.isFinite(s?.lat) && Number.isFinite(s?.lon)
-  );
-  const hasRoverNedPose = useTelemetrySelector(
-    (s) => s?.pos_n != null && s?.pos_e != null && Number.isFinite(s.pos_n) && Number.isFinite(s.pos_e)
-  );
-  // systemHealth updates rarely (armed/mode/etc.); safe for App-level props.
+  // Full live telemetry subscription (baseline-correct). Deadband in the store
+  // already skips noise; do not use boolean-only selectors that miss pose updates.
+  const telemetrySnapshot = useTelemetrySnapshot();
   const systemHealth = useSystemHealth();
   /**
    * Always-current pose for Start live entry. Updated on every telemetry packet
-   * (including when React deadband skips UI notify) and on REST refresh.
+   * (including when React deadband skips setState) and on REST refresh.
    */
   const telemetrySnapshotRef = useRef<TelemetrySnapshot | null>(null);
   const telemetryReceivedAtMsRef = useRef<number>(0);
@@ -1004,16 +1007,22 @@ function AppRoot() {
     []
   );
 
+  // Keep ref aligned whenever the React snapshot advances (map/Start share one truth).
+  useEffect(() => {
+    if (telemetrySnapshot) {
+      telemetrySnapshotRef.current = telemetrySnapshot;
+    }
+  }, [telemetrySnapshot]);
+
   // Latch first finite GPS after telemetry exists — must not run above this declaration.
   useEffect(() => {
-    if (latchedPreviewGps || !hasFiniteGpsFix) return;
-    const snap = getTelemetrySnapshot();
-    const lat = snap?.lat;
-    const lon = snap?.lon;
+    if (latchedPreviewGps) return;
+    const lat = telemetrySnapshot?.lat;
+    const lon = telemetrySnapshot?.lon;
     if (Number.isFinite(lat) && Number.isFinite(lon)) {
       setLatchedPreviewGps({ lat: lat as number, lon: lon as number });
     }
-  }, [hasFiniteGpsFix, latchedPreviewGps]);
+  }, [telemetrySnapshot?.lat, telemetrySnapshot?.lon, latchedPreviewGps]);
 
   const [activityFeed, setActivityFeed] = useState<ActivityEntry[]>([]);
   const [discoveryFeed, setDiscoveryFeed] = useState<DiscoveredRover[]>([]);
@@ -1073,6 +1082,8 @@ function AppRoot() {
     useState<AppPlannedStartSnapshot | null>(null);
   /** Local-only CSV preview (Select File .csv never hits backend path APIs). */
   const [localCsvPreview, setLocalCsvPreview] = useState<LocalPointCsvResult | null>(null);
+  /** Per-file parses; preview/export is `mergeLocalPointCsvResults` of this list (not last-wins). */
+  const localCsvParsesRef = useRef<LocalPointCsvResult[]>([]);
   /**
    * Local DXF parse meta (app planner). Geometry lives in `lines`; this keeps
    * file name / georef / parse warnings for Send readiness and mission naming.
@@ -1192,8 +1203,8 @@ function AppRoot() {
   }, [setPage]);
 
   useEffect(() => {
-    missionStateRef.current = missionStateLive;
-  }, [missionStateLive]);
+    missionStateRef.current = telemetrySnapshot?.mission_state ?? null;
+  }, [telemetrySnapshot?.mission_state]);
 
   useEffect(() => {
     if (!autoOriginEligible) {
@@ -1203,11 +1214,11 @@ function AppRoot() {
 
   useEffect(() => {
     if (!autoOriginEligible || autoOriginReference) return;
-    const captured = buildAutoOriginReference(sanitizePlanLines(lines), getTelemetrySnapshot());
+    const captured = buildAutoOriginReference(sanitizePlanLines(lines), telemetrySnapshot);
     if (captured) {
       setAutoOriginReference(captured);
     }
-  }, [autoOriginEligible, autoOriginReference, lines, hasRoverNedPose]);
+  }, [autoOriginEligible, autoOriginReference, lines, telemetrySnapshot]);
 
   useEffect(() => {
     if (!autoOriginReference) return;
@@ -1255,6 +1266,11 @@ function AppRoot() {
     if (!autoOriginEligible || !autoOriginReference) return base;
     return applyAutoOriginShift(base, autoOriginReference);
   }, [mapSourceLines, autoOriginEligible, autoOriginReference]);
+
+  const csvMapPins = useMemo(
+    () => (localCsvPreview ? localCsvToMapPins(localCsvPreview) : null),
+    [localCsvPreview]
+  );
 
   /**
    * Geometry catalog to recover mission-layer identity on hydrated (post-Send/Load)
@@ -1357,15 +1373,15 @@ function AppRoot() {
   // placement can be diagnosed against the drawn path's first point.
   useEffect(() => {
     if (!autoOriginEligible) return;
-    const snap = getTelemetrySnapshot();
     const first = getPlanStartPoint(sanitizePlanLines(lines));
     const rover =
-      snap?.pos_n != null && snap?.pos_e != null
-        ? { n: snap.pos_n, e: snap.pos_e }
+      telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
+        ? { n: telemetrySnapshot.pos_n, e: telemetrySnapshot.pos_e }
         : null;
+    if (!__DEV__) return;
     console.log("[CANVAS] frame", JSON.stringify({
       missionRunning,
-      missionState: missionStateLive,
+      missionState: telemetrySnapshot?.mission_state ?? null,
       autoOriginReference,
       planFirstPoint: first,
       roverTelemetry: rover,
@@ -1380,14 +1396,21 @@ function AppRoot() {
     autoOriginEligible,
     missionRunning,
     autoOriginReference,
-    missionStateLive,
-    hasRoverNedPose,
+    telemetrySnapshot?.mission_state,
+    telemetrySnapshot?.pos_n,
+    telemetrySnapshot?.pos_e,
     lines,
   ]);
 
-  // Fallback only (plan start). Live rover NED is applied in HomeView from the
-  // telemetry store so AppRoot does not re-render on every pose tick.
-  const previewRoverPoint = useMemo(() => getPlanStartPoint(displayedLines), [displayedLines]);
+  const previewRoverPoint = useMemo(() => {
+    const telemetryPoint =
+      telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
+        ? { north: telemetrySnapshot.pos_n, east: telemetrySnapshot.pos_e }
+        : null;
+    const planStartPoint = getPlanStartPoint(displayedLines);
+    // Prefer live telemetry so the rover icon tracks the real pose.
+    return telemetryPoint ?? planStartPoint;
+  }, [displayedLines, telemetrySnapshot?.pos_e, telemetrySnapshot?.pos_n]);
 
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectedWsRef = useRef(selectedWs);
@@ -1528,6 +1551,7 @@ function AppRoot() {
     // Multi-file batch: keep parse metadata and geometry; only demote send/load stages.
     if (!localBatchActive) {
       setLocalCsvPreview(null);
+      localCsvParsesRef.current = [];
       setLocalDxfMeta(null);
     }
   }, []);
@@ -1697,8 +1721,8 @@ function AppRoot() {
   }, []);
 
   useEffect(() => {
-    if (missionStateLive != null || prevMissionState != null) {
-      const currentState = missionStateLive;
+    if (telemetrySnapshot) {
+      const currentState = telemetrySnapshot.mission_state;
       const terminal = outcomeFromMissionStateTransition(prevMissionState, currentState);
       if (terminal && runningLayerIdsRef.current.length > 0) {
         const ids = [...runningLayerIdsRef.current];
@@ -1722,7 +1746,7 @@ function AppRoot() {
       }
       setPrevMissionState(currentState ?? null);
     }
-  }, [missionStateLive, prevMissionState]);
+  }, [telemetrySnapshot?.mission_state, prevMissionState]);
 
   useEffect(() => {
     selectedWsRef.current = selectedWs;
@@ -1778,6 +1802,7 @@ function AppRoot() {
     setSelectedLineId(null);
     setImportedPlan(null);
     setLocalCsvPreview(null);
+    localCsvParsesRef.current = [];
     setLocalDxfMeta(null);
     setUploadedFiles([]);
     uploadedFilesRef.current = [];
@@ -2285,11 +2310,17 @@ function AppRoot() {
 
   useEffect(() => {
     if (page !== "connection") return;
-    void scanForWebsockets();
+    // First paint last-known host; sweep after idle so Connect is tappable immediately.
+    const first = setTimeout(() => {
+      void scanForWebsockets();
+    }, 1500);
     const timer = setInterval(() => {
       void scanForWebsockets();
     }, DISCOVERY_REFRESH_MS);
-    return () => clearInterval(timer);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
   }, [page]);
 
   const fetchBackendPaths = async () => {
@@ -2324,6 +2355,7 @@ function AppRoot() {
     setLoadedPathInspection(null);
     // Backend path selection replaces any on-device CSV / local DXF preview.
     setLocalCsvPreview(null);
+    localCsvParsesRef.current = [];
     setLocalDxfMeta(null);
     setMissionActionBusy(true);
     try {
@@ -2915,6 +2947,15 @@ function AppRoot() {
           appPlannedStartSnapshot?.sharpCornerMode ?? SHARP_CORNER_MODE
         );
 
+        const expectedMarks = selectMarkPlanLines(
+          appPlannedStartSnapshot?.paintedLines ?? lines
+        ).length;
+        const loadedMarks = selectMarkPlanLines(cornerTaggedLines).length;
+        const markCount = verifyHydratedMarkCount(expectedMarks, loadedMarks);
+        if (!markCount.ok) {
+          throw classifyMissionError(409, markCount.message ?? "Loaded path count mismatch.");
+        }
+
         setAlignedRefPoints(hydrated.alignedRefPoints);
         setLines(sanitizePlanLines(cornerTaggedLines));
         setSelectedLineId(hydrated.selectedLineId);
@@ -3073,6 +3114,7 @@ function AppRoot() {
     setSharedOriginGps(null);
     sharedOriginGpsRef.current = null;
     setLocalCsvPreview(null);
+    localCsvParsesRef.current = [];
     setLocalDxfMeta(null);
     setIsGeographicDxf(false);
     setGeoOriginDxf(null);
@@ -3109,6 +3151,7 @@ function AppRoot() {
         return;
       }
       // Standalone NED: replace-style single file (legacy Auto Origin path).
+      localCsvParsesRef.current = [data];
       setLocalCsvPreview(data);
       setLocalDxfMeta(null);
       const previewLines = chainMarkLinesByGeometry(
@@ -3135,7 +3178,17 @@ function AppRoot() {
       return;
     }
 
-    setLocalCsvPreview(data);
+    localCsvParsesRef.current = [...localCsvParsesRef.current, data];
+    let previewForPins = data;
+    try {
+      previewForPins =
+        localCsvParsesRef.current.length === 1
+          ? data
+          : mergeLocalPointCsvResults(localCsvParsesRef.current);
+    } catch {
+      previewForPins = data;
+    }
+    setLocalCsvPreview(previewForPins);
 
     const used = usedPrefixesFromUploaded(uploadedFilesRef.current);
     const prefix = allocateLineIdPrefix(data.fileName, used);
@@ -3353,6 +3406,7 @@ function AppRoot() {
       void pathApi.deletePath(apiBaseUrl, uploadedName).catch(() => {});
     }
     setLocalCsvPreview(null);
+    localCsvParsesRef.current = [];
     setLocalDxfMeta(null);
     setIsGeographicDxf(false);
     setGeoOriginDxf(null);
@@ -3638,7 +3692,7 @@ function AppRoot() {
       return;
     }
 
-    if (virtualJoystick.joystickActive || backendJoystickActive || getTelemetrySnapshot()?.joystick_active) {
+    if (virtualJoystick.joystickActive || telemetrySnapshot?.joystick_active) {
       Alert.alert("Joystick active", "Release manual drive before starting a mission.");
       showToast("Start blocked", "Release the joystick lease before starting.", "error");
       return;
@@ -3694,64 +3748,47 @@ function AppRoot() {
     // instead so a real confirmation isn't ignored by a stale read.
     let effectiveStagedWorkflow = stagedWorkflow;
     let effectiveLoadedInspection = loadedPathInspection;
-    const workflowAlreadyReady =
-      stagedWorkflow.staged === "verified" &&
-      stagedWorkflow.loaded === "verified" &&
-      Boolean(stagedMissionId);
     try {
-      // Parallel preflight (was sequential — main source of "Start lag" when
-      // already staged/loaded). When workflow is already verified, skip the
-      // extra loaded-path round-trip and only refresh mission status.
-      if (workflowAlreadyReady) {
-        const missionStatus = await missionApi.fetchMissionStatus(apiBaseUrl);
-        if (missionStatus.running_mission_id) {
-          setMissionRunning(true);
-        }
-        logAction("START_RECONCILE_FAST", {
-          missionState: missionStatus.state,
-          loadedMissionId: missionStatus.loaded_mission_id,
-          skippedDeepCheck: true,
-        });
-      } else {
-        const [missionStatus, stagedStatus] = await Promise.all([
-          missionApi.fetchMissionStatus(apiBaseUrl),
-          missionApi.fetchStagedMissionStatus(apiBaseUrl, stagedMissionId),
-        ]);
+      // Full preflight like baseline — always re-check staged/loaded truth.
+      // Parallel fetch keeps Start responsive without skipping verification.
+      const [missionStatus, stagedStatus] = await Promise.all([
+        missionApi.fetchMissionStatus(apiBaseUrl),
+        missionApi.fetchStagedMissionStatus(apiBaseUrl, stagedMissionId),
+      ]);
 
-        if (stagedStatus?.verified) {
-          effectiveStagedWorkflow = { ...effectiveStagedWorkflow, staged: "verified" };
-          setWorkflowStep("staged", "verified");
-        }
-        if (missionStatus.running_mission_id) {
-          setMissionRunning(true);
-        }
+      if (stagedStatus?.verified) {
+        effectiveStagedWorkflow = { ...effectiveStagedWorkflow, staged: "verified" };
+        setWorkflowStep("staged", "verified");
+      }
+      if (missionStatus.running_mission_id) {
+        setMissionRunning(true);
+      }
 
-        // Only upgrade "loaded" from a fresh check — never downgrade it here,
-        // that stays the background poll's job (reconcileLoadedMission).
-        if (
-          effectiveStagedWorkflow.staged === "verified" &&
-          stagedMissionId &&
-          effectiveStagedWorkflow.loaded !== "verified"
-        ) {
-          const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
-          if (loadedRes.ok) {
-            const loadedData = (await loadedRes.json()) as missionApi.LoadedPathResponse;
-            const verification = verifyStagedLoadedMission(loadedData, stagedMissionId);
-            if (verification.verified) {
-              effectiveStagedWorkflow = { ...effectiveStagedWorkflow, loaded: "verified" };
-              effectiveLoadedInspection = loadedData;
-              setWorkflowStep("loaded", "verified");
-              setLoadedPathInspection(loadedData);
-            }
+      // Only upgrade "loaded" from a fresh check — never downgrade it here,
+      // that stays the background poll's job (reconcileLoadedMission).
+      if (
+        effectiveStagedWorkflow.staged === "verified" &&
+        stagedMissionId &&
+        effectiveStagedWorkflow.loaded !== "verified"
+      ) {
+        const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
+        if (loadedRes.ok) {
+          const loadedData = (await loadedRes.json()) as missionApi.LoadedPathResponse;
+          const verification = verifyStagedLoadedMission(loadedData, stagedMissionId);
+          if (verification.verified) {
+            effectiveStagedWorkflow = { ...effectiveStagedWorkflow, loaded: "verified" };
+            effectiveLoadedInspection = loadedData;
+            setWorkflowStep("loaded", "verified");
+            setLoadedPathInspection(loadedData);
           }
         }
-
-        logAction("START_RECONCILE", {
-          missionState: missionStatus.state,
-          loadedMissionId: missionStatus.loaded_mission_id,
-          stagedVerified: stagedStatus?.verified,
-        });
       }
+
+      logAction("START_RECONCILE", {
+        missionState: missionStatus.state,
+        loadedMissionId: missionStatus.loaded_mission_id,
+        stagedVerified: stagedStatus?.verified,
+      });
     } catch (reconcileErr) {
       // Non-fatal — proceed with existing local state if re-fetch fails
       console.warn("[START] Re-fetch failed, using cached workflow state:", reconcileErr);
@@ -4061,14 +4098,11 @@ function AppRoot() {
       });
       const entryNote =
         isAppPlannedStart
-          ? " Approach rebuilt from current rover position."
+          ? " Approach path was built from the rover's current position."
           : "";
-      // Toast only — a blocking Alert after Start freezes the HUD and feels like lag/crash.
-      showToast(
-        "Mission running",
-        `${importedPlan.fileName} is now active.${entryNote}`,
-        "success"
-      );
+      // Baseline UX: confirm Start; toast for non-blocking HUD feedback.
+      showToast("Mission running", `${importedPlan.fileName} is now active.`, "success");
+      Alert.alert("Started", `${importedPlan.fileName} started on the rover.${entryNote}`);
     } catch (error) {
       const missionError = error && typeof error === "object" && "kind" in error
         ? error as ReturnType<typeof classifyMissionError>
@@ -4087,7 +4121,6 @@ function AppRoot() {
       });
       const message = missionError?.message ?? (error instanceof Error ? error.message : "Could not start the mission.");
       const title = missionError?.title ?? "Start failed";
-      // Prefer toast for non-blocking UX; keep Alert only for failures that need attention.
       showToast(title, message, "error");
       Alert.alert(title, message);
       if (missionError?.status === 409) void refreshMissionIdentity();
@@ -4393,7 +4426,7 @@ function AppRoot() {
       selectedPathName,
       missionRunning,
       missionLoaded,
-      missionState: missionStateLive ?? getTelemetrySnapshot()?.mission_state ?? null,
+      missionState: telemetrySnapshot?.mission_state ?? null,
     });
     setMissionActionBusy(true);
     try {
@@ -4428,6 +4461,7 @@ function AppRoot() {
       setSelectedLineId(null);
       setSelectedPathName(null);
       setLocalCsvPreview(null);
+      localCsvParsesRef.current = [];
       setLocalDxfMeta(null);
       setUploadedFiles([]);
       uploadedFilesRef.current = [];
@@ -5033,7 +5067,7 @@ function AppRoot() {
                   missionLoadedPanelOpenToken={missionLoadedPanelOpenToken}
                   missionRunning={missionRunning}
                   systemHealth={systemHealth}
-                  telemetrySnapshot={null}
+                  telemetrySnapshot={telemetrySnapshot}
                   activityFeed={activityFeed}
                   discoveryFeed={discoveryFeed}
                   telemetryError={telemetryError}
@@ -5075,6 +5109,7 @@ function AppRoot() {
                   setAlignedRefPoints={setAlignedRefPoints}
                   mapViewEnabled={mapViewEnabled}
                   setMapViewEnabled={setMapViewEnabled}
+                  csvMapPins={csvMapPins}
                   showRefPointLabels={showRefPointLabels}
                   setShowRefPointLabels={setShowRefPointLabels}
                   activeRefPointLabelIndex={activeRefPointLabelIndex}
@@ -5086,7 +5121,7 @@ function AppRoot() {
                           <SectionPages
                             title=""
                             onBack={() => setPage("home")}
-                            telemetrySnapshot={null}
+                            telemetrySnapshot={telemetrySnapshot}
                             missionRunning={missionRunning}
                             previewRoverPoint={previewRoverPoint}
                             page={page}
@@ -5516,6 +5551,7 @@ type HomeViewProps = {
   setAlignedRefPoints?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>>;
   mapViewEnabled?: boolean;
   setMapViewEnabled?: React.Dispatch<React.SetStateAction<boolean>>;
+  csvMapPins?: { x: number; y: number; lat?: number; lon?: number }[] | null;
   showRefPointLabels?: boolean;
   setShowRefPointLabels: React.Dispatch<React.SetStateAction<boolean>>;
   activeRefPointLabelIndex?: number | null;
@@ -5538,7 +5574,7 @@ type HomeViewProps = {
 };
 
 function HomeView(props: HomeViewProps) {
-  // Live telemetry from store — same data as before, without re-rendering AppRoot every tick.
+  // Prefer App-provided live snapshot (single source of truth). Store is fallback only.
   const liveTelemetry = useTelemetrySnapshot();
   const liveHealth = useSystemHealth();
   const {
@@ -5546,7 +5582,7 @@ function HomeView(props: HomeViewProps) {
     renderSectionContent,
     autoOrigin,
     onToggleAutoOrigin,
-    previewRoverPoint: previewRoverPointFallback,
+    previewRoverPoint: previewRoverPointProp,
     originShiftKey,
     mapSourceLines,
     autoOriginReference,
@@ -5638,13 +5674,13 @@ function HomeView(props: HomeViewProps) {
     recenterPlanCount = 0,
   } = props;
 
-  // Same values as the old App-driven props — sourced live so parent stays quiet.
-  const telemetrySnapshot = liveTelemetry ?? telemetrySnapshotProp;
-  const systemHealth = liveHealth ?? systemHealthProp;
+  const telemetrySnapshot = telemetrySnapshotProp ?? liveTelemetry;
+  const systemHealth = systemHealthProp ?? liveHealth;
   const previewRoverPoint =
-    telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
+    previewRoverPointProp ??
+    (telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
       ? { north: telemetrySnapshot.pos_n as number, east: telemetrySnapshot.pos_e as number }
-      : previewRoverPointFallback;
+      : null);
 
   const [sprayModalOpen, setSprayModalOpen] = useState(false);
   const [sprayTab, setSprayTab] = useState<"continuous" | "dashed" | "point">("continuous");
@@ -6353,7 +6389,7 @@ function LineDetailsDrawer({
               label="Info"
               value={{
                 label: "Line geometry",
-                value: selectedLine ? `${lineLength(selectedLine).toFixed(2)} m` : "n/a",
+                value: selectedLine ? `${getLineLengthM(selectedLine).toFixed(2)} m` : "n/a",
                 tone: "#ffffff",
               }}
             />
@@ -6362,8 +6398,8 @@ function LineDetailsDrawer({
           {selectedLine ? (
             <>
               <View style={drawerStyles.stripRow}>
-                <StripMetric label="Length" value={`${lineLength(selectedLine).toFixed(2)} m`} tone="#ffffff" />
-                <StripMetric label="Angle" value={`${lineAngle(selectedLine).toFixed(2)}°`} tone="#ffffff" />
+                <StripMetric label="Length" value={`${getLineLengthM(selectedLine).toFixed(2)} m`} tone="#ffffff" />
+                <StripMetric label="Angle" value={`${lineAngleDeg(selectedLine).toFixed(2)}°`} tone="#ffffff" />
                 <StripMetric label="Width" value={`${selectedLine.width.toFixed(2)} m`} tone="#ffffff" />
               </View>
 
@@ -6914,13 +6950,14 @@ function SectionPages(props: {
   offsetPreviewLines?: PlanLine[] | null;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
-  // Live store so Fields/Templates map pose updates without re-rendering AppRoot.
+  // Prefer App props; store fallback if a screen mounts without a parent snapshot.
   const liveTelemetry = useTelemetrySnapshot();
-  const telemetrySnapshot = liveTelemetry ?? props.telemetrySnapshot;
+  const telemetrySnapshot = props.telemetrySnapshot ?? liveTelemetry;
   const previewRoverPoint =
-    telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
+    props.previewRoverPoint ??
+    (telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
       ? { north: telemetrySnapshot.pos_n as number, east: telemetrySnapshot.pos_e as number }
-      : props.previewRoverPoint;
+      : null);
 
   return (
     <Suspense fallback={<ActivityIndicator />}>
@@ -6930,6 +6967,7 @@ function SectionPages(props: {
           {...props}
           previewRoverPoint={previewRoverPoint}
           onClearMission={props.onClearMission}
+          mapHostedExternally={!!mapViewEnabled}
           renderPlanPreview={(previewProps) => (
             <PlanPreview
               {...previewProps}

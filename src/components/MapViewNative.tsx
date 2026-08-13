@@ -400,6 +400,7 @@ export function MapViewNative(props: MapViewProps) {
   // shows the correct facing direction at bearing 0, and visibly drifts out of
   // alignment with the map's own content the moment the user rotates the camera.
   const [cameraBearing, setCameraBearing] = useState(0);
+  const [styleReady, setStyleReady] = useState(false);
   const handleCameraChanged = useCallback((state: { properties?: { heading?: number } } | null | undefined) => {
     // Release builds: Mapbox sometimes delivers incomplete camera events; never throw.
     try {
@@ -1127,7 +1128,7 @@ export function MapViewNative(props: MapViewProps) {
     .map((p) => `${p.x},${p.y},${p.lat ?? ""},${p.lon ?? ""}`)
     .join("|");
   useEffect(() => {
-    if (!selectedPoints || selectedPoints.length === 0) return;
+    if (!__DEV__ || !selectedPoints || selectedPoints.length === 0) return;
     console.log(
       `[AlignDXF][Map] Yellow ref-point dots (${selectedPoints.length}):`,
       JSON.stringify(
@@ -2623,7 +2624,7 @@ export function MapViewNative(props: MapViewProps) {
       fitToPlan();
     }
     lastSelectedPointsCountRef.current = count;
-  }, [visible, selectedPoints, fitToPlan]);
+  }, [visible, selectedPoints?.length, fitToPlan]);
 
   // Re-fit when a Fix Alignment just completed (alignedRefPoints going from empty to
   // non-empty). A completed alignment relocates the WHOLE plan to its real GPS position
@@ -2946,6 +2947,7 @@ export function MapViewNative(props: MapViewProps) {
         onCameraChanged={handleCameraChanged}
         onDidFinishLoadingMap={() => {
           mapLoadedRef.current = true;
+          setStyleReady(true);
           // Retry one-shot autocenter now that native map is ready.
           if (!hasAutoCenteredRef.current) {
             if (roverGeo.center) {
@@ -3623,6 +3625,19 @@ export function MapViewNative(props: MapViewProps) {
           </MarkerView>
         )}
       </RNMapboxMapView>
+      {!styleReady ? (
+        <View
+          pointerEvents="none"
+          style={{
+            ...StyleSheet.absoluteFillObject,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: "rgba(15, 23, 42, 0.45)",
+          }}
+        >
+          <Text style={{ color: "#f8fafc", fontSize: 14, fontWeight: "700" }}>Loading map…</Text>
+        </View>
+      ) : null}
     </View>
   );
 

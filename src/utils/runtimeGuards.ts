@@ -37,10 +37,8 @@ export function installRuntimeGuards(): void {
       });
     }
 
-    // Hermes / RN: unhandled promise rejections often surface as "app closed"
-    // without a redbox in release. Swallow after logging so a single bad await
-    // in a fire-and-forget path does not terminate the process when the runtime
-    // treats rejections as fatal.
+    // Log unhandled rejections for release debugging. Do NOT preventDefault —
+    // swallowing rejections hid real Start/load failures as "app not working".
     const onRejection = (reason: unknown) => {
       const msg =
         reason instanceof Error
@@ -54,22 +52,11 @@ export function installRuntimeGuards(): void {
     if (typeof g.addEventListener === "function") {
       g.addEventListener("unhandledrejection", (event: any) => {
         onRejection(event?.reason ?? event);
-        try {
-          event?.preventDefault?.();
-        } catch {
-          /* ignore */
-        }
       });
     } else {
-      // Fallback for environments without addEventListener on globalThis
       const previous = g.onunhandledrejection;
       g.onunhandledrejection = (event) => {
         onRejection(event?.reason ?? event);
-        try {
-          event?.preventDefault?.();
-        } catch {
-          /* ignore */
-        }
         if (typeof previous === "function") {
           try {
             previous(event);

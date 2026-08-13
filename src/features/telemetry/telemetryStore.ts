@@ -57,7 +57,7 @@ export function setSystemHealth(
   emit(healthListeners);
 }
 
-/** Coalesce store notifications to one paint frame to reduce UI thrash under 10 Hz telemetry. */
+/** Coalesce React notifications to one paint frame under 10 Hz telemetry. */
 let telemetryEmitScheduled = false;
 let healthEmitScheduled = false;
 
@@ -79,7 +79,11 @@ function scheduleHealthEmit() {
   });
 }
 
-/** Apply a live socket/REST telemetry packet with deadband merge. */
+/**
+ * Apply a live socket/REST telemetry packet with deadband merge.
+ * The store value updates synchronously (getTelemetrySnapshot / refs).
+ * React subscribers paint at most once per frame so Fields/HUD stay responsive.
+ */
 export function applyTelemetryPacket(data: TelemetrySnapshot) {
   const merged = mergeTelemetrySnapshot(telemetrySnapshot, data);
   if (merged !== telemetrySnapshot) {

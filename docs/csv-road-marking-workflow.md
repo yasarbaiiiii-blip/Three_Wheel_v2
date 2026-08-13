@@ -223,10 +223,11 @@ Splits one CSV's points into independent open paths on two signals, applied in o
    rows from a different key, however close together they are.
 2. **Jump-distance fallback** — within each key-group (or across the whole file when no
    grouping column exists at all), a gap far larger than that group's own typical point
-   spacing (`> max(5 m, 20 × median spacing)`) also starts a new group. Catches multiple
-   unrelated features bundled with no name column, and a real GPS dropout mid-survey —
-   showing two separate paths with a visible gap is the safe failure mode, not a fabricated
-   straight line bridging missing data.
+   spacing (`> max(5 m, 20 × median spacing)`) is a *candidate* split. A long first/last
+   interval (or an interior collinear hop) is treated as a **sparse waypoint straight**,
+   not a dropout — that is the mixed-density survey (132 m 2-pt approach + dense curve).
+   A split is never allowed to isolate a single point (that used to drop pin 1 silently).
+   Two dense unrelated features with a large non-collinear gap still split.
 
 **Known limitation:** two genuinely unrelated paths that happen to end/start close together
 (below the jump threshold) with no grouping column will still be bridged into one path.

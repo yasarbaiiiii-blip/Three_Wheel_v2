@@ -87,9 +87,9 @@ describe("assignPathCodes", () => {
     expect(assignPathCodes(parsed.points)[0]).toBe("path_1");
   });
 
-  it("never re-uses one code across a jump-split of the same feature", () => {
-    // One labelled feature whose two halves sit ~150 m apart: the jump rule splits it into
-    // two drawn paths. Re-using "road_a" for both would have the rover re-join them.
+  it("keeps one code across a collinear sparse hop of the same feature", () => {
+    // Same heading, ~150 m gap: mixed-density waypoint straight, not a dropout.
+    // Re-joining is the correct paint (same as a 132 m 2-pt line).
     const text = [
       "Name,Feature,Latitude,Longitude",
       "1,road_a,13.072000,80.261000",
@@ -100,6 +100,25 @@ describe("assignPathCodes", () => {
       "6,road_a,13.073520,80.261000",
     ].join("\n");
     const parsed = parseLocalPointCsv(text, "split.csv");
+    const codes = assignPathCodes(parsed.points);
+    expect(new Set(codes).size).toBe(1);
+    expect(codes[0]).toBe("road_a");
+    expect(codes[3]).toBe("road_a");
+  });
+
+  it("does not re-use one code across a non-collinear jump of the same feature", () => {
+    // Same label, ~150 m gap, but the second cluster heads east — unrelated feature
+    // halves. Must stay two codes so the rover does not invent a diagonal.
+    const text = [
+      "Name,Feature,Latitude,Longitude",
+      "1,road_a,13.072000,80.261000",
+      "2,road_a,13.072010,80.261000",
+      "3,road_a,13.072020,80.261000",
+      "4,road_a,13.072020,80.262500",
+      "5,road_a,13.072020,80.262510",
+      "6,road_a,13.072020,80.262520",
+    ].join("\n");
+    const parsed = parseLocalPointCsv(text, "split_L.csv");
     const codes = assignPathCodes(parsed.points);
     expect(new Set(codes).size).toBe(2);
     expect(codes[0]).toBe("road_a");

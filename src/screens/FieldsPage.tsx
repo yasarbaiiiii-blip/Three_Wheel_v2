@@ -220,6 +220,8 @@ export type FieldsPageProps = {
    * pending geometry missing.
    */
   onAlignContextChange?: (ctx: { fileId: string | null; displayLines: PlanLine[] }) => void;
+  /** Parent already hosts Mapbox (Home+Fields one-map). Skip a second native map. */
+  mapHostedExternally?: boolean;
   onCommitDxfFileAlignment?: (
     fileId: string,
     alignedLines: PlanLine[],
@@ -355,6 +357,7 @@ export function FieldsPage(props: FieldsPageProps) {
     sharedOriginGps = null,
     onBeginLocalImportBatch,
     onAlignContextChange,
+    mapHostedExternally = false,
     onCommitDxfFileAlignment,
     onLocalCsvParsed,
     onLocalDxfParsed,
@@ -838,6 +841,21 @@ export function FieldsPage(props: FieldsPageProps) {
     return localCsvToMapPins(activeCsvPreview);
   }, [activeCsvPreview]);
 
+  const EMPTY_MAP_PINS = useMemo(() => [] as { x: number; y: number; lat?: number; lon?: number }[], []);
+  const alignGuidePins = useMemo(() => {
+    if (activeStep !== "align") return EMPTY_MAP_PINS;
+    return refPoints.map((point) => {
+      const lat = parseFloat(point.lat);
+      const lon = parseFloat(point.lon);
+      return {
+        x: point.dxf_y,
+        y: point.dxf_x,
+        ...(Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : {}),
+      };
+    });
+  }, [activeStep, refPoints, EMPTY_MAP_PINS]);
+  const selectedMapPoints = localCsvMapPins ?? alignGuidePins;
+
   const stepStatus = (id: FieldsStepId): "pending" | "active" | "done" => {
     switch (id) {
       case "upload":
@@ -986,10 +1004,17 @@ export function FieldsPage(props: FieldsPageProps) {
   ]);
 
   return (
-    <View style={{ flex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
-      {/* Map preview — full screen background */}
-      <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
-        {renderPlanPreview({
+    <View style={{ flex: 1, backgroundColor: mapHostedExternally ? "transparent" : FIELDS_COLORS.bgBase }}>
+      {/* Map preview — skip a second Mapbox when Home already hosts the native map. */}
+      <View
+        style={{
+          ...StyleSheet.absoluteFillObject,
+          zIndex: 1,
+          backgroundColor: mapHostedExternally ? "transparent" : FIELDS_COLORS.bgBase,
+        }}
+        pointerEvents={mapHostedExternally && mapViewEnabled ? "none" : "auto"}
+      >
+        {mapHostedExternally && mapViewEnabled ? null : renderPlanPreview({
           lines: anchorSelectMode && anchorTarget ? anchorIsolatedLines : mapDisplayLines,
           ghostLines: offsetPreviewLines,
           mapSourceLines:
@@ -1009,19 +1034,7 @@ export function FieldsPage(props: FieldsPageProps) {
           roverPosN: previewRoverPoint?.north ?? null,
           roverPosE: previewRoverPoint?.east ?? null,
           roverHeadingDeg: telemetrySnapshot?.heading_ned_deg ?? null,
-          selectedPoints: localCsvMapPins
-            ? localCsvMapPins
-            : activeStep === "align"
-              ? refPoints.map((point) => {
-                  const lat = parseFloat(point.lat);
-                  const lon = parseFloat(point.lon);
-                  return {
-                    x: point.dxf_y,
-                    y: point.dxf_x,
-                    ...(Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : {}),
-                  };
-                })
-              : [],
+          selectedPoints: selectedMapPoints,
           onSelectPoint: localCsvMapPins
             ? undefined
             : canTapGuidePoints

@@ -25,7 +25,7 @@ import { splitCsvCells } from "./refPointsCsv";
 import {
   buildRoadMarkingFittedPath,
   polylineLengthM,
-  splitIntoOpenPathGroups,
+  splitIntoOpenPathGroupsDetailed,
 } from "./roadMarkingCsvPath";
 import type { PlanLine } from "../types/plan";
 
@@ -934,12 +934,14 @@ function buildPlanLineForGroup(
   pathIndex: number,
   groupCount: number,
   groupLabel: string | undefined,
-  surveyRmsM: number | null
+  surveyRmsM: number | null,
+  groupingWarnings: string[] = []
 ): PlanLine | null {
   const id = planLineIdForGroup(pathIndex);
   const label = planLineLabelForGroup(pathIndex, groupCount, groupLabel, sourcePointCount);
   const fitted = buildRoadMarkingFittedPath(rawNed, { surveyRmsM });
   const preview_points = fitted.samples;
+  const extraWarnings = groupingWarnings.filter((w) => typeof w === "string" && w.length > 0);
 
   if (preview_points.length < 2) {
     // Degenerate after open/dedupe — emit open chain only when nothing else is possible.
@@ -975,7 +977,11 @@ function buildPlanLineForGroup(
           vertexCount: fallback.length,
           fit_mode: "degenerate",
           paintable: false,
-          fit_warnings: ["Path degenerated to raw vertices after cleanup.", ...fitted.warnings],
+          fit_warnings: [
+            "Path degenerated to raw vertices after cleanup.",
+            ...fitted.warnings,
+            ...extraWarnings,
+          ],
           /** Raw survey rows for this group — Anchor candidate points (see roadMarkingCsvPath.ts). */
           source_points: rawNed.map((p) => ({ north: p.north, east: p.east })),
         },
@@ -1012,7 +1018,7 @@ function buildPlanLineForGroup(
         source_vertex_count: sourcePointCount,
         fit_mode: fitted.mode,
         paintable: fitted.paintable,
-        fit_warnings: fitted.warnings,
+        fit_warnings: [...fitted.warnings, ...extraWarnings],
         max_joint_turn_deg: fitted.quality.maxJointTurnDeg,
         length_ratio: fitted.quality.lengthRatio,
         max_source_deviation_m: fitted.quality.maxSourceDeviationM,
@@ -1055,7 +1061,7 @@ export function localCsvPointsToPlanLines(points: LocalPointCsvPoint[]): PlanLin
     east: p.east_m,
   }));
   const groupKeys = points.some((p) => p.group != null) ? points.map((p) => p.group) : undefined;
-  const groups = splitIntoOpenPathGroups(rawNed, groupKeys);
+  const { groups, warnings: groupingWarnings } = splitIntoOpenPathGroupsDetailed(rawNed, groupKeys);
 
   const lines: PlanLine[] = [];
   let cursor = 0;
@@ -1074,7 +1080,8 @@ export function localCsvPointsToPlanLines(points: LocalPointCsvPoint[]): PlanLin
       pathIndex,
       groups.length,
       groupLabel,
-      groupSurveyRmsM(groupSourcePoints)
+      groupSurveyRmsM(groupSourcePoints),
+      groupingWarnings
     );
     if (line) lines.push(line);
   }
