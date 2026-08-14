@@ -1532,7 +1532,17 @@ export function FieldsPage(props: FieldsPageProps) {
                         label: l.label,
                         paint: true as boolean,
                       }));
-                  return applyCsvOrderToPlanLines(prev, order, next);
+                  const rebuilt = applyCsvOrderToPlanLines(prev, order, next);
+                  const prevSig = prev.map((l) => `${l.id}:${l.layer}`).join("|");
+                  const nextSig = rebuilt.map((l) => `${l.id}:${l.layer}`).join("|");
+                  if (prevSig === nextSig) {
+                    const prevGeom = prev.map((l) => `${l.id}:${l.from.x},${l.from.y}:${l.to.x},${l.to.y}`).join("|");
+                    const nextGeom = rebuilt
+                      .map((l) => `${l.id}:${l.from.x},${l.from.y}:${l.to.x},${l.to.y}`)
+                      .join("|");
+                    if (prevGeom === nextGeom) return prev;
+                  }
+                  return rebuilt;
                 });
               }}
               onClearLocalCsv={() => {

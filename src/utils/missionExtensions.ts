@@ -102,6 +102,13 @@ export function normalizeCsvExtensionConfig(
   return { enabled, preM, aftM, perLine };
 }
 
+/** True when a PRE/AFT text field is a finished number (not "", "-", or "1."). */
+export function isCompleteExtensionDraft(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === "-" || trimmed.endsWith(".")) return false;
+  return Number.isFinite(Number(trimmed));
+}
+
 // ── Phase 3: per-edge freeness (port of path.py _extension_endpoint_freeness) ─
 
 export type MarkEdge = {

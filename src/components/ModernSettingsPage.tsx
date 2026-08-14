@@ -26,7 +26,10 @@ import {
   Lock,
   Globe,
   Square,
+  Gauge,
+  SlidersHorizontal,
 } from "lucide-react-native";
+import SchemaParamEditor from "./settings/SchemaParamEditor";
 
 const COLORS = {
   bgBase: "#09090b",
@@ -66,6 +69,7 @@ const SHADOWS = {
 };
 
 type SprayMode = "continuous" | "dashed" | "point";
+type SettingsSection = "connection" | "drive" | "spray" | "general";
 
 type ModernSettingsPageProps = {
   rtkCaster?: string;
@@ -319,7 +323,10 @@ const IconSegmentControl = ({
             size={compact ? 13 : 15}
             strokeWidth={2.2}
           />
-          <Text style={[styles.segmentText, compact && styles.segmentTextCompact, active && styles.segmentTextActive]}>
+          <Text
+            numberOfLines={1}
+            style={[styles.segmentText, compact && styles.segmentTextCompact, active && styles.segmentTextActive]}
+          >
             {opt.label}
           </Text>
         </Pressable>
@@ -434,7 +441,8 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
   } = props;
 
   const { width } = useWindowDimensions();
-  const twoColumn = width >= 900;
+  const compactTabs = width < 720;
+  const [section, setSection] = useState<SettingsSection>("connection");
 
   const [localRtkMode, setLocalRtkMode] = useState(
     rtkDefaultMode ? rtkDefaultMode : (rtkMode === "lora" ? "Lora" : "NTRIP")
@@ -688,6 +696,12 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
 
   const isNtripMode = localRtkMode === "NTRIP";
   const credentialsComplete = !!(rtkCaster && rtkPort && rtkMountPoint && rtkUsername && rtkPassword);
+  const sectionCopy: Record<SettingsSection, { title: string; subtitle: string }> = {
+    connection: { title: "RTK / LoRa", subtitle: "Correction source and caster login" },
+    drive: { title: "Drive", subtitle: "RPP speed, profile, and tracking knobs" },
+    spray: { title: "Spray", subtitle: "Hardware, pattern, and spray variables" },
+    general: { title: "General", subtitle: "Field operation preferences" },
+  };
 
   const rtkImportAction = (
     <Pressable
@@ -986,27 +1000,52 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
     <View style={styles.page}>
       <View style={styles.pageHeader}>
         <Text style={styles.pageTitle}>Settings</Text>
-        <Text style={styles.pageSubtitle}>RTK, spray, and field preferences</Text>
+        <Text style={styles.pageSubtitle}>{sectionCopy[section].subtitle}</Text>
       </View>
 
-      <View style={[styles.columns, twoColumn ? styles.columnsRow : styles.columnsStack]}>
-        <ScrollView
-          style={styles.column}
-          contentContainerStyle={styles.columnContent}
-          showsVerticalScrollIndicator={false}
-        >
-          {rtkSection}
-        </ScrollView>
+      <IconSegmentControl
+        compact={compactTabs}
+        value={section}
+        onChange={(id) => setSection(id as SettingsSection)}
+        options={[
+          { id: "connection", label: "RTK", icon: Satellite },
+          { id: "drive", label: "Drive", icon: Gauge },
+          { id: "spray", label: "Spray", icon: Droplets },
+          { id: "general", label: "General", icon: Settings },
+        ]}
+      />
 
-        <ScrollView
-          style={styles.column}
-          contentContainerStyle={styles.columnContent}
-          showsVerticalScrollIndicator={false}
-        >
-          {spraySection}
-          {generalSection}
-        </ScrollView>
-      </View>
+      <ScrollView
+        style={styles.column}
+        contentContainerStyle={styles.columnContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        nestedScrollEnabled
+      >
+        {section === "connection" ? rtkSection : null}
+        {section === "drive" ? (
+          <SchemaParamEditor
+            apiBaseUrl={apiBaseUrl}
+            family="rpp"
+            title="Drive / RPP"
+            subtitle="Live rover tracking parameters. Apply writes only the values you change."
+            icon={Gauge}
+          />
+        ) : null}
+        {section === "spray" ? (
+          <>
+            {spraySection}
+            <SchemaParamEditor
+              apiBaseUrl={apiBaseUrl}
+              family="spray"
+              title="Spray variables"
+              subtitle="Solenoid timing, nozzle offset, and actuator values. Hardware on/off is above."
+              icon={SlidersHorizontal}
+            />
+          </>
+        ) : null}
+        {section === "general" ? generalSection : null}
+      </ScrollView>
     </View>
   );
 }
@@ -1051,7 +1090,7 @@ const styles = StyleSheet.create({
   },
   columnContent: {
     gap: 16,
-    paddingBottom: 24,
+    paddingBottom: 40,
   },
   panel: {
     backgroundColor: COLORS.panelSolid,

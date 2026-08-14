@@ -19,7 +19,15 @@
  * Coordinate order is converted ONLY through toMapboxCoord/fromMapboxCoord.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Animated, Easing, StyleSheet, View, Text } from "react-native";
+import {
+  Animated,
+  Easing,
+  Keyboard,
+  StyleSheet,
+  View,
+  Text,
+  type LayoutChangeEvent,
+} from "react-native";
 import {
   MapView as RNMapboxMapView,
   Camera,
@@ -401,11 +409,15 @@ export function MapViewNative(props: MapViewProps) {
   // alignment with the map's own content the moment the user rotates the camera.
   const [cameraBearing, setCameraBearing] = useState(0);
   const [styleReady, setStyleReady] = useState(false);
-  const handleCameraChanged = useCallback((state: { properties?: { heading?: number } } | null | undefined) => {
+  const cameraZoomRef = useRef<number | null>(null);
+  const mapLayoutRef = useRef({ width: 0, height: 0 });
+  const handleCameraChanged = useCallback((state: { properties?: { heading?: number; zoom?: number } } | null | undefined) => {
     // Release builds: Mapbox sometimes delivers incomplete camera events; never throw.
     try {
       const heading = state?.properties?.heading;
       setCameraBearing(typeof heading === "number" && Number.isFinite(heading) ? heading : 0);
+      const zoom = state?.properties?.zoom;
+      if (typeof zoom === "number" && Number.isFinite(zoom)) cameraZoomRef.current = zoom;
     } catch (err) {
       console.warn("[MapViewNative] onCameraChanged ignored:", err);
     }
@@ -418,6 +430,37 @@ export function MapViewNative(props: MapViewProps) {
       console.warn("[MapViewNative] setCamera failed:", err);
     }
   }, []);
+  /** Keyboard / split-screen resize can leave the Android GL surface black until a touch. */
+  const recoverMapSurface = useCallback(() => {
+    if (!mapLoadedRef.current) return;
+    const zoom = cameraZoomRef.current;
+    if (zoom == null) return;
+    requestAnimationFrame(() => {
+      safeSetCamera({
+        animationDuration: 0,
+        zoomLevel: zoom,
+      });
+    });
+  }, [safeSetCamera]);
+  const handleMapContainerLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      const { width, height } = event.nativeEvent.layout;
+      const prev = mapLayoutRef.current;
+      mapLayoutRef.current = { width, height };
+      if (prev.width <= 0 || prev.height <= 0) return;
+      if (Math.abs(prev.width - width) < 1 && Math.abs(prev.height - height) < 1) return;
+      recoverMapSurface();
+    },
+    [recoverMapSurface]
+  );
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardDidShow", recoverMapSurface);
+    const hide = Keyboard.addListener("keyboardDidHide", recoverMapSurface);
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, [recoverMapSurface]);
   const safeFitBounds = useCallback(
     (sw: [number, number], ne: [number, number], padding: number, duration: number) => {
       if (!mapLoadedRef.current) return;
@@ -2938,7 +2981,7 @@ export function MapViewNative(props: MapViewProps) {
   const activeHandlesFC = previewHandlesFC ?? steadyHandlesFC;
   // The inner map content (shared between editing and non-editing render).
   const mapContent = (
-    <View style={styles.container}>
+    <View style={styles.container} onLayout={handleMapContainerLayout} collapsable={false}>
       <RNMapboxMapView
         ref={mapViewRef}
         style={styles.map}

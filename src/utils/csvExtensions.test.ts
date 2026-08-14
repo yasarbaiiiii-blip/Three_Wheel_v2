@@ -6,6 +6,7 @@ import {
   buildCsvExtensionLines,
   extensionEndpointsForLine,
   isMissionClosedLoop,
+  isCompleteExtensionDraft,
   normalizeCsvExtensionConfig,
   terminalUnitVector,
 } from "./csvExtensions";
@@ -55,6 +56,17 @@ describe("normalizeCsvExtensionConfig", () => {
   it("does not floor aft when disabled", () => {
     const cfg = normalizeCsvExtensionConfig({ enabled: false, preM: 0.5, aftM: 0.02 });
     expect(cfg.aftM).toBeCloseTo(0.02, 6);
+  });
+});
+
+describe("isCompleteExtensionDraft", () => {
+  it("rejects in-progress typing so the map is not rebuilt mid-keystroke", () => {
+    expect(isCompleteExtensionDraft("")).toBe(false);
+    expect(isCompleteExtensionDraft("-")).toBe(false);
+    expect(isCompleteExtensionDraft("1.")).toBe(false);
+    expect(isCompleteExtensionDraft("0.")).toBe(false);
+    expect(isCompleteExtensionDraft("0.5")).toBe(true);
+    expect(isCompleteExtensionDraft("1")).toBe(true);
   });
 });
 

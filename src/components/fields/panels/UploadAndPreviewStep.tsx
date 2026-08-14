@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Alert, Platform, Pressable, TouchableOpacity, ScrollView, Switch, Text, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
@@ -14,6 +14,7 @@ import {
   CSV_EXT_MAX_M,
   CSV_EXT_WARN_M,
   DXF_EXTENSION_CONFIG,
+  isCompleteExtensionDraft,
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
 } from "../../../utils/missionExtensions";
@@ -303,19 +304,67 @@ export function UploadAndPreviewStep({
       : null
   );
 
-  /** Draft strings for CSV extension inputs (commit normalized values on blur). */
+  /** Draft strings for CSV extension inputs (commit on blur / after a pause). */
   const [csvExtPreDraft, setCsvExtPreDraft] = useState(
     () => String(csvExtensionConfig?.preM ?? 0.5)
   );
   const [csvExtAftDraft, setCsvExtAftDraft] = useState(
     () => String(csvExtensionConfig?.aftM ?? 0.5)
   );
+  const extPreFocusedRef = useRef(false);
+  const extAftFocusedRef = useRef(false);
+  const extCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!csvExtensionConfig) return;
-    setCsvExtPreDraft(String(csvExtensionConfig.preM));
-    setCsvExtAftDraft(String(csvExtensionConfig.aftM));
+    if (!extPreFocusedRef.current) setCsvExtPreDraft(String(csvExtensionConfig.preM));
+    if (!extAftFocusedRef.current) setCsvExtAftDraft(String(csvExtensionConfig.aftM));
   }, [csvExtensionConfig?.preM, csvExtensionConfig?.aftM, csvExtensionConfig?.enabled]);
+
+  useEffect(
+    () => () => {
+      if (extCommitTimerRef.current) clearTimeout(extCommitTimerRef.current);
+    },
+    []
+  );
+
+  const commitExtensionDrafts = useCallback(
+    (preRaw: string, aftRaw: string) => {
+      if (!csvExtensionConfig || !onCsvExtensionConfigChange) return;
+      const next = normalizeCsvExtensionConfig({
+        ...csvExtensionConfig,
+        enabled: true,
+        preM: isCompleteExtensionDraft(preRaw) ? parseFloat(preRaw) : csvExtensionConfig.preM,
+        aftM: isCompleteExtensionDraft(aftRaw) ? parseFloat(aftRaw) : csvExtensionConfig.aftM,
+      });
+      const same =
+        next.enabled === csvExtensionConfig.enabled &&
+        next.preM === csvExtensionConfig.preM &&
+        next.aftM === csvExtensionConfig.aftM &&
+        next.perLine === csvExtensionConfig.perLine;
+      if (same) {
+        setCsvExtPreDraft(String(next.preM));
+        setCsvExtAftDraft(String(next.aftM));
+        return;
+      }
+      onInvalidateWorkflow("spray");
+      onCsvExtensionConfigChange(next);
+      setCsvExtPreDraft(String(next.preM));
+      setCsvExtAftDraft(String(next.aftM));
+    },
+    [csvExtensionConfig, onCsvExtensionConfigChange, onInvalidateWorkflow]
+  );
+
+  const scheduleExtensionCommit = useCallback(
+    (preRaw: string, aftRaw: string) => {
+      if (extCommitTimerRef.current) clearTimeout(extCommitTimerRef.current);
+      if (!isCompleteExtensionDraft(preRaw) || !isCompleteExtensionDraft(aftRaw)) return;
+      extCommitTimerRef.current = setTimeout(() => {
+        commitExtensionDrafts(preRaw, aftRaw);
+      }, 400);
+    },
+    [commitExtensionDrafts]
+  );
 
   // Re-hydrate summary when parent already holds the parse (layout remount on CSV flow).
   useEffect(() => {
@@ -1410,25 +1459,17 @@ export function UploadAndPreviewStep({
                       color: FIELDS_COLORS.textMain,
                     }}
                     value={csvExtPreDraft}
+                    onFocus={() => {
+                      extPreFocusedRef.current = true;
+                    }}
                     onChangeText={(v) => {
-                      onInvalidateWorkflow("spray");
                       setCsvExtPreDraft(v);
-                      const n = parseFloat(v);
-                      if (!Number.isFinite(n)) return;
-                      onCsvExtensionConfigChange(
-                        normalizeCsvExtensionConfig({
-                          ...csvExtensionConfig,
-                          preM: n,
-                        })
-                      );
+                      scheduleExtensionCommit(v, csvExtAftDraft);
                     }}
                     onBlur={() => {
-                      const next = normalizeCsvExtensionConfig({
-                        ...csvExtensionConfig,
-                        preM: parseFloat(csvExtPreDraft),
-                      });
-                      onCsvExtensionConfigChange(next);
-                      setCsvExtPreDraft(String(next.preM));
+                      extPreFocusedRef.current = false;
+                      if (extCommitTimerRef.current) clearTimeout(extCommitTimerRef.current);
+                      commitExtensionDrafts(csvExtPreDraft, csvExtAftDraft);
                     }}
                     keyboardType="numeric"
                   />
@@ -1449,27 +1490,17 @@ export function UploadAndPreviewStep({
                       color: FIELDS_COLORS.textMain,
                     }}
                     value={csvExtAftDraft}
+                    onFocus={() => {
+                      extAftFocusedRef.current = true;
+                    }}
                     onChangeText={(v) => {
-                      onInvalidateWorkflow("spray");
                       setCsvExtAftDraft(v);
-                      const n = parseFloat(v);
-                      if (!Number.isFinite(n)) return;
-                      onCsvExtensionConfigChange(
-                        normalizeCsvExtensionConfig({
-                          ...csvExtensionConfig,
-                          enabled: true,
-                          aftM: n,
-                        })
-                      );
+                      scheduleExtensionCommit(csvExtPreDraft, v);
                     }}
                     onBlur={() => {
-                      const next = normalizeCsvExtensionConfig({
-                        ...csvExtensionConfig,
-                        enabled: true,
-                        aftM: parseFloat(csvExtAftDraft),
-                      });
-                      onCsvExtensionConfigChange(next);
-                      setCsvExtAftDraft(String(next.aftM));
+                      extAftFocusedRef.current = false;
+                      if (extCommitTimerRef.current) clearTimeout(extCommitTimerRef.current);
+                      commitExtensionDrafts(csvExtPreDraft, csvExtAftDraft);
                     }}
                     keyboardType="numeric"
                   />
