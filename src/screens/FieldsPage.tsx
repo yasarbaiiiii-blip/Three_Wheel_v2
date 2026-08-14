@@ -220,8 +220,6 @@ export type FieldsPageProps = {
    * pending geometry missing.
    */
   onAlignContextChange?: (ctx: { fileId: string | null; displayLines: PlanLine[] }) => void;
-  /** Parent already hosts Mapbox (Home+Fields one-map). Skip a second native map. */
-  mapHostedExternally?: boolean;
   onCommitDxfFileAlignment?: (
     fileId: string,
     alignedLines: PlanLine[],
@@ -357,7 +355,6 @@ export function FieldsPage(props: FieldsPageProps) {
     sharedOriginGps = null,
     onBeginLocalImportBatch,
     onAlignContextChange,
-    mapHostedExternally = false,
     onCommitDxfFileAlignment,
     onLocalCsvParsed,
     onLocalDxfParsed,
@@ -1004,17 +1001,11 @@ export function FieldsPage(props: FieldsPageProps) {
   ]);
 
   return (
-    <View style={{ flex: 1, backgroundColor: mapHostedExternally ? "transparent" : FIELDS_COLORS.bgBase }}>
-      {/* Map preview — skip a second Mapbox when Home already hosts the native map. */}
-      <View
-        style={{
-          ...StyleSheet.absoluteFillObject,
-          zIndex: 1,
-          backgroundColor: mapHostedExternally ? "transparent" : FIELDS_COLORS.bgBase,
-        }}
-        pointerEvents={mapHostedExternally && mapViewEnabled ? "none" : "auto"}
-      >
-        {mapHostedExternally && mapViewEnabled ? null : renderPlanPreview({
+    <View style={{ flex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
+      {/* Fields owns this MapView. Sharing Home's map under a full-screen overlay
+          made native Mapbox invisible on Android. */}
+      <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
+        {renderPlanPreview({
           lines: anchorSelectMode && anchorTarget ? anchorIsolatedLines : mapDisplayLines,
           ghostLines: offsetPreviewLines,
           mapSourceLines:

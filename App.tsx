@@ -6967,7 +6967,6 @@ function SectionPages(props: {
           {...props}
           previewRoverPoint={previewRoverPoint}
           onClearMission={props.onClearMission}
-          mapHostedExternally={!!mapViewEnabled}
           renderPlanPreview={(previewProps) => (
             <PlanPreview
               {...previewProps}

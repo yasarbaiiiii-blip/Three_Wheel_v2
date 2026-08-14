@@ -725,6 +725,7 @@ export default function ModernHomeUI(props) {
   // ── Control popover (mission-layer assignment + pills + Anchor) ──
   const [showControlMenu, setShowControlMenu] = useState(false);
   const showRoverMarker = layerVisibility?.rover !== false;
+  const showRefPointsLayer = layerVisibility?.refPoints !== false;
   // Opt-in, unlike the flags around it: path length labels stay hidden until explicitly
   // enabled, so a dense plan reads as geometry rather than a wall of numbers.
   const showLengthLabels = layerVisibility?.lengths === true;
@@ -2023,8 +2024,9 @@ export default function ModernHomeUI(props) {
 
   return (
     <View style={styles.container}>
-      {/* One native map for Home and Fields — do not unmount when opening Fields. */}
-      {isHomePage || isFieldsPage ? (
+      {/* Home map only. Fields hosts its own PlanPreview MapView — a transparent
+          full-screen Fields overlay hides native Mapbox on Android. */}
+      {isHomePage ? (
       <View style={{ ...StyleSheet.absoluteFillObject, zIndex: mapFullscreen ? 200 : 1, backgroundColor: COLORS.bgBase }}>
         {mapViewEnabled ? (
           <>
@@ -2068,8 +2070,8 @@ export default function ModernHomeUI(props) {
               onSelectPoint={props.onSelectPoint}
               onSelectLine={onSelectLine}
               selectedLineId={selectedLineId}
-              selectedPoints={csvMapPins ?? undefined}
-              showRefPointLabels={showRefPointLabels}
+              selectedPoints={showRefPointsLayer ? csvMapPins ?? undefined : undefined}
+              showRefPointLabels={showRefPointsLayer && showRefPointLabels}
               onMapClickToMark={drawingMode === "click" ? handleMapClickToMark : undefined}
               drawnWaypoints={drawingMode !== "none" ? drawnPoints : undefined}
               manualDrawingEnabled={drawingMode === "manual"}
