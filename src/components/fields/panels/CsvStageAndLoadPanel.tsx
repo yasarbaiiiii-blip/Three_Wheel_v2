@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Platform, Text, TouchableOpacity, View } from "react-native";
 
 import type * as pathApi from "../../../api/pathApi";
@@ -108,6 +108,8 @@ type CsvStageAndLoadPanelProps = {
   /** App's staged-load commit: loads to the controller, verifies, re-hydrates, navigates. */
   onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
   missionActionBusy: boolean;
+  onBeginPathExclusive?: (kind: "send") => boolean;
+  onEndPathExclusive?: (kind: "send") => void;
 };
 
 function nullableNumber(value: unknown): number | null {
@@ -163,6 +165,8 @@ export function CsvStageAndLoadPanel({
   onWorkflowStep,
   onLoadSelectedPath,
   missionActionBusy,
+  onBeginPathExclusive,
+  onEndPathExclusive,
 }: CsvStageAndLoadPanelProps) {
   void _roverPose;
   const extCfg = useMemo(
@@ -171,6 +175,7 @@ export function CsvStageAndLoadPanel({
   );
   void _mapPinCount;
   const [busy, setBusy] = useState(false);
+  const sendInFlightRef = useRef(false);
   const [step, setStep] = useState<CsvStageStep | "loadMission" | null>(null);
   const [staged, setStaged] = useState<{ missionId: string; plan: pathApi.PathPlanResponse } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -366,6 +371,7 @@ export function CsvStageAndLoadPanel({
   };
 
   const handleSendAppPlanned = async () => {
+    if (sendInFlightRef.current || busy || missionActionBusy) return;
     if (!apiBaseUrl) {
       Alert.alert("Not connected", "Connect to the rover before sending the path.");
       return;
@@ -410,6 +416,11 @@ export function CsvStageAndLoadPanel({
       return;
     }
 
+    sendInFlightRef.current = true;
+    if (onBeginPathExclusive && !onBeginPathExclusive("send")) {
+      sendInFlightRef.current = false;
+      return;
+    }
     setBusy(true);
     setError(null);
     setStep(null);
@@ -487,10 +498,13 @@ export function CsvStageAndLoadPanel({
     } finally {
       setBusy(false);
       setStep(null);
+      sendInFlightRef.current = false;
+      onEndPathExclusive?.("send");
     }
   };
 
   const handleSendRoverPlanned = async () => {
+    if (sendInFlightRef.current || busy || missionActionBusy) return;
     if (!apiBaseUrl) {
       Alert.alert("Not connected", "Connect to the rover before sending the path.");
       return;
@@ -505,6 +519,11 @@ export function CsvStageAndLoadPanel({
         [...readiness.hardBlocks, ...readiness.needsAck].slice(0, 6).join("\n\n") ||
           "Resolve geometry or parse warnings before sending."
       );
+      return;
+    }
+    sendInFlightRef.current = true;
+    if (onBeginPathExclusive && !onBeginPathExclusive("send")) {
+      sendInFlightRef.current = false;
       return;
     }
     setBusy(true);
@@ -545,6 +564,8 @@ export function CsvStageAndLoadPanel({
     } finally {
       setBusy(false);
       setStep(null);
+      sendInFlightRef.current = false;
+      onEndPathExclusive?.("send");
     }
   };
 

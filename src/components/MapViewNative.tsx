@@ -1260,9 +1260,23 @@ export function MapViewNative(props: MapViewProps) {
   // Only depends on rover fields + lines/origin so high-frequency updates never
   // re-render the plan/boundary/item sources.
   const roverGeo = useMemo(() => {
-    const lat = telemetrySnapshot?.lat;
-    const lon = telemetrySnapshot?.lon;
+    let lat = telemetrySnapshot?.lat;
+    let lon = telemetrySnapshot?.lon;
     const heading = telemetrySnapshot?.heading_ned_deg ?? null;
+    const posN = telemetrySnapshot?.pos_n;
+    const posE = telemetrySnapshot?.pos_e;
+    if (
+      (lat == null || lon == null || !Number.isFinite(lat) || !Number.isFinite(lon)) &&
+      projectionOrigin &&
+      typeof posN === "number" &&
+      Number.isFinite(posN) &&
+      typeof posE === "number" &&
+      Number.isFinite(posE)
+    ) {
+      const gps = projectPlanNorthEastToGps(posN, posE, projectionOrigin);
+      lat = gps.lat;
+      lon = gps.lon;
+    }
 
     if (lat == null || lon == null || !Number.isFinite(lat) || !Number.isFinite(lon)) {
       return { center: null as Coord | null, heading, rangeCircle: null as GeoJSON.Feature<GeoJSON.Polygon> | null, targetLine: null as GeoJSON.FeatureCollection | null, targetPoint: null as Coord | null };
@@ -1321,6 +1335,8 @@ export function MapViewNative(props: MapViewProps) {
   }, [
     telemetrySnapshot?.lat,
     telemetrySnapshot?.lon,
+    telemetrySnapshot?.pos_n,
+    telemetrySnapshot?.pos_e,
     telemetrySnapshot?.heading_ned_deg,
     telemetrySnapshot?.mission_state,
     telemetrySnapshot?.projection_segment_index,

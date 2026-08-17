@@ -78,6 +78,8 @@ export type FieldsPageProps = {
   onSelectPath: (name: string) => void;
   onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
   missionActionBusy: boolean;
+  onBeginPathExclusive?: (kind: "send" | "load") => boolean;
+  onEndPathExclusive?: (kind: "send" | "load") => void;
   onSelectLine: (id: string | null, options?: { highlightLineIds?: string[] | null }) => void;
   /**
    * Explicit multi-line highlight set from Path Order Extension group selection.
@@ -297,6 +299,8 @@ export function FieldsPage(props: FieldsPageProps) {
     onSelectPath,
     onLoadSelectedPath,
     missionActionBusy,
+    onBeginPathExclusive,
+    onEndPathExclusive,
     onSelectLine,
     highlightLineIds = null,
     extPre,
@@ -1686,6 +1690,8 @@ export function FieldsPage(props: FieldsPageProps) {
                         onWorkflowStep={onWorkflowStep}
                         onLoadSelectedPath={onLoadSelectedPath}
                         missionActionBusy={missionActionBusy}
+                        onBeginPathExclusive={onBeginPathExclusive}
+                        onEndPathExclusive={onEndPathExclusive}
                       />
                     </View>
                   }
@@ -1854,6 +1860,8 @@ export function FieldsPage(props: FieldsPageProps) {
               setStagedMissionId={setStagedMissionId}
               onLoadSelectedPath={onLoadSelectedPath}
               missionActionBusy={missionActionBusy}
+              onBeginPathExclusive={onBeginPathExclusive}
+              onEndPathExclusive={onEndPathExclusive}
               onNavigateHome={handleNavigateHome}
               extensionVisible={layerVisibility.extension !== false}
               onToggleExtensionVisible={handleToggleExtensionVisible}

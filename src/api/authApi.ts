@@ -17,6 +17,7 @@ let sessionToken: string | null = null;
 let activeBaseUrl: string | null = null;
 let invalidSessionHandler: (() => void) | null = null;
 let originalFetch: typeof fetch | null = null;
+let invalidSessionNotified = false;
 
 export function normalizeBase(url: string | null | undefined): string | null {
   const trimmed = (url ?? "").trim().replace(/\/$/, "");
@@ -40,6 +41,7 @@ export function setAuthRuntime(args: {
   sessionToken = args.token;
   activeBaseUrl = normalizeBase(args.baseUrl);
   invalidSessionHandler = args.onInvalidSession ?? invalidSessionHandler;
+  if (args.token) invalidSessionNotified = false;
 }
 
 /**
@@ -121,8 +123,14 @@ export function installAuthenticatedFetch() {
       ? withAuthHeader(init, sessionToken)
       : init;
     const response = await originalFetch!(input, nextInit);
-    if (response.status === 401 && shouldAttachToken(input)) {
-      invalidSessionHandler?.();
+    if (response.status === 401 && shouldAttachToken(input) && !invalidSessionNotified) {
+      invalidSessionNotified = true;
+      sessionToken = null;
+      try {
+        invalidSessionHandler?.();
+      } catch {
+        // Kick-to-login must never throw through fetch.
+      }
     }
     return response;
   }) as typeof fetch;

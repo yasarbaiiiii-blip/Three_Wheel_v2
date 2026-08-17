@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, TouchableOpacity, Text, View } from "react-native";
 import { Loader } from "lucide-react-native";
 
@@ -47,6 +47,8 @@ type PathOrderAndSprayStepProps = {
   setStagedMissionId: React.Dispatch<React.SetStateAction<string | null>>;
   onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
   missionActionBusy: boolean;
+  onBeginPathExclusive?: (kind: "load") => boolean;
+  onEndPathExclusive?: (kind: "load") => void;
   onNavigateHome: () => void;
   extensionVisible: boolean;
   onToggleExtensionVisible: () => void;
@@ -120,12 +122,15 @@ export function PathOrderAndSprayStep({
   setStagedMissionId,
   onLoadSelectedPath,
   missionActionBusy,
+  onBeginPathExclusive,
+  onEndPathExclusive,
   onNavigateHome,
   extPre,
   extAft,
   extensionsEnabled = false,
 }: PathOrderAndSprayStepProps) {
   const [isLoading, setIsLoading] = useState(false);
+  const loadInFlightRef = useRef(false);
   const [loadStep, setLoadStep] = useState<pathApi.LoadToControllerStep | null>(null);
   /** Operator path order + paint (CSV-parity list). */
   const [pathOrder, setPathOrder] = useState<CsvPathOrderEntry[] | null>(null);
@@ -203,6 +208,7 @@ export function PathOrderAndSprayStep({
   }, [extensionConfig.enabled, extensionConfig.preM, extensionConfig.aftM, extensionConfig.perLine]);
 
   const handleLoadToController = async () => {
+    if (loadInFlightRef.current || isLoading || missionActionBusy) return;
     const targetPath = selectedPathName || importedPlan?.fileName;
     if (!apiBaseUrl || !targetPath) {
       Alert.alert("Error", "No path selected to load.");
@@ -214,6 +220,11 @@ export function PathOrderAndSprayStep({
       return;
     }
 
+    loadInFlightRef.current = true;
+    if (onBeginPathExclusive && !onBeginPathExclusive("load")) {
+      loadInFlightRef.current = false;
+      return;
+    }
     setIsLoading(true);
     setLoadStep(null);
 
@@ -287,6 +298,8 @@ export function PathOrderAndSprayStep({
     } finally {
       setIsLoading(false);
       setLoadStep(null);
+      loadInFlightRef.current = false;
+      onEndPathExclusive?.("load");
     }
   };
 

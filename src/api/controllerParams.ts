@@ -136,29 +136,142 @@ export function normalizeControllerParams(raw: unknown): ControllerParam[] {
     }));
 }
 
+export const PARAMS_REQUEST_TIMEOUT_MS = 20000;
+
+export type SetParamsResult = {
+  ok: boolean;
+  accepted: string[];
+  rejected: string[];
+};
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = PARAMS_REQUEST_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Rover did not respond in time. Check Wi-Fi and try again.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function fetchControllerParams(
   baseUrl: string,
-  family: ParamFamily
+  family: ParamFamily,
+  timeoutMs = PARAMS_REQUEST_TIMEOUT_MS
 ): Promise<ControllerParam[]> {
-  const res = await fetch(apiUrl(baseUrl, familyPath(family)), {
-    method: "GET",
-    headers: { Accept: "application/json" },
-  });
+  const res = await fetchWithTimeout(
+    apiUrl(baseUrl, familyPath(family)),
+    { method: "GET", headers: { Accept: "application/json" } },
+    timeoutMs
+  );
   if (!res.ok) throw new Error(await readApiError(res));
   return normalizeControllerParams(await res.json());
+}
+
+export function interpretSetParamsResult(
+  payload: Record<string, ParamValue>,
+  body: unknown
+): SetParamsResult {
+  const names = Object.keys(payload);
+  if (!body || typeof body !== "object") {
+    return { ok: true, accepted: names, rejected: [] };
+  }
+  const record = body as { ok?: unknown; parameters?: unknown };
+  const map =
+    record.parameters && typeof record.parameters === "object" && !Array.isArray(record.parameters)
+      ? (record.parameters as Record<string, unknown>)
+      : null;
+
+  if (map) {
+    const accepted: string[] = [];
+    const rejected: string[] = [];
+    for (const name of names) {
+      if (map[name] === false) rejected.push(name);
+      else accepted.push(name);
+    }
+    return { ok: record.ok !== false && rejected.length === 0, accepted, rejected };
+  }
+
+  if (record.ok === false) {
+    return { ok: false, accepted: [], rejected: names };
+  }
+  return { ok: true, accepted: names, rejected: [] };
+}
+
+export function mergeAppliedCurrent(
+  params: ControllerParam[],
+  applied: Record<string, ParamValue>
+): ControllerParam[] {
+  if (Object.keys(applied).length === 0) return params;
+  return params.map((item) =>
+    item.name in applied ? { ...item, current: applied[item.name] } : item
+  );
+}
+
+export function dropSettledEdits(
+  edits: Record<string, ParamValue>,
+  payload: Record<string, ParamValue>,
+  accepted: string[],
+  paramsByName: Map<string, ControllerParam>
+): Record<string, ParamValue> {
+  if (accepted.length === 0) return edits;
+  const acceptedSet = new Set(accepted);
+  let changed = false;
+  const next: Record<string, ParamValue> = {};
+  for (const [name, value] of Object.entries(edits)) {
+    if (!acceptedSet.has(name)) {
+      next[name] = value;
+      continue;
+    }
+    const param = paramsByName.get(name);
+    if (param && !valuesEqual(value, payload[name], param.type)) {
+      next[name] = value;
+      continue;
+    }
+    changed = true;
+  }
+  return changed || Object.keys(next).length !== Object.keys(edits).length ? next : edits;
+}
+
+export function formatAppliedNames(names: string[]): string {
+  const labels = names.map(paramLabel);
+  if (labels.length === 0) return "";
+  if (labels.length <= 3) return labels.join(", ");
+  return `${labels.slice(0, 2).join(", ")} +${labels.length - 2} more`;
 }
 
 export async function setControllerParams(
   baseUrl: string,
   family: ParamFamily,
-  parameters: Record<string, ParamValue>
-): Promise<void> {
-  const res = await fetch(apiUrl(baseUrl, familyPath(family)), {
-    method: "PUT",
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify({ parameters }),
-  });
+  parameters: Record<string, ParamValue>,
+  timeoutMs = PARAMS_REQUEST_TIMEOUT_MS
+): Promise<SetParamsResult> {
+  const res = await fetchWithTimeout(
+    apiUrl(baseUrl, familyPath(family)),
+    {
+      method: "PUT",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ parameters }),
+    },
+    timeoutMs
+  );
   if (!res.ok) throw new Error(await readApiError(res));
+  const text = await res.text();
+  if (!text.trim()) return interpretSetParamsResult(parameters, null);
+  try {
+    return interpretSetParamsResult(parameters, JSON.parse(text));
+  } catch {
+    return interpretSetParamsResult(parameters, null);
+  }
 }
 
 export function paramKind(param: Pick<ControllerParam, "type">): string {

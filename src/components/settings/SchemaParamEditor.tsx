@@ -1,7 +1,6 @@
-import React, { memo, useCallback, useEffect, useMemo, useState } from "react";
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Pressable,
   StyleSheet,
   Switch,
@@ -9,22 +8,25 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { AlertTriangle, Check, ChevronDown, ChevronRight, Gauge, RefreshCw } from "lucide-react-native";
+import { Check, ChevronDown, ChevronRight, Gauge, RefreshCw } from "lucide-react-native";
 import {
   advancedParams,
   baselineValue,
   buildDirtyPayload,
   coerceParamValue,
   coerceTypedValue,
+  dropSettledEdits,
   ENUM_OPTIONS,
   fetchControllerParams,
   fieldParams,
+  formatAppliedNames,
   formatParamValue,
   groupParams,
   INERT_PARAM_NAMES,
   isBoolParam,
   isNumericParam,
   liveValueCount,
+  mergeAppliedCurrent,
   paramLabel,
   paramUnit,
   setControllerParams,
@@ -44,12 +46,19 @@ type SchemaParamEditorProps = {
   icon?: React.ComponentType<{ color?: string; size?: number; strokeWidth?: number }>;
 };
 
+type ApplyStatus =
+  | { kind: "idle" }
+  | { kind: "applying"; count: number }
+  | { kind: "applied"; names: string[] }
+  | { kind: "failed"; message: string };
+
 type ParamRowProps = {
   param: ControllerParam;
   value: ParamValue | null;
   draft: string;
   error: string | null;
   dirty: boolean;
+  applied: boolean;
   onDraftChange: (name: string, draft: string) => void;
   onCommitDraft: (name: string) => void;
   onTypedChange: (name: string, value: ParamValue) => void;
@@ -88,6 +97,7 @@ const ParamRow = memo(function ParamRow({
   draft,
   error,
   dirty,
+  applied,
   onDraftChange,
   onCommitDraft,
   onTypedChange,
@@ -98,55 +108,63 @@ const ParamRow = memo(function ParamRow({
   const numeric = isNumericParam(param) && !enumOptions;
   const numericValue = typeof value === "number" && Number.isFinite(value) ? value : Number(param.default);
   const boolValue = Boolean(value);
+  const range =
+    typeof param.min === "number" || typeof param.max === "number"
+      ? `${typeof param.min === "number" ? param.min : "—"}–${typeof param.max === "number" ? param.max : "—"}`
+      : null;
 
   return (
-    <View style={[styles.row, dirty && styles.rowDirty, inert && styles.rowInert]}>
-      <View style={styles.rowCopy}>
-        <View style={styles.rowTitleLine}>
-          <Text style={styles.rowTitle}>{paramLabel(param.name)}</Text>
-          {unit ? <Text style={styles.unit}>{unit}</Text> : null}
-          {dirty ? <View style={styles.dirtyDot} /> : null}
-        </View>
-        {param.description ? (
-          <Text style={styles.rowHint} numberOfLines={3}>
-            {param.description}
-          </Text>
-        ) : null}
-        {inert ? (
-          <View style={styles.inertBadge}>
-            <AlertTriangle color={SETTINGS_COLORS.warning} size={11} strokeWidth={2.4} />
-            <Text style={styles.inertText}>Inert — kept for contract only</Text>
+    <View style={[styles.row, dirty && styles.rowDirty, applied && styles.rowApplied, inert && styles.rowInert]}>
+      <View style={styles.rowMain}>
+        <View style={styles.rowCopy}>
+          <View style={styles.rowTitleLine}>
+            <Text style={styles.rowTitle} numberOfLines={1}>
+              {paramLabel(param.name)}
+            </Text>
+            {unit ? <Text style={styles.unit}>{unit}</Text> : null}
+            {dirty ? (
+              <View style={styles.dirtyDot} />
+            ) : applied ? (
+              <Check color={SETTINGS_COLORS.success} size={11} strokeWidth={2.8} />
+            ) : null}
           </View>
-        ) : null}
-        {error ? <Text style={styles.rowError}>{error}</Text> : null}
-      </View>
-
-      {isBoolParam(param) ? (
-        <Switch
-          value={boolValue}
-          onValueChange={(next) => onTypedChange(param.name, next)}
-          trackColor={{ false: SETTINGS_COLORS.surfaceSolid, true: SETTINGS_COLORS.accentBrand }}
-          thumbColor={boolValue ? SETTINGS_COLORS.accentText : SETTINGS_COLORS.textMuted}
-        />
-      ) : enumOptions ? (
-        <View style={{ flex: 1 }}>
-          <EnumChips
-            options={enumOptions}
-            value={String(value ?? param.default ?? "") === "sharp" ? "segment" : String(value ?? param.default ?? "")}
-            onChange={(next) => onTypedChange(param.name, next)}
-          />
+          {numeric ? (
+            <Text style={styles.rowHint} numberOfLines={1}>
+              Scroll dial or type{range ? ` · ${range}` : ""}
+            </Text>
+          ) : param.description ? (
+            <Text style={styles.rowHint} numberOfLines={1}>
+              {param.description}
+            </Text>
+          ) : null}
+          {inert ? <Text style={styles.inertText}>Inert — no effect</Text> : null}
+          {error ? <Text style={styles.rowError}>{error}</Text> : null}
         </View>
-      ) : (
-        <View style={styles.controls}>
-          {numeric && Number.isFinite(numericValue) ? (
-            <VerticalValueDial
-              param={param}
-              value={numericValue}
+
+        {isBoolParam(param) ? (
+          <Switch
+            value={boolValue}
+            onValueChange={(next) => onTypedChange(param.name, next)}
+            trackColor={{ false: SETTINGS_COLORS.surfaceSolid, true: SETTINGS_COLORS.accentBrand }}
+            thumbColor={boolValue ? SETTINGS_COLORS.accentText : SETTINGS_COLORS.textMuted}
+          />
+        ) : enumOptions ? (
+          <View style={styles.enumWrap}>
+            <EnumChips
+              options={enumOptions}
+              value={String(value ?? param.default ?? "") === "sharp" ? "segment" : String(value ?? param.default ?? "")}
               onChange={(next) => onTypedChange(param.name, next)}
             />
-          ) : null}
-          <View style={styles.manual}>
-            <Text style={styles.manualLabel}>Manual</Text>
+          </View>
+        ) : (
+          <View style={styles.controls}>
+            {numeric && Number.isFinite(numericValue) ? (
+              <VerticalValueDial
+                param={param}
+                value={numericValue}
+                onChange={(next) => onTypedChange(param.name, next)}
+              />
+            ) : null}
             <TextInput
               value={draft}
               onChangeText={(text) => onDraftChange(param.name, text)}
@@ -158,15 +176,11 @@ const ParamRow = memo(function ParamRow({
               style={[styles.input, error ? styles.inputError : null]}
               placeholder={formatParamValue(param.default)}
               placeholderTextColor={SETTINGS_COLORS.textDim}
+              accessibilityLabel={`Type ${paramLabel(param.name)}`}
             />
-            {typeof param.min === "number" || typeof param.max === "number" ? (
-              <Text style={styles.range}>
-                {typeof param.min === "number" ? param.min : "—"} to {typeof param.max === "number" ? param.max : "—"}
-              </Text>
-            ) : null}
           </View>
-        </View>
-      )}
+        )}
+      </View>
     </View>
   );
 });
@@ -185,8 +199,31 @@ export default function SchemaParamEditor({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [applyStatus, setApplyStatus] = useState<ApplyStatus>({ kind: "idle" });
+  const [appliedNames, setAppliedNames] = useState<string[]>([]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
+  const appliedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savingRef = useRef(false);
+
+  const clearAppliedTimer = useCallback(() => {
+    if (appliedTimerRef.current) {
+      clearTimeout(appliedTimerRef.current);
+      appliedTimerRef.current = null;
+    }
+  }, []);
+
+  const markApplied = useCallback((names: string[]) => {
+    clearAppliedTimer();
+    setAppliedNames(names);
+    if (names.length === 0) return;
+    appliedTimerRef.current = setTimeout(() => {
+      setAppliedNames([]);
+      setApplyStatus((prev) => (prev.kind === "applied" ? { kind: "idle" } : prev));
+    }, 2800);
+  }, [clearAppliedTimer]);
+
+  useEffect(() => () => clearAppliedTimer(), [clearAppliedTimer]);
 
   const load = useCallback(async () => {
     if (!apiBaseUrl) {
@@ -194,6 +231,8 @@ export default function SchemaParamEditor({
       setEdits({});
       setDrafts({});
       setErrors({});
+      setApplyStatus({ kind: "idle" });
+      setAppliedNames([]);
       return;
     }
     setLoading(true);
@@ -204,6 +243,8 @@ export default function SchemaParamEditor({
       setEdits({});
       setDrafts({});
       setErrors({});
+      setApplyStatus({ kind: "idle" });
+      setAppliedNames([]);
     } catch (err: unknown) {
       setLoadError(err instanceof Error ? err.message : "Failed to load parameters.");
     } finally {
@@ -298,23 +339,66 @@ export default function SchemaParamEditor({
   const offline = params.length > 0 && liveCount === 0;
 
   const handleSave = useCallback(async () => {
-    if (!apiBaseUrl || dirtyCount === 0) return;
+    if (!apiBaseUrl || dirtyCount === 0 || savingRef.current) return;
+    const payload = buildDirtyPayload(params, edits);
+    const names = Object.keys(payload);
+    if (names.length === 0) return;
+
+    savingRef.current = true;
     setSaving(true);
+    setApplyStatus({ kind: "applying", count: names.length });
     try {
-      const payload = buildDirtyPayload(params, edits);
-      await setControllerParams(apiBaseUrl, family, payload);
-      await load();
+      const result = await setControllerParams(apiBaseUrl, family, payload);
+      const acceptedPayload: Record<string, ParamValue> = {};
+      for (const name of result.accepted) {
+        if (name in payload) acceptedPayload[name] = payload[name];
+      }
+
+      setParams((prev) => mergeAppliedCurrent(prev, acceptedPayload));
+      setEdits((prev) => dropSettledEdits(prev, payload, result.accepted, paramsByName));
+      setDrafts((prev) => {
+        if (result.accepted.length === 0) return prev;
+        const next = { ...prev };
+        for (const name of result.accepted) delete next[name];
+        return next;
+      });
+      setErrors((prev) => {
+        if (result.accepted.length === 0) return prev;
+        const next = { ...prev };
+        for (const name of result.accepted) delete next[name];
+        return next;
+      });
+
+      if (result.rejected.length > 0) {
+        markApplied(result.accepted);
+        setApplyStatus({
+          kind: "failed",
+          message:
+            result.accepted.length > 0
+              ? `Rover kept ${formatAppliedNames(result.accepted)}. Failed: ${formatAppliedNames(result.rejected)}.`
+              : `Rover rejected ${formatAppliedNames(result.rejected)}.`,
+        });
+        return;
+      }
+
+      markApplied(result.accepted);
+      setApplyStatus({ kind: "applied", names: result.accepted });
     } catch (err: unknown) {
-      Alert.alert("Could not apply", err instanceof Error ? err.message : "Parameter update failed.");
+      setApplyStatus({
+        kind: "failed",
+        message: err instanceof Error ? err.message : "Parameter update failed.",
+      });
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
-  }, [apiBaseUrl, dirtyCount, edits, family, load, params]);
+  }, [apiBaseUrl, dirtyCount, edits, family, markApplied, params, paramsByName]);
 
   const handleDiscard = useCallback(() => {
     setEdits({});
     setDrafts({});
     setErrors({});
+    setApplyStatus({ kind: "idle" });
   }, []);
 
   const toggleGroup = useCallback((group: string) => {
@@ -330,6 +414,7 @@ export default function SchemaParamEditor({
         draft={draftOf(param)}
         error={errors[param.name] ?? null}
         dirty={param.name in edits}
+        applied={appliedNames.includes(param.name) && !(param.name in edits)}
         onDraftChange={handleDraftChange}
         onCommitDraft={handleCommitDraft}
         onTypedChange={handleTypedChange}
@@ -341,23 +426,86 @@ export default function SchemaParamEditor({
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           <View style={styles.iconWrap}>
-            <Icon color={SETTINGS_COLORS.accentBrand} size={18} strokeWidth={2.2} />
+            <Icon color={SETTINGS_COLORS.accentBrand} size={15} strokeWidth={2.2} />
           </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.title}>{title}</Text>
-            <Text style={styles.subtitle}>{subtitle}</Text>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.title} numberOfLines={1}>{title}</Text>
+            <Text style={styles.subtitle} numberOfLines={1}>
+              {params.length > 0
+                ? `${field.length} field · ${advanced.length} advanced · ${liveCount}/${params.length} live`
+                : subtitle}
+            </Text>
           </View>
         </View>
-        <Pressable onPress={load} disabled={loading || !apiBaseUrl} style={styles.refreshBtn}>
-          {loading ? (
-            <ActivityIndicator color={SETTINGS_COLORS.accentText} size="small" />
-          ) : (
-            <RefreshCw color={SETTINGS_COLORS.accentText} size={14} strokeWidth={2.4} />
-          )}
-        </Pressable>
+        <View style={styles.headerActions}>
+          <Pressable
+            onPress={handleDiscard}
+            disabled={dirtyCount === 0 || saving}
+            style={[styles.headerBtn, styles.discardBtn, dirtyCount === 0 && styles.btnDisabled]}
+          >
+            <Text style={styles.discardText}>Discard</Text>
+          </Pressable>
+          <Pressable
+            onPress={handleSave}
+            disabled={dirtyCount === 0 || saving || !apiBaseUrl}
+            style={[styles.headerBtn, styles.applyBtn, (dirtyCount === 0 || saving) && styles.btnDisabled]}
+          >
+            {saving ? (
+              <ActivityIndicator color={SETTINGS_COLORS.accentText} size="small" />
+            ) : (
+              <Check color={SETTINGS_COLORS.accentText} size={13} strokeWidth={2.6} />
+            )}
+            <Text style={styles.applyText}>
+              {saving ? "Applying" : dirtyCount > 0 ? `Apply ${dirtyCount}` : "Apply"}
+            </Text>
+          </Pressable>
+          <Pressable onPress={load} disabled={loading || saving || !apiBaseUrl} style={styles.refreshBtn}>
+            {loading ? (
+              <ActivityIndicator color={SETTINGS_COLORS.accentText} size="small" />
+            ) : (
+              <RefreshCw color={SETTINGS_COLORS.accentText} size={13} strokeWidth={2.4} />
+            )}
+          </Pressable>
+        </View>
       </View>
 
       <View style={styles.body}>
+        <Text style={styles.howHint}>
+          Dial or type to stage a change. Apply writes it to the rover — the value is not live until then.
+        </Text>
+
+        {dirtyCount > 0 && applyStatus.kind !== "applying" ? (
+          <View style={styles.statusBanner}>
+            <Text style={styles.statusText}>
+              {dirtyCount} change{dirtyCount === 1 ? "" : "s"} not on the rover yet
+            </Text>
+          </View>
+        ) : null}
+
+        {applyStatus.kind === "applying" ? (
+          <View style={[styles.statusBanner, styles.statusApplying]}>
+            <ActivityIndicator color={SETTINGS_COLORS.accentBrand} size="small" />
+            <Text style={styles.statusText}>
+              Writing {applyStatus.count} value{applyStatus.count === 1 ? "" : "s"} to the rover…
+            </Text>
+          </View>
+        ) : null}
+
+        {applyStatus.kind === "applied" ? (
+          <View style={[styles.statusBanner, styles.statusApplied]}>
+            <Check color={SETTINGS_COLORS.success} size={12} strokeWidth={2.6} />
+            <Text style={[styles.statusText, styles.statusAppliedText]}>
+              Applied on rover: {formatAppliedNames(applyStatus.names)}
+            </Text>
+          </View>
+        ) : null}
+
+        {applyStatus.kind === "failed" ? (
+          <View style={[styles.statusBanner, styles.statusFailed]}>
+            <Text style={[styles.statusText, styles.statusFailedText]}>{applyStatus.message}</Text>
+          </View>
+        ) : null}
+
         {!apiBaseUrl ? (
           <View style={styles.banner}>
             <Text style={styles.bannerText}>Connect to the rover to load live controller settings.</Text>
@@ -372,32 +520,20 @@ export default function SchemaParamEditor({
 
         {offline ? (
           <View style={[styles.banner, styles.bannerWarn]}>
-            <Text style={styles.bannerText}>
-              Controller offline — showing schema defaults. Apply will fail until the node is up.
-            </Text>
-          </View>
-        ) : null}
-
-        {params.length > 0 ? (
-          <View style={styles.metaRow}>
-            <Text style={styles.meta}>
-              {field.length} field · {advanced.length} advanced
-            </Text>
-            <Text style={styles.meta}>{liveCount}/{params.length} live</Text>
+            <Text style={styles.bannerText}>Controller offline — defaults only. Apply needs the node up.</Text>
           </View>
         ) : null}
 
         {loading && params.length === 0 ? (
           <View style={styles.loadingBox}>
             <ActivityIndicator color={SETTINGS_COLORS.accentBrand} />
-            <Text style={styles.bannerText}>Loading parameters…</Text>
           </View>
         ) : null}
 
         {field.length > 0 ? (
           <View style={styles.section}>
             <Text style={styles.sectionLabel}>Field</Text>
-            {renderRows(field)}
+            <View style={styles.listCard}>{renderRows(field)}</View>
           </View>
         ) : null}
 
@@ -405,14 +541,12 @@ export default function SchemaParamEditor({
           <View style={styles.section}>
             <Pressable onPress={() => setAdvancedOpen((open) => !open)} style={styles.advancedToggle}>
               {advancedOpen ? (
-                <ChevronDown color={SETTINGS_COLORS.accentBrand} size={16} strokeWidth={2.4} />
+                <ChevronDown color={SETTINGS_COLORS.accentBrand} size={14} strokeWidth={2.4} />
               ) : (
-                <ChevronRight color={SETTINGS_COLORS.textMuted} size={16} strokeWidth={2.4} />
+                <ChevronRight color={SETTINGS_COLORS.textMuted} size={14} strokeWidth={2.4} />
               )}
-              <View style={{ flex: 1 }}>
-                <Text style={styles.advancedTitle}>Advanced</Text>
-                <Text style={styles.advancedHint}>{advanced.length} extra controller knobs</Text>
-              </View>
+              <Text style={styles.advancedTitle}>Advanced</Text>
+              <Text style={styles.groupCount}>{advanced.length}</Text>
             </Pressable>
             {advancedOpen
               ? advancedGroups.map(({ group, params: items }) => {
@@ -421,42 +555,20 @@ export default function SchemaParamEditor({
                     <View key={group} style={styles.group}>
                       <Pressable onPress={() => toggleGroup(group)} style={styles.groupHeader}>
                         {open ? (
-                          <ChevronDown color={SETTINGS_COLORS.textMuted} size={14} strokeWidth={2.4} />
+                          <ChevronDown color={SETTINGS_COLORS.textMuted} size={13} strokeWidth={2.4} />
                         ) : (
-                          <ChevronRight color={SETTINGS_COLORS.textMuted} size={14} strokeWidth={2.4} />
+                          <ChevronRight color={SETTINGS_COLORS.textMuted} size={13} strokeWidth={2.4} />
                         )}
                         <Text style={styles.groupTitle}>{group}</Text>
                         <Text style={styles.groupCount}>{items.length}</Text>
                       </Pressable>
-                      {open ? renderRows(items) : null}
+                      {open ? <View style={styles.listCard}>{renderRows(items)}</View> : null}
                     </View>
                   );
                 })
               : null}
           </View>
         ) : null}
-
-        <View style={styles.footer}>
-          <Pressable
-            onPress={handleDiscard}
-            disabled={dirtyCount === 0 || saving}
-            style={[styles.footerBtn, styles.discardBtn, dirtyCount === 0 && styles.btnDisabled]}
-          >
-            <Text style={styles.discardText}>Discard</Text>
-          </Pressable>
-          <Pressable
-            onPress={handleSave}
-            disabled={dirtyCount === 0 || saving || !apiBaseUrl}
-            style={[styles.footerBtn, styles.applyBtn, (dirtyCount === 0 || saving) && styles.btnDisabled]}
-          >
-            {saving ? (
-              <ActivityIndicator color={SETTINGS_COLORS.accentText} size="small" />
-            ) : (
-              <Check color={SETTINGS_COLORS.accentText} size={16} strokeWidth={2.4} />
-            )}
-            <Text style={styles.applyText}>{saving ? "Applying…" : `Apply ${dirtyCount || ""}`.trim()}</Text>
-          </Pressable>
-        </View>
       </View>
     </View>
   );
@@ -465,32 +577,38 @@ export default function SchemaParamEditor({
 const styles = StyleSheet.create({
   panel: {
     backgroundColor: SETTINGS_COLORS.panelSolid,
-    borderRadius: 20,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: SETTINGS_COLORS.panelBorder,
     overflow: "hidden",
   },
   header: {
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
     justifyContent: "space-between",
-    gap: 12,
-    paddingHorizontal: 18,
-    paddingTop: 18,
-    paddingBottom: 14,
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: SETTINGS_COLORS.panelBorder,
   },
   headerLeft: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
+    gap: 8,
     flex: 1,
+    minWidth: 0,
+  },
+  headerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    flexShrink: 0,
   },
   iconWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
+    width: 28,
+    height: 28,
+    borderRadius: 8,
     backgroundColor: SETTINGS_COLORS.accentMuted,
     borderWidth: 1,
     borderColor: SETTINGS_COLORS.accentBorder,
@@ -499,34 +617,85 @@ const styles = StyleSheet.create({
   },
   title: {
     color: SETTINGS_COLORS.textMain,
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: "700",
   },
   subtitle: {
     color: SETTINGS_COLORS.textMuted,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "500",
-    marginTop: 2,
+    marginTop: 1,
+  },
+  headerBtn: {
+    minHeight: 32,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 4,
   },
   refreshBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
+    width: 32,
+    height: 32,
+    borderRadius: 8,
     backgroundColor: SETTINGS_COLORS.accentBrand,
     alignItems: "center",
     justifyContent: "center",
   },
   body: {
-    padding: 18,
-    gap: 14,
+    padding: 10,
+    gap: 8,
+  },
+  howHint: {
+    color: SETTINGS_COLORS.textDim,
+    fontSize: 10,
+    fontWeight: "600",
+    lineHeight: 14,
+  },
+  statusBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: SETTINGS_COLORS.accentMuted,
+    borderWidth: 1,
+    borderColor: SETTINGS_COLORS.accentBorder,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  statusApplying: {
+    backgroundColor: SETTINGS_COLORS.infoMuted,
+    borderColor: SETTINGS_COLORS.infoBorder,
+  },
+  statusApplied: {
+    backgroundColor: SETTINGS_COLORS.successMuted,
+    borderColor: SETTINGS_COLORS.successBorder,
+  },
+  statusFailed: {
+    backgroundColor: SETTINGS_COLORS.dangerMuted,
+    borderColor: SETTINGS_COLORS.dangerBorder,
+  },
+  statusText: {
+    flex: 1,
+    color: SETTINGS_COLORS.textMain,
+    fontSize: 11,
+    fontWeight: "600",
+    lineHeight: 15,
+  },
+  statusAppliedText: {
+    color: SETTINGS_COLORS.success,
+  },
+  statusFailedText: {
+    color: SETTINGS_COLORS.danger,
   },
   banner: {
     backgroundColor: SETTINGS_COLORS.surfaceSolid,
     borderWidth: 1,
     borderColor: SETTINGS_COLORS.panelBorder,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
   },
   bannerWarn: {
     backgroundColor: SETTINGS_COLORS.warningMuted,
@@ -534,146 +703,131 @@ const styles = StyleSheet.create({
   },
   bannerText: {
     color: SETTINGS_COLORS.textMuted,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "500",
-    lineHeight: 16,
-  },
-  metaRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-  },
-  meta: {
-    color: SETTINGS_COLORS.textDim,
-    fontSize: 10,
-    fontWeight: "800",
-    letterSpacing: 0.6,
-    textTransform: "uppercase",
+    lineHeight: 15,
   },
   loadingBox: {
     alignItems: "center",
-    gap: 10,
-    paddingVertical: 18,
+    paddingVertical: 12,
   },
   section: {
-    gap: 10,
+    gap: 6,
   },
   sectionLabel: {
     color: SETTINGS_COLORS.textDim,
     fontSize: 10,
     fontWeight: "800",
-    letterSpacing: 0.9,
+    letterSpacing: 0.7,
     textTransform: "uppercase",
   },
-  row: {
+  listCard: {
     backgroundColor: SETTINGS_COLORS.cardSolid,
-    borderRadius: 14,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: SETTINGS_COLORS.panelBorder,
-    padding: 14,
-    gap: 12,
+    overflow: "hidden",
+  },
+  row: {
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: SETTINGS_COLORS.panelBorder,
   },
   rowDirty: {
-    borderColor: SETTINGS_COLORS.accentBorder,
     backgroundColor: SETTINGS_COLORS.accentMuted,
   },
+  rowApplied: {
+    backgroundColor: SETTINGS_COLORS.successMuted,
+  },
   rowInert: {
-    opacity: 0.78,
+    opacity: 0.72,
   },
-  rowCopy: {
-    gap: 4,
-  },
-  rowTitleLine: {
+  rowMain: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
   },
+  rowCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 1,
+  },
+  rowTitleLine: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
   rowTitle: {
     color: SETTINGS_COLORS.textMain,
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: "700",
     textTransform: "capitalize",
     flexShrink: 1,
   },
   unit: {
     color: SETTINGS_COLORS.accentBrand,
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: "800",
-    letterSpacing: 0.4,
   },
   dirtyDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
     backgroundColor: SETTINGS_COLORS.accentBrand,
   },
   rowHint: {
     color: SETTINGS_COLORS.textDim,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "500",
-    lineHeight: 15,
   },
   rowError: {
     color: SETTINGS_COLORS.danger,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "600",
-  },
-  inertBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    marginTop: 4,
   },
   inertText: {
     color: SETTINGS_COLORS.warning,
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: "700",
   },
   controls: {
     flexDirection: "row",
     alignItems: "center",
-    flexWrap: "wrap",
-    gap: 12,
-  },
-  manual: {
-    flex: 1,
     gap: 6,
+    flexShrink: 0,
   },
-  manualLabel: {
-    color: SETTINGS_COLORS.textDim,
-    fontSize: 10,
-    fontWeight: "800",
-    letterSpacing: 0.8,
-    textTransform: "uppercase",
+  enumWrap: {
+    flexShrink: 1,
+    maxWidth: "58%",
   },
   input: {
+    width: 72,
     backgroundColor: SETTINGS_COLORS.surfaceSolid,
     borderWidth: 1,
     borderColor: SETTINGS_COLORS.panelBorder,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    minHeight: 44,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 0,
+    height: 32,
     color: SETTINGS_COLORS.textMain,
-    fontSize: 16,
+    fontSize: 13,
     fontVariant: ["tabular-nums"],
+    textAlign: "center",
   },
   inputError: {
     borderColor: SETTINGS_COLORS.danger,
   },
-  range: {
-    color: SETTINGS_COLORS.textDim,
-    fontSize: 10,
-    fontWeight: "600",
-  },
   chips: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 6,
+    gap: 4,
+    justifyContent: "flex-end",
   },
   chip: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 9,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 7,
     backgroundColor: SETTINGS_COLORS.surfaceSolid,
     borderWidth: 1,
     borderColor: SETTINGS_COLORS.panelBorder,
@@ -684,7 +838,7 @@ const styles = StyleSheet.create({
   },
   chipText: {
     color: SETTINGS_COLORS.textMuted,
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: "700",
   },
   chipTextActive: {
@@ -693,59 +847,42 @@ const styles = StyleSheet.create({
   advancedToggle: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
+    gap: 8,
     backgroundColor: SETTINGS_COLORS.cardSolid,
     borderWidth: 1,
     borderColor: SETTINGS_COLORS.panelBorder,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
   },
   advancedTitle: {
+    flex: 1,
     color: SETTINGS_COLORS.textMain,
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: "700",
   },
-  advancedHint: {
-    color: SETTINGS_COLORS.textDim,
-    fontSize: 11,
-    marginTop: 1,
-  },
   group: {
-    gap: 8,
+    gap: 4,
   },
   groupHeader: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    paddingVertical: 4,
+    gap: 6,
+    paddingVertical: 2,
+    paddingHorizontal: 2,
   },
   groupTitle: {
     flex: 1,
     color: SETTINGS_COLORS.textMuted,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "800",
-    letterSpacing: 0.4,
+    letterSpacing: 0.3,
     textTransform: "uppercase",
   },
   groupCount: {
     color: SETTINGS_COLORS.textDim,
     fontSize: 10,
     fontWeight: "700",
-  },
-  footer: {
-    flexDirection: "row",
-    gap: 10,
-    paddingTop: 4,
-  },
-  footerBtn: {
-    flex: 1,
-    minHeight: 46,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    gap: 8,
   },
   discardBtn: {
     backgroundColor: SETTINGS_COLORS.surfaceSolid,
@@ -754,7 +891,7 @@ const styles = StyleSheet.create({
   },
   discardText: {
     color: SETTINGS_COLORS.textMain,
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: "700",
   },
   applyBtn: {
@@ -764,10 +901,10 @@ const styles = StyleSheet.create({
   },
   applyText: {
     color: SETTINGS_COLORS.accentText,
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: "800",
   },
   btnDisabled: {
-    opacity: 0.45,
+    opacity: 0.4,
   },
 });

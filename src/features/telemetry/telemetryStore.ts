@@ -57,43 +57,21 @@ export function setSystemHealth(
   emit(healthListeners);
 }
 
-/** Coalesce React notifications to one paint frame under 10 Hz telemetry. */
-let telemetryEmitScheduled = false;
-let healthEmitScheduled = false;
-
-function scheduleTelemetryEmit() {
-  if (telemetryEmitScheduled) return;
-  telemetryEmitScheduled = true;
-  requestAnimationFrame(() => {
-    telemetryEmitScheduled = false;
-    emit(telemetryListeners);
-  });
-}
-
-function scheduleHealthEmit() {
-  if (healthEmitScheduled) return;
-  healthEmitScheduled = true;
-  requestAnimationFrame(() => {
-    healthEmitScheduled = false;
-    emit(healthListeners);
-  });
-}
-
 /**
  * Apply a live socket/REST telemetry packet with deadband merge.
- * The store value updates synchronously (getTelemetrySnapshot / refs).
- * React subscribers paint at most once per frame so Fields/HUD stay responsive.
+ * Store + React subscribers update synchronously so a hitch in requestAnimationFrame
+ * cannot freeze the HUD/rover marker.
  */
 export function applyTelemetryPacket(data: TelemetrySnapshot) {
   const merged = mergeTelemetrySnapshot(telemetrySnapshot, data);
   if (merged !== telemetrySnapshot) {
     telemetrySnapshot = merged;
-    scheduleTelemetryEmit();
+    emit(telemetryListeners);
   }
   const health = mergeSystemHealthFromTelemetry(systemHealth, data);
   if (health !== systemHealth) {
     systemHealth = health;
-    scheduleHealthEmit();
+    emit(healthListeners);
   }
 }
 

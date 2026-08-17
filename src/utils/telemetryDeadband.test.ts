@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   mergeTelemetrySnapshot,
   mergeSystemHealthFromTelemetry,
+  normalizeTelemetryPacket,
   withinDeadband,
   POSITION_DEADBAND_M,
 } from "./telemetryDeadband";
@@ -44,5 +45,65 @@ describe("telemetryDeadband", () => {
     const health = mergeSystemHealthFromTelemetry(prev, data);
     expect(health.mission_state).toBe("running");
     expect(health.armed).toBe(true);
+  });
+
+  it("does not wipe last-known pose when a sparse packet omits or nulls it", () => {
+    const prev = {
+      pos_n: 12.3,
+      pos_e: -4.1,
+      lat: 25.1,
+      lon: 55.2,
+      armed: true,
+      mode: "AUTO",
+    } as TelemetrySnapshot;
+    const merged = mergeTelemetrySnapshot(prev, {
+      armed: true,
+      mode: "AUTO",
+      pos_n: null,
+      lat: undefined,
+    } as TelemetrySnapshot);
+    expect(merged.pos_n).toBe(12.3);
+    expect(merged.lat).toBe(25.1);
+    expect(merged.pos_e).toBe(-4.1);
+  });
+
+  it("applies discrete mission_state even when pose is unchanged", () => {
+    const prev = { pos_n: 1, pos_e: 2, mission_state: "idle" } as TelemetrySnapshot;
+    const merged = mergeTelemetrySnapshot(prev, {
+      pos_n: 1,
+      pos_e: 2,
+      mission_state: "running",
+    });
+    expect(merged.mission_state).toBe("running");
+  });
+});
+
+describe("normalizeTelemetryPacket", () => {
+  it("reads aliases and unwraps a nested telemetry envelope", () => {
+    const packet = normalizeTelemetryPacket({
+      telemetry: {
+        north: 3.5,
+        east: -1.25,
+        latitude: 25.2,
+        longitude: 55.3,
+        heading: 90,
+        speed: 0.4,
+      },
+    });
+    expect(packet).toMatchObject({
+      pos_n: 3.5,
+      pos_e: -1.25,
+      lat: 25.2,
+      lon: 55.3,
+      heading_ned_deg: 90,
+      speed_m_s: 0.4,
+    });
+  });
+
+  it("returns null for empty junk and omits missing numeric fields", () => {
+    expect(normalizeTelemetryPacket(null)).toBeNull();
+    const packet = normalizeTelemetryPacket({ armed: true, mode: "MANUAL" });
+    expect(packet).toEqual({ armed: true, mode: "MANUAL" });
+    expect(packet && "pos_n" in packet).toBe(false);
   });
 });

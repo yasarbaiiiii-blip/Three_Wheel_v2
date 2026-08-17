@@ -26,10 +26,33 @@ describe("authApi authenticated fetch", () => {
     await fetch("http://192.168.1.102:5001/api/mission/status");
     await fetch("http://192.168.1.102:5001/api/auth/login", { method: "POST" });
     await fetch("http://192.168.1.102:5001/api/expired");
+    await fetch("http://192.168.1.102:5001/api/expired-again");
 
     expect(seen[0].token).toBe("session-token");
     expect(seen[1].token).toBeNull();
     expect(invalid).toHaveBeenCalledTimes(1);
+    expect(seen[3].token).toBeNull();
+
+    globalThis.fetch = original;
+  });
+
+  it("does not let a throwing invalid-session handler break fetch", async () => {
+    vi.resetModules();
+    const authApi = await import("./authApi");
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => new Response("{}", { status: 401 })) as typeof fetch;
+
+    authApi.installAuthenticatedFetch();
+    authApi.setAuthRuntime({
+      token: "session-token",
+      baseUrl: "http://192.168.1.102:5001",
+      onInvalidSession: () => {
+        throw new Error("handler boom");
+      },
+    });
+
+    const response = await fetch("http://192.168.1.102:5001/api/rpp/params");
+    expect(response.status).toBe(401);
 
     globalThis.fetch = original;
   });

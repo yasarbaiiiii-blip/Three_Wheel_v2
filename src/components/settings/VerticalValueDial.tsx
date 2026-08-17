@@ -9,13 +9,8 @@ import {
   View,
 } from "react-native";
 import { ChevronDown, ChevronUp } from "lucide-react-native";
-import {
-  buildDialTicks,
-  decimalsForStep,
-  nearestTickIndex,
-  type ControllerParam,
-} from "../../api/controllerParams";
-import { DIAL_HEIGHT, DIAL_ITEM_H, DIAL_PAD, DIAL_VISIBLE, SETTINGS_COLORS } from "./settingsTheme";
+import { buildDialTicks, nearestTickIndex, type ControllerParam } from "../../api/controllerParams";
+import { DIAL_HEIGHT, DIAL_ITEM_H, DIAL_PAD, DIAL_VISIBLE, DIAL_WIDTH, SETTINGS_COLORS } from "./settingsTheme";
 
 type VerticalValueDialProps = {
   param: ControllerParam;
@@ -73,8 +68,7 @@ function VerticalValueDialInner({ param, value, onChange, disabled = false }: Ve
         ignoreNext.current = false;
         return;
       }
-      const index = Math.round(event.nativeEvent.contentOffset.y / DIAL_ITEM_H);
-      commitIndex(index);
+      commitIndex(Math.round(event.nativeEvent.contentOffset.y / DIAL_ITEM_H));
     },
     [commitIndex, disabled]
   );
@@ -89,21 +83,16 @@ function VerticalValueDialInner({ param, value, onChange, disabled = false }: Ve
     [commitIndex, disabled, scrollToIndex, selected, ticks.length]
   );
 
-  const stepHint = useMemo(() => {
-    if (ticks.length < 2) return "";
-    const gap = Math.abs(ticks[1] - ticks[0]);
-    return integer ? `step ${gap}` : `step ${gap.toFixed(decimalsForStep(gap))}`;
-  }, [integer, ticks]);
-
   return (
     <View style={[styles.wrap, disabled && styles.disabled]}>
       <Pressable
         onPress={() => stepBy(-1)}
         disabled={disabled || selected <= 0}
-        hitSlop={8}
+        hitSlop={6}
         style={({ pressed }) => [styles.chevron, pressed && styles.chevronPressed]}
+        accessibilityLabel="Increase with dial"
       >
-        <ChevronUp color={SETTINGS_COLORS.accentBrand} size={16} strokeWidth={2.4} />
+        <ChevronUp color={SETTINGS_COLORS.accentBrand} size={13} strokeWidth={2.6} />
       </Pressable>
 
       <View style={styles.well}>
@@ -118,7 +107,6 @@ function VerticalValueDialInner({ param, value, onChange, disabled = false }: Ve
           scrollEnabled={!disabled}
           onMomentumScrollEnd={onMomentumEnd}
           onScrollEndDrag={onMomentumEnd}
-          scrollEventThrottle={16}
           contentOffset={{ x: 0, y: selected * DIAL_ITEM_H }}
         >
           <View style={{ height: DIAL_PAD }} />
@@ -139,7 +127,7 @@ function VerticalValueDialInner({ param, value, onChange, disabled = false }: Ve
                   style={[
                     styles.itemText,
                     active && styles.itemTextActive,
-                    { opacity: active ? 1 : Math.max(0.18, 1 - dist / (DIAL_VISIBLE - 1)) },
+                    { opacity: active ? 1 : Math.max(0.22, 1 - dist / DIAL_VISIBLE) },
                   ]}
                 >
                   {tickLabel(tick, integer)}
@@ -154,41 +142,40 @@ function VerticalValueDialInner({ param, value, onChange, disabled = false }: Ve
       <Pressable
         onPress={() => stepBy(1)}
         disabled={disabled || selected >= ticks.length - 1}
-        hitSlop={8}
+        hitSlop={6}
         style={({ pressed }) => [styles.chevron, pressed && styles.chevronPressed]}
+        accessibilityLabel="Decrease with dial"
       >
-        <ChevronDown color={SETTINGS_COLORS.accentBrand} size={16} strokeWidth={2.4} />
+        <ChevronDown color={SETTINGS_COLORS.accentBrand} size={13} strokeWidth={2.6} />
       </Pressable>
-      {stepHint ? <Text style={styles.hint}>{stepHint}</Text> : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   wrap: {
-    width: 92,
+    width: DIAL_WIDTH,
     alignItems: "center",
-    gap: 4,
   },
   disabled: {
     opacity: 0.45,
   },
   well: {
     height: DIAL_HEIGHT,
-    width: 84,
+    width: DIAL_WIDTH - 4,
     backgroundColor: SETTINGS_COLORS.surfaceSolid,
-    borderRadius: 14,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: SETTINGS_COLORS.panelBorder,
     overflow: "hidden",
   },
   selection: {
     position: "absolute",
-    left: 4,
-    right: 4,
+    left: 2,
+    right: 2,
     top: DIAL_PAD,
     height: DIAL_ITEM_H,
-    borderRadius: 10,
+    borderRadius: 6,
     borderWidth: 1,
     borderColor: SETTINGS_COLORS.accentBorder,
     backgroundColor: SETTINGS_COLORS.accentMuted,
@@ -201,30 +188,23 @@ const styles = StyleSheet.create({
   },
   itemText: {
     color: SETTINGS_COLORS.textMuted,
-    fontSize: 13,
+    fontSize: 10,
     fontWeight: "600",
     fontVariant: ["tabular-nums"],
   },
   itemTextActive: {
     color: SETTINGS_COLORS.accentBrand,
-    fontSize: 15,
+    fontSize: 11,
     fontWeight: "800",
   },
   chevron: {
-    width: 32,
-    height: 22,
+    width: 28,
+    height: 16,
     alignItems: "center",
     justifyContent: "center",
   },
   chevronPressed: {
-    opacity: 0.6,
-  },
-  hint: {
-    color: SETTINGS_COLORS.textDim,
-    fontSize: 9,
-    fontWeight: "700",
-    letterSpacing: 0.3,
-    textTransform: "uppercase",
+    opacity: 0.55,
   },
 });
 

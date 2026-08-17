@@ -1,3 +1,5 @@
+import { normalizeTelemetryPacket } from "../utils/telemetryDeadband";
+
 export type LoadMissionPayload = {
   path_name?: string;
   mission_file?: string;
@@ -185,30 +187,16 @@ export async function fetchLatestTelemetryPose(
     });
     if (!res.ok) return null;
     const data = (await res.json()) as Record<string, unknown>;
-    if (!data || typeof data !== "object") return null;
-
-    const num = (v: unknown): number | null =>
-      typeof v === "number" && Number.isFinite(v) ? v : null;
-
-    // Normalize common aliases (same as the socket telemetry handler).
-    const lat =
-      num(data.lat) ??
-      num(data.latitude) ??
-      num(data.gps_lat) ??
-      num(data.global_lat);
-    const lon =
-      num(data.lon) ??
-      num(data.longitude) ??
-      num(data.gps_lon) ??
-      num(data.global_lon);
+    const packet = normalizeTelemetryPacket(data);
+    if (!packet) return null;
 
     return {
-      pos_n: num(data.pos_n),
-      pos_e: num(data.pos_e),
-      lat,
-      lon,
-      gps_fix: num(data.gps_fix),
-      pose_age_ms: num(data.pose_age_ms),
+      pos_n: packet.pos_n ?? null,
+      pos_e: packet.pos_e ?? null,
+      lat: packet.lat ?? null,
+      lon: packet.lon ?? null,
+      gps_fix: packet.gps_fix ?? null,
+      pose_age_ms: packet.pose_age_ms ?? null,
     };
   } catch {
     return null;

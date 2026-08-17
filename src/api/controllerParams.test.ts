@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   advancedParams,
   baselineValue,
@@ -7,13 +7,18 @@ import {
   coerceParamValue,
   coerceTypedValue,
   dialStepFor,
+  dropSettledEdits,
   fieldParams,
+  formatAppliedNames,
   formatParamValue,
   groupParams,
+  interpretSetParamsResult,
+  mergeAppliedCurrent,
   nearestTickIndex,
   normalizeControllerParams,
   paramLabel,
   paramUnit,
+  setControllerParams,
   valuesEqual,
   type ControllerParam,
 } from "./controllerParams";
@@ -76,6 +81,114 @@ describe("controllerParams coerce + dirty payload", () => {
     expect(payload).toEqual({ mission_speed: 0.35 });
     expect(valuesEqual(1, 1.0, "float")).toBe(true);
     expect(valuesEqual(true, "true", "bool")).toBe(true);
+  });
+});
+
+describe("controllerParams apply result merge", () => {
+  it("treats empty or ok PUT bodies as all accepted", () => {
+    const payload = { mission_speed: 0.35, max_linear_vel: 1.2 };
+    expect(interpretSetParamsResult(payload, null)).toEqual({
+      ok: true,
+      accepted: ["mission_speed", "max_linear_vel"],
+      rejected: [],
+    });
+    expect(interpretSetParamsResult(payload, { ok: true })).toEqual({
+      ok: true,
+      accepted: ["mission_speed", "max_linear_vel"],
+      rejected: [],
+    });
+  });
+
+  it("splits per-name ROS results and keeps failed keys dirty", () => {
+    const payload = { mission_speed: 0.35, max_linear_vel: 1.2 };
+    expect(interpretSetParamsResult(payload, {
+      ok: false,
+      parameters: { mission_speed: true, max_linear_vel: false },
+    })).toEqual({
+      ok: false,
+      accepted: ["mission_speed"],
+      rejected: ["max_linear_vel"],
+    });
+
+    const params = [
+      param({ name: "mission_speed", type: "float", current: 1 }),
+      param({ name: "max_linear_vel", type: "float", current: 0.8 }),
+    ];
+    const merged = mergeAppliedCurrent(params, { mission_speed: 0.35 });
+    expect(merged[0].current).toBe(0.35);
+    expect(merged[1].current).toBe(0.8);
+
+    const leftover = dropSettledEdits(
+      { mission_speed: 0.35, max_linear_vel: 1.2 },
+      payload,
+      ["mission_speed"],
+      new Map(params.map((item) => [item.name, item]))
+    );
+    expect(leftover).toEqual({ max_linear_vel: 1.2 });
+  });
+
+  it("keeps an edit if the user changed the value again during apply", () => {
+    const speed = param({ name: "mission_speed", type: "float", current: 1 });
+    const leftover = dropSettledEdits(
+      { mission_speed: 0.5 },
+      { mission_speed: 0.35 },
+      ["mission_speed"],
+      new Map([["mission_speed", speed]])
+    );
+    expect(leftover).toEqual({ mission_speed: 0.5 });
+  });
+
+  it("summarizes applied names for the status banner", () => {
+    expect(formatAppliedNames(["mission_speed"])).toBe("Mission speed");
+    expect(formatAppliedNames(["mission_speed", "max_linear_vel", "min_linear_vel", "xy_goal_tolerance"])).toBe(
+      "Mission speed, Max speed +2 more"
+    );
+  });
+});
+
+describe("controllerParams setControllerParams", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("returns accepted keys from a 200 body and does not require a follow-up GET", async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true, parameters: { mission_speed: true } }), { status: 200 })
+    ) as typeof fetch;
+
+    const result = await setControllerParams("http://192.168.1.102:5001", "rpp", { mission_speed: 0.35 });
+    expect(result).toEqual({ ok: true, accepted: ["mission_speed"], rejected: [] });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toBe("http://192.168.1.102:5001/api/rpp/params");
+    expect((init as RequestInit).method).toBe("PUT");
+  });
+
+  it("treats an empty 200 body as success for the sent keys", async () => {
+    globalThis.fetch = vi.fn(async () => new Response("", { status: 200 })) as typeof fetch;
+    const result = await setControllerParams("http://192.168.1.102:5001", "spray", {
+      solenoid_open_delay_s: 0.04,
+    });
+    expect(result).toEqual({ ok: true, accepted: ["solenoid_open_delay_s"], rejected: [] });
+  });
+
+  it("times out a hung rover write", async () => {
+    globalThis.fetch = vi.fn(
+      (_url: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            const err = new Error("aborted");
+            err.name = "AbortError";
+            reject(err);
+          });
+        })
+    ) as typeof fetch;
+
+    await expect(
+      setControllerParams("http://192.168.1.102:5001", "rpp", { mission_speed: 0.35 }, 20)
+    ).rejects.toThrow(/did not respond in time/);
   });
 });
 

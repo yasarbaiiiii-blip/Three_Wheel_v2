@@ -435,15 +435,24 @@ export function UploadAndPreviewStep({
     if (isLocalDxfPlanner) return;
     if (!targetPathName || !apiBaseUrl || isCsvPath) return;
     setPreviewData(null);
-    pathApi.getPathPreview(apiBaseUrl, targetPathName)
+    const requestedName = targetPathName;
+    const controller = new AbortController();
+    pathApi.getPathPreview(apiBaseUrl, requestedName)
       .then(res => {
+        if (controller.signal.aborted) return;
         if (res.ok) {
-          return res.json().then((data: pathApi.PathPreviewResponse) => setPreviewData(data));
+          return res.json().then((data: pathApi.PathPreviewResponse) => {
+            if (controller.signal.aborted) return;
+            setPreviewData(data);
+          });
         }
       })
       .catch(() => {
         // Preview is optional — swallow errors silently
       });
+    return () => {
+      controller.abort();
+    };
   }, [targetPathName, apiBaseUrl, isCsvPath, isLocalDxfPlanner]);
 
   /**

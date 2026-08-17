@@ -3,6 +3,11 @@ import "./global.css";
 
 import { DXF_PLANNER, SMOKE_TEST_MAPBOX, SMOKE_TEST_CENTER } from "./src/config/featureFlags";
 import { installRuntimeGuards, yieldToUi } from "./src/utils/runtimeGuards";
+import {
+  createPathPipelineGuard,
+  exclusiveBusyMessage,
+  type PathExclusiveKind,
+} from "./src/utils/pathPipelineGuard";
 import { AppErrorBoundary } from "./src/components/AppErrorBoundary";
 
 // Mapbox token is applied on first map mount (MapViewNative / MapboxHelloMap),
@@ -194,7 +199,7 @@ import {
   SOCKET_CONNECT_TIMEOUT_MS,
   waitForSocketConnect,
 } from "./src/utils/socketConnect";
-import { rtkModeFromStatus } from "./src/utils/telemetryDeadband";
+import { normalizeTelemetryPacket, rtkModeFromStatus } from "./src/utils/telemetryDeadband";
 const SwoziPage = lazyDefault(
   () => import("./src/screens/SecondaryPages").then((m) => ({ default: m.SwoziPage })),
   "SwoziPage"
@@ -998,10 +1003,14 @@ function AppRoot() {
       pose_age_ms?: number | null;
     }) => {
       const prev = telemetrySnapshotRef.current ?? getTelemetrySnapshot();
-      telemetrySnapshotRef.current = {
-        ...(prev ?? {}),
-        ...partial,
-      } as TelemetrySnapshot;
+      const next = { ...(prev ?? {}) } as TelemetrySnapshot;
+      if (partial.pos_n != null) next.pos_n = partial.pos_n;
+      if (partial.pos_e != null) next.pos_e = partial.pos_e;
+      if (partial.lat != null) next.lat = partial.lat;
+      if (partial.lon != null) next.lon = partial.lon;
+      if (partial.gps_fix != null) next.gps_fix = partial.gps_fix;
+      if (partial.pose_age_ms != null) next.pose_age_ms = partial.pose_age_ms;
+      telemetrySnapshotRef.current = next;
       telemetryReceivedAtMsRef.current = Date.now();
     },
     []
@@ -1031,6 +1040,9 @@ function AppRoot() {
   const [missionActionBusy, setMissionActionBusy] = useState(false);
   /** Prevents double-tap Start / re-entrant restage while a previous Start is in flight. */
   const startInFlightRef = useRef(false);
+  /** Shared preview/send/start/load generation + exclusive lock. */
+  const pathPipelineRef = useRef(createPathPipelineGuard());
+  const missionIdentityRepeatRef = useRef(false);
   const [missionFileReady, setMissionFileReady] = useState(false);
   const [missionLoaded, setMissionLoaded] = useState(false);
   const [missionLoadedPanelOpenToken, setMissionLoadedPanelOpenToken] = useState(0);
@@ -1424,8 +1436,11 @@ function AppRoot() {
   const discoveryScanGenerationRef = useRef(0);
   const connectInFlightRef = useRef(false);
   const pendingSocketRef = useRef<Socket | null>(null);
+  const socketRef = useRef<Socket | null>(null);
+  const invalidSessionLockRef = useRef(false);
   const wsStatusRef = useRef(wsStatus);
   const previousSelectedPathRef = useRef<string | null>(null);
+  socketRef.current = socket;
 
   const activeMenu = useMemo(() => MENU_ITEMS.find((x) => x.key === page), [page]);
   const sectionTitle =
@@ -1443,16 +1458,30 @@ function AppRoot() {
   }, []);
 
   const handleInvalidSession = useCallback(() => {
-    setOperatorSession(null);
-    setOperatorPassword("");
-    void authApi.saveStoredSession(null);
-    socket?.disconnect();
-    setSocket(null);
-    setWsStatus("idle");
-    setPage("connection");
-    setWsError("Session expired. Enter the rover password again.");
-    clearTelemetryRuntime();
-  }, [socket]);
+    if (invalidSessionLockRef.current) return;
+    invalidSessionLockRef.current = true;
+    try {
+      setOperatorSession(null);
+      setOperatorPassword("");
+      void authApi.saveStoredSession(null);
+      try {
+        socketRef.current?.disconnect();
+      } catch {
+        // Socket may already be dead after a rover restart.
+      }
+      setSocket(null);
+      setWsStatus("idle");
+      setPage("connection");
+      setWsError("Session expired. Enter the rover password again.");
+      clearTelemetryRuntime();
+    } catch (err) {
+      console.error("[AUTH] invalid session handler failed:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (operatorSession?.token) invalidSessionLockRef.current = false;
+  }, [operatorSession?.token]);
 
   useEffect(() => {
     authApi.setAuthRuntime({
@@ -1480,6 +1509,24 @@ function AppRoot() {
     toastTimerRef.current = setTimeout(() => {
       setToast((current) => (current?.id === id ? null : current));
     }, 2800);
+  }, []);
+
+  const beginPathExclusive = useCallback((kind: PathExclusiveKind): boolean => {
+    const acquired = pathPipelineRef.current.tryExclusive(kind);
+    if (!acquired.ok) {
+      showToast("Busy", exclusiveBusyMessage(acquired.holder), "info");
+      return false;
+    }
+    missionIdentityGenerationRef.current += 1;
+    setMissionActionBusy(true);
+    return true;
+  }, [showToast]);
+
+  const endPathExclusive = useCallback((kind: PathExclusiveKind) => {
+    pathPipelineRef.current.releaseExclusive(kind);
+    if (!pathPipelineRef.current.isExclusive()) {
+      setMissionActionBusy(false);
+    }
   }, []);
 
   const virtualJoystick = useVirtualJoystick({
@@ -1565,6 +1612,11 @@ function AppRoot() {
     missionId: string | null | undefined
   ) => {
     if (!apiBaseUrl) return;
+    if (pathPipelineRef.current.isExclusive()) {
+      console.warn("[RECOVERY] Skipped — another path action is exclusive.");
+      return;
+    }
+    const recoverToken = pathPipelineRef.current.beginAsyncMapWrite();
     try {
       console.log(`[RECOVERY] Recovering loaded mission context: source=${sourceName}, missionId=${missionId}`);
       // Flag to prevent the selectedPathName change effect from wiping staged state
@@ -1573,16 +1625,19 @@ function AppRoot() {
       // Step 1: Only hit the filename-based preview when sourceName actually looks
       // like a real file. /api/path/{name}/preview does a literal file lookup and
       // 404s on anything else — in particular, the backend can report a staged
-      // mission's ID as source_name when no real DXF filename is known, and
-      // calling previewSelectedPath with that 404s and silently replaces the map
-      // with a mock placeholder line. When it IS a real filename, this still runs
-      // because it's what refreshes importedPlan/selectedPathName and the
-      // per-entity spray/extension editor state.
+      // mission's ID as source_name when no real DXF filename is known.
+      // When it IS a real filename, this still runs because it's what refreshes
+      // importedPlan/selectedPathName and the per-entity spray/extension editor state.
       const looksLikeFilename = /\.(dxf|csv|waypoints)$/i.test(sourceName || "");
       if (looksLikeFilename) {
-        await previewSelectedPath(sourceName!);
+        await previewSelectedPath(sourceName!, { ignoreExclusive: true, reuseToken: recoverToken });
       } else if (sourceName) {
         console.warn(`[RECOVERY] sourceName "${sourceName}" is not a real filename, skipping DXF preview.`);
+      }
+
+      if (!pathPipelineRef.current.isCurrent(recoverToken)) {
+        console.warn("[RECOVERY] Abandoned — a newer path write started.");
+        return;
       }
 
       // Step 2: If we have a mission ID, fetch the staged mission geometry and use
@@ -1592,6 +1647,10 @@ function AppRoot() {
       if (missionId) {
         try {
           const stagedRes = await pathApi.getStagedMission(apiBaseUrl, missionId);
+          if (!pathPipelineRef.current.isCurrent(recoverToken)) {
+            console.warn("[RECOVERY] Abandoned after staged fetch — a newer path write started.");
+            return;
+          }
           if (stagedRes.ok) {
             const stagedArtifact = (await stagedRes.json()) as pathApi.StagedMissionResponse;
             // Geometry + origin from one hydrator — never set lines without the staged anchor.
@@ -1632,6 +1691,7 @@ function AppRoot() {
       // Step 3: Re-fetch loaded-path inspection since previewSelectedPath clears it
       try {
         const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
+        if (!pathPipelineRef.current.isCurrent(recoverToken)) return;
         if (loadedRes.ok) {
           const loadedData = (await loadedRes.json()) as missionApi.LoadedPathResponse;
           setLoadedPathInspection(loadedData);
@@ -1909,32 +1969,19 @@ function AppRoot() {
       nextSocket.on("telemetry", (rawData: any) => {
         // Never let a bad packet force-close a release APK (uncaught JS → process kill).
         try {
-          let data = rawData;
+          let parsed = rawData;
           if (typeof rawData === "string") {
             try {
-              data = JSON.parse(rawData);
+              parsed = JSON.parse(rawData);
             } catch (e) {
               console.error("[SOCKET] Failed to parse telemetry JSON:", e);
               return;
             }
           }
-          if (!data || typeof data !== "object") {
-            console.warn("[SOCKET] Invalid telemetry format:", data);
+          const data = normalizeTelemetryPacket(parsed);
+          if (!data) {
+            console.warn("[SOCKET] Invalid telemetry format:", rawData);
             return;
-          }
-
-          // Normalize common ROS/backend field aliases so state updates even if backend uses long-form property names
-          if (data.lat == null && (data.latitude != null || data.gps_lat != null || data.global_lat != null)) {
-            data.lat = data.latitude ?? data.gps_lat ?? data.global_lat;
-          }
-          if (data.lon == null && (data.longitude != null || data.gps_lon != null || data.global_lon != null)) {
-            data.lon = data.longitude ?? data.gps_lon ?? data.global_lon;
-          }
-          if (data.alt == null && (data.altitude != null || data.gps_alt != null)) {
-            data.alt = data.altitude ?? data.gps_alt;
-          }
-          if (data.heading_ned_deg == null && data.heading != null) {
-            data.heading_ned_deg = data.heading;
           }
 
           try {
@@ -1953,9 +2000,8 @@ function AppRoot() {
             pose_age_ms: data.pose_age_ms,
           });
 
-          applyTelemetryPacket(data as TelemetrySnapshot);
-          // Keep Start/live-entry ref aligned with store (full merged snapshot).
-          telemetrySnapshotRef.current = getTelemetrySnapshot() ?? (data as TelemetrySnapshot);
+          applyTelemetryPacket(data);
+          telemetrySnapshotRef.current = getTelemetrySnapshot() ?? data;
         } catch (err) {
           console.error("[SOCKET] telemetry handler crash suppressed:", err);
         }
@@ -2350,8 +2396,17 @@ function AppRoot() {
     return request(); // fallback final attempt
   };
 
-  const previewSelectedPath = async (pathName: string) => {
+  const previewSelectedPath = async (
+    pathName: string,
+    opts?: { ignoreExclusive?: boolean; reuseToken?: number }
+  ) => {
     if (!apiBaseUrl) return;
+    if (!opts?.ignoreExclusive && pathPipelineRef.current.isExclusive()) {
+      const holder = pathPipelineRef.current.exclusiveKind();
+      showToast("Busy", holder ? exclusiveBusyMessage(holder) : "Wait — another path action is still in progress.", "info");
+      return;
+    }
+    const previewToken = opts?.reuseToken ?? pathPipelineRef.current.beginAsyncMapWrite();
     setLoadedPathInspection(null);
     // Backend path selection replaces any on-device CSV / local DXF preview.
     setLocalCsvPreview(null);
@@ -2480,15 +2535,12 @@ function AppRoot() {
           }
         }
       } catch (err) {
-        console.log("[API GET] /api/path/entities/preview - Endpoint failed/not supported, fallback to mock line:", err);
-        generatedLines = [{
-          id: "rpp-line-0",
-          label: "Segment 1 (Preview fallback)",
-          layer: "marking",
-          from: { id: 1, x: 0, y: 0 },
-          to: { id: 2, x: 0, y: 10 },
-          width: 0.1,
-        }];
+        console.log("[API GET] /api/path/entities/preview - Endpoint failed:", err);
+        throw err instanceof Error ? err : new Error("Preview not available");
+      }
+      if (!pathPipelineRef.current.isCurrent(previewToken)) {
+        console.log(`[API GET] /api/path/${pathName}/preview - dropped stale result`);
+        return;
       }
       // Keep backend/imported DXF coordinates canonical until a verified Fix Alignment
       // rehydrate bakes them into NED. Viewport auto-fit must not mutate design coords
@@ -2533,15 +2585,23 @@ function AppRoot() {
       setMissionLoaded(false);
       setMissionRunning(false);
     } catch (err) {
+      if (!pathPipelineRef.current.isCurrent(previewToken)) return;
       console.log("Error loading path preview:", err);
       Alert.alert("Preview failed", err instanceof Error ? err.message : String(err));
     } finally {
-      setMissionActionBusy(false);
+      if (pathPipelineRef.current.isCurrent(previewToken) && !pathPipelineRef.current.isExclusive()) {
+        setMissionActionBusy(false);
+      }
     }
   };
 
   const parseDxfPlan = async () => {
     if (!apiBaseUrl || !importedPlan) return;
+    if (pathPipelineRef.current.isExclusive()) {
+      const holder = pathPipelineRef.current.exclusiveKind();
+      showToast("Busy", holder ? exclusiveBusyMessage(holder) : "Wait — another path action is still in progress.", "info");
+      return;
+    }
     if (protectedMissionResident) {
       const message = "Reparse is blocked while a protected surveyed mission is resident.";
       Alert.alert("Mission conflict", message);
@@ -2614,10 +2674,13 @@ function AppRoot() {
     return () => clearInterval(timer);
   }, [page, apiBaseUrl, missionActionBusy]);
 
-  async function refreshTelemetryPanel() {
+  async function refreshTelemetryPanel(opts?: { quiet?: boolean }) {
     if (!apiBaseUrl) return;
-    setTelemetryLoading(true);
-    setTelemetryError("");
+    const quiet = opts?.quiet === true;
+    if (!quiet) {
+      setTelemetryLoading(true);
+      setTelemetryError("");
+    }
     try {
       const [statusRes, healthRes, telemetryRes, loadedRes] = await Promise.all([
         fetchMissionStatus(apiBaseUrl),
@@ -2684,54 +2747,33 @@ function AppRoot() {
       if (loadedRes) reconcileLoadedMission(loadedRes, statusRes);
       setMissionRunning(statusRes.state === "running");
 
-      const nextTelemetry = {
-        rpp_state: telemetryRes ? telemetryRes.rpp_state : statusRes.rpp_state,
-        rpp_state_name: telemetryRes ? telemetryRes.rpp_state_name : statusRes.rpp_state_name,
-        dist_to_goal_m: telemetryRes ? telemetryRes.dist_to_goal_m : statusRes.dist_to_goal,
-        speed_m_s: telemetryRes ? telemetryRes.speed_m_s : statusRes.speed,
-        measured_speed_m_s:
-          telemetryRes?.measured_speed_m_s ??
-          statusRes?.measured_speed_m_s ??
-          null,
-        xtrack_m: telemetryRes ? telemetryRes.xtrack_m : statusRes.xtrack,
-        battery_pct: telemetryRes ? telemetryRes.battery_pct : 85,
-        battery_v: telemetryRes ? telemetryRes.battery_v : null,
-        pose_age_ms: telemetryRes ? telemetryRes.pose_age_ms : (healthRes ? healthRes.pose_age_ms : 100),
-        gps_sat: telemetryRes ? telemetryRes.gps_sat : 12,
-        gps_fix: telemetryRes ? telemetryRes.gps_fix : null,
-        gps_fix_name: telemetryRes?.gps_fix_name ?? null,
-        hrms: telemetryRes?.hrms ?? null,
-        vrms: telemetryRes?.vrms ?? null,
-        pos_n: telemetryRes ? telemetryRes.pos_n : 0.0,
-        pos_e: telemetryRes ? telemetryRes.pos_e : 0.0,
-        heading_ned_deg: telemetryRes ? telemetryRes.heading_ned_deg : 0.0,
-        heading_err_deg: telemetryRes ? telemetryRes.heading_err_deg : null,
-        lookahead_m: telemetryRes ? telemetryRes.lookahead_m : 0.0,
-        kappa: telemetryRes ? telemetryRes.kappa : null,
-        lat: telemetryRes ? telemetryRes.lat : null,
-        lon: telemetryRes ? telemetryRes.lon : null,
-        alt: telemetryRes ? telemetryRes.alt : null,
-        armed: telemetryRes ? telemetryRes.armed : (healthRes ? healthRes.armed : (statusRes.state !== "idle" && statusRes.state !== "error")),
-        mode: telemetryRes ? telemetryRes.mode : (healthRes ? healthRes.mode : statusRes.state.toUpperCase()),
+      const normalizedTelemetry = telemetryRes ? normalizeTelemetryPacket(telemetryRes) : null;
+      const fromStatus = normalizeTelemetryPacket({
+        rpp_state: statusRes.rpp_state,
+        rpp_state_name: statusRes.rpp_state_name,
+        dist_to_goal: statusRes.dist_to_goal,
+        speed: statusRes.speed,
+        measured_speed_m_s: statusRes.measured_speed_m_s,
+        xtrack: statusRes.xtrack,
         mission_state: statusRes.state,
-        // Additional fields from API
-        along_track_speed_mps: telemetryRes?.along_track_speed_mps ?? null,
-        cross_track_speed_mps: telemetryRes?.cross_track_speed_mps ?? null,
-        projection_segment_index: telemetryRes?.projection_segment_index ?? null,
-        gps_safety_ok: telemetryRes?.gps_safety_ok ?? null,
-        manual_resume_required: telemetryRes?.manual_resume_required ?? null,
-      } as any;
-      if (telemetryRes) {
+      });
+      const mergedPacket = {
+        ...(fromStatus ?? {}),
+        ...(normalizedTelemetry ?? {}),
+        mission_state: statusRes.state,
+      };
+      applyTelemetryPacket(mergedPacket);
+      const live = getTelemetrySnapshot();
+      if (live) {
         noteTelemetryForLiveEntry({
-          pos_n: telemetryRes.pos_n,
-          pos_e: telemetryRes.pos_e,
-          lat: telemetryRes.lat,
-          lon: telemetryRes.lon,
-          gps_fix: telemetryRes.gps_fix,
-          pose_age_ms: telemetryRes.pose_age_ms,
+          pos_n: live.pos_n,
+          pos_e: live.pos_e,
+          lat: live.lat,
+          lon: live.lon,
+          gps_fix: live.gps_fix,
+          pose_age_ms: live.pose_age_ms,
         });
       }
-      setTelemetrySnapshot(nextTelemetry);
 
       if (statusRes.state === "paused") {
         setIsPaused(true);
@@ -2739,23 +2781,31 @@ function AppRoot() {
         setIsPaused(false);
       }
 
-      setSystemHealth({
-        ros_node: healthRes ? healthRes.ros_node : (telemetryRes ? telemetryRes.connected : false),
-        fcu_connected: healthRes ? healthRes.fcu_connected : (telemetryRes ? telemetryRes.connected : false),
-        armed: telemetryRes ? telemetryRes.armed : (healthRes ? healthRes.armed : (statusRes.state !== "idle" && statusRes.state !== "error")),
-        mode: telemetryRes ? telemetryRes.mode : (healthRes ? healthRes.mode : statusRes.state.toUpperCase()),
-        rpp_state: telemetryRes ? telemetryRes.rpp_state : statusRes.rpp_state,
+      setSystemHealth((prev) => ({
+        ros_node: healthRes?.ros_node ?? prev?.ros_node ?? Boolean(telemetryRes),
+        fcu_connected:
+          healthRes?.fcu_connected ??
+          (typeof telemetryRes?.connected === "boolean" ? telemetryRes.connected : prev?.fcu_connected ?? false),
+        armed: live?.armed ?? healthRes?.armed ?? prev?.armed ?? false,
+        mode: live?.mode ?? healthRes?.mode ?? prev?.mode ?? statusRes.state.toUpperCase(),
+        rpp_state: live?.rpp_state ?? statusRes.rpp_state ?? prev?.rpp_state ?? null,
         mission_state: statusRes.state,
-      } as any);
+      }));
     } catch (error) {
-      setTelemetryError(error instanceof Error ? error.message : "Unable to load status");
+      if (!quiet) {
+        setTelemetryError(error instanceof Error ? error.message : "Unable to load status");
+      }
     } finally {
-      setTelemetryLoading(false);
+      if (!quiet) setTelemetryLoading(false);
     }
   }
 
   async function refreshMissionIdentity() {
-    if (!apiBaseUrl || missionIdentityInFlightRef.current) return;
+    if (!apiBaseUrl) return;
+    if (missionIdentityInFlightRef.current) {
+      missionIdentityRepeatRef.current = true;
+      return;
+    }
     missionIdentityInFlightRef.current = true;
     const requestGeneration = missionIdentityGenerationRef.current;
     try {
@@ -2773,6 +2823,10 @@ function AppRoot() {
       // Telemetry errors are presented by the existing status refresh path.
     } finally {
       missionIdentityInFlightRef.current = false;
+      if (missionIdentityRepeatRef.current) {
+        missionIdentityRepeatRef.current = false;
+        void refreshMissionIdentity();
+      }
     }
   }
 
@@ -2782,6 +2836,18 @@ function AppRoot() {
     const timer = setInterval(() => void refreshMissionIdentity(), 3000);
     return () => clearInterval(timer);
   }, [apiBaseUrl, reconcileLoadedMission, wsStatus]);
+
+  useEffect(() => {
+    if (!apiBaseUrl || wsStatus !== "connected") return;
+    void refreshTelemetryPanel();
+    const timer = setInterval(() => {
+      const last = telemetryReceivedAtMsRef.current;
+      if (!last || Date.now() - last > 2500) {
+        void refreshTelemetryPanel({ quiet: true });
+      }
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [apiBaseUrl, wsStatus]);
 
   async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     const controller = new AbortController();
@@ -2878,7 +2944,13 @@ function AppRoot() {
     }
 
     logAction("LOAD_REQUEST", { apiBaseUrl, stagedMissionId: requestedMissionId || null, fileName: importedPlan?.fileName });
-    if (manageBusy) setMissionActionBusy(true);
+    const ownLock = !pathPipelineRef.current.isExclusive();
+    if (ownLock) {
+      if (!beginPathExclusive("load")) return false;
+    } else if (manageBusy) {
+      setMissionActionBusy(true);
+    }
+    const loadMapToken = pathPipelineRef.current.currentGeneration();
     // Invalidate any identity poll already in flight — its snapshot predates
     // this load and must not be allowed to overwrite the result below.
     missionIdentityGenerationRef.current += 1;
@@ -2956,6 +3028,10 @@ function AppRoot() {
           throw classifyMissionError(409, markCount.message ?? "Loaded path count mismatch.");
         }
 
+        if (!pathPipelineRef.current.isCurrent(loadMapToken)) {
+          throw new Error("A newer path action replaced this load. The map was not overwritten.");
+        }
+
         setAlignedRefPoints(hydrated.alignedRefPoints);
         setLines(sanitizePlanLines(cornerTaggedLines));
         setSelectedLineId(hydrated.selectedLineId);
@@ -3028,7 +3104,11 @@ function AppRoot() {
       if (missionError?.status === 409) void refreshMissionIdentity();
       return false;
     } finally {
-      if (manageBusy) setMissionActionBusy(false);
+      if (ownLock) {
+        endPathExclusive("load");
+      } else if (manageBusy && !pathPipelineRef.current.isExclusive()) {
+        setMissionActionBusy(false);
+      }
     }
   }
 
@@ -3687,8 +3767,13 @@ function AppRoot() {
     }
     // Re-entrancy: double-taps + slow restage previously stacked starts and
     // could leave the UI busy or race Mapbox/state updates into a hard close.
-    if (startInFlightRef.current || missionActionBusy) {
-      showToast("Start", "Start already in progress…", "info");
+    if (startInFlightRef.current || missionActionBusy || pathPipelineRef.current.isExclusive()) {
+      const holder = pathPipelineRef.current.exclusiveKind();
+      showToast(
+        "Start",
+        holder ? exclusiveBusyMessage(holder) : "Start already in progress…",
+        "info"
+      );
       return;
     }
 
@@ -3698,18 +3783,18 @@ function AppRoot() {
       return;
     }
 
+    if (!beginPathExclusive("start")) return;
     startInFlightRef.current = true;
-    setMissionActionBusy(true);
-    // Paint busy state before any network / restage work (perceived lag).
-    showToast("Start", "Preparing mission…", "info");
-    await yieldToUi();
-
     // Mission-layer Start selection — driven entirely by pill visibility now
     // (missionLayers[].visible), same state MissionLayerPills toggles for map
     // preview. No separate re-pick modal: what's visible is what runs.
     let selectedStartLayerIds: string[] | null = null;
     // Single try/finally so every early return still clears busy + in-flight flags.
     try {
+    // Paint busy state before any network / restage work (perceived lag).
+    showToast("Start", "Preparing mission…", "info");
+    await yieldToUi();
+
     const startResolution = resolveVisibleStartLayerIds(missionLayers);
     if (startResolution.kind === "blocked") {
       if (startResolution.reason === "no_layers_ready") {
@@ -4126,7 +4211,7 @@ function AppRoot() {
       if (missionError?.status === 409) void refreshMissionIdentity();
     } finally {
       startInFlightRef.current = false;
-      setMissionActionBusy(false);
+      endPathExclusive("start");
     }
   }
 
@@ -4428,7 +4513,7 @@ function AppRoot() {
       missionLoaded,
       missionState: telemetrySnapshot?.mission_state ?? null,
     });
-    setMissionActionBusy(true);
+    if (!beginPathExclusive("clear")) return;
     try {
       showToast("Clear", "Clearing resident mission...", "warning");
       SecureStore.deleteItemAsync(STAGED_MISSION_KEY).catch(() => {});
@@ -4509,7 +4594,7 @@ function AppRoot() {
         void refreshMissionIdentity();
       }
     } finally {
-      setMissionActionBusy(false);
+      endPathExclusive("clear");
     }
   }
 
@@ -4691,6 +4776,11 @@ function AppRoot() {
         source: "generated",
       });
       const safeGeneratedLines = sanitizePlanLines(normalizePlanLinesForCurves(generatedLines));
+      if (pathPipelineRef.current.isExclusive()) {
+        showToast("Busy", "Template map was not applied — another path action is in progress.", "info");
+        return;
+      }
+      pathPipelineRef.current.beginAsyncMapWrite();
       setLines(safeGeneratedLines);
       setSelectedLineId(safeGeneratedLines[0]?.id ?? null);
       setMissionLoaded(true);
@@ -5141,6 +5231,8 @@ function AppRoot() {
                             onSelectPath={previewSelectedPath}
                             onLoadSelectedPath={loadMissionOnBackend}
                             missionActionBusy={missionActionBusy}
+                            onBeginPathExclusive={beginPathExclusive}
+                            onEndPathExclusive={endPathExclusive}
                             onClearMission={clearResidentMissionOnBackend}
                             apiBaseUrl={apiBaseUrl}
                             onRefreshPaths={fetchBackendPaths}
@@ -5178,6 +5270,7 @@ function AppRoot() {
                                 return;
                               }
                               const safeGeneratedLines = sanitizePlanLines(normalizePlanLinesForCurves(generatedLines));
+                              pathPipelineRef.current.beginAsyncMapWrite();
                               setImportedPlan({ fileName: `${name}.dxf`, uri: "", fileType: "dxf", source: "generated" });
                               setLines(safeGeneratedLines);
                               setSelectedLineId(safeGeneratedLines[0]?.id ?? null);
@@ -5674,8 +5767,8 @@ function HomeView(props: HomeViewProps) {
     recenterPlanCount = 0,
   } = props;
 
-  const telemetrySnapshot = telemetrySnapshotProp ?? liveTelemetry;
-  const systemHealth = systemHealthProp ?? liveHealth;
+  const telemetrySnapshot = liveTelemetry ?? telemetrySnapshotProp;
+  const systemHealth = liveHealth ?? systemHealthProp;
   const previewRoverPoint =
     previewRoverPointProp ??
     (telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
@@ -6803,6 +6896,8 @@ function SectionPages(props: {
   onSelectPath: (name: string) => void;
   onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
   missionActionBusy: boolean;
+  onBeginPathExclusive?: (kind: PathExclusiveKind) => boolean;
+  onEndPathExclusive?: (kind: PathExclusiveKind) => void;
   apiBaseUrl: string;
   onRefreshPaths: () => void;
   onParsePlan?: () => Promise<void>;
@@ -6952,7 +7047,7 @@ function SectionPages(props: {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
   // Prefer App props; store fallback if a screen mounts without a parent snapshot.
   const liveTelemetry = useTelemetrySnapshot();
-  const telemetrySnapshot = props.telemetrySnapshot ?? liveTelemetry;
+  const telemetrySnapshot = liveTelemetry ?? props.telemetrySnapshot;
   const previewRoverPoint =
     props.previewRoverPoint ??
     (telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
