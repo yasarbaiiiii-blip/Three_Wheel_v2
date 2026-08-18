@@ -1,7 +1,8 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { Alert, Pressable, ScrollView, Switch, Text, TextInput, View } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
 import Slider from "@react-native-community/slider";
+import { Check, ChevronDown, MapPin } from "lucide-react-native";
 
 import { generateRoadSignLines, ROAD_SIGN_LABELS, type RoadSignType } from "../../../utils/roadSignTemplates";
 import { generateTextLines, type FontStyle } from "../../../utils/characterTemplates";
@@ -12,6 +13,14 @@ import { FIELDS_COLORS } from "../fieldsTheme";
 import { RoadSignThumbnail } from "../RoadSignThumbnail";
 
 const ROAD_SIGN_TYPES = Object.keys(ROAD_SIGN_LABELS) as RoadSignType[];
+
+/** Minimal shape of a placed template used by the dropdown. */
+export type PlacedTemplateSummary = {
+  id: string;
+  fileName: string;
+};
+
+// â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 type TemplatePanelProps = {
   apiBaseUrl: string;
@@ -26,14 +35,202 @@ type TemplatePanelProps = {
   onApplyBoundary?: (w: number, h: number) => void;
   telemetryPosN?: number | null;
   telemetryPosE?: number | null;
-  /**
-   * CSV mission flow: add templates locally (no parse-dxf). Lines are converted to
-   * CSV NED convention before the callback. DXF / Templates page keeps the default.
-   */
   placementMode?: "dxf" | "csvLocal";
-  /** Required when placementMode is csvLocal. */
   onAddLocalTemplateLines?: (lines: PlanLine[]) => void;
+  canPlace?: boolean;
+  placeBlockedReason?: string | null;
+  session?: "idle" | "picking" | "ghost";
+  selectedLabel?: string | null;
+  /** ID of the currently selected placed template. */
+  selectedTemplateId?: string | null;
+  dragEnabled?: boolean;
+  scaleEnabled?: boolean;
+  rotateEnabled?: boolean;
+  onBeginPlace?: (draft: {
+    kind: "sign" | "characters";
+    fileName: string;
+    sourceLines: PlanLine[];
+  }) => void;
+  onCancelPlace?: () => void;
+  onConfirmPlace?: () => void;
+  onToggleDrag?: () => void;
+  onToggleScale?: () => void;
+  onToggleRotate?: () => void;
+  onRemoveSelected?: () => void;
+  /** List of all currently placed templates. */
+  placedTemplates?: PlacedTemplateSummary[];
+  /** Called when the user picks a placed template from the dropdown. */
+  onSelectPlacedTemplate?: (id: string) => void;
 };
+
+// â”€â”€â”€ PlacedTemplatesDropdown â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+type PlacedTemplatesDropdownProps = {
+  templates: PlacedTemplateSummary[];
+  selectedId: string | null | undefined;
+  onSelect: (id: string) => void;
+};
+
+function PlacedTemplatesDropdown({ templates, selectedId, onSelect }: PlacedTemplatesDropdownProps) {
+  const [open, setOpen] = useState(false);
+
+  if (templates.length === 0) return null;
+
+  const selectedTemplate = templates.find((t) => t.id === selectedId);
+
+  return (
+    <View style={{ zIndex: 30 }}>
+      <Text
+        style={{
+          color: FIELDS_COLORS.textDim,
+          fontSize: 10,
+          fontWeight: "800",
+          letterSpacing: 0.6,
+          marginBottom: 6,
+          textTransform: "uppercase",
+        }}
+      >
+        Placed Templates ({templates.length})
+      </Text>
+
+      <Pressable
+        onPress={() => setOpen((o) => !o)}
+        accessibilityRole="button"
+        accessibilityLabel="Placed templates dropdown"
+        accessibilityState={{ expanded: open }}
+        style={{
+          minHeight: 44,
+          borderRadius: 10,
+          borderWidth: 1.5,
+          borderColor: open ? FIELDS_COLORS.accentBrand : FIELDS_COLORS.panelBorder,
+          backgroundColor: FIELDS_COLORS.cardSolid,
+          paddingHorizontal: 12,
+          paddingVertical: 8,
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 10,
+        }}
+      >
+        <MapPin size={14} color={FIELDS_COLORS.accentBrand} />
+        <Text
+          style={{ flex: 1, color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}
+          numberOfLines={1}
+        >
+          {selectedTemplate?.fileName ?? "Select a placed templateâ€¦"}
+        </Text>
+        <View style={{ transform: [{ rotate: open ? "180deg" : "0deg" }] }}>
+          <ChevronDown size={16} color={FIELDS_COLORS.textMuted} />
+        </View>
+      </Pressable>
+
+      {open ? (
+        <View
+          style={{
+            marginTop: 6,
+            borderRadius: 10,
+            borderWidth: 1,
+            borderColor: FIELDS_COLORS.panelBorder,
+            backgroundColor: FIELDS_COLORS.cardSolid,
+            overflow: "hidden",
+          }}
+        >
+          {templates.map((tpl, index) => {
+            const isSelected = tpl.id === selectedId;
+            return (
+              <Pressable
+                key={tpl.id}
+                onPress={() => {
+                  setOpen(false);
+                  onSelect(tpl.id);
+                }}
+                style={{
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 10,
+                  backgroundColor: isSelected ? "rgba(244,193,12,0.10)" : "transparent",
+                  borderTopWidth: index === 0 ? 0 : 1,
+                  borderTopColor: FIELDS_COLORS.panelBorder,
+                }}
+              >
+                <View
+                  style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: 3.5,
+                    backgroundColor: FIELDS_COLORS.accentBrand,
+                    opacity: isSelected ? 1 : 0.45,
+                  }}
+                />
+                <Text
+                  style={{
+                    flex: 1,
+                    color: isSelected ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted,
+                    fontSize: 13,
+                    fontWeight: isSelected ? "800" : "600",
+                  }}
+                  numberOfLines={1}
+                >
+                  {tpl.fileName}
+                </Text>
+                {isSelected ? <Check size={15} color={FIELDS_COLORS.accentBrand} strokeWidth={2.5} /> : null}
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+// â”€â”€â”€ ToolBtn â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+type ToolBtnProps = {
+  label: string;
+  active: boolean;
+  disabled: boolean;
+  onPress?: () => void;
+};
+
+function ToolBtn({ label, active, disabled, onPress }: ToolBtnProps) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      accessibilityRole="button"
+      accessibilityState={{ disabled, selected: active }}
+      style={[
+        {
+          flex: 1,
+          height: 36,
+          borderRadius: 8,
+          alignItems: "center",
+          justifyContent: "center",
+          borderWidth: 1.5,
+        },
+        active
+          ? { backgroundColor: FIELDS_COLORS.accentBrand, borderColor: FIELDS_COLORS.accentBorder }
+          : disabled
+          ? { backgroundColor: FIELDS_COLORS.surfaceSolid, borderColor: FIELDS_COLORS.panelBorder, opacity: 0.4 }
+          : { backgroundColor: FIELDS_COLORS.surfaceSolid, borderColor: FIELDS_COLORS.panelBorder },
+      ]}
+    >
+      <Text
+        style={{
+          color: active ? "#18181b" : FIELDS_COLORS.textMuted,
+          fontSize: 11,
+          fontWeight: "800",
+          letterSpacing: 0.3,
+        }}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+// â”€â”€â”€ TemplatePanel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function TemplatePanel(props: TemplatePanelProps) {
   const { apiBaseUrl, onRefreshPaths, onSelectPath } = props;
@@ -65,7 +262,11 @@ export function TemplatePanel(props: TemplatePanelProps) {
     return generateRoadSignLines(selectedSign, parsedSize);
   }, [charactersEnabled, previewText, fontStyle, selectedSign, parsedSize]);
 
-  const handleParse = async () => {
+  const templateTitle = charactersEnabled
+    ? `Text ${previewText || "ABC"} ${parsedSize.toFixed(1)}m`
+    : `${ROAD_SIGN_LABELS[selectedSign]} ${parsedSize.toFixed(1)}m`;
+
+  const handleParse = useCallback(async () => {
     if (previewLines.length === 0) {
       Alert.alert("Empty Template", "No valid template to generate.");
       return;
@@ -75,7 +276,19 @@ export function TemplatePanel(props: TemplatePanelProps) {
       ? `Text_${previewText || "Empty"}_${parsedSize}m`
       : `Road_Sign_${ROAD_SIGN_LABELS[selectedSign].replace(/\s+/g, "_")}_${parsedSize}m`;
 
-    // CSV mission: place locally in NED CSV frame — never leave the CSV flow via parse-dxf.
+    if (props.onBeginPlace) {
+      if (props.canPlace === false) {
+        Alert.alert("Cannot place yet", props.placeBlockedReason || "Import or align a plan first.");
+        return;
+      }
+      props.onBeginPlace({
+        kind: charactersEnabled ? "characters" : "sign",
+        fileName: templateTitle,
+        sourceLines: previewLines,
+      });
+      return;
+    }
+
     if (props.placementMode === "csvLocal") {
       if (!props.onAddLocalTemplateLines) {
         Alert.alert("Error", "CSV template placement is not wired.");
@@ -110,7 +323,7 @@ export function TemplatePanel(props: TemplatePanelProps) {
       if (!boundaryMode) {
         const roverN = props.telemetryPosN ?? 0;
         const roverE = props.telemetryPosE ?? 0;
-        linesToConvert = previewLines.map(line => ({
+        linesToConvert = previewLines.map((line) => ({
           ...line,
           from: { ...line.from, x: line.from.x + roverE + 2.0, y: line.from.y + roverN },
           to: { ...line.to, x: line.to.x + roverE + 2.0, y: line.to.y + roverN },
@@ -138,19 +351,125 @@ export function TemplatePanel(props: TemplatePanelProps) {
     } finally {
       setIsParsing(false);
     }
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    previewLines,
+    charactersEnabled,
+    previewText,
+    parsedSize,
+    selectedSign,
+    templateTitle,
+    boundaryMode,
+    apiBaseUrl,
+    props.onBeginPlace,
+    props.canPlace,
+    props.placeBlockedReason,
+    props.placementMode,
+    props.onAddLocalTemplateLines,
+    props.telemetryPosN,
+    props.telemetryPosE,
+    onRefreshPaths,
+    onSelectPath,
+  ]);
+
+  // Derived
+  const hasSelection = Boolean(props.selectedLabel);
+  const toolsDisabled = !hasSelection;
+  const placedTemplates = props.placedTemplates ?? [];
+  const showDropdown = placedTemplates.length > 0;
 
   return (
-    <View style={{ gap: 12 }}>
+    <View style={{ gap: 14 }}>
+      {/* Instruction */}
       <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
-        Quick template generator for road signs and text. Strokes are placed just ahead of the rover.
+        +Add, tap the map for a ghost, then Place. Select a placed sign to Drag, Scale, or Rotate.
       </Text>
 
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-        <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>Characters</Text>
-        <Switch value={charactersEnabled} onValueChange={setCharactersEnabled} trackColor={{ false: FIELDS_COLORS.panelBorder, true: FIELDS_COLORS.tealDark }} />
+      {/* â”€â”€ Placed Templates Dropdown â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {showDropdown ? (
+        <PlacedTemplatesDropdown
+          templates={placedTemplates}
+          selectedId={props.selectedTemplateId}
+          onSelect={(id) => props.onSelectPlacedTemplate?.(id)}
+        />
+      ) : null}
+
+      {/* â”€â”€ Drag / Scale / Rotate (always visible) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      <View style={{ gap: 8 }}>
+        <Text
+          style={{
+            color: FIELDS_COLORS.textDim,
+            fontSize: 10,
+            fontWeight: "800",
+            letterSpacing: 0.6,
+            textTransform: "uppercase",
+          }}
+        >
+          Transform Tools
+        </Text>
+
+        {toolsDisabled ? (
+          <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, lineHeight: 16 }}>
+            Select a placed template above to activate Drag, Scale, or Rotate.
+          </Text>
+        ) : (
+          <Text
+            style={{ color: FIELDS_COLORS.accentBrand, fontSize: 11, fontWeight: "700" }}
+            numberOfLines={1}
+          >
+            Selected: {props.selectedLabel}
+          </Text>
+        )}
+
+        <View style={{ flexDirection: "row", gap: 6 }}>
+          <ToolBtn label="Drag" active={!!props.dragEnabled} disabled={toolsDisabled} onPress={props.onToggleDrag} />
+          <ToolBtn label="Scale" active={!!props.scaleEnabled} disabled={toolsDisabled} onPress={props.onToggleScale} />
+          <ToolBtn label="Rotate" active={!!props.rotateEnabled} disabled={toolsDisabled} onPress={props.onToggleRotate} />
+        </View>
+
+        {!toolsDisabled && (props.dragEnabled || props.scaleEnabled || props.rotateEnabled) ? (
+          <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, lineHeight: 15 }}>
+            Tap the template on the map to apply. Tap empty space to deselect.
+          </Text>
+        ) : null}
+
+        {!toolsDisabled && props.onRemoveSelected ? (
+          <Pressable
+            onPress={props.onRemoveSelected}
+            accessibilityRole="button"
+            style={{
+              height: 32,
+              borderRadius: 8,
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: FIELDS_COLORS.dangerMuted,
+              borderWidth: 1,
+              borderColor: FIELDS_COLORS.dangerBorder,
+            }}
+          >
+            <Text style={{ color: FIELDS_COLORS.danger, fontSize: 11, fontWeight: "800" }}>
+              Remove from map
+            </Text>
+          </Pressable>
+        ) : null}
       </View>
 
+      {/* Divider */}
+      <View style={{ height: 1, backgroundColor: FIELDS_COLORS.panelBorder }} />
+
+      {/* â”€â”€ Characters toggle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+        <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}>
+          Characters
+        </Text>
+        <Switch
+          value={charactersEnabled}
+          onValueChange={setCharactersEnabled}
+          trackColor={{ false: FIELDS_COLORS.panelBorder, true: FIELDS_COLORS.tealDark }}
+        />
+      </View>
+
+      {/* â”€â”€ Sign picker or text input â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {charactersEnabled ? (
         <View style={{ gap: 8 }}>
           <TextInput
@@ -174,16 +493,13 @@ export function TemplatePanel(props: TemplatePanelProps) {
               <Pressable
                 key={style}
                 onPress={() => setFontStyle(style)}
-                style={{
-                  flex: 1,
-                  height: 36,
-                  borderRadius: 8,
-                  alignItems: "center",
-                  justifyContent: "center",
-                  backgroundColor: fontStyle === style ? FIELDS_COLORS.tealDark : FIELDS_COLORS.surfaceSolid,
-                  borderWidth: 1,
-                  borderColor: FIELDS_COLORS.panelBorder,
-                }}
+                accessibilityRole="button"
+                style={[
+                  { flex: 1, height: 36, borderRadius: 8, alignItems: "center", justifyContent: "center", borderWidth: 1 },
+                  fontStyle === style
+                    ? { backgroundColor: FIELDS_COLORS.tealDark, borderColor: FIELDS_COLORS.teal }
+                    : { backgroundColor: FIELDS_COLORS.surfaceSolid, borderColor: FIELDS_COLORS.panelBorder },
+                ]}
               >
                 <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700", textTransform: "capitalize" }}>
                   {style}
@@ -193,22 +509,25 @@ export function TemplatePanel(props: TemplatePanelProps) {
           </View>
         </View>
       ) : (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ gap: 8 }}
+          removeClippedSubviews
+        >
           {ROAD_SIGN_TYPES.map((sign) => {
             const selected = selectedSign === sign;
             return (
               <Pressable
                 key={sign}
                 onPress={() => setSelectedSign(sign)}
-                style={{
-                  alignItems: "center",
-                  gap: 6,
-                  padding: 8,
-                  borderRadius: 10,
-                  borderWidth: 1,
-                  borderColor: selected ? FIELDS_COLORS.accentBrand : FIELDS_COLORS.panelBorder,
-                  backgroundColor: selected ? FIELDS_COLORS.accentMuted : FIELDS_COLORS.surfaceSolid,
-                }}
+                accessibilityRole="button"
+                style={[
+                  { alignItems: "center", gap: 6, padding: 8, borderRadius: 10, borderWidth: 1 },
+                  selected
+                    ? { borderColor: FIELDS_COLORS.accentBrand, backgroundColor: FIELDS_COLORS.accentMuted }
+                    : { borderColor: FIELDS_COLORS.panelBorder, backgroundColor: FIELDS_COLORS.surfaceSolid },
+                ]}
               >
                 <RoadSignThumbnail sign={sign} />
                 <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 9, fontWeight: "700" }}>
@@ -220,6 +539,7 @@ export function TemplatePanel(props: TemplatePanelProps) {
         </ScrollView>
       )}
 
+      {/* â”€â”€ Size slider â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <View style={{ gap: 6 }}>
         <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontWeight: "800", textTransform: "uppercase" }}>
           Size (m): {parsedSize.toFixed(1)}
@@ -237,29 +557,105 @@ export function TemplatePanel(props: TemplatePanelProps) {
         />
       </View>
 
-      <Pressable
-        onPress={handleParse}
-        disabled={isParsing}
-        style={({ pressed }) => ({
-          height: 48,
-          borderRadius: 12,
-          alignItems: "center",
-          justifyContent: "center",
-          backgroundColor: isParsing ? FIELDS_COLORS.textDim : "#0ea5e9",
-          borderWidth: 1.5,
-          borderColor: "#38bdf8",
-          elevation: 4,
-          shadowColor: "#000",
-          shadowOffset: { width: 0, height: 2 },
-          shadowOpacity: 0.3,
-          shadowRadius: 4,
-          opacity: pressed ? 0.85 : 1,
-        })}
-      >
-        <Text style={{ color: "#fff", fontSize: 15, fontWeight: "800", letterSpacing: 0.5 }}>
-          {isParsing ? "Adding..." : "+ Add"}
-        </Text>
-      </Pressable>
+      {/* â”€â”€ Session hints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {props.session === "picking" ? (
+        <View style={{ backgroundColor: "rgba(244,193,12,0.10)", borderRadius: 8, borderWidth: 1, borderColor: FIELDS_COLORS.accentBorder, paddingHorizontal: 12, paddingVertical: 8 }}>
+          <Text style={{ color: FIELDS_COLORS.accentBrand, fontSize: 12, fontWeight: "700" }}>
+            ðŸ‘† Tap the map to set the ghost position.
+          </Text>
+        </View>
+      ) : null}
+      {props.session === "ghost" ? (
+        <View style={{ backgroundColor: "rgba(244,193,12,0.10)", borderRadius: 8, borderWidth: 1, borderColor: FIELDS_COLORS.accentBorder, paddingHorizontal: 12, paddingVertical: 8 }}>
+          <Text style={{ color: FIELDS_COLORS.accentBrand, fontSize: 12, fontWeight: "700" }}>
+            Ghost is on the map â€” tap Place, or tap again to move it.
+          </Text>
+        </View>
+      ) : null}
+
+      {/* â”€â”€ Action Buttons â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      <View style={{ flexDirection: "row", gap: 8 }}>
+        {props.session === "ghost" || props.session === "picking" ? (
+          <>
+            {/* Cancel */}
+            <Pressable
+              onPress={props.onCancelPlace}
+              accessibilityRole="button"
+              style={{
+                flex: 1,
+                height: 44,
+                borderRadius: 10,
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: FIELDS_COLORS.surfaceSolid,
+                borderWidth: 1.5,
+                borderColor: FIELDS_COLORS.panelBorder,
+              }}
+            >
+              <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "800" }}>
+                Cancel
+              </Text>
+            </Pressable>
+
+            {/* Place (ghost ready) or Tap mapâ€¦ (picking) */}
+            {props.session === "ghost" ? (
+              <Pressable
+                onPress={props.onConfirmPlace}
+                accessibilityRole="button"
+                style={{
+                  flex: 1,
+                  height: 44,
+                  borderRadius: 10,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: FIELDS_COLORS.teal,
+                  borderWidth: 1.5,
+                  borderColor: FIELDS_COLORS.tealDark,
+                }}
+              >
+                <Text style={{ color: "#fff", fontSize: 13, fontWeight: "800" }}>Place</Text>
+              </Pressable>
+            ) : (
+              <View
+                style={{
+                  flex: 1,
+                  height: 44,
+                  borderRadius: 10,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: FIELDS_COLORS.textDim,
+                  borderWidth: 1.5,
+                  borderColor: FIELDS_COLORS.panelBorder,
+                }}
+              >
+                <Text style={{ color: "#fff", fontSize: 13, fontWeight: "800" }}>Tap mapâ€¦</Text>
+              </View>
+            )}
+          </>
+        ) : (
+          /* +Add button */
+          <Pressable
+            onPress={handleParse}
+            disabled={isParsing}
+            accessibilityRole="button"
+            accessibilityState={{ disabled: isParsing }}
+            style={{
+              flex: 1,
+              height: 44,
+              borderRadius: 10,
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: isParsing ? FIELDS_COLORS.textDim : FIELDS_COLORS.accentBrand,
+              borderWidth: 1.5,
+              borderColor: isParsing ? FIELDS_COLORS.panelBorder : FIELDS_COLORS.accentBorder,
+            }}
+          >
+            <Text style={{ color: "#18181b", fontSize: 13, fontWeight: "800" }}>
+              {isParsing ? "Adding..." : "+ Add"}
+            </Text>
+          </Pressable>
+        )}
+      </View>
     </View>
   );
 }

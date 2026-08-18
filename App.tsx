@@ -306,9 +306,17 @@ import {
 } from "./src/utils/dxfLocalImport";
 import { alignmentFromGeographic } from "./src/utils/dxfAlignment";
 import { rebasePlanLinesToOrigin } from "./src/utils/planOriginRebase";
+import {
+  bakeTemplateInstance,
+  buildTemplateFileEntry,
+  createPlacedTemplateInstance,
+  replacePrefixedLines,
+  removePrefixedLines,
+} from "./src/utils/templateInstance";
 import type {
   PendingDxfAlignmentEntry,
   UploadedFileEntry,
+  PlacedTemplateInstance,
 } from "./src/types/uploadedFiles";
 import {
   applyCsvOrderToPlanLines,
@@ -1117,6 +1125,9 @@ function AppRoot() {
   const [sharedOriginGps, setSharedOriginGps] = useState<[number, number] | null>(null);
   const uploadedFilesRef = useRef<UploadedFileEntry[]>([]);
   uploadedFilesRef.current = uploadedFiles;
+  const [placedTemplates, setPlacedTemplates] = useState<PlacedTemplateInstance[]>([]);
+  const placedTemplatesRef = useRef<PlacedTemplateInstance[]>([]);
+  placedTemplatesRef.current = placedTemplates;
   const sharedOriginGpsRef = useRef<[number, number] | null>(null);
   sharedOriginGpsRef.current = sharedOriginGps;
 
@@ -1866,6 +1877,8 @@ function AppRoot() {
     setLocalDxfMeta(null);
     setUploadedFiles([]);
     uploadedFilesRef.current = [];
+    setPlacedTemplates([]);
+    placedTemplatesRef.current = [];
     setMissionLayers([]);
     setControlModeActive(false);
     setPendingLayerAssignment(null);
@@ -3186,6 +3199,8 @@ function AppRoot() {
   function handleBeginLocalImportBatch() {
     setUploadedFiles([]);
     uploadedFilesRef.current = [];
+    setPlacedTemplates([]);
+    placedTemplatesRef.current = [];
     setMissionLayers([]);
     setControlModeActive(false);
     setPendingLayerAssignment(null);
@@ -3208,6 +3223,76 @@ function AppRoot() {
     previousSelectedPathRef.current = null;
     setSelectedPathName(null);
     demoteWorkflowAfterBatchChange(true);
+  }
+
+  function handlePlaceTemplate(args: {
+    kind: "sign" | "characters";
+    fileName: string;
+    sourceLines: PlanLine[];
+    north: number;
+    east: number;
+  }) {
+    const used = usedPrefixesFromUploaded(uploadedFilesRef.current);
+    const prefix = allocateLineIdPrefix(args.fileName, used);
+    const instance = createPlacedTemplateInstance({
+      id: `${prefix}-tpl`,
+      fileName: args.fileName,
+      kind: args.kind,
+      lineIdPrefix: prefix,
+      sourceLines: args.sourceLines,
+      north: args.north,
+      east: args.east,
+    });
+    const baked = bakeTemplateInstance(instance);
+    if (baked.length === 0) {
+      Alert.alert("Empty template", "That template has no drawable strokes.");
+      return;
+    }
+    setLines((prev) => sanitizePlanLines(replacePrefixedLines(prev, prefix, baked)));
+    const entry = buildTemplateFileEntry(instance);
+    const nextFiles = [...uploadedFilesRef.current, entry];
+    uploadedFilesRef.current = nextFiles;
+    setUploadedFiles(nextFiles);
+    placedTemplatesRef.current = [...placedTemplatesRef.current, instance];
+    setPlacedTemplates(placedTemplatesRef.current);
+    setSelectedLineId(baked[0]?.id ?? null);
+    demoteWorkflowAfterBatchChange(nextFiles.some((f) => f.status === "needs_alignment"));
+    return instance.id;
+  }
+
+  function handleUpdateTemplateInstance(
+    id: string,
+    patch: Partial<Pick<PlacedTemplateInstance, "north" | "east" | "rotationDeg" | "scale">>
+  ) {
+    const current = placedTemplatesRef.current.find((item) => item.id === id);
+    if (!current) return;
+    const next = { ...current, ...patch };
+    const baked = bakeTemplateInstance(next);
+    if (baked.length === 0) return;
+    setLines((prev) => sanitizePlanLines(replacePrefixedLines(prev, next.lineIdPrefix, baked)));
+    placedTemplatesRef.current = placedTemplatesRef.current.map((item) =>
+      item.id === id ? next : item
+    );
+    setPlacedTemplates(placedTemplatesRef.current);
+  }
+
+  function handleRemoveTemplate(id: string) {
+    const current = placedTemplatesRef.current.find((item) => item.id === id);
+    if (!current) return;
+    setLines((prev) => sanitizePlanLines(removePrefixedLines(prev, current.lineIdPrefix)));
+    placedTemplatesRef.current = placedTemplatesRef.current.filter((item) => item.id !== id);
+    setPlacedTemplates(placedTemplatesRef.current);
+    const nextFiles = uploadedFilesRef.current.filter((f) => f.id !== id);
+    uploadedFilesRef.current = nextFiles;
+    setUploadedFiles(nextFiles);
+    setMissionLayers((prev) => unassignFile(prev, id));
+    setSelectedLineId((prev) =>
+      prev &&
+      (prev.startsWith(`${current.lineIdPrefix}__`) ||
+        prev.startsWith(`${current.lineIdPrefix}-`))
+        ? null
+        : prev
+    );
   }
 
   /**
@@ -3492,6 +3577,8 @@ function AppRoot() {
     setGeoOriginDxf(null);
     setUploadedFiles([]);
     uploadedFilesRef.current = [];
+    setPlacedTemplates([]);
+    placedTemplatesRef.current = [];
     setMissionLayers([]);
     setControlModeActive(false);
     setPendingLayerAssignment(null);
@@ -4550,6 +4637,8 @@ function AppRoot() {
       setLocalDxfMeta(null);
       setUploadedFiles([]);
       uploadedFilesRef.current = [];
+      setPlacedTemplates([]);
+      placedTemplatesRef.current = [];
       setMissionLayers([]);
       setControlModeActive(false);
       setPendingLayerAssignment(null);
@@ -5349,6 +5438,10 @@ function AppRoot() {
                             localCsvPreview={localCsvPreview}
                             localDxfMeta={localDxfMeta}
                             uploadedFiles={uploadedFiles}
+                            placedTemplates={placedTemplates}
+                            onPlaceTemplate={handlePlaceTemplate}
+                            onUpdateTemplateInstance={handleUpdateTemplateInstance}
+                            onRemoveTemplate={handleRemoveTemplate}
                             pendingDxfAlignment={pendingDxfAlignment}
                             setPendingDxfAlignment={setPendingDxfAlignment}
                             sharedOriginGps={sharedOriginGps}
@@ -6990,6 +7083,19 @@ function SectionPages(props: {
     warnings: string[];
   } | null;
   uploadedFiles?: UploadedFileEntry[];
+  placedTemplates?: import("./src/types/uploadedFiles").PlacedTemplateInstance[];
+  onPlaceTemplate?: (args: {
+    kind: "sign" | "characters";
+    fileName: string;
+    sourceLines: PlanLine[];
+    north: number;
+    east: number;
+  }) => string | void;
+  onUpdateTemplateInstance?: (
+    id: string,
+    patch: Partial<{ north: number; east: number; rotationDeg: number; scale: number }>
+  ) => void;
+  onRemoveTemplate?: (id: string) => void;
   pendingDxfAlignment?: Record<string, PendingDxfAlignmentEntry>;
   setPendingDxfAlignment?: React.Dispatch<
     React.SetStateAction<Record<string, PendingDxfAlignmentEntry>>

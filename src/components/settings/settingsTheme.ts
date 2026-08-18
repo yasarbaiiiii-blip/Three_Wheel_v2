@@ -29,4 +29,4 @@ export const DIAL_ITEM_H = 20;
 export const DIAL_VISIBLE = 3;
 export const DIAL_PAD = DIAL_ITEM_H;
 export const DIAL_HEIGHT = DIAL_ITEM_H * DIAL_VISIBLE;
-export const DIAL_WIDTH = 54;
+export const DIAL_WIDTH = 72;

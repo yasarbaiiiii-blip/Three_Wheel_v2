@@ -1,11 +1,13 @@
-import React, { memo, useCallback, useEffect, useMemo, useRef } from "react";
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Keyboard,
   NativeScrollEvent,
   NativeSyntheticEvent,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { ChevronDown, ChevronUp } from "lucide-react-native";
@@ -15,7 +17,11 @@ import { DIAL_HEIGHT, DIAL_ITEM_H, DIAL_PAD, DIAL_VISIBLE, DIAL_WIDTH, SETTINGS_
 type VerticalValueDialProps = {
   param: ControllerParam;
   value: number;
+  draft: string;
+  error?: boolean;
   onChange: (value: number) => void;
+  onDraftChange: (draft: string) => void;
+  onCommitDraft: () => void;
   disabled?: boolean;
 };
 
@@ -26,7 +32,16 @@ function tickLabel(value: number, integer: boolean): string {
   return value.toFixed(decimals).replace(/\.?0+$/, "") || "0";
 }
 
-function VerticalValueDialInner({ param, value, onChange, disabled = false }: VerticalValueDialProps) {
+function VerticalValueDialInner({
+  param,
+  value,
+  draft,
+  error = false,
+  onChange,
+  onDraftChange,
+  onCommitDraft,
+  disabled = false,
+}: VerticalValueDialProps) {
   const integer = ["int", "integer"].includes(param.type);
   const seed = typeof param.current === "number" ? param.current : typeof param.default === "number" ? param.default : value;
   const ticks = useMemo(
@@ -35,8 +50,28 @@ function VerticalValueDialInner({ param, value, onChange, disabled = false }: Ve
   );
   const selected = nearestTickIndex(ticks, value);
   const scrollRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
   const visualRef = useRef(selected);
   const ignoreNext = useRef(false);
+  const [typing, setTyping] = useState(false);
+
+  const exitTyping = useCallback((commit: boolean) => {
+    if (!typing) return;
+    setTyping(false);
+    Keyboard.dismiss();
+    if (commit) onCommitDraft();
+  }, [onCommitDraft, typing]);
+
+  const startTyping = useCallback(() => {
+    if (disabled) return;
+    setTyping(true);
+  }, [disabled]);
+
+  useEffect(() => {
+    if (!typing) return;
+    const timer = setTimeout(() => inputRef.current?.focus(), 16);
+    return () => clearTimeout(timer);
+  }, [typing]);
 
   const scrollToIndex = useCallback((index: number, animated: boolean) => {
     const clamped = Math.max(0, Math.min(ticks.length - 1, index));
@@ -45,11 +80,12 @@ function VerticalValueDialInner({ param, value, onChange, disabled = false }: Ve
   }, [ticks.length]);
 
   useEffect(() => {
+    if (typing) return;
     if (Math.abs(visualRef.current - selected) > 0) {
       scrollToIndex(selected, false);
       visualRef.current = selected;
     }
-  }, [selected, scrollToIndex]);
+  }, [selected, scrollToIndex, typing]);
 
   const commitIndex = useCallback(
     (index: number) => {
@@ -73,14 +109,19 @@ function VerticalValueDialInner({ param, value, onChange, disabled = false }: Ve
     [commitIndex, disabled]
   );
 
+  const onScrollBeginDrag = useCallback(() => {
+    exitTyping(true);
+  }, [exitTyping]);
+
   const stepBy = useCallback(
     (delta: number) => {
       if (disabled) return;
+      exitTyping(true);
       const next = Math.max(0, Math.min(ticks.length - 1, selected + delta));
       scrollToIndex(next, true);
       commitIndex(next);
     },
-    [commitIndex, disabled, scrollToIndex, selected, ticks.length]
+    [commitIndex, disabled, exitTyping, scrollToIndex, selected, ticks.length]
   );
 
   return (
@@ -95,7 +136,7 @@ function VerticalValueDialInner({ param, value, onChange, disabled = false }: Ve
         <ChevronUp color={SETTINGS_COLORS.accentBrand} size={13} strokeWidth={2.6} />
       </Pressable>
 
-      <View style={styles.well}>
+      <View style={[styles.well, typing && styles.wellTyping, error && styles.wellError]}>
         <View pointerEvents="none" style={styles.selection} />
         <ScrollView
           ref={scrollRef}
@@ -105,6 +146,8 @@ function VerticalValueDialInner({ param, value, onChange, disabled = false }: Ve
           snapToAlignment="start"
           decelerationRate="fast"
           scrollEnabled={!disabled}
+          keyboardShouldPersistTaps="handled"
+          onScrollBeginDrag={onScrollBeginDrag}
           onMomentumScrollEnd={onMomentumEnd}
           onScrollEndDrag={onMomentumEnd}
           contentOffset={{ x: 0, y: selected * DIAL_ITEM_H }}
@@ -118,6 +161,11 @@ function VerticalValueDialInner({ param, value, onChange, disabled = false }: Ve
                 key={`${tick}-${index}`}
                 onPress={() => {
                   if (disabled) return;
+                  if (active) {
+                    startTyping();
+                    return;
+                  }
+                  exitTyping(true);
                   scrollToIndex(index, true);
                   commitIndex(index);
                 }}
@@ -127,7 +175,8 @@ function VerticalValueDialInner({ param, value, onChange, disabled = false }: Ve
                   style={[
                     styles.itemText,
                     active && styles.itemTextActive,
-                    { opacity: active ? 1 : Math.max(0.22, 1 - dist / DIAL_VISIBLE) },
+                    active && typing && styles.itemTextHidden,
+                    { opacity: typing ? 0 : active ? 1 : Math.max(0.22, 1 - dist / DIAL_VISIBLE) },
                   ]}
                 >
                   {tickLabel(tick, integer)}
@@ -137,6 +186,22 @@ function VerticalValueDialInner({ param, value, onChange, disabled = false }: Ve
           })}
           <View style={{ height: DIAL_PAD }} />
         </ScrollView>
+
+        {typing ? (
+          <TextInput
+            ref={inputRef}
+            value={draft}
+            onChangeText={onDraftChange}
+            onBlur={() => exitTyping(true)}
+            onSubmitEditing={() => exitTyping(true)}
+            keyboardType={integer ? "number-pad" : "decimal-pad"}
+            autoCapitalize="none"
+            autoCorrect={false}
+            selectTextOnFocus
+            style={styles.typeInput}
+            accessibilityLabel="Type value"
+          />
+        ) : null}
       </View>
 
       <Pressable
@@ -169,6 +234,12 @@ const styles = StyleSheet.create({
     borderColor: SETTINGS_COLORS.panelBorder,
     overflow: "hidden",
   },
+  wellTyping: {
+    borderColor: SETTINGS_COLORS.accentBorder,
+  },
+  wellError: {
+    borderColor: SETTINGS_COLORS.danger,
+  },
   selection: {
     position: "absolute",
     left: 2,
@@ -196,6 +267,24 @@ const styles = StyleSheet.create({
     color: SETTINGS_COLORS.accentBrand,
     fontSize: 11,
     fontWeight: "800",
+  },
+  itemTextHidden: {
+    opacity: 0,
+  },
+  typeInput: {
+    position: "absolute",
+    left: 2,
+    right: 2,
+    top: DIAL_PAD,
+    height: DIAL_ITEM_H,
+    zIndex: 2,
+    padding: 0,
+    margin: 0,
+    color: SETTINGS_COLORS.accentBrand,
+    fontSize: 12,
+    fontWeight: "800",
+    fontVariant: ["tabular-nums"],
+    textAlign: "center",
   },
   chevron: {
     width: 28,

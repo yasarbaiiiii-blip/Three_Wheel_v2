@@ -58,16 +58,6 @@ const COLORS = {
   infoBorder: "#1f5a7a",
 };
 
-const SHADOWS = {
-  panel: {
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.5,
-    shadowRadius: 16,
-    elevation: 10,
-  },
-};
-
 type SprayMode = "continuous" | "dashed" | "point";
 type SettingsSection = "connection" | "drive" | "spray" | "general";
 
@@ -140,11 +130,11 @@ const SettingsPanel = ({
     <View style={styles.panelHeader}>
       <View style={styles.panelHeaderLeft}>
         <View style={styles.panelIconWrap}>
-          <Icon color={COLORS.accentBrand} size={18} strokeWidth={2.2} />
+          <Icon color={COLORS.accentBrand} size={14} strokeWidth={2.2} />
         </View>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.panelTitle}>{title}</Text>
-          {subtitle ? <Text style={styles.panelSubtitle}>{subtitle}</Text> : null}
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.panelTitle} numberOfLines={1}>{title}</Text>
+          {subtitle ? <Text style={styles.panelSubtitle} numberOfLines={1}>{subtitle}</Text> : null}
         </View>
       </View>
       {headerAction}
@@ -303,7 +293,7 @@ const IconSegmentControl = ({
   onChange: (id: string) => void;
   compact?: boolean;
 }) => (
-  <View style={[styles.segmented, compact && styles.segmentedCompact]}>
+  <View style={[styles.tabBar, compact && styles.tabBarCompact]}>
     {options.map((opt) => {
       const active = value === opt.id;
       const Icon = opt.icon;
@@ -311,21 +301,20 @@ const IconSegmentControl = ({
         <Pressable
           key={opt.id}
           style={[
-            styles.segmentBtn,
-            styles.segmentBtnWithIcon,
-            compact && styles.segmentBtnCompact,
-            active && styles.segmentBtnActive,
+            styles.tabPill,
+            compact && styles.tabPillCompact,
+            active && styles.tabPillActive,
           ]}
           onPress={() => onChange(opt.id)}
         >
           <Icon
             color={active ? COLORS.accentText : COLORS.textMuted}
-            size={compact ? 13 : 15}
+            size={13}
             strokeWidth={2.2}
           />
           <Text
             numberOfLines={1}
-            style={[styles.segmentText, compact && styles.segmentTextCompact, active && styles.segmentTextActive]}
+            style={[styles.tabPillText, compact && styles.tabPillTextCompact, active && styles.tabPillTextActive]}
           >
             {opt.label}
           </Text>
@@ -442,6 +431,7 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
 
   const { width } = useWindowDimensions();
   const compactTabs = width < 720;
+  const wide = width >= 720;
   const [section, setSection] = useState<SettingsSection>("connection");
 
   const [localRtkMode, setLocalRtkMode] = useState(
@@ -729,7 +719,6 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
       />
 
       <View style={styles.compactBlock}>
-        <Text style={styles.blockLabel}>Connection</Text>
         <View style={styles.rtkActionRow}>
           <View style={styles.rtkToggleWrap}>
             <RtkModeToggle
@@ -742,12 +731,9 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
             <Text style={styles.rtkActionBtnTextSave}>Save</Text>
           </Pressable>
         </View>
-      </View>
-
-      <View style={styles.compactBlock}>
         <SettingsToggle
           label="Auto Connect"
-          hint="Automatically start RTK using the saved default mode as soon as the rover connects"
+          hint="Start RTK on rover connect"
           value={rtkAutoConnect}
           onValueChange={(v) => setRtkAutoConnect?.(v)}
           disabled={!setRtkAutoConnect}
@@ -778,15 +764,17 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
             </View>
           </View>
 
-          <SettingsField
-            label="Host"
-            value={rtkCaster}
-            onChangeText={setRtkCaster || (() => {})}
-            placeholder="caster.example.com"
-            editable={!fieldsLocked && !!setRtkCaster}
-          />
           <View style={styles.fieldRow}>
-            <View style={{ flex: 0.75 }}>
+            <View style={{ flex: 1.4 }}>
+              <SettingsField
+                label="Host"
+                value={rtkCaster}
+                onChangeText={setRtkCaster || (() => {})}
+                placeholder="caster.example.com"
+                editable={!fieldsLocked && !!setRtkCaster}
+              />
+            </View>
+            <View style={{ flex: 0.6 }}>
               <SettingsField
                 label="Port"
                 value={rtkPort}
@@ -796,28 +784,32 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
                 editable={!fieldsLocked && !!setRtkPort}
               />
             </View>
-            <View style={{ flex: 1.25 }}>
+          </View>
+          <View style={styles.fieldRow}>
+            <View style={{ flex: 1 }}>
               <SettingsField
-                label="Mount point"
+                label="Mount"
                 value={rtkMountPoint}
                 onChangeText={setRtkMountPoint || (() => {})}
                 placeholder="MP23960a"
                 editable={!fieldsLocked && !!setRtkMountPoint}
               />
             </View>
+            <View style={{ flex: 1 }}>
+              <SettingsField
+                label="User"
+                value={rtkUsername}
+                onChangeText={setRtkUsername || (() => {})}
+                placeholder="Username"
+                editable={!fieldsLocked && !!setRtkUsername}
+              />
+            </View>
           </View>
-          <SettingsField
-            label="Username"
-            value={rtkUsername}
-            onChangeText={setRtkUsername || (() => {})}
-            placeholder="Your NTRIP username"
-            editable={!fieldsLocked && !!setRtkUsername}
-          />
           <SettingsField
             label="Password"
             value={rtkPassword}
             onChangeText={setRtkPassword || (() => {})}
-            placeholder="Your NTRIP password"
+            placeholder="Password"
             secureTextEntry
             editable={!fieldsLocked && !!setRtkPassword}
           />
@@ -830,7 +822,7 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
           ) : null}
 
           <Text style={styles.helpText}>
-            Tip: import a .txt file with host, port, mountpoint, username, and password — or type them in above.
+            Import a .txt with host, port, mountpoint, user, password — or type them here.
           </Text>
         </View>
       ) : (
@@ -998,22 +990,23 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
 
   return (
     <View style={styles.page}>
-      <View style={styles.pageHeader}>
-        <Text style={styles.pageTitle}>Settings</Text>
-        <Text style={styles.pageSubtitle}>{sectionCopy[section].subtitle}</Text>
+      <View style={[styles.topBar, compactTabs && styles.topBarStack]}>
+        <View style={styles.pageHeader}>
+          <Text style={styles.pageTitle}>Settings</Text>
+          <Text style={styles.pageSubtitle} numberOfLines={1}>{sectionCopy[section].subtitle}</Text>
+        </View>
+        <IconSegmentControl
+          compact={compactTabs}
+          value={section}
+          onChange={(id) => setSection(id as SettingsSection)}
+          options={[
+            { id: "connection", label: "RTK", icon: Satellite },
+            { id: "drive", label: "Drive", icon: Gauge },
+            { id: "spray", label: "Spray", icon: Droplets },
+            { id: "general", label: "General", icon: Settings },
+          ]}
+        />
       </View>
-
-      <IconSegmentControl
-        compact={compactTabs}
-        value={section}
-        onChange={(id) => setSection(id as SettingsSection)}
-        options={[
-          { id: "connection", label: "RTK", icon: Satellite },
-          { id: "drive", label: "Drive", icon: Gauge },
-          { id: "spray", label: "Spray", icon: Droplets },
-          { id: "general", label: "General", icon: Settings },
-        ]}
-      />
 
       <ScrollView
         style={styles.column}
@@ -1028,21 +1021,23 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
             apiBaseUrl={apiBaseUrl}
             family="rpp"
             title="Drive / RPP"
-            subtitle="Live rover tracking parameters. Apply writes only the values you change."
+            subtitle="Apply writes only the values you change"
             icon={Gauge}
           />
         ) : null}
         {section === "spray" ? (
-          <>
-            {spraySection}
-            <SchemaParamEditor
-              apiBaseUrl={apiBaseUrl}
-              family="spray"
-              title="Spray variables"
-              subtitle="Solenoid timing, nozzle offset, and actuator values. Hardware on/off is above."
-              icon={SlidersHorizontal}
-            />
-          </>
+          <View style={wide ? styles.split : styles.stack}>
+            <View style={wide ? styles.splitCol : undefined}>{spraySection}</View>
+            <View style={wide ? styles.splitCol : undefined}>
+              <SchemaParamEditor
+                apiBaseUrl={apiBaseUrl}
+                family="spray"
+                title="Spray variables"
+                subtitle="Timing, nozzle, actuator"
+                icon={SlidersHorizontal}
+              />
+            </View>
+          </View>
         ) : null}
         {section === "general" ? generalSection : null}
       </ScrollView>
@@ -1055,23 +1050,91 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 0,
     backgroundColor: COLORS.bgBase,
-    padding: 10,
-    gap: 8,
+    paddingHorizontal: 8,
+    paddingTop: 8,
+    paddingBottom: 6,
+    gap: 6,
+  },
+  topBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  topBarStack: {
+    flexDirection: "column",
+    alignItems: "stretch",
+    gap: 6,
   },
   pageHeader: {
-    gap: 2,
-    paddingBottom: 2,
+    gap: 1,
+    flexShrink: 1,
+    minWidth: 0,
   },
   pageTitle: {
     color: COLORS.textMain,
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: "800",
     letterSpacing: 0.2,
   },
   pageSubtitle: {
     color: COLORS.textMuted,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "500",
+  },
+  tabBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    backgroundColor: COLORS.surfaceSolid,
+    borderRadius: 8,
+    padding: 3,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    gap: 3,
+  },
+  tabBarCompact: {
+    alignSelf: "stretch",
+  },
+  tabPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  tabPillCompact: {
+    flex: 1,
+    paddingHorizontal: 4,
+    paddingVertical: 5,
+  },
+  tabPillActive: {
+    backgroundColor: COLORS.accentBrand,
+  },
+  tabPillText: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  tabPillTextCompact: {
+    fontSize: 10,
+  },
+  tabPillTextActive: {
+    color: COLORS.accentText,
+  },
+  split: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+  },
+  splitCol: {
+    flex: 1,
+    minWidth: 0,
+  },
+  stack: {
+    gap: 8,
   },
   columns: {
     flex: 1,
@@ -1089,25 +1152,23 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   columnContent: {
-    gap: 10,
-    paddingBottom: 24,
+    gap: 8,
+    paddingBottom: 16,
   },
   panel: {
     backgroundColor: COLORS.panelSolid,
-    borderRadius: 14,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
     overflow: "hidden",
-    ...SHADOWS.panel,
   },
   panelHeader: {
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
     justifyContent: "space-between",
-    gap: 10,
-    paddingHorizontal: 12,
-    paddingTop: 12,
-    paddingBottom: 10,
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.panelBorder,
   },
@@ -1118,9 +1179,9 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   panelIconWrap: {
-    width: 30,
-    height: 30,
-    borderRadius: 8,
+    width: 24,
+    height: 24,
+    borderRadius: 6,
     backgroundColor: COLORS.accentMuted,
     borderWidth: 1,
     borderColor: COLORS.accentBorder,
@@ -1129,41 +1190,41 @@ const styles = StyleSheet.create({
   },
   panelTitle: {
     color: COLORS.textMain,
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: "700",
   },
   panelSubtitle: {
     color: COLORS.textMuted,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "500",
-    marginTop: 2,
+    marginTop: 1,
   },
   panelBody: {
-    padding: 12,
-    gap: 10,
+    padding: 8,
+    gap: 6,
   },
   block: {
     backgroundColor: COLORS.cardSolid,
-    borderRadius: 10,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
-    padding: 10,
-    gap: 8,
+    padding: 8,
+    gap: 6,
   },
   compactBlock: {
     backgroundColor: COLORS.cardSolid,
-    borderRadius: 12,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-    gap: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+    gap: 6,
   },
   rtkActionRow: {
     flexDirection: "row",
     alignItems: "stretch",
     gap: 6,
-    height: 38,
+    height: 34,
   },
   rtkToggleWrap: {
     flex: 2,
@@ -1179,7 +1240,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 3,
     gap: 3,
-    height: 38,
+    height: 34,
   },
   rtkToggleOption: {
     flex: 1,
@@ -1204,7 +1265,7 @@ const styles = StyleSheet.create({
   },
   rtkActionBtn: {
     flex: 1,
-    height: 38,
+    height: 34,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -1264,9 +1325,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
     borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    minHeight: 36,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    minHeight: 32,
     color: COLORS.textMain,
     fontSize: 13,
   },
@@ -1277,8 +1338,8 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 12,
-    paddingVertical: 4,
+    gap: 10,
+    paddingVertical: 2,
   },
   toggleRowDisabled: {
     opacity: 0.55,
@@ -1298,11 +1359,11 @@ const styles = StyleSheet.create({
   segmented: {
     flexDirection: "row",
     backgroundColor: COLORS.surfaceSolid,
-    borderRadius: 10,
-    padding: 4,
+    borderRadius: 8,
+    padding: 3,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
-    gap: 4,
+    gap: 3,
   },
   segmentedCompact: {
     borderRadius: 8,
@@ -1311,8 +1372,8 @@ const styles = StyleSheet.create({
   },
   segmentBtn: {
     flex: 1,
-    paddingVertical: 10,
-    borderRadius: 8,
+    paddingVertical: 6,
+    borderRadius: 6,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -1347,8 +1408,8 @@ const styles = StyleSheet.create({
     gap: 8,
     alignSelf: "stretch",
     backgroundColor: COLORS.accentBrand,
-    borderRadius: 10,
-    paddingVertical: 12,
+    borderRadius: 8,
+    paddingVertical: 8,
     borderWidth: 1,
     borderColor: COLORS.accentBorder,
   },
@@ -1369,7 +1430,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
     alignSelf: "flex-end",
-    marginTop: 18,
+    marginTop: 6,
   },
   secondaryBtnText: {
     color: COLORS.textMain,
@@ -1476,12 +1537,12 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 10,
     alignSelf: "stretch",
-    minHeight: 48,
+    minHeight: 40,
     backgroundColor: COLORS.surfaceSolid,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
-    borderRadius: 12,
-    paddingVertical: 14,
+    borderRadius: 8,
+    paddingVertical: 8,
   },
   holdBtnActive: {
     backgroundColor: COLORS.accentBrand,
@@ -1512,8 +1573,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
     borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
   },
   noteBannerText: {
     flex: 1,
@@ -1529,9 +1590,9 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.cardSolid,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 11,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
   },
   rtkStatusLive: {
     backgroundColor: COLORS.successMuted,

@@ -91,6 +91,7 @@ export function PlanPreview({
   missionRunning = false,
   selectedPoints,
   onSelectPoint,
+  onMapPlacePoint,
   onGuidePointFocus,
   alignedRefPoints = [],
   telemetryPosN = null,
@@ -108,6 +109,11 @@ export function PlanPreview({
   onPlanAttached,
   visualAlignmentItem,
   setVisualAlignmentItem,
+  templateEditItem = null,
+  onUpdateTemplateEditItem,
+  templateToolMode = "rotate",
+  templateGestureTools,
+  onTemplateEditDeselect,
   visualAlignmentAnchor,
   previewFallbackGps = null,
   boundaryMode = false,
@@ -151,6 +157,7 @@ export function PlanPreview({
   missionRunning?: boolean;
   selectedPoints?: { x: number; y: number }[];
   onSelectPoint?: (pt: { x: number; y: number }) => void;
+  onMapPlacePoint?: (pt: { x: number; y: number }) => void;
   onGuidePointFocus?: (index: number) => void;
   alignedRefPoints?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
   telemetryPosN?: number | null;
@@ -168,6 +175,11 @@ export function PlanPreview({
   onPlanAttached?: (info: { x: number; y: number; rotation: number; scale: number }) => void;
   visualAlignmentItem?: PlacedItem | null;
   setVisualAlignmentItem?: React.Dispatch<React.SetStateAction<PlacedItem | null>>;
+  templateEditItem?: PlacedItem | null;
+  onUpdateTemplateEditItem?: (updates: Partial<PlacedItem>) => void;
+  templateToolMode?: "both" | "scale" | "rotate";
+  templateGestureTools?: { drag?: boolean; scale?: boolean; rotate?: boolean };
+  onTemplateEditDeselect?: () => void;
   visualAlignmentAnchor?: { originLat: number; originLon: number; originDxfNorth: number; originDxfEast: number } | null;
   /** Shared latched GPS for fields fallback origin (matches startPlanEditing). */
   previewFallbackGps?: { lat: number; lon: number } | null;
@@ -964,7 +976,7 @@ export function PlanPreview({
       >
         {mapViewEnabled ? (
           <MapView
-            mode={isPlacedItemActive || boundaryMode ? "templates" : "fields"}
+            mode={isPlacedItemActive || boundaryMode || !!templateEditItem ? "templates" : "fields"}
             boundaryWidth={boundaryWidth}
             boundaryHeight={boundaryHeight}
             boundaryPosition={boundaryPosition}
@@ -978,32 +990,53 @@ export function PlanPreview({
               isPlanEditingMode ? multiPointPlacementPhase : "idle"
             }
             onPlanAttached={onPlanAttached}
-            placedItems={isPlacedItemActive && visualAlignmentItem ? [visualAlignmentItem] : []}
+            placedItems={
+              isPlacedItemActive && visualAlignmentItem
+                ? [visualAlignmentItem]
+                : templateEditItem
+                  ? [templateEditItem]
+                  : []
+            }
             selectedItemIds={
               // Tap plan → select; tap outside → deselect (gestures only when selected).
               isEditablePlacedItemMode && visualSelected && placedItemId
                 ? [placedItemId]
-                : boundaryMode && boundarySelected
+                : templateEditItem
+                  ? [templateEditItem.id]
+                  : boundaryMode && boundarySelected
                 ? ["boundary"]
                 : []
             }
             multiTouchMode={
               // Resize: pan only (edge-handle scale). Move: pan + two-finger rotate.
-              multiPointPlacementPhase === "resizing"
+              templateEditItem
+                ? templateToolMode
+                : multiPointPlacementPhase === "resizing"
                 ? "scale"
                 : isEditablePlacedItemMode || isPlanEditingMode
                 ? "rotate"
                 : "both"
             }
+            gestureTools={templateEditItem ? templateGestureTools : undefined}
             onSelectionChange={(ids) => {
               if (boundaryMode) {
                 setBoundarySelected(ids.includes("boundary"));
+                return;
+              }
+              if (templateEditItem) {
+                if (!ids.includes(templateEditItem.id)) {
+                  onTemplateEditDeselect?.();
+                }
                 return;
               }
               if (!isEditablePlacedItemMode || !placedItemId) return;
               setVisualSelected(ids.includes(placedItemId));
             }}
             onUpdatePlacedItem={(id, updates) => {
+              if (templateEditItem && id === templateEditItem.id) {
+                onUpdateTemplateEditItem?.(updates);
+                return;
+              }
               if (!isEditablePlacedItemMode || !placedItemId || id !== placedItemId) return;
               setVisualAlignmentItem?.((prev: PlacedItem | null) => {
                 if (!prev) return prev;
@@ -1038,6 +1071,7 @@ export function PlanPreview({
             recenterPlanTrigger={recenterPlanTrigger || recenterPlanCount}
             resetNorthTrigger={resetNorthTrigger}
             onSelectPoint={showRefPointsLayer ? onSelectPoint : undefined}
+            onMapPlacePoint={onMapPlacePoint}
             onGuidePointFocus={showRefPointsLayer ? onGuidePointFocus : undefined}
             onSelectLine={onSelectLine}
             selectedLineId={selectedLineId}

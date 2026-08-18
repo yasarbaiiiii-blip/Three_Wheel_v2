@@ -37,6 +37,11 @@ export interface MapViewProps {
   resetNorthTrigger?: number;
   onSelectPoint?: (pt: { x: number; y: number }) => void;
   /**
+   * Fields template placement: any map tap in plan N/E (x=north, y=east).
+   * Takes priority over guide-point picking while a Place session is active.
+   */
+  onMapPlacePoint?: (pt: { x: number; y: number }) => void;
+  /**
    * Multi-Point: operator tapped an existing guide pin (gold numbered marker).
    * Parent should focus that point's Latitude/Longitude fields — not deselect.
    * `index` is 0-based into `selectedPoints` / refPoints.
@@ -86,6 +91,11 @@ export interface MapViewProps {
   onUpdatePlacedItems?: (items: PlacedItem[]) => void;
   onSelectionChange?: (ids: string[]) => void;
   multiTouchMode?: "both" | "scale" | "rotate";
+  /**
+   * Independent sticker tools. When set, overrides `multiTouchMode` so Drag /
+   * Scale / Rotate can be enabled together or one at a time.
+   */
+  gestureTools?: { drag?: boolean; scale?: boolean; rotate?: boolean };
   previewAnchor?: DesignPreviewAnchor;
   autoOriginReference?: AutoOriginReference | null;
   mapGeometryFrame?: MapGeometryFrame;

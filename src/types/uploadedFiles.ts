@@ -5,7 +5,25 @@
 
 export type UploadedFileStatus = "verified" | "needs_alignment";
 
-export type UploadedFileKind = "csv" | "dxf";
+export type UploadedFileKind = "csv" | "dxf" | "template";
+
+export type PlacedTemplateKind = "sign" | "characters";
+
+/**
+ * One placed sign or character string. Source strokes stay in local drawing
+ * space; `north`/`east`/`rotationDeg`/`scale` bake into mission lines.
+ */
+export type PlacedTemplateInstance = {
+  id: string;
+  fileName: string;
+  kind: PlacedTemplateKind;
+  lineIdPrefix: string;
+  sourceLines: import("./plan").PlanLine[];
+  north: number;
+  east: number;
+  rotationDeg: number;
+  scale: number;
+};
 
 export type UploadedFileVerifiedSummary = {
   scale: number | null;

@@ -1085,7 +1085,9 @@ export function UploadAndPreviewStep({
                 const selected = selectedUploadedFileId === f.id;
                 const verified = f.status === "verified";
                 const kindLabel =
-                  f.kind === "csv"
+                  f.kind === "template"
+                    ? "template"
+                    : f.kind === "csv"
                     ? f.isGeographic
                       ? "csv · gps"
                       : "csv · ned"

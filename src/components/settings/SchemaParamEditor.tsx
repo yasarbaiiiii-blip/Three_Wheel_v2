@@ -6,6 +6,7 @@ import {
   Switch,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from "react-native";
 import { Check, ChevronDown, ChevronRight, Gauge, RefreshCw } from "lucide-react-native";
@@ -122,21 +123,13 @@ const ParamRow = memo(function ParamRow({
               {paramLabel(param.name)}
             </Text>
             {unit ? <Text style={styles.unit}>{unit}</Text> : null}
+            {range ? <Text style={styles.rangeText}>{range}</Text> : null}
             {dirty ? (
               <View style={styles.dirtyDot} />
             ) : applied ? (
               <Check color={SETTINGS_COLORS.success} size={11} strokeWidth={2.8} />
             ) : null}
           </View>
-          {numeric ? (
-            <Text style={styles.rowHint} numberOfLines={1}>
-              Scroll dial or type{range ? ` · ${range}` : ""}
-            </Text>
-          ) : param.description ? (
-            <Text style={styles.rowHint} numberOfLines={1}>
-              {param.description}
-            </Text>
-          ) : null}
           {inert ? <Text style={styles.inertText}>Inert — no effect</Text> : null}
           {error ? <Text style={styles.rowError}>{error}</Text> : null}
         </View>
@@ -156,29 +149,30 @@ const ParamRow = memo(function ParamRow({
               onChange={(next) => onTypedChange(param.name, next)}
             />
           </View>
+        ) : numeric && Number.isFinite(numericValue) ? (
+          <VerticalValueDial
+            param={param}
+            value={numericValue}
+            draft={draft}
+            error={Boolean(error)}
+            onChange={(next) => onTypedChange(param.name, next)}
+            onDraftChange={(text) => onDraftChange(param.name, text)}
+            onCommitDraft={() => onCommitDraft(param.name)}
+          />
         ) : (
-          <View style={styles.controls}>
-            {numeric && Number.isFinite(numericValue) ? (
-              <VerticalValueDial
-                param={param}
-                value={numericValue}
-                onChange={(next) => onTypedChange(param.name, next)}
-              />
-            ) : null}
-            <TextInput
-              value={draft}
-              onChangeText={(text) => onDraftChange(param.name, text)}
-              onBlur={() => onCommitDraft(param.name)}
-              onSubmitEditing={() => onCommitDraft(param.name)}
-              keyboardType={numeric ? "decimal-pad" : "default"}
-              autoCapitalize="none"
-              autoCorrect={false}
-              style={[styles.input, error ? styles.inputError : null]}
-              placeholder={formatParamValue(param.default)}
-              placeholderTextColor={SETTINGS_COLORS.textDim}
-              accessibilityLabel={`Type ${paramLabel(param.name)}`}
-            />
-          </View>
+          <TextInput
+            value={draft}
+            onChangeText={(text) => onDraftChange(param.name, text)}
+            onBlur={() => onCommitDraft(param.name)}
+            onSubmitEditing={() => onCommitDraft(param.name)}
+            keyboardType="default"
+            autoCapitalize="none"
+            autoCorrect={false}
+            style={[styles.input, error ? styles.inputError : null]}
+            placeholder={formatParamValue(param.default)}
+            placeholderTextColor={SETTINGS_COLORS.textDim}
+            accessibilityLabel={`Type ${paramLabel(param.name)}`}
+          />
         )}
       </View>
     </View>
@@ -201,6 +195,8 @@ export default function SchemaParamEditor({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [applyStatus, setApplyStatus] = useState<ApplyStatus>({ kind: "idle" });
   const [appliedNames, setAppliedNames] = useState<string[]>([]);
+  const { width } = useWindowDimensions();
+  const twoCol = width >= 720;
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const appliedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -405,21 +401,31 @@ export default function SchemaParamEditor({
     setOpenGroups((prev) => ({ ...prev, [group]: !prev[group] }));
   }, []);
 
-  const renderRows = (items: ControllerParam[]) =>
-    items.map((param) => (
-      <ParamRow
-        key={param.name}
-        param={param}
-        value={valueOf(param)}
-        draft={draftOf(param)}
-        error={errors[param.name] ?? null}
-        dirty={param.name in edits}
-        applied={appliedNames.includes(param.name) && !(param.name in edits)}
-        onDraftChange={handleDraftChange}
-        onCommitDraft={handleCommitDraft}
-        onTypedChange={handleTypedChange}
-      />
-    ));
+  const renderRow = (param: ControllerParam) => (
+    <ParamRow
+      key={param.name}
+      param={param}
+      value={valueOf(param)}
+      draft={draftOf(param)}
+      error={errors[param.name] ?? null}
+      dirty={param.name in edits}
+      applied={appliedNames.includes(param.name) && !(param.name in edits)}
+      onDraftChange={handleDraftChange}
+      onCommitDraft={handleCommitDraft}
+      onTypedChange={handleTypedChange}
+    />
+  );
+
+  const renderRows = (items: ControllerParam[], grid = false) =>
+    grid ? (
+      <View style={styles.fieldGrid}>{items.map((param) => (
+        <View key={param.name} style={styles.gridCell}>
+          <View style={styles.gridInner}>{renderRow(param)}</View>
+        </View>
+      ))}</View>
+    ) : (
+      <View style={styles.listCard}>{items.map(renderRow)}</View>
+    );
 
   return (
     <View style={styles.panel}>
@@ -470,9 +476,9 @@ export default function SchemaParamEditor({
       </View>
 
       <View style={styles.body}>
-        <Text style={styles.howHint}>
-          Dial or type to stage a change. Apply writes it to the rover — the value is not live until then.
-        </Text>
+        {dirtyCount === 0 && applyStatus.kind === "idle" ? (
+          <Text style={styles.howHint}>Scroll the dial, or tap the value to type. Apply writes it to the rover.</Text>
+        ) : null}
 
         {dirtyCount > 0 && applyStatus.kind !== "applying" ? (
           <View style={styles.statusBanner}>
@@ -533,7 +539,7 @@ export default function SchemaParamEditor({
         {field.length > 0 ? (
           <View style={styles.section}>
             <Text style={styles.sectionLabel}>Field</Text>
-            <View style={styles.listCard}>{renderRows(field)}</View>
+            {renderRows(field, twoCol)}
           </View>
         ) : null}
 
@@ -562,7 +568,7 @@ export default function SchemaParamEditor({
                         <Text style={styles.groupTitle}>{group}</Text>
                         <Text style={styles.groupCount}>{items.length}</Text>
                       </Pressable>
-                      {open ? <View style={styles.listCard}>{renderRows(items)}</View> : null}
+                      {open ? renderRows(items) : null}
                     </View>
                   );
                 })
@@ -577,7 +583,7 @@ export default function SchemaParamEditor({
 const styles = StyleSheet.create({
   panel: {
     backgroundColor: SETTINGS_COLORS.panelSolid,
-    borderRadius: 14,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: SETTINGS_COLORS.panelBorder,
     overflow: "hidden",
@@ -587,8 +593,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     gap: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
     borderBottomWidth: 1,
     borderBottomColor: SETTINGS_COLORS.panelBorder,
   },
@@ -606,9 +612,9 @@ const styles = StyleSheet.create({
     flexShrink: 0,
   },
   iconWrap: {
-    width: 28,
-    height: 28,
-    borderRadius: 8,
+    width: 24,
+    height: 24,
+    borderRadius: 6,
     backgroundColor: SETTINGS_COLORS.accentMuted,
     borderWidth: 1,
     borderColor: SETTINGS_COLORS.accentBorder,
@@ -627,25 +633,25 @@ const styles = StyleSheet.create({
     marginTop: 1,
   },
   headerBtn: {
-    minHeight: 32,
-    paddingHorizontal: 10,
-    borderRadius: 8,
+    minHeight: 28,
+    paddingHorizontal: 8,
+    borderRadius: 7,
     alignItems: "center",
     justifyContent: "center",
     flexDirection: "row",
     gap: 4,
   },
   refreshBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
+    width: 28,
+    height: 28,
+    borderRadius: 7,
     backgroundColor: SETTINGS_COLORS.accentBrand,
     alignItems: "center",
     justifyContent: "center",
   },
   body: {
-    padding: 10,
-    gap: 8,
+    padding: 8,
+    gap: 6,
   },
   howHint: {
     color: SETTINGS_COLORS.textDim,
@@ -721,16 +727,32 @@ const styles = StyleSheet.create({
     letterSpacing: 0.7,
     textTransform: "uppercase",
   },
+  fieldGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    marginHorizontal: -3,
+  },
+  gridCell: {
+    width: "50%",
+    padding: 3,
+  },
+  gridInner: {
+    backgroundColor: SETTINGS_COLORS.cardSolid,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: SETTINGS_COLORS.panelBorder,
+    overflow: "hidden",
+  },
   listCard: {
     backgroundColor: SETTINGS_COLORS.cardSolid,
-    borderRadius: 10,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: SETTINGS_COLORS.panelBorder,
     overflow: "hidden",
   },
   row: {
-    paddingHorizontal: 10,
-    paddingVertical: 7,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: SETTINGS_COLORS.panelBorder,
   },
@@ -769,6 +791,11 @@ const styles = StyleSheet.create({
     color: SETTINGS_COLORS.accentBrand,
     fontSize: 9,
     fontWeight: "800",
+  },
+  rangeText: {
+    color: SETTINGS_COLORS.textDim,
+    fontSize: 9,
+    fontWeight: "600",
   },
   dirtyDot: {
     width: 6,

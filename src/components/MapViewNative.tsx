@@ -330,6 +330,7 @@ export function MapViewNative(props: MapViewProps) {
     recenterPlanTrigger,
     resetNorthTrigger,
     onSelectPoint,
+    onMapPlacePoint,
     onGuidePointFocus,
     onSelectLine,
     selectedLineId,
@@ -363,6 +364,7 @@ export function MapViewNative(props: MapViewProps) {
     onUpdatePlacedItem,
     onUpdatePlacedItems,
     multiTouchMode = "both",
+    gestureTools,
     onMapClickToMark,
     drawnWaypoints,
     manualDrawingEnabled,
@@ -769,7 +771,14 @@ export function MapViewNative(props: MapViewProps) {
   // ── Plan lines (Fields) → FeatureCollection of LineStrings ──
   // Reuses projectPlanLineToGpsSegments (preview_points-first / from→to fallback).
   const planLinesFC = useMemo(() => {
-    if (mode === "templates" || !projectionOrigin || lines.length === 0) {
+    // Full-plan stickers (Move / Visual Align) already draw the mission. A
+    // placed template sticker must leave the rest of the plan visible.
+    const isFullPlanSticker =
+      mode === "templates" &&
+      (placedItems ?? []).some(
+        (it) => it.id === "plan-editing-group" || it.id === "visual-alignment-group"
+      );
+    if (isFullPlanSticker || !projectionOrigin || lines.length === 0) {
       return featureCollection([]);
     }
     const features: GeoJSON.Feature[] = [];
@@ -793,7 +802,7 @@ export function MapViewNative(props: MapViewProps) {
       }
     }
     return featureCollection(features);
-  }, [lines, originSig, mode]);
+  }, [lines, originSig, mode, placedItemsSig]);
 
   // ── Offset ghost preview: live drag-only, never committed, not mode-gated ──
   // Offset only exists in Fields, so `ghostLines` is simply never populated when
@@ -2539,24 +2548,31 @@ export function MapViewNative(props: MapViewProps) {
     [rotationDelta, panDeltaN, panDeltaE, pinchScale, onDragMove]
   );
 
-  // Gate gestures based on multiTouchMode + plan phase:
+  // Gate gestures based on multiTouchMode + plan phase, or independent gestureTools:
   // - resizing: pan only (edge-handle axis resize; no pinch/rotate)
   // - "both": pan + pinch + rotation
   // - "scale": pan + pinch only (no rotation)
   // - "rotate": pan + rotation only (no pinch/scale)
+  // - gestureTools: each tool independently (Fields template Drag/Scale/Rotate)
   const composedGesture = useMemo(
     () => {
       if (manualDrawingEnabled) {
         return Gesture.Pan().enabled(false);
       }
       const resizing = planPlacementPhase === "resizing";
-      const gestures: any[] = [panGesture.enabled(!!hasEditableSelection)];
-      if (!resizing && (multiTouchMode === "both" || multiTouchMode === "scale")) {
-        gestures.push(pinchGesture.enabled(!!hasEditableSelection));
-      }
-      if (!resizing && (multiTouchMode === "both" || multiTouchMode === "rotate")) {
-        gestures.push(rotationGesture.enabled(!!hasEditableSelection));
-      }
+      const selected = !!hasEditableSelection;
+      const allowPan = gestureTools ? !!gestureTools.drag : true;
+      const allowScale = gestureTools
+        ? !!gestureTools.scale
+        : multiTouchMode === "both" || multiTouchMode === "scale";
+      const allowRotate = gestureTools
+        ? !!gestureTools.rotate
+        : multiTouchMode === "both" || multiTouchMode === "rotate";
+      const gestures: any[] = [];
+      if (allowPan) gestures.push(panGesture.enabled(selected));
+      if (!resizing && allowScale) gestures.push(pinchGesture.enabled(selected));
+      if (!resizing && allowRotate) gestures.push(rotationGesture.enabled(selected));
+      if (gestures.length === 0) return Gesture.Pan().enabled(false);
       return Gesture.Simultaneous(...gestures);
     },
     [
@@ -2564,6 +2580,7 @@ export function MapViewNative(props: MapViewProps) {
       pinchGesture,
       rotationGesture,
       multiTouchMode,
+      gestureTools,
       hasEditableSelection,
       manualDrawingEnabled,
       planPlacementPhase,
@@ -2591,9 +2608,8 @@ export function MapViewNative(props: MapViewProps) {
       boundaryGeo.indent.features.forEach(pushFeatureCoords);
       placedItemsGeo.lines.features.forEach(pushFeatureCoords);
       placedItemsGeo.boxes.features.forEach(pushFeatureCoords);
-    } else {
-      planLinesFC.features.forEach(pushFeatureCoords);
     }
+    planLinesFC.features.forEach(pushFeatureCoords);
     // Always include selected alignment ref points — CSV-imported or tapped points may sit
     // outside the plan's own line bounds, and they must never end up framed off-screen.
     selectedPointsFC.features.forEach(pushFeatureCoords);
@@ -2734,9 +2750,6 @@ export function MapViewNative(props: MapViewProps) {
           const mpp = metersPerPixelSV.value > 0 ? metersPerPixelSV.value : 0.05;
           const padM = Math.max(0.75, Math.min(4, mpp * 28));
           for (const item of placedItems) {
-            if (item.id !== "plan-editing-group" && item.id !== "visual-alignment-group") {
-              continue;
-            }
             const pose = poseFromPlanItem(item);
             if (isWorldPointInPlanObb(world, pose, padM)) {
               onSelectionChange?.([item.id]);
@@ -2753,6 +2766,11 @@ export function MapViewNative(props: MapViewProps) {
       // Plan frame: north = x, east = y (same as PlanLine.from.x/y).
       const clickN = local.north + projectionOrigin.originDxfNorth;
       const clickE = local.east + projectionOrigin.originDxfEast;
+
+      if (onMapPlacePoint) {
+        onMapPlacePoint({ x: clickN, y: clickE });
+        return;
+      }
 
       // Multi-Point hit: ~36px finger target in metres. Slightly generous so the
       // plan start vertex is easy to grab; still capped so hollow interior taps
@@ -2935,6 +2953,7 @@ export function MapViewNative(props: MapViewProps) {
       originSig,
       lines,
       onSelectPoint,
+      onMapPlacePoint,
       onSelectLine,
       onSelectionChange,
       onMapClickToMark,

@@ -7,7 +7,7 @@ import {
   getLoadedMissionId,
   isProtectedMissionResident,
 } from "../api/missionContract";
-import { PlacedItem } from "../components/BoundaryEditor";
+import { type PlacedItem } from "../components/BoundaryEditor";
 import { FieldsStepCard } from "../components/fields/FieldsStepCard";
 import { FieldsClearBar } from "../components/fields/FieldsClearBar";
 import { MapPlanInteractionOverlay } from "../components/fields/MapPlanInteractionOverlay";
@@ -21,6 +21,11 @@ import { TemplatePanel } from "../components/fields/panels/TemplatePanel";
 import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPreviewStep";
 import { useFieldsWorkflow } from "../hooks/useFieldsWorkflow";
 import { designObbFromLines } from "../utils/planResizeHandles";
+import {
+  ghostLinesForPose,
+  instanceForLineId,
+  toCenteredPlanFrameLines,
+} from "../utils/templateInstance";
 import {
   shouldRenderAlignCard,
   type FieldsStepSlice,
@@ -150,6 +155,12 @@ export type FieldsPageProps = {
     mapSourceLines?: PlanLine[];
     /** Live drag-time Offset preview overlay — null unless actively dragging the compass dial. */
     ghostLines?: PlanLine[] | null;
+    onMapPlacePoint?: (pt: { x: number; y: number }) => void;
+    templateEditItem?: PlacedItem | null;
+    onUpdateTemplateEditItem?: (updates: Partial<PlacedItem>) => void;
+    templateToolMode?: "both" | "scale" | "rotate";
+    templateGestureTools?: { drag?: boolean; scale?: boolean; rotate?: boolean };
+    onTemplateEditDeselect?: () => void;
     autoOriginReference?: AutoOriginReference | null;
     mapGeometryFrame?: MapGeometryFrame;
     autoOriginEnabled?: boolean;
@@ -203,6 +214,19 @@ export type FieldsPageProps = {
   } | null;
   /** Multi-type local batch (CSV + metric/geo DXF). */
   uploadedFiles?: import("../types/uploadedFiles").UploadedFileEntry[];
+  placedTemplates?: import("../types/uploadedFiles").PlacedTemplateInstance[];
+  onPlaceTemplate?: (args: {
+    kind: "sign" | "characters";
+    fileName: string;
+    sourceLines: PlanLine[];
+    north: number;
+    east: number;
+  }) => string | void;
+  onUpdateTemplateInstance?: (
+    id: string,
+    patch: Partial<{ north: number; east: number; rotationDeg: number; scale: number }>
+  ) => void;
+  onRemoveTemplate?: (id: string) => void;
   pendingDxfAlignment?: Record<
     string,
     import("../types/uploadedFiles").PendingDxfAlignmentEntry
@@ -354,6 +378,10 @@ export function FieldsPage(props: FieldsPageProps) {
     localCsvPreview = null,
     localDxfMeta = null,
     uploadedFiles = [],
+    placedTemplates = [],
+    onPlaceTemplate,
+    onUpdateTemplateInstance,
+    onRemoveTemplate,
     pendingDxfAlignment = {},
     setPendingDxfAlignment,
     sharedOriginGps = null,
@@ -535,6 +563,129 @@ export function FieldsPage(props: FieldsPageProps) {
     [setActiveStep]
   );
 
+  const [tplSession, setTplSession] = useState<"idle" | "picking" | "ghost">("idle");
+  const [tplDraft, setTplDraft] = useState<{
+    kind: "sign" | "characters";
+    fileName: string;
+    sourceLines: PlanLine[];
+  } | null>(null);
+  const [tplGhostPose, setTplGhostPose] = useState<{ north: number; east: number } | null>(null);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [tplDrag, setTplDrag] = useState(false);
+  const [tplScale, setTplScale] = useState(false);
+  const [tplRotate, setTplRotate] = useState(false);
+
+  const needsAlign = uploadedFiles.some((f) => f.status === "needs_alignment");
+  const hasMissionFrame = Boolean(
+    sharedOriginGps ||
+      (verifiedAlignmentRequest?.origin_gps &&
+        Array.isArray(verifiedAlignmentRequest.origin_gps) &&
+        verifiedAlignmentRequest.origin_gps.length >= 2) ||
+      selectMarkPlanLines(lines).length > 0
+  );
+  const canPlaceTemplates = hasMissionFrame && !needsAlign;
+  const placeBlockedReason = needsAlign
+    ? "Align the metric DXF first so the template is not moved twice."
+    : "Import a survey or aligned plan first so the template has a map frame.";
+
+  const templateGhostLines = useMemo(() => {
+    if (tplSession !== "ghost" || !tplDraft || !tplGhostPose) return null;
+    return ghostLinesForPose(tplDraft.sourceLines, {
+      north: tplGhostPose.north,
+      east: tplGhostPose.east,
+      rotationDeg: 0,
+      scale: 1,
+    });
+  }, [tplSession, tplDraft, tplGhostPose]);
+
+  // useMemo so the .find() doesn't run on every prop change.
+  const selectedTemplate = useMemo(
+    () => placedTemplates.find((item) => item.id === selectedTemplateId) ?? null,
+    [placedTemplates, selectedTemplateId]
+  );
+  const templateToolsOn = Boolean(selectedTemplate && (tplDrag || tplScale || tplRotate));
+
+  const templateEditItem = useMemo((): PlacedItem | null => {
+    if (!selectedTemplate || !templateToolsOn) return null;
+    const local = toCenteredPlanFrameLines(selectedTemplate.sourceLines);
+    const obb = designObbFromLines(local);
+    return {
+      id: selectedTemplate.id,
+      lines: local,
+      x: selectedTemplate.east,
+      y: selectedTemplate.north,
+      rotation: selectedTemplate.rotationDeg,
+      scale: selectedTemplate.scale,
+      width: Math.max(0.5, obb.width),
+      height: Math.max(0.5, obb.height),
+    };
+  }, [selectedTemplate, templateToolsOn]);
+
+  const templateToolMode: "both" | "scale" | "rotate" = tplScale && tplRotate
+    ? "both"
+    : tplScale
+      ? "scale"
+      : "rotate";
+  const templateGestureTools = useMemo(
+    () => ({ drag: tplDrag, scale: tplScale, rotate: tplRotate }),
+    [tplDrag, tplScale, tplRotate]
+  );
+
+  /**
+   * Fully deselect the active template: clear all tool flags AND the selected ID.
+   * Called when the user taps empty map space while transform tools are active.
+   */
+  const handleTemplateEditDeselect = useCallback(() => {
+    setTplDrag(false);
+    setTplScale(false);
+    setTplRotate(false);
+    setSelectedTemplateId(null);
+  }, []);
+
+
+  /**
+   * Map onSelectLine: if the tapped line belongs to a placed template, select that
+   * template and open the panel; otherwise clear template selection.
+   */
+  const handleMapSelectLine = useCallback(
+    (id: string | null, options?: { highlightLineIds?: string[] | null }) => {
+      const inst = instanceForLineId(placedTemplates, id);
+      if (inst) {
+        setSelectedTemplateId(inst.id);
+        openOnlySection("templates");
+      } else if (tplSession === "idle") {
+        setSelectedTemplateId(null);
+        setTplDrag(false);
+        setTplScale(false);
+        setTplRotate(false);
+      }
+      onSelectLine(id, options);
+    },
+    [placedTemplates, tplSession, onSelectLine, openOnlySection]
+  );
+
+  /**
+   * Called from TemplatePanel's placed-templates dropdown.
+   * Selects the chosen template, opens the Templates section, and opens
+   * Templates panel so Drag/Scale/Rotate are immediately accessible.
+   */
+  const handleSelectPlacedTemplate = useCallback(
+    (id: string) => {
+      setSelectedTemplateId(id);
+      openOnlySection("templates");
+      // Highlight the template's lines on the map for visual feedback.
+      const tpl = placedTemplates.find((t) => t.id === id);
+      if (tpl) {
+        const firstLine = tpl.sourceLines[0];
+        if (firstLine) {
+          const prefixed = `${tpl.lineIdPrefix}__${firstLine.id}`;
+          onSelectLine(prefixed, { highlightLineIds: null });
+        }
+      }
+    },
+    [placedTemplates, openOnlySection, onSelectLine]
+  );
+
   /**
    * How many PRE/AFT runs the current config actually produces, and — when that is zero —
    * why. Extensions are geometry-gated: a shape that closes on itself has no open end to run
@@ -579,6 +730,28 @@ export function FieldsPage(props: FieldsPageProps) {
       return true;
     },
     [loadedPathInspection, protectedResident]
+  );
+
+  /**
+   * Update the placed template's position/rotation/scale from a map gesture.
+   * Stable reference — only re-creates when the selected template or tool flags change.
+   * Placed AFTER blockProtectedWorkflowMutation so the dep is in scope.
+   */
+  const handleUpdateTemplateEditItem = useCallback(
+    (updates: Partial<{ x: number; y: number; rotation: number; scale: number }>) => {
+      if (!selectedTemplate) return;
+      if (blockProtectedWorkflowMutation("Editing a template")) return;
+      const patch: Partial<{ north: number; east: number; rotationDeg: number; scale: number }> = {};
+      if (tplDrag) {
+        if (typeof updates.y === "number") patch.north = updates.y;
+        if (typeof updates.x === "number") patch.east = updates.x;
+      }
+      if (tplRotate && typeof updates.rotation === "number") patch.rotationDeg = updates.rotation;
+      if (tplScale && typeof updates.scale === "number") patch.scale = updates.scale;
+      if (Object.keys(patch).length === 0) return;
+      onUpdateTemplateInstance?.(selectedTemplate.id, patch);
+    },
+    [selectedTemplate, tplDrag, tplRotate, tplScale, blockProtectedWorkflowMutation, onUpdateTemplateInstance]
   );
 
   /**
@@ -756,6 +929,11 @@ export function FieldsPage(props: FieldsPageProps) {
       if (prefixed.length > 0) {
         onSelectLine(prefixed[0] ?? null, { highlightLineIds: prefixed });
       }
+      if (entry.kind === "template") {
+        setSelectedTemplateId(entry.id);
+        openOnlySection("templates");
+        return;
+      }
       if (entry.status === "needs_alignment") {
         resetWorkingAlignState();
         setActiveStep("align");
@@ -802,6 +980,12 @@ export function FieldsPage(props: FieldsPageProps) {
     selectedPending,
     activeStep,
   ]);
+
+  const mapDisplayWithoutEditingTemplate = useMemo(() => {
+    if (!selectedTemplate || !templateToolsOn) return mapDisplayLines;
+    const token = `${selectedTemplate.lineIdPrefix}__`;
+    return mapDisplayLines.filter((line) => !line.id.startsWith(token));
+  }, [mapDisplayLines, selectedTemplate, templateToolsOn]);
 
   /**
    * Keep App's plan-manipulation handlers pointed at the geometry actually on screen.
@@ -1010,8 +1194,22 @@ export function FieldsPage(props: FieldsPageProps) {
           made native Mapbox invisible on Android. */}
       <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
         {renderPlanPreview({
-          lines: anchorSelectMode && anchorTarget ? anchorIsolatedLines : mapDisplayLines,
-          ghostLines: offsetPreviewLines,
+          lines: anchorSelectMode && anchorTarget
+            ? anchorIsolatedLines
+            : mapDisplayWithoutEditingTemplate,
+          ghostLines: templateGhostLines ?? offsetPreviewLines,
+          onMapPlacePoint:
+            tplSession === "picking" || tplSession === "ghost"
+              ? (pt) => {
+                  setTplGhostPose({ north: pt.x, east: pt.y });
+                  setTplSession("ghost");
+                }
+              : undefined,
+          templateEditItem,
+          templateToolMode,
+          templateGestureTools,
+          onTemplateEditDeselect: handleTemplateEditDeselect,
+          onUpdateTemplateEditItem: selectedTemplate ? handleUpdateTemplateEditItem : undefined,
           mapSourceLines:
             anchorSelectMode && anchorTarget
               ? anchorIsolatedLines
@@ -1024,7 +1222,7 @@ export function FieldsPage(props: FieldsPageProps) {
           geoOrigin,
           visibility: effectiveLayerVisibility,
           selectedLineId,
-          onSelectLine,
+          onSelectLine: handleMapSelectLine,
           highlightLineIds,
           roverPosN: previewRoverPoint?.north ?? null,
           roverPosE: previewRoverPoint?.east ?? null,
@@ -1238,15 +1436,6 @@ export function FieldsPage(props: FieldsPageProps) {
           </ScrollView>
           {/* Path order list (VirtualizedList) + Verify & Load — outside ScrollView. */}
           {renderFieldsSteps("csvPathOrder")}
-          <ScrollView
-            style={{ flexGrow: 0, flexShrink: 1, minHeight: 0 }}
-            contentContainerStyle={{ gap: 8, paddingBottom: 12 }}
-            keyboardShouldPersistTaps="handled"
-            nestedScrollEnabled
-            showsVerticalScrollIndicator={isSectionOpen("templates")}
-          >
-            {renderFieldsSteps("csvScroll")}
-          </ScrollView>
         </View>
         ) : (
         <View
@@ -1308,54 +1497,104 @@ export function FieldsPage(props: FieldsPageProps) {
         telemetryPosN={telemetrySnapshot?.pos_n ?? null}
         telemetryPosE={telemetrySnapshot?.pos_e ?? null}
         placementMode={isLocalFlow ? "csvLocal" : "dxf"}
-        onAddLocalTemplateLines={
-          isLocalFlow
-            ? (templateLines) => {
-                setLines((prev) => {
-                  const existingMarks = prev.filter(
-                    (l) => l.layer !== "transit" && l.layer !== "extension"
-                  );
-                  const marks = [...existingMarks, ...templateLines];
-                  const order =
-                    csvPathOrder ??
-                    marks.map((l) => ({
-                      lineId: l.id,
-                      label: l.label,
-                      paint: true as boolean,
-                    }));
-                  return applyCsvOrderToPlanLines(marks, order, csvExtensionConfig);
-                });
-                setShowMapInteraction(true);
+        canPlace={canPlaceTemplates}
+        placeBlockedReason={placeBlockedReason}
+        session={tplSession}
+        selectedLabel={selectedTemplate?.fileName ?? null}
+        dragEnabled={tplDrag}
+        scaleEnabled={tplScale}
+        rotateEnabled={tplRotate}
+        onBeginPlace={(draft) => {
+          if (blockProtectedWorkflowMutation("Placing a template")) return;
+          if (!canPlaceTemplates) {
+            Alert.alert("Cannot place yet", placeBlockedReason);
+            return;
+          }
+          setTplDraft(draft);
+          setTplGhostPose(null);
+          setTplSession("picking");
+          setSelectedTemplateId(null);
+          setTplDrag(false);
+          setTplScale(false);
+          setTplRotate(false);
+          setShowMapInteraction(true);
+        }}
+        onCancelPlace={() => {
+          setTplSession("idle");
+          setTplDraft(null);
+          setTplGhostPose(null);
+        }}
+        onConfirmPlace={() => {
+          if (!tplDraft || !tplGhostPose || !onPlaceTemplate) return;
+          if (blockProtectedWorkflowMutation("Placing a template")) return;
+          const placedId = onPlaceTemplate({
+            kind: tplDraft.kind,
+            fileName: tplDraft.fileName,
+            sourceLines: tplDraft.sourceLines,
+            north: tplGhostPose.north,
+            east: tplGhostPose.east,
+          });
+          setTplSession("idle");
+          setTplDraft(null);
+          setTplGhostPose(null);
+          setShowMapInteraction(true);
+          if (typeof placedId === "string") {
+            setSelectedTemplateId(placedId);
+            openOnlySection("templates");
+          }
+        }}
+        onToggleDrag={() => {
+          if (blockProtectedWorkflowMutation("Editing a template")) return;
+          setTplDrag((v) => !v);
+        }}
+        onToggleScale={() => {
+          if (blockProtectedWorkflowMutation("Editing a template")) return;
+          setTplScale((v) => !v);
+        }}
+        onToggleRotate={() => {
+          if (blockProtectedWorkflowMutation("Editing a template")) return;
+          setTplRotate((v) => !v);
+        }}
+        onRemoveSelected={
+          selectedTemplate && onRemoveTemplate
+            ? () => {
+                if (blockProtectedWorkflowMutation("Removing a template")) return;
+                onRemoveTemplate(selectedTemplate.id);
+                setSelectedTemplateId(null);
+                setTplDrag(false);
+                setTplScale(false);
+                setTplRotate(false);
               }
             : undefined
         }
+        onAddLocalTemplateLines={undefined}
+        placedTemplates={placedTemplates.map((tpl) => ({ id: tpl.id, fileName: tpl.fileName }))}
+        selectedTemplateId={selectedTemplateId}
+        onSelectPlacedTemplate={handleSelectPlacedTemplate}
       />
     );
   }
 
   /**
    * Slice the step tree so Path Order VirtualizedLists are never ScrollView children.
-   * - csvUpload / csvPathOrder / csvScroll: local-flow sections (CSV and local DXF)
-   * - localDxfTop: Upload + Align (scrollable) — Templates trails in csvScroll
-   * - dxfTop: Upload + Templates + Align (scrollable)
-   * - dxfPathOrder: Path Order & Load (flex fill, own list scroll)
+   * - csvUpload: Upload + Templates (local CSV)
+   * - localDxfTop: Upload + Align + Templates (local / batch DXF)
+   * - csvPathOrder / dxfPathOrder: Path Order & Load (own list scroll)
+   * - dxfTop: Upload + Align + Templates (rover DXF)
    */
   function renderFieldsSteps(slice: FieldsStepSlice) {
     const showUpload =
       slice === "csvUpload" || slice === "dxfTop" || slice === "localDxfTop";
     const showCsvPathOrder = slice === "csvPathOrder";
     /**
-     * Templates is its own step card in every flow — there is no Bounding Box step.
-     *
-     * Where it sits differs by flow, and that is deliberate. Local flows put it last, after
-     * Align: `placeTemplateLinesInCsvFrame` positions strokes relative to the rover's live
-     * position, which is an already-aligned frame, so placing them before Align would let the
-     * alignment transform move them a second time. The rover-planned DXF flow has no such
-     * constraint — its templates round-trip through POST /parse-dxf as a fresh plan — so it
-     * keeps Templates up top, before Align, which is also the default (nothing uploaded) view.
+     * Templates sits above Path Order in every flow. Align (when shown) stays above
+     * Templates so a metric DXF is fitted before a sign can be baked into that frame.
      */
     const showTemplatesStep =
-      (slice === "csvScroll" && isLocalFlow) || (slice === "dxfTop" && !isLocalFlow);
+      (slice === "csvUpload" && isLocalCsvFlow && !hasLocalBatch) ||
+      (slice === "csvUpload" && hasLocalBatch && !isLocalDxfFlow) ||
+      (slice === "localDxfTop" && (isLocalDxfFlow || hasLocalBatch)) ||
+      (slice === "dxfTop" && !isLocalFlow);
     const showDxfPathOrder = slice === "dxfPathOrder" && !isLocalDxfFlow;
     const activeCsvForSend = activeCsvPreview;
     // Multi-file / local app batch: single Path Order card once every file is verified.
@@ -1384,26 +1623,16 @@ export function FieldsPage(props: FieldsPageProps) {
 
     /**
      * Card numbering per flow:
-     *   local CSV   1 Upload · 2 Path Order & Load · 3 Templates
-     *   local DXF   1 Upload · 2 Align · 3 Path Order & Load · 4 Templates
-     *   multi batch 1 Upload · 2 Align (if needed) · 3 Path Order · 4 Templates
-     *   rover DXF   1 Upload · 2 Templates · 3 Align · 4 Path Order & Load
+     *   local CSV   1 Upload · 2 Templates · 3 Path Order & Load
+     *   local DXF   1 Upload · 2 Align · 3 Templates · 4 Path Order & Load
+     *   multi batch 1 Upload · 2 Align (if needed) · 3 Templates · 4 Path Order
+     *   rover DXF   1 Upload · 2 Align · 3 Templates · 4 Path Order & Load
      */
     const stepNo = {
       upload: 1,
-      align: isLocalCsvFlow && !hasPendingAlignment ? 3 : 2,
-      pathOrder:
-        isLocalCsvFlow && !hasPendingAlignment
-          ? 2
-          : isLocalDxfFlow || hasLocalBatch
-            ? 3
-            : 4,
-      templates:
-        isLocalCsvFlow && !hasPendingAlignment
-          ? 3
-          : isLocalDxfFlow || hasLocalBatch
-            ? 4
-            : 2,
+      align: 2,
+      templates: isLocalCsvFlow && !hasPendingAlignment ? 2 : 3,
+      pathOrder: isLocalCsvFlow && !hasPendingAlignment ? 3 : 4,
     };
 
     return (
@@ -1700,7 +1929,7 @@ export function FieldsPage(props: FieldsPageProps) {
             </FieldsStepCard>
           ) : showCsvPathOrder ? (
             <FieldsStepCard
-              stepNumber={2}
+              stepNumber={stepNo.pathOrder}
               title="Path Order & Load"
               status="pending"
               expanded={isSectionOpen("pathOrder")}
@@ -1710,34 +1939,6 @@ export function FieldsPage(props: FieldsPageProps) {
                 Load a survey CSV or DXF first, then order paths, review transit, and verify & load.
               </Text>
             </FieldsStepCard>
-          ) : null}
-
-          {/*
-            Step: Templates — trailing step in both local flows (after Align + Path Order),
-            and the second card in the rover-DXF flow (where Bounding Box used to sit).
-          */}
-          {showTemplatesStep ? (
-          <FieldsStepCard
-            stepNumber={stepNo.templates}
-            title="Templates"
-            status={isSectionOpen("templates") ? "active" : "pending"}
-            expanded={isSectionOpen("templates")}
-            onToggle={() => toggleSection("templates")}
-            scrollableBody
-            bodyMaxHeight={380}
-          >
-            <View
-              style={{
-                borderRadius: 10,
-                backgroundColor: FIELDS_COLORS.surfaceSolid,
-                borderWidth: 1,
-                borderColor: FIELDS_COLORS.panelBorder,
-                padding: 12,
-              }}
-            >
-              {renderTemplatePanel()}
-            </View>
-          </FieldsStepCard>
           ) : null}
 
           {/* Align DXF — rover DXF, local metric DXF, or multi-file pending file. */}
@@ -1827,10 +2028,35 @@ export function FieldsPage(props: FieldsPageProps) {
           </FieldsStepCard>
           )}
 
+          {/* Templates — above Path Order in every flow; after Align when Align is shown. */}
+          {showTemplatesStep ? (
+          <FieldsStepCard
+            stepNumber={stepNo.templates}
+            title="Templates"
+            status={isSectionOpen("templates") ? "active" : "pending"}
+            expanded={isSectionOpen("templates")}
+            onToggle={() => toggleSection("templates")}
+            scrollableBody
+            bodyMaxHeight={380}
+          >
+            <View
+              style={{
+                borderRadius: 10,
+                backgroundColor: FIELDS_COLORS.surfaceSolid,
+                borderWidth: 1,
+                borderColor: FIELDS_COLORS.panelBorder,
+                padding: 12,
+              }}
+            >
+              {renderTemplatePanel()}
+            </View>
+          </FieldsStepCard>
+          ) : null}
+
           {/* Path Order & Load — DXF/waypoints; hosted outside page ScrollView */}
           {showDxfPathOrder && (
           <FieldsStepCard
-            stepNumber={4}
+            stepNumber={stepNo.pathOrder}
             title="Path Order & Load"
             status={stepStatus("orderAndSpray")}
             expanded={isSectionOpen("orderAndSpray")}
