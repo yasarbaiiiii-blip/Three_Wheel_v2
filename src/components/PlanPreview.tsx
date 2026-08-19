@@ -619,7 +619,8 @@ export function PlanPreview({
     const positionDelta = Math.hypot(nextPose.north - prevPose.north, nextPose.east - prevPose.east);
     const headingDelta = Math.abs(shortestAngleDelta(prevPose.headingDeg, nextPose.headingDeg));
 
-    if (positionDelta > 1.5 || headingDelta > 25) {
+    const snapM = missionRunning ? 0.45 : 1.5;
+    if (positionDelta > snapM || headingDelta > 25) {
       displayRoverPoseRef.current = nextPose;
       setDisplayRoverPose(nextPose);
       return;

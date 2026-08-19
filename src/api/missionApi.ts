@@ -10,6 +10,25 @@ export type LoadMissionToControllerPayload = {
   mission_id: string;
 };
 
+/** Optional flags for App.loadMissionOnBackend (Send / Start fast path). */
+export type LoadMissionOptions = {
+  hideRuntimeEntryLine?: boolean;
+  extensionLines?: import("../types/plan").PlanLine[] | null;
+  manageBusy?: boolean;
+  stagedInspection?: import("./pathApi").StagedMissionResponse | null;
+  /** Send already drew the staged path — skip a second hydrate. */
+  skipMapHydration?: boolean;
+  /** Start is already on Home — don't remount the page. */
+  skipNavigate?: boolean;
+  /**
+   * Layer-scoped Start restages a subset — mark-count must compare against
+   * that subset, not the full Send snapshot.
+   */
+  expectedPaintedLines?: import("../types/plan").PlanLine[] | null;
+  /** Caller presents the error (Start). Skip Alert/toast and rethrow. */
+  rethrow?: boolean;
+};
+
 export type PlacementMode = "GPS_SURVEYED" | "LOCAL_NED";
 
 export type StartMissionPayload = {

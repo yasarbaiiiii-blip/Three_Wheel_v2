@@ -35,6 +35,7 @@ import {
 } from "../../../utils/csvTrajectory";
 import type { LocalPointCsvResult } from "../../../utils/localPointCsv";
 import { sanitizePlanLines } from "../../../utils/pathWorkflow";
+import { yieldToUi } from "../../../utils/runtimeGuards";
 import {
   buildMissionLayerLegCatalog,
   tagLinesWithMissionLayer,
@@ -106,7 +107,10 @@ type CsvStageAndLoadPanelProps = {
   >;
   onWorkflowStep?: (step: StagedWorkflowStep, status: StagedWorkflowStatus) => void;
   /** App's staged-load commit: loads to the controller, verifies, re-hydrates, navigates. */
-  onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
+  onLoadSelectedPath: (
+    missionId?: string,
+    opts?: import("../../../api/missionApi").LoadMissionOptions
+  ) => boolean | Promise<boolean>;
   missionActionBusy: boolean;
   onBeginPathExclusive?: (kind: "send") => boolean;
   onEndPathExclusive?: (kind: "send") => void;
@@ -335,6 +339,19 @@ export function CsvStageAndLoadPanel({
     onWorkflowStep?.("staged", "verified");
     onWorkflowStep?.("loaded", "pending");
 
+    // Kick load immediately — map hydrate is local CPU and can overlap the rover POST.
+    let loadPromise: Promise<boolean> | null = null;
+    if (allowLoad) {
+      setLoadBlocked(false);
+      setStep("loadMission");
+      loadPromise = Promise.resolve(
+        onLoadSelectedPath(result.missionId, {
+          stagedInspection: result.stagedInspection ?? null,
+          skipMapHydration: true,
+        })
+      );
+    }
+
     // Prefer stagedInspection (has anchor + waypoints). PathPlanResponse has no anchor —
     // hydrating lines from plan alone caused frame desync under numbered pins.
     // Extension catalog recovers pre/aft labels (artifact only has spray booleans).
@@ -363,10 +380,8 @@ export function CsvStageAndLoadPanel({
       onSelectLine(hydrated.selectedLineId);
     }
 
-    if (allowLoad) {
-      setLoadBlocked(false);
-      setStep("loadMission");
-      await onLoadSelectedPath(result.missionId);
+    if (loadPromise) {
+      await loadPromise;
     }
   };
 
@@ -425,6 +440,7 @@ export function CsvStageAndLoadPanel({
     setError(null);
     setStep(null);
     setLoadBlocked(false);
+    await yieldToUi();
     try {
       // CSV: paintedLines are frontend-fitted from survey points.
       // DXF: paintedLines are the real entity paths from parseLocalDxf (already baked
@@ -530,6 +546,7 @@ export function CsvStageAndLoadPanel({
     setError(null);
     setStep(null);
     setLoadBlocked(false);
+    await yieldToUi();
     try {
       const formData = await buildUploadFormData(exported);
       const result = await uploadAndStageCsvMission(apiBaseUrl, exported, formData, {

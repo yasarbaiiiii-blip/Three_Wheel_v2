@@ -45,7 +45,10 @@ type PathOrderAndSprayStepProps = {
   setStagedPlanResult: React.Dispatch<React.SetStateAction<StagedPlanResultState | null>>;
   setStagedMissionInspection: React.Dispatch<React.SetStateAction<pathApi.StagedMissionResponse | null>>;
   setStagedMissionId: React.Dispatch<React.SetStateAction<string | null>>;
-  onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
+  onLoadSelectedPath: (
+    missionId?: string,
+    opts?: import("../../../api/missionApi").LoadMissionOptions
+  ) => boolean | Promise<boolean>;
   missionActionBusy: boolean;
   onBeginPathExclusive?: (kind: "load") => boolean;
   onEndPathExclusive?: (kind: "load") => void;

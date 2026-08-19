@@ -106,4 +106,29 @@ describe("normalizeTelemetryPacket", () => {
     expect(packet).toEqual({ armed: true, mode: "MANUAL" });
     expect(packet && "pos_n" in packet).toBe(false);
   });
+
+  it("keeps root pose when a nested telemetry object has no position", () => {
+    const packet = normalizeTelemetryPacket({
+      pos_n: 12.5,
+      pos_e: -3.1,
+      lat: 13.08,
+      lon: 80.27,
+      telemetry: { battery_pct: 88, mode: "AUTO" },
+    });
+    expect(packet).toMatchObject({
+      pos_n: 12.5,
+      pos_e: -3.1,
+      lat: 13.08,
+      lon: 80.27,
+    });
+  });
+
+  it("prefers root pose over a nested telemetry pose", () => {
+    const packet = normalizeTelemetryPacket({
+      pos_n: 1,
+      pos_e: 2,
+      telemetry: { north: 99, east: 98 },
+    });
+    expect(packet).toMatchObject({ pos_n: 1, pos_e: 2 });
+  });
 });

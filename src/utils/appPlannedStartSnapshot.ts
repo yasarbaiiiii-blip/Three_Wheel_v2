@@ -84,6 +84,8 @@ export async function restageAppTrajectoryWithLiveEntry(
     roverPose: RoverPoseForEntry | null | undefined;
     markSpeedMs?: number;
     travelSpeedMs?: number;
+    /** Start does not need the staged artifact for the map. */
+    skipStagedInspect?: boolean;
   }
 ): Promise<RestageWithLiveEntryResult> {
   const markSpeedMs = args.markSpeedMs ?? 0.35;
@@ -129,6 +131,7 @@ export async function restageAppTrajectoryWithLiveEntry(
     groundTruth: built.groundTruth,
     markSpeedMs,
     travelSpeedMs,
+    skipStagedInspect: args.skipStagedInspect === true,
   });
 
   if (!staged.success || !staged.missionId || !staged.plan) {

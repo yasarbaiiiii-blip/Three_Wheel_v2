@@ -66,6 +66,70 @@ export function verifyHydratedMarkCount(
   return { ok: true, message: null };
 }
 
+/** Poll budget after load-to-controller while the rover still reports the previous mission. */
+export const LOADED_PATH_CONFIRM_ATTEMPTS = 8;
+export const LOADED_PATH_CONFIRM_GAP_MS = 300;
+
+/**
+ * True when getLoadedPath likely just hasn't flipped to the new mission_id yet
+ * (Send's mission still resident, or loaded flag not latched). Hard failures
+ * (zero waypoints, missing staged metadata on the matching id) are not transient.
+ */
+export function isTransientLoadedMissionMismatch(
+  loaded: LoadedPathResponse | null,
+  expectedMissionId: string
+): boolean {
+  const expected = normalizedId(expectedMissionId);
+  if (!expected) return false;
+  const actual = getLoadedMissionId(loaded);
+  if (!actual || actual !== expected) return true;
+  const state = typeof loaded?.state === "string" ? loaded.state.toLowerCase() : "";
+  if (!loaded?.loaded && state !== "completed") return true;
+  return false;
+}
+
+export async function confirmStagedMissionLoaded(args: {
+  expectedMissionId: string;
+  fetchLoaded: () => Promise<LoadedPathResponse | null>;
+  sleep?: (ms: number) => Promise<void>;
+  attempts?: number;
+  gapMs?: number;
+}): Promise<{
+  verified: boolean;
+  loaded: LoadedPathResponse | null;
+  message: string | null;
+}> {
+  const attempts = args.attempts ?? LOADED_PATH_CONFIRM_ATTEMPTS;
+  const gapMs = args.gapMs ?? LOADED_PATH_CONFIRM_GAP_MS;
+  const sleep = args.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+
+  let loaded: LoadedPathResponse | null = null;
+  let last: { verified: boolean; message: string | null } = {
+    verified: false,
+    message: `Staged mission ${args.expectedMissionId} does not match loaded mission <none>.`,
+  };
+
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) await sleep(gapMs);
+    try {
+      loaded = await args.fetchLoaded();
+    } catch {
+      loaded = null;
+    }
+    if (!loaded) {
+      last = { verified: false, message: "Loaded path verification failed" };
+      continue;
+    }
+    last = verifyStagedLoadedMission(loaded, args.expectedMissionId);
+    if (last.verified) return { verified: true, loaded, message: null };
+    if (!isTransientLoadedMissionMismatch(loaded, args.expectedMissionId)) {
+      return { verified: false, loaded, message: last.message };
+    }
+  }
+
+  return { verified: false, loaded, message: last.message };
+}
+
 export function verifyStagedLoadedMission(
   loaded: LoadedPathResponse,
   expectedMissionId: string,

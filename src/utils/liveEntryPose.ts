@@ -68,11 +68,22 @@ export function telemetryToRoverPoseForEntry(
   return any ? pose : null;
 }
 
+function isFreshSocketCache(
+  cachePose: RoverPoseForEntry | null,
+  cacheReceivedAtMs: number | null,
+  nowMs: number,
+  cacheMaxAgeMs: number
+): cachePose is RoverPoseForEntry {
+  if (cachePose == null) return false;
+  if (cacheReceivedAtMs == null || !Number.isFinite(cacheReceivedAtMs)) return false;
+  const age = nowMs - cacheReceivedAtMs;
+  return age >= 0 && age <= cacheMaxAgeMs;
+}
+
 /**
- * Prefer REST latest. Allow socket cache only when the client received it recently.
- * REST poses are stamped with pose_age_ms from the backend when present; missing
- * age is allowed for rest_latest (caller just fetched). Cache without a receive
- * timestamp is rejected.
+ * Prefer a socket sample received within cacheMaxAgeMs (typically 100 ms at 10 Hz).
+ * REST is the fallback when the cache is missing or stale — waiting on REST when
+ * the socket is already fresh adds a field-radio RTT for an older snapshot.
  */
 export function pickRoverPoseForEntry(args: {
   restPose: RoverPoseForEntry | null;
@@ -82,6 +93,10 @@ export function pickRoverPoseForEntry(args: {
   cacheMaxAgeMs?: number;
 }): PickRoverPoseResult {
   const cacheMax = args.cacheMaxAgeMs ?? LIVE_ENTRY_CACHE_MAX_AGE_MS;
+
+  if (isFreshSocketCache(args.cachePose, args.cacheReceivedAtMs, args.nowMs, cacheMax)) {
+    return { ok: true, pose: args.cachePose, source: "socket_cache" };
+  }
 
   if (args.restPose != null) {
     return { ok: true, pose: args.restPose, source: "rest_latest" };
@@ -97,14 +112,11 @@ export function pickRoverPoseForEntry(args: {
       };
     }
     const age = args.nowMs - receivedAt;
-    if (age < 0 || age > cacheMax) {
-      return {
-        ok: false,
-        error:
-          `Rover pose cache is stale (${Math.round(age)} ms). Wait for live GPS, then Start again.`,
-      };
-    }
-    return { ok: true, pose: args.cachePose, source: "socket_cache" };
+    return {
+      ok: false,
+      error:
+        `Rover pose cache is stale (${Math.round(age)} ms). Wait for live GPS, then Start again.`,
+    };
   }
 
   return {
@@ -112,6 +124,26 @@ export function pickRoverPoseForEntry(args: {
     error:
       "No rover pose available for approach path. Wait for live GPS, then Start again.",
   };
+}
+
+/**
+ * Start can reuse the Send-loaded mission when live entry would be omitted
+ * (rover already at the first tip) and that same mission is still on the controller.
+ * Layer-scoped Start always restages — the Send artifact is the full snapshot.
+ */
+export function canSkipLiveEntryRestage(args: {
+  entryIncluded: boolean;
+  loadedVerified: boolean;
+  loadedMissionId: string | null | undefined;
+  stagedMissionId: string | null | undefined;
+  layerScoped: boolean;
+}): boolean {
+  if (args.entryIncluded) return false;
+  if (args.layerScoped) return false;
+  if (!args.loadedVerified) return false;
+  const loaded = args.loadedMissionId?.trim() ?? "";
+  const staged = args.stagedMissionId?.trim() ?? "";
+  return loaded.length > 0 && loaded === staged;
 }
 
 /**

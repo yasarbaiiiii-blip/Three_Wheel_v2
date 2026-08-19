@@ -27,11 +27,27 @@ export function finiteNumber(value: unknown): number | null {
   return null;
 }
 
+function recordHasPose(rec: Record<string, unknown>): boolean {
+  return (
+    rec.pos_n != null ||
+    rec.lat != null ||
+    rec.north != null ||
+    rec.latitude != null ||
+    rec.local_n != null ||
+    rec.gps_lat != null
+  );
+}
+
 function unwrapTelemetryRecord(raw: unknown): Record<string, unknown> | null {
   if (!raw || typeof raw !== "object") return null;
   const root = raw as Record<string, unknown>;
   if (root.telemetry && typeof root.telemetry === "object" && !Array.isArray(root.telemetry)) {
-    return root.telemetry as Record<string, unknown>;
+    const inner = root.telemetry as Record<string, unknown>;
+    // Only unwrap when the root itself has no pose. A live packet like
+    // { pos_n, lat, telemetry: { battery } } must keep the root pose.
+    if (!recordHasPose(root)) {
+      return inner;
+    }
   }
   if (root.data && typeof root.data === "object" && !Array.isArray(root.data) && !("pos_n" in root) && !("lat" in root)) {
     return root.data as Record<string, unknown>;

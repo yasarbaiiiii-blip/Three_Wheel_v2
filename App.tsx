@@ -116,6 +116,7 @@ import * as authApi from "./src/api/authApi";
 import {
   buildMissionStartPayload,
   classifyMissionError,
+  confirmStagedMissionLoaded,
   evaluateMissionStartGate,
   getLoadedMissionId,
   invalidateWorkflowFrom,
@@ -130,13 +131,18 @@ import {
   type AppPlannedStartSnapshot,
 } from "./src/utils/appPlannedStartSnapshot";
 import {
+  LIVE_ENTRY_CACHE_MAX_AGE_MS,
+  canSkipLiveEntryRestage,
   classifyLiveEntryStartRequirement,
   entryPoseDrifted,
   isAppPlannedMissionContext,
   pickRoverPoseForEntry,
   telemetryToRoverPoseForEntry,
 } from "./src/utils/liveEntryPose";
-import { resolveRoverNedInMissionFrame } from "./src/utils/missionTrajectory";
+import {
+  buildTrajectory,
+  resolveRoverNedInMissionFrame,
+} from "./src/utils/missionTrajectory";
 import { buildCsvExtensionLines } from "./src/utils/missionExtensions";
 import type { MissionLayer } from "./src/types/missionLayers";
 import {
@@ -2915,12 +2921,7 @@ function AppRoot() {
 
   async function loadMissionOnBackend(
     requestedStagedMissionId?: string,
-    opts?: {
-      hideRuntimeEntryLine?: boolean;
-      extensionLines?: PlanLine[] | null;
-      /** When false, caller owns missionActionBusy (Start path). Default true. */
-      manageBusy?: boolean;
-    }
+    opts?: missionApi.LoadMissionOptions
   ) {
     const manageBusy = opts?.manageBusy !== false;
     const requestedMissionId = requestedStagedMissionId?.trim() || stagedMissionId?.trim() || "";
@@ -2972,90 +2973,109 @@ function AppRoot() {
 
       if (isStagedLoad) {
         const missionId = requestedMissionId;
-        const loadRes = await missionApi.loadMissionToController(apiBaseUrl, { mission_id: missionId });
+        let loadRes = await missionApi.loadMissionToController(apiBaseUrl, { mission_id: missionId });
+        // Controller can be briefly busy after plan-trajectory (Send then Start).
+        if (!loadRes.ok && (loadRes.status === 503 || loadRes.status === 504)) {
+          await new Promise((r) => setTimeout(r, 600));
+          loadRes = await missionApi.loadMissionToController(apiBaseUrl, { mission_id: missionId });
+        }
         if (!loadRes.ok) {
           throw await parseMissionResponseError(loadRes, "Load to controller failed");
         }
 
-        const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
-        if (!loadedRes.ok) {
-          const errMsg = await parseFetchError(loadedRes, "Loaded path verification failed");
-          throw new Error(errMsg);
-        }
-
-        const loadedData = (await loadedRes.json()) as missionApi.LoadedPathResponse;
-        const verification = verifyStagedLoadedMission(loadedData, missionId);
-        if (!verification.verified) {
-          setLoadedPathInspection(loadedData);
-          throw classifyMissionError(409, verification.message ?? "Loaded staged mission verification failed.");
-        }
-
-        let stagedArtifact: pathApi.StagedMissionResponse | null =
-          stagedMissionMatchesId(stagedMissionInspection, missionId) ? stagedMissionInspection : null;
-        if (!stagedArtifact) {
-          const stagedRes = await pathApi.getStagedMission(apiBaseUrl, missionId);
-          if (!stagedRes.ok) {
-            const errMsg = await parseFetchError(stagedRes, "Staged mission geometry fetch failed");
-            throw new Error(errMsg);
-          }
-          stagedArtifact = (await stagedRes.json()) as pathApi.StagedMissionResponse;
-          if (!stagedMissionMatchesId(stagedArtifact, missionId)) {
-            throw new Error(`Staged mission ${missionId} could not be loaded for map preview.`);
-          }
-          setStagedMissionInspection(stagedArtifact);
-        }
-
-        // Geometry + origin atomically from the staged artifact (same path as recovery + CSV panel).
-        const hydrated = hydrateStagedMissionForMap(stagedArtifact, {
-          hideRuntimeEntryLine: opts?.hideRuntimeEntryLine,
-          extensionLines: opts?.extensionLines,
+        const confirmed = await confirmStagedMissionLoaded({
+          expectedMissionId: missionId,
+          fetchLoaded: async () => {
+            const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
+            if (!loadedRes.ok) return null;
+            return (await loadedRes.json()) as missionApi.LoadedPathResponse;
+          },
         });
-        if (!hydrated) {
-          throw new Error(`Staged mission ${missionId} has no drawable waypoints for map preview.`);
+        const loadedData = confirmed.loaded;
+        if (!confirmed.verified || !loadedData) {
+          if (loadedData) setLoadedPathInspection(loadedData);
+          throw classifyMissionError(
+            409,
+            confirmed.message ?? "Loaded staged mission verification failed."
+          );
         }
 
-        // Recover mission-layer identity lost when hydration strips file-prefixed
-        // ids, so M-Layers visibility toggles keep affecting the map post-Start —
-        // including each layer's extension run-ups/run-outs, not just its marks.
-        const layerCatalog = buildMissionLayerLegCatalog(
-          appPlannedStartSnapshot?.paintedLines ?? [],
-          uploadedFiles,
-          missionLayers,
-          appPlannedStartSnapshot?.extensionConfig
-        );
-        const missionLayerTaggedLines = tagLinesWithMissionLayer(hydrated.lines, layerCatalog);
-        // Recover corner class / teardrop-vs-pivot so Path Order + map still show
-        // corners after densified hydrate (same catalog pattern as mission layers).
-        const cornerTaggedLines = recoverCornersAfterHydration(
-          missionLayerTaggedLines,
-          appPlannedStartSnapshot?.paintedLines ?? [],
-          appPlannedStartSnapshot?.sharpCornerMode ?? SHARP_CORNER_MODE
-        );
+        let stagedArtifact: pathApi.StagedMissionResponse | null = null;
+        if (!opts?.skipMapHydration) {
+          const passedInspection = opts?.stagedInspection ?? null;
+          stagedArtifact =
+            stagedMissionMatchesId(passedInspection, missionId)
+              ? passedInspection
+              : stagedMissionMatchesId(stagedMissionInspection, missionId)
+                ? stagedMissionInspection
+                : null;
+          if (!stagedArtifact) {
+            const stagedRes = await pathApi.getStagedMission(apiBaseUrl, missionId);
+            if (!stagedRes.ok) {
+              const errMsg = await parseFetchError(stagedRes, "Staged mission geometry fetch failed");
+              throw new Error(errMsg);
+            }
+            stagedArtifact = (await stagedRes.json()) as pathApi.StagedMissionResponse;
+            if (!stagedMissionMatchesId(stagedArtifact, missionId)) {
+              throw new Error(`Staged mission ${missionId} could not be loaded for map preview.`);
+            }
+            setStagedMissionInspection(stagedArtifact);
+          } else if (passedInspection && stagedMissionMatchesId(passedInspection, missionId)) {
+            setStagedMissionInspection(passedInspection);
+          }
 
-        const expectedMarks = selectMarkPlanLines(
-          appPlannedStartSnapshot?.paintedLines ?? lines
-        ).length;
-        const loadedMarks = selectMarkPlanLines(cornerTaggedLines).length;
-        const markCount = verifyHydratedMarkCount(expectedMarks, loadedMarks);
-        if (!markCount.ok) {
-          throw classifyMissionError(409, markCount.message ?? "Loaded path count mismatch.");
+          // Geometry + origin atomically from the staged artifact (same path as recovery + CSV panel).
+          const hydrated = hydrateStagedMissionForMap(stagedArtifact, {
+            hideRuntimeEntryLine: opts?.hideRuntimeEntryLine,
+            extensionLines: opts?.extensionLines,
+          });
+          if (!hydrated) {
+            throw new Error(`Staged mission ${missionId} has no drawable waypoints for map preview.`);
+          }
+
+          // Recover mission-layer identity lost when hydration strips file-prefixed
+          // ids, so M-Layers visibility toggles keep affecting the map post-Start —
+          // including each layer's extension run-ups/run-outs, not just its marks.
+          const layerCatalog = buildMissionLayerLegCatalog(
+            appPlannedStartSnapshot?.paintedLines ?? [],
+            uploadedFiles,
+            missionLayers,
+            appPlannedStartSnapshot?.extensionConfig
+          );
+          const missionLayerTaggedLines = tagLinesWithMissionLayer(hydrated.lines, layerCatalog);
+          // Recover corner class / teardrop-vs-pivot so Path Order + map still show
+          // corners after densified hydrate (same catalog pattern as mission layers).
+          const cornerTaggedLines = recoverCornersAfterHydration(
+            missionLayerTaggedLines,
+            appPlannedStartSnapshot?.paintedLines ?? [],
+            appPlannedStartSnapshot?.sharpCornerMode ?? SHARP_CORNER_MODE
+          );
+
+          const expectedMarks = selectMarkPlanLines(
+            opts?.expectedPaintedLines ?? appPlannedStartSnapshot?.paintedLines ?? lines
+          ).length;
+          const loadedMarks = selectMarkPlanLines(cornerTaggedLines).length;
+          const markCount = verifyHydratedMarkCount(expectedMarks, loadedMarks);
+          if (!markCount.ok) {
+            throw classifyMissionError(409, markCount.message ?? "Loaded path count mismatch.");
+          }
+
+          if (!pathPipelineRef.current.isCurrent(loadMapToken)) {
+            throw new Error("A newer path action replaced this load. The map was not overwritten.");
+          }
+
+          setAlignedRefPoints(hydrated.alignedRefPoints);
+          setLines(sanitizePlanLines(cornerTaggedLines));
+          setSelectedLineId(hydrated.selectedLineId);
+          setVisualAlignmentItem(null);
+          setIsVisualAlignmentMode(false);
         }
-
-        if (!pathPipelineRef.current.isCurrent(loadMapToken)) {
-          throw new Error("A newer path action replaced this load. The map was not overwritten.");
-        }
-
-        setAlignedRefPoints(hydrated.alignedRefPoints);
-        setLines(sanitizePlanLines(cornerTaggedLines));
-        setSelectedLineId(hydrated.selectedLineId);
-        setVisualAlignmentItem(null);
-        setIsVisualAlignmentMode(false);
 
         setStagedMissionId(missionId);
         setStagedPlanResult((prev) => prev?.missionId === missionId ? prev : {
           missionId,
           numWaypoints: loadedData.num_waypoints ?? null,
-          numSegments: stagedArtifact.segment_runs?.length ?? null,
+          numSegments: stagedArtifact?.segment_runs?.length ?? null,
           totalLengthM: null,
           markLengthM: null,
           transitLengthM: null,
@@ -3072,7 +3092,9 @@ function AppRoot() {
         setMissionRunning(false);
         void refreshTelemetryPanel();
         logAction("LOAD_SUCCESS", { stagedMissionId: missionId, fileName: importedPlan?.fileName });
-        setPage("home");
+        if (!opts?.skipNavigate) {
+          setPage("home");
+        }
         showToast("Mission loaded", "Staged mission loaded to controller and verified.", "success");
         return true;
       }
@@ -3112,6 +3134,11 @@ function AppRoot() {
       });
       const message = missionError?.message ?? (error instanceof Error ? error.message : "Could not load the mission.");
       const title = missionError?.title ?? "Load failed";
+      if (opts?.rethrow) {
+        if (error instanceof Error) throw error;
+        if (missionError) throw missionError;
+        throw new Error(message);
+      }
       Alert.alert(title, message);
       showToast(title, message, "error");
       if (missionError?.status === 409) void refreshMissionIdentity();
@@ -3920,50 +3947,52 @@ function AppRoot() {
     // instead so a real confirmation isn't ignored by a stale read.
     let effectiveStagedWorkflow = stagedWorkflow;
     let effectiveLoadedInspection = loadedPathInspection;
-    try {
-      // Full preflight like baseline — always re-check staged/loaded truth.
-      // Parallel fetch keeps Start responsive without skipping verification.
-      const [missionStatus, stagedStatus] = await Promise.all([
-        missionApi.fetchMissionStatus(apiBaseUrl),
-        missionApi.fetchStagedMissionStatus(apiBaseUrl, stagedMissionId),
-      ]);
+    const locallyReady =
+      stagedWorkflow.staged === "verified" &&
+      stagedWorkflow.loaded === "verified" &&
+      !!stagedMissionId;
+    if (!locallyReady) {
+      try {
+        // Only hit the rover when local Send/Load state is incomplete.
+        const [missionStatus, stagedStatus] = await Promise.all([
+          missionApi.fetchMissionStatus(apiBaseUrl),
+          missionApi.fetchStagedMissionStatus(apiBaseUrl, stagedMissionId),
+        ]);
 
-      if (stagedStatus?.verified) {
-        effectiveStagedWorkflow = { ...effectiveStagedWorkflow, staged: "verified" };
-        setWorkflowStep("staged", "verified");
-      }
-      if (missionStatus.running_mission_id) {
-        setMissionRunning(true);
-      }
+        if (stagedStatus?.verified) {
+          effectiveStagedWorkflow = { ...effectiveStagedWorkflow, staged: "verified" };
+          setWorkflowStep("staged", "verified");
+        }
+        if (missionStatus.running_mission_id) {
+          setMissionRunning(true);
+        }
 
-      // Only upgrade "loaded" from a fresh check — never downgrade it here,
-      // that stays the background poll's job (reconcileLoadedMission).
-      if (
-        effectiveStagedWorkflow.staged === "verified" &&
-        stagedMissionId &&
-        effectiveStagedWorkflow.loaded !== "verified"
-      ) {
-        const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
-        if (loadedRes.ok) {
-          const loadedData = (await loadedRes.json()) as missionApi.LoadedPathResponse;
-          const verification = verifyStagedLoadedMission(loadedData, stagedMissionId);
-          if (verification.verified) {
-            effectiveStagedWorkflow = { ...effectiveStagedWorkflow, loaded: "verified" };
-            effectiveLoadedInspection = loadedData;
-            setWorkflowStep("loaded", "verified");
-            setLoadedPathInspection(loadedData);
+        if (
+          effectiveStagedWorkflow.staged === "verified" &&
+          stagedMissionId &&
+          effectiveStagedWorkflow.loaded !== "verified"
+        ) {
+          const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
+          if (loadedRes.ok) {
+            const loadedData = (await loadedRes.json()) as missionApi.LoadedPathResponse;
+            const verification = verifyStagedLoadedMission(loadedData, stagedMissionId);
+            if (verification.verified) {
+              effectiveStagedWorkflow = { ...effectiveStagedWorkflow, loaded: "verified" };
+              effectiveLoadedInspection = loadedData;
+              setWorkflowStep("loaded", "verified");
+              setLoadedPathInspection(loadedData);
+            }
           }
         }
-      }
 
-      logAction("START_RECONCILE", {
-        missionState: missionStatus.state,
-        loadedMissionId: missionStatus.loaded_mission_id,
-        stagedVerified: stagedStatus?.verified,
-      });
-    } catch (reconcileErr) {
-      // Non-fatal — proceed with existing local state if re-fetch fails
-      console.warn("[START] Re-fetch failed, using cached workflow state:", reconcileErr);
+        logAction("START_RECONCILE", {
+          missionState: missionStatus.state,
+          loadedMissionId: missionStatus.loaded_mission_id,
+          stagedVerified: stagedStatus?.verified,
+        });
+      } catch (reconcileErr) {
+        console.warn("[START] Re-fetch failed, using cached workflow state:", reconcileErr);
+      }
     }
 
     const isCsvMissionEarly =
@@ -4065,19 +4094,25 @@ function AppRoot() {
 
       let startMissionId = isStagedStart ? stagedMissionId : null;
 
-      // Every app-planned Start: rebuild entry from a fresh rover pose (X→A, then Y→A, …).
+      // Every app-planned Start: rebuild entry from a fresh rover pose (X→A, then Y→A, …)
+      // unless the rover is already at the first tip and Send's mission is still loaded.
       if (isAppPlannedStart && appPlannedStartSnapshot) {
-        showToast("Approach", "Building runtime entry from current rover position…", "info");
-
-        // Pose AFTER gate/dialogs — REST primary, timed socket cache fallback.
-        const restPoseRaw = await missionApi.fetchLatestTelemetryPose(apiBaseUrl);
-        if (restPoseRaw) {
-          noteTelemetryForLiveEntry(restPoseRaw);
+        const nowMs = Date.now();
+        const cachePose = telemetryToRoverPoseForEntry(telemetrySnapshotRef.current);
+        const cacheReceivedAtMs = telemetryReceivedAtMsRef.current || null;
+        const cacheAgeMs =
+          cacheReceivedAtMs != null ? nowMs - cacheReceivedAtMs : Number.POSITIVE_INFINITY;
+        let restPoseRaw: Awaited<ReturnType<typeof missionApi.fetchLatestTelemetryPose>> = null;
+        if (!(cachePose && cacheAgeMs >= 0 && cacheAgeMs <= LIVE_ENTRY_CACHE_MAX_AGE_MS)) {
+          restPoseRaw = await missionApi.fetchLatestTelemetryPose(apiBaseUrl);
+          if (restPoseRaw) {
+            noteTelemetryForLiveEntry(restPoseRaw);
+          }
         }
         const picked = pickRoverPoseForEntry({
           restPose: telemetryToRoverPoseForEntry(restPoseRaw),
-          cachePose: telemetryToRoverPoseForEntry(telemetrySnapshotRef.current),
-          cacheReceivedAtMs: telemetryReceivedAtMsRef.current || null,
+          cachePose,
+          cacheReceivedAtMs,
           nowMs: Date.now(),
         });
         if (!picked.ok) {
@@ -4086,9 +4121,9 @@ function AppRoot() {
         let livePose = picked.pose;
         let poseSource = picked.source;
 
-        // Scope the frozen Send snapshot to selected mission layers (if any).
         let startSnapshot = appPlannedStartSnapshot;
-        if (selectedStartLayerIds && selectedStartLayerIds.length > 0) {
+        const layerScoped = !!(selectedStartLayerIds && selectedStartLayerIds.length > 0);
+        if (layerScoped) {
           const scoped = buildLayerScopedStartSnapshot(
             appPlannedStartSnapshot,
             uploadedFiles,
@@ -4100,6 +4135,30 @@ function AppRoot() {
           }
           startSnapshot = scoped.snapshot;
         }
+
+        const previewed = buildTrajectory(startSnapshot.paintedLines, {
+          markSpeedMs: 0.35,
+          travelSpeedMs: 0.5,
+          groundTruthSource: startSnapshot.groundTruthSource,
+          extensions: startSnapshot.extensionConfig,
+          roverPose: livePose,
+          originGps: startSnapshot.originGps,
+          includeEntryTransit: true,
+          requireEntryTransit: true,
+          sharpCornerMode: startSnapshot.sharpCornerMode ?? SHARP_CORNER_MODE,
+        });
+        if (previewed.entryTransit?.error) {
+          throw new Error(previewed.entryTransit.error);
+        }
+
+        const skipRestage = canSkipLiveEntryRestage({
+          entryIncluded: previewed.entryTransit?.included === true,
+          loadedVerified: effectiveStagedWorkflow.loaded === "verified",
+          loadedMissionId:
+            getLoadedMissionId(effectiveLoadedInspection) ?? stagedMissionId,
+          stagedMissionId,
+          layerScoped,
+        });
 
         const applyRestageUi = (
           restaged: Extract<
@@ -4130,90 +4189,108 @@ function AppRoot() {
           });
         };
 
-        let restaged = await restageAppTrajectoryWithLiveEntry(apiBaseUrl, {
-          snapshot: startSnapshot,
-          roverPose: livePose,
-        });
-        if (!restaged.success) {
-          throw new Error(restaged.error);
-        }
-        applyRestageUi(restaged);
-
-        // Load the freshly staged mission (with live entry) to the controller.
-        // Start owns the busy flag — avoid loadMissionOnBackend clearing it mid-flight.
-        let loadedOk = await loadMissionOnBackend(restaged.missionId, {
-          hideRuntimeEntryLine: restaged.entryIncluded === true,
-          extensionLines: buildCsvExtensionLines(startSnapshot.paintedLines, startSnapshot.extensionConfig),
-          manageBusy: false,
-        });
-        if (!loadedOk) {
-          throw new Error(
-            "Trajectory restaged with live entry but load to controller failed. Fix load, then Start again."
-          );
-        }
-
-        // Drift re-check: restage+load can take seconds; rebuild once if rover moved.
         let driftRetry = false;
-        const usedNed = resolveRoverNedInMissionFrame(livePose, startSnapshot.originGps);
-        const restPoseRaw2 = await missionApi.fetchLatestTelemetryPose(apiBaseUrl);
-        if (restPoseRaw2) {
-          noteTelemetryForLiveEntry(restPoseRaw2);
-        }
-        const picked2 = pickRoverPoseForEntry({
-          restPose: telemetryToRoverPoseForEntry(restPoseRaw2),
-          cachePose: telemetryToRoverPoseForEntry(telemetrySnapshotRef.current),
-          cacheReceivedAtMs: telemetryReceivedAtMsRef.current || null,
-          nowMs: Date.now(),
-        });
-        if (picked2.ok && usedNed.ok) {
-          const latestNed = resolveRoverNedInMissionFrame(picked2.pose, startSnapshot.originGps);
-          if (
-            latestNed.ok &&
-            entryPoseDrifted(
-              [usedNed.north, usedNed.east],
-              [latestNed.north, latestNed.east]
-            )
-          ) {
-            driftRetry = true;
-            showToast("Approach", "Rover moved — rebuilding entry from new position…", "info");
-            livePose = picked2.pose;
-            poseSource = picked2.source;
-            restaged = await restageAppTrajectoryWithLiveEntry(apiBaseUrl, {
-              snapshot: startSnapshot,
-              roverPose: livePose,
-            });
-            if (!restaged.success) {
-              throw new Error(restaged.error);
-            }
-            applyRestageUi(restaged);
-            loadedOk = await loadMissionOnBackend(restaged.missionId, {
-              hideRuntimeEntryLine: restaged.entryIncluded === true,
-              extensionLines: buildCsvExtensionLines(
-                startSnapshot.paintedLines,
-                startSnapshot.extensionConfig
-              ),
-              manageBusy: false,
-            });
-            if (!loadedOk) {
-              throw new Error(
-                "Trajectory restaged with live entry but load to controller failed. Fix load, then Start again."
-              );
+        if (skipRestage) {
+          startMissionId = stagedMissionId;
+          logAction("START_SKIP_RESTAGE", {
+            missionId: stagedMissionId,
+            reason: previewed.entryTransit?.skipReason ?? "entry omitted",
+            poseSource,
+          });
+        } else {
+          showToast("Approach", "Building runtime entry from current rover position…", "info");
+          let restaged = await restageAppTrajectoryWithLiveEntry(apiBaseUrl, {
+            snapshot: startSnapshot,
+            roverPose: livePose,
+            skipStagedInspect: true,
+          });
+          if (!restaged.success) {
+            throw new Error(restaged.error);
+          }
+          applyRestageUi(restaged);
+
+          let loadedOk = await loadMissionOnBackend(restaged.missionId, {
+            hideRuntimeEntryLine: restaged.entryIncluded === true,
+            extensionLines: buildCsvExtensionLines(
+              startSnapshot.paintedLines,
+              startSnapshot.extensionConfig
+            ),
+            manageBusy: false,
+            stagedInspection: restaged.stagedInspection ?? null,
+            skipNavigate: true,
+            skipMapHydration: true,
+            expectedPaintedLines: startSnapshot.paintedLines,
+            rethrow: true,
+          });
+          if (!loadedOk) {
+            throw new Error(
+              "Trajectory restaged with live entry but load to controller failed. Fix load, then Start again."
+            );
+          }
+
+          const usedNed = resolveRoverNedInMissionFrame(livePose, startSnapshot.originGps);
+          const picked2 = pickRoverPoseForEntry({
+            restPose: null,
+            cachePose: telemetryToRoverPoseForEntry(telemetrySnapshotRef.current),
+            cacheReceivedAtMs: telemetryReceivedAtMsRef.current || null,
+            nowMs: Date.now(),
+          });
+          if (picked2.ok && usedNed.ok) {
+            const latestNed = resolveRoverNedInMissionFrame(picked2.pose, startSnapshot.originGps);
+            if (
+              latestNed.ok &&
+              entryPoseDrifted(
+                [usedNed.north, usedNed.east],
+                [latestNed.north, latestNed.east]
+              )
+            ) {
+              driftRetry = true;
+              showToast("Approach", "Rover moved — rebuilding entry from new position…", "info");
+              livePose = picked2.pose;
+              poseSource = picked2.source;
+              restaged = await restageAppTrajectoryWithLiveEntry(apiBaseUrl, {
+                snapshot: startSnapshot,
+                roverPose: livePose,
+                skipStagedInspect: true,
+              });
+              if (!restaged.success) {
+                throw new Error(restaged.error);
+              }
+              applyRestageUi(restaged);
+              loadedOk = await loadMissionOnBackend(restaged.missionId, {
+                hideRuntimeEntryLine: restaged.entryIncluded === true,
+                extensionLines: buildCsvExtensionLines(
+                  startSnapshot.paintedLines,
+                  startSnapshot.extensionConfig
+                ),
+                manageBusy: false,
+                stagedInspection: restaged.stagedInspection ?? null,
+                skipNavigate: true,
+                skipMapHydration: true,
+                expectedPaintedLines: startSnapshot.paintedLines,
+                rethrow: true,
+              });
+              if (!loadedOk) {
+                throw new Error(
+                  "Trajectory restaged with live entry but load to controller failed. Fix load, then Start again."
+                );
+              }
             }
           }
-        }
 
-        startMissionId = restaged.missionId;
-        logAction("START_LIVE_ENTRY", {
-          missionId: restaged.missionId,
-          entryIncluded: restaged.entryIncluded,
-          entryLengthM: restaged.entryLengthM ?? null,
-          poseSource,
-          lat: livePose.lat ?? null,
-          lon: livePose.lon ?? null,
-          gps_fix: livePose.gps_fix ?? null,
-          pose_age_ms: livePose.pose_age_ms ?? null,
-          driftRetry,
-        });
+          startMissionId = restaged.missionId;
+          logAction("START_LIVE_ENTRY", {
+            missionId: restaged.missionId,
+            entryIncluded: restaged.entryIncluded,
+            entryLengthM: restaged.entryLengthM ?? null,
+            poseSource,
+            lat: livePose.lat ?? null,
+            lon: livePose.lon ?? null,
+            gps_fix: livePose.gps_fix ?? null,
+            pose_age_ms: livePose.pose_age_ms ?? null,
+            driftRetry,
+          });
+        }
       }
 
       const startPayload = buildMissionStartPayload({
@@ -6987,7 +7064,10 @@ function SectionPages(props: {
   backendPaths: any[];
   selectedPathName: string | null;
   onSelectPath: (name: string) => void;
-  onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
+  onLoadSelectedPath: (
+    missionId?: string,
+    opts?: missionApi.LoadMissionOptions
+  ) => boolean | Promise<boolean>;
   missionActionBusy: boolean;
   onBeginPathExclusive?: (kind: PathExclusiveKind) => boolean;
   onEndPathExclusive?: (kind: PathExclusiveKind) => void;

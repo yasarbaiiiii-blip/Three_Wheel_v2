@@ -1269,13 +1269,14 @@ export function MapViewNative(props: MapViewProps) {
   // Only depends on rover fields + lines/origin so high-frequency updates never
   // re-render the plan/boundary/item sources.
   const roverGeo = useMemo(() => {
-    let lat = telemetrySnapshot?.lat;
-    let lon = telemetrySnapshot?.lon;
     const heading = telemetrySnapshot?.heading_ned_deg ?? null;
     const posN = telemetrySnapshot?.pos_n;
     const posE = telemetrySnapshot?.pos_e;
+    let lat = telemetrySnapshot?.lat;
+    let lon = telemetrySnapshot?.lon;
+    // Same frame as the drawn plan: planner NED projected through the plan origin.
+    // GPS lat/lon is only a fallback when local pose is missing (filtered GPS lags).
     if (
-      (lat == null || lon == null || !Number.isFinite(lat) || !Number.isFinite(lon)) &&
       projectionOrigin &&
       typeof posN === "number" &&
       Number.isFinite(posN) &&

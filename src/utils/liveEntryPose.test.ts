@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   LIVE_ENTRY_CACHE_MAX_AGE_MS,
   LIVE_ENTRY_RECHECK_MOVE_M,
+  canSkipLiveEntryRestage,
   classifyLiveEntryStartRequirement,
   entryPoseDrifted,
   isAppPlannedMissionContext,
@@ -42,12 +43,27 @@ describe("pickRoverPoseForEntry", () => {
   const cache = { lat: 1, lon: 2, gps_fix: 4, pose_age_ms: 10 };
   const rest = { lat: 3, lon: 4, gps_fix: 5, pose_age_ms: 20 };
 
-  it("prefers REST over cache", () => {
+  it("prefers a fresh socket cache over REST", () => {
     const r = pickRoverPoseForEntry({
       restPose: rest,
       cachePose: cache,
       cacheReceivedAtMs: Date.now(),
       nowMs: Date.now(),
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.source).toBe("socket_cache");
+      expect(r.pose.lat).toBe(1);
+    }
+  });
+
+  it("uses REST when the socket cache is stale", () => {
+    const now = 100_000;
+    const r = pickRoverPoseForEntry({
+      restPose: rest,
+      cachePose: cache,
+      cacheReceivedAtMs: now - LIVE_ENTRY_CACHE_MAX_AGE_MS - 1,
+      nowMs: now,
     });
     expect(r.ok).toBe(true);
     if (r.ok) {
@@ -143,6 +159,59 @@ describe("entryPoseDrifted", () => {
   it("true over threshold", () => {
     expect(entryPoseDrifted([0, 0], [LIVE_ENTRY_RECHECK_MOVE_M + 0.01, 0])).toBe(true);
     expect(entryPoseDrifted([10, 10], [12, 10])).toBe(true);
+  });
+});
+
+describe("canSkipLiveEntryRestage", () => {
+  it("skips when entry is omitted and the Send mission is still loaded", () => {
+    expect(
+      canSkipLiveEntryRestage({
+        entryIncluded: false,
+        loadedVerified: true,
+        loadedMissionId: "stg_1",
+        stagedMissionId: "stg_1",
+        layerScoped: false,
+      })
+    ).toBe(true);
+  });
+
+  it("restages when entry is needed, layers are scoped, or ids differ", () => {
+    expect(
+      canSkipLiveEntryRestage({
+        entryIncluded: true,
+        loadedVerified: true,
+        loadedMissionId: "stg_1",
+        stagedMissionId: "stg_1",
+        layerScoped: false,
+      })
+    ).toBe(false);
+    expect(
+      canSkipLiveEntryRestage({
+        entryIncluded: false,
+        loadedVerified: true,
+        loadedMissionId: "stg_1",
+        stagedMissionId: "stg_1",
+        layerScoped: true,
+      })
+    ).toBe(false);
+    expect(
+      canSkipLiveEntryRestage({
+        entryIncluded: false,
+        loadedVerified: true,
+        loadedMissionId: "stg_old",
+        stagedMissionId: "stg_new",
+        layerScoped: false,
+      })
+    ).toBe(false);
+    expect(
+      canSkipLiveEntryRestage({
+        entryIncluded: false,
+        loadedVerified: false,
+        loadedMissionId: "stg_1",
+        stagedMissionId: "stg_1",
+        layerScoped: false,
+      })
+    ).toBe(false);
   });
 });
 

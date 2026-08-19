@@ -270,6 +270,11 @@ export async function planAndStageAppTrajectory(
     sprayMode?: SprayMode;
     dashOnDistanceM?: number | null;
     dashOffDistanceM?: number | null;
+    /**
+     * Start restage already verified run_echo; skip GET /staged/{id} (large)
+     * and the must_hit spot-check. Send keeps inspect for map hydrate.
+     */
+    skipStagedInspect?: boolean;
     onStep?: (step: CsvStageStep) => void;
   }
 ): Promise<CsvStageResult> {
@@ -352,6 +357,17 @@ export async function planAndStageAppTrajectory(
       appPlanned: true,
       error:
         "Densified run_echo does not match the trajectory we sent — Load blocked.\n" + detail,
+    };
+  }
+
+  if (args.skipStagedInspect) {
+    return {
+      success: true,
+      pathName,
+      missionId,
+      plan,
+      echoVerification,
+      appPlanned: true,
     };
   }
 

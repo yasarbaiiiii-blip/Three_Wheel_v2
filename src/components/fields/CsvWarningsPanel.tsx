@@ -23,19 +23,20 @@ export function CsvWarningsPanel({
   title = "CSV warnings",
   critical = [],
   advisory = [],
-  defaultExpanded,
+  defaultExpanded = false,
   maxVisible = 8,
 }: CsvWarningsPanelProps) {
   const total = critical.length + advisory.length;
-  const [expanded, setExpanded] = useState(
-    defaultExpanded ?? critical.length > 0
-  );
+  const [expanded, setExpanded] = useState(defaultExpanded);
 
   if (total === 0) return null;
 
-  const critShow = expanded ? critical : critical.slice(0, 2);
-  const advShow = expanded ? advisory : advisory.slice(0, Math.max(0, 2 - critShow.length));
-  const hidden = total - critShow.length - advShow.length;
+  const all = [
+    ...critical.map((w) => ({ kind: "critical" as const, text: w })),
+    ...advisory.map((w) => ({ kind: "advisory" as const, text: w })),
+  ];
+  const shown = expanded ? all.slice(0, maxVisible) : [];
+  const hidden = total - shown.length;
 
   return (
     <View
@@ -57,12 +58,12 @@ export function CsvWarningsPanel({
         {critical.length > 0 ? (
           <ShieldAlert size={14} color={FIELDS_COLORS.warning} />
         ) : (
-          <AlertTriangle size={14} color={FIELDS_COLORS.textMuted} />
+          <AlertTriangle size={14} color={FIELDS_COLORS.warning} />
         )}
         <Text
           style={{
             flex: 1,
-            color: critical.length > 0 ? FIELDS_COLORS.warning : FIELDS_COLORS.textMain,
+            color: FIELDS_COLORS.warning,
             fontSize: 12,
             fontWeight: "700",
           }}
@@ -77,32 +78,21 @@ export function CsvWarningsPanel({
         )}
       </Pressable>
 
-      {critShow.map((w, i) => (
+      {shown.map((w, i) => (
         <Text
-          key={`c-${i}`}
-          style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}
+          key={`${w.kind}-${i}`}
+          style={{
+            color: w.kind === "critical" ? FIELDS_COLORS.warning : FIELDS_COLORS.textMuted,
+            fontSize: 11,
+            lineHeight: 15,
+          }}
         >
-          • {w}
+          • {w.text}
         </Text>
       ))}
-      {advShow.map((w, i) => (
-        <Text
-          key={`a-${i}`}
-          style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, lineHeight: 15 }}
-        >
-          • {w}
-        </Text>
-      ))}
-      {!expanded && hidden > 0 ? (
-        <Pressable onPress={() => setExpanded(true)}>
-          <Text style={{ color: FIELDS_COLORS.accentBrand, fontSize: 11, fontWeight: "600" }}>
-            Show {hidden} more…
-          </Text>
-        </Pressable>
-      ) : null}
-      {expanded && total > maxVisible ? (
+      {expanded && hidden > 0 ? (
         <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10 }}>
-          Showing first {Math.min(total, critShow.length + advShow.length)} of {total}.
+          Showing first {shown.length} of {total}.
         </Text>
       ) : null}
     </View>

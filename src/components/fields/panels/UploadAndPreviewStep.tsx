@@ -517,8 +517,8 @@ export function UploadAndPreviewStep({
       setImportError(null);
       setAppendOnImport(false);
 
-      if (allWarnings.length > 0) {
-        console.warn("[import][csv] warnings:", allWarnings);
+      if (__DEV__ && allWarnings.length > 0) {
+        console.log(`[import][csv] ${allWarnings.length} warning(s)`);
       }
     } catch (err) {
       console.log("Error importing CSV locally:", err);
@@ -590,8 +590,8 @@ export function UploadAndPreviewStep({
         // mode under which a closed shape (a square drawn as one polyline) gets run-ups.
         onCsvExtensionConfigChange(normalizeCsvExtensionConfig(DXF_EXTENSION_CONFIG));
       }
-      if (allWarnings.length > 0) {
-        console.warn("[import][dxf-local] warnings:", allWarnings);
+      if (__DEV__ && allWarnings.length > 0) {
+        console.log(`[import][dxf-local] ${allWarnings.length} warning(s)`);
       }
     } catch (err) {
       console.log("Error importing DXF locally:", err);

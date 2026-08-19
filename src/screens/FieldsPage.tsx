@@ -81,7 +81,10 @@ export type FieldsPageProps = {
   backendPaths: any[];
   selectedPathName: string | null;
   onSelectPath: (name: string) => void;
-  onLoadSelectedPath: (missionId?: string) => boolean | Promise<boolean>;
+  onLoadSelectedPath: (
+    missionId?: string,
+    opts?: import("../api/missionApi").LoadMissionOptions
+  ) => boolean | Promise<boolean>;
   missionActionBusy: boolean;
   onBeginPathExclusive?: (kind: "send" | "load") => boolean;
   onEndPathExclusive?: (kind: "send" | "load") => void;

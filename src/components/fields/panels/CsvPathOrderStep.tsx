@@ -29,6 +29,7 @@ import {
   type CsvTransitPreview,
 } from "../../../utils/csvPathOrder";
 import { getLineLengthM } from "../../../utils/pathWorkflow";
+import { CsvWarningsPanel } from "../CsvWarningsPanel";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 const DEFAULT_SPEEDS = { markSpeedMs: 0.35, travelSpeedMs: 0.5 };
@@ -242,6 +243,25 @@ export function CsvPathOrderStep({
     () => csvExtensionLengthM(painted, extensionConfig),
     [painted, extensionConfig]
   );
+  const pathWarningItems = useMemo(() => {
+    const items: string[] = [];
+    for (const w of reversals) {
+      items.push(
+        `${w.fromLabel} → ${w.toLabel}: ${w.headingChangeDeg.toFixed(0)}° reversal`
+      );
+    }
+    for (const w of curveDirectionWarnings) {
+      items.push(
+        `${w.label}: curve direction adds ~${w.wastedM.toFixed(1)} m of avoidable transit`
+      );
+    }
+    for (const w of degenerateEntityWarnings) {
+      items.push(
+        `${w.label}: only ${(w.lengthM * 100).toFixed(1)} cm long — Skip it to remove its transit cost`
+      );
+    }
+    return items;
+  }, [reversals, curveDirectionWarnings, degenerateEntityWarnings]);
 
   // Notify parent only when order/paint actually changes — not when map line
   // objects are rebuilt (that was causing Maximum update depth exceeded).
@@ -288,46 +308,15 @@ export function CsvPathOrderStep({
           {extensionLengthM > 0.05
             ? `  ·  Extension ${extensionLengthM.toFixed(1)} m`
             : ""}
-          {reversals.length > 0 ? (
-            <Text style={{ color: FIELDS_COLORS.warning, fontWeight: "600" }}>
-              {`  ·  ${reversals.length} reversal${reversals.length === 1 ? "" : "s"}`}
-            </Text>
-          ) : null}
         </Text>
       ) : null}
 
-      {/*
-        Curves are never reversed by chainMarkLinesByGeometry (would break their
-        analytic PRE/AFT tangents) — when an arc's authored rotation direction fights the
-        walk, the app is forced into an avoidable detour it cannot fix on its own. Surface
-        it here so the operator can re-author the arc in the source DXF.
-      */}
-      {curveDirectionWarnings.length > 0
-        ? curveDirectionWarnings.map((w) => (
-            <Text
-              key={w.lineId}
-              style={{ color: FIELDS_COLORS.warning, fontSize: 10, fontWeight: "600" }}
-            >
-              {`⚠ ${w.label}: curve direction adds ~${w.wastedM.toFixed(1)} m of avoidable transit — consider reversing it in the source DXF`}
-            </Text>
-          ))
-        : null}
-
-      {/*
-        Entities this short paint almost nothing but still cost a full transit round-trip
-        to visit (confirmed on a real file: two entities under 5cm added ~11m of pure
-        overhead). Flag them so the operator can Skip in the list above.
-      */}
-      {degenerateEntityWarnings.length > 0
-        ? degenerateEntityWarnings.map((w) => (
-            <Text
-              key={w.lineId}
-              style={{ color: FIELDS_COLORS.warning, fontSize: 10, fontWeight: "600" }}
-            >
-              {`⚠ ${w.label}: only ${(w.lengthM * 100).toFixed(1)} cm long — Skip it above to remove its transit cost`}
-            </Text>
-          ))
-        : null}
+      <CsvWarningsPanel
+        title="Path warnings"
+        advisory={pathWarningItems}
+        defaultExpanded={false}
+        maxVisible={8}
+      />
 
       {/*
         Take the whole area the card gives us and let the list scroll inside it, rather than
