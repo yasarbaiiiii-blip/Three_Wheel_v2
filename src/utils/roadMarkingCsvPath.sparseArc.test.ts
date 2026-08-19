@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildRoadMarkingFittedPath,
+  pinFittedPathTermini,
   CORNER_TOLERANCE_M,
   fitCircleHyper,
   fitCircleThroughEndpoints,
@@ -563,5 +564,25 @@ describe("G1 joints on the curve_6_points-1 survey", () => {
     };
     const worst = Math.max(...res.samples.map(distToChords));
     expect(worst).toBeLessThan(0.06);
+  });
+});
+
+describe("pinFittedPathTermini", () => {
+  it("snaps a drifted first/last sample back onto the surveyed ends", () => {
+    const source: RoadMarkingNedPoint[] = [
+      { north: 0, east: 0 },
+      { north: 4, east: 0 },
+      { north: 4, east: 3 },
+      { north: 0, east: 3 },
+    ];
+    const drifted = [
+      { north: 0.04, east: -0.03 },
+      { north: 4, east: 0 },
+      { north: 4, east: 3 },
+      { north: 0.02, east: 3.05 },
+    ];
+    const pinned = pinFittedPathTermini(drifted, source);
+    expect(pinned[0]).toEqual(source[0]);
+    expect(pinned[pinned.length - 1]).toEqual(source[3]);
   });
 });

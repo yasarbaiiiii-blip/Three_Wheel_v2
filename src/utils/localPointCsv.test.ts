@@ -186,6 +186,31 @@ describe("localCsvPointsToPlanLines", () => {
     expect(lines[0].from.y).toBeCloseTo(r.points[0].east_m, 1);
   });
 
+  it("pins a 4-point GPS path to the CSV termini and stamps their lat/lon", () => {
+    const r = parseLocalPointCsv(
+      [
+        "lat,lon",
+        "13.0000,80.0000",
+        "13.0004,80.0000",
+        "13.0004,80.0004",
+        "13.0000,80.0004",
+      ].join("\n")
+    );
+    const lines = localCsvPointsToPlanLines(r.points, r.anchor);
+    const pts = lines[0].entity?.preview_points ?? [];
+    expect(pts.length).toBeGreaterThanOrEqual(2);
+    const first = pts[0];
+    const last = pts[pts.length - 1];
+    expect(first.north).toBeCloseTo(r.points[0].north_m, 6);
+    expect(first.east).toBeCloseTo(r.points[0].east_m, 6);
+    expect(last.north).toBeCloseTo(r.points[3].north_m, 6);
+    expect(last.east).toBeCloseTo(r.points[3].east_m, 6);
+    expect(first.lat).toBeCloseTo(13.0, 7);
+    expect(first.lon).toBeCloseTo(80.0, 7);
+    expect(last.lat).toBeCloseTo(13.0, 7);
+    expect(last.lon).toBeCloseTo(80.0004, 7);
+  });
+
   it("splits into one PlanLine per feature when the CSV has a grouping column (real bug regression)", () => {
     // Mirrors roundabout_coordinates.csv: two named features in one file, no header for
     // north/east — the parser must never bridge them with a straight teleport line.

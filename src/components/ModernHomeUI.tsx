@@ -199,6 +199,26 @@ const MenuSegmentPill = ({ label, checked, onPress }) => (
   </Pressable>
 );
 
+const MapToolChip = ({ icon: Icon, label, active, onPress, accessibilityLabel }) => (
+  <Pressable
+    onPress={onPress}
+    accessibilityLabel={accessibilityLabel ?? label}
+    accessibilityRole="button"
+    accessibilityState={{ selected: !!active }}
+  >
+    <View style={[styles.mapToolChip, active && styles.mapToolChipOn]}>
+      <View style={[styles.mapToolChipIcon, active && styles.mapToolChipIconOn]}>
+        <Icon
+          color={active ? COLORS.accentText : COLORS.accentBrand}
+          size={15}
+          strokeWidth={2.3}
+        />
+      </View>
+      <Text style={[styles.mapToolChipLabel, active && styles.mapToolChipLabelOn]}>{label}</Text>
+    </View>
+  </Pressable>
+);
+
 const StatTile = ({ icon: Icon, label, value, tone = COLORS.textMain, accent = COLORS.accentBrand, wide = false }) => (
   <View style={[styles.statTile, wide && styles.statTileWide]}>
     <View style={styles.statTileTop}>
@@ -1176,6 +1196,7 @@ export default function ModernHomeUI(props) {
   // ── Click to Mark handlers ──
   const handleToggleMarkMenu = useCallback(() => {
     setShowMarkMenu((v) => !v);
+    setShowControlMenu(false);
     setShowLayersMenu(false);
   }, []);
 
@@ -1347,55 +1368,46 @@ export default function ModernHomeUI(props) {
     return (
       <AnimatedReanimated.View style={[styles.mapToolsColumn, compassAnimatedStyle]} pointerEvents="box-none">
         <View style={styles.mapToolsGroupCard} pointerEvents="auto">
-          <Pressable onPress={() => onResetNorth?.()} style={({ pressed }) => [pressed && { opacity: 0.7 }]} accessibilityLabel="Reset Map to North">
-            <Compass
-              headingDeg={roverHeadingDeg ?? 0}
-              hasRoverHeading={hasRoverHeading}
-              colors={COLORS}
-              style={styles.topBarCompass}
-              labelStyle={styles.topBarCompassLabel}
-              labelIdleStyle={styles.topBarCompassLabelIdle}
-            />
+          <Pressable onPress={() => onResetNorth?.()} accessibilityLabel="Reset Map to North">
+            <View style={styles.mapToolCompassWell}>
+              <Compass
+                headingDeg={roverHeadingDeg ?? 0}
+                hasRoverHeading={hasRoverHeading}
+                colors={COLORS}
+                style={styles.topBarCompass}
+                labelStyle={styles.topBarCompassLabel}
+                labelIdleStyle={styles.topBarCompassLabelIdle}
+              />
+            </View>
           </Pressable>
 
           <View style={styles.mapToolsDivider} />
 
-          <Pressable
-            style={({ pressed }) => [styles.focusToolBtnGrouped, pressed && styles.focusToolBtnPressed]}
+          <MapToolChip
+            icon={MapIcon}
+            label="Plan"
             onPress={() => onFocusPlan?.()}
             accessibilityLabel="Focus Plan"
-          >
-            <MapIcon color={COLORS.accentBrand} size={18} strokeWidth={2.2} />
-            <Text style={styles.focusToolLabel}>Plan</Text>
-          </Pressable>
+          />
 
-          <View style={styles.mapToolsDivider} />
-
-          <Pressable
-            style={({ pressed }) => [styles.focusToolBtnGrouped, pressed && styles.focusToolBtnPressed]}
+          <MapToolChip
+            icon={Tractor}
+            label="Rover"
             onPress={() => onFocusRover?.()}
             accessibilityLabel="Focus Rover"
-          >
-            <Tractor color={COLORS.accentBrand} size={18} strokeWidth={2.2} />
-            <Text style={styles.focusToolLabel}>Rover</Text>
-          </Pressable>
+          />
 
           {isHomePage && (
             <>
               <View style={styles.mapToolsDivider} />
               <View>
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.focusToolBtnGrouped,
-                    drawingMode !== "none" && { backgroundColor: COLORS.accentMuted },
-                    pressed && styles.focusToolBtnPressed,
-                  ]}
+                <MapToolChip
+                  icon={Pencil}
+                  label="Mark"
+                  active={drawingMode !== "none" || showMarkMenu}
                   onPress={handleToggleMarkMenu}
                   accessibilityLabel="Mark Options"
-                >
-                  <Pencil color={drawingMode !== "none" ? COLORS.accentBrand : COLORS.textMuted} size={18} strokeWidth={2.2} />
-                  <Text style={[styles.focusToolLabel, drawingMode !== "none" && { color: COLORS.accentBrand }]}>Mark</Text>
-                </Pressable>
+                />
                 {showMarkMenu && (
                   <View style={[styles.menuPopover, styles.menuPopoverOptions]}>
                     <View style={styles.menuPopoverArrow} />
@@ -1428,119 +1440,38 @@ export default function ModernHomeUI(props) {
             <>
               <View style={styles.mapToolsDivider} />
               <View>
-                <Pressable
-                  style={({ pressed }) => [styles.focusToolBtnGrouped, pressed && styles.focusToolBtnPressed]}
-                  onPress={() => {
-                    setShowLayersMenu((v) => !v);
-                    if (isHomePage) setShowMarkMenu(false);
-                  }}
-                  accessibilityLabel="Layers"
-                >
-                  <Layers color={COLORS.accentBrand} size={18} strokeWidth={2.2} />
-                  <Text style={styles.focusToolLabel}>Layers</Text>
-                </Pressable>
-                {showLayersMenu && (
-                  <View style={[styles.menuPopover, { width: menuPopoverWidthFor(layerTiles.length, MENU_LAYER_TILE_W) }]}>
-                    <View style={styles.menuPopoverArrow} />
-
-                    <MenuSectionLabel
-                      label="Map Layers"
-                      hint={`${layerTiles.filter((l) => l.checked).length}/${layerTiles.length}`}
-                    />
-
-                    <View style={styles.menuTileRow}>
-                      {layerTiles.map((tile) => (
-                        <MenuLayerTile
-                          key={tile.key}
-                          icon={tile.icon}
-                          label={tile.label}
-                          checked={tile.checked}
-                          onPress={tile.onPress}
-                        />
-                      ))}
-                    </View>
-
-                    <View style={styles.menuDivider} />
-
-                    <Pressable onPress={() => setShowLayersPlanSubmenu((v) => !v)} accessibilityRole="button">
-                      <View style={styles.menuGroupHeader}>
-                        <ChevronRight
-                          color={COLORS.textMuted}
-                          size={13}
-                          strokeWidth={2.6}
-                          style={{ transform: [{ rotate: showLayersPlanSubmenu ? "90deg" : "0deg" }] }}
-                        />
-                        <Text style={styles.menuGroupTitle}>Plan Segments</Text>
-                        {availableSegmentKinds.length > 0 && (
-                          <View style={styles.menuCountBadge}>
-                            <Text style={styles.menuCountText}>
-                              {availableSegmentKinds.filter((k) => layerVisibility?.segmentTypes?.[k] !== false).length}/{availableSegmentKinds.length}
-                            </Text>
-                          </View>
-                        )}
-                      </View>
-                    </Pressable>
-
-                    {showLayersPlanSubmenu && (
-                      availableSegmentKinds.length === 0 ? (
-                        <Text style={styles.menuEmptyText}>No plan loaded</Text>
-                      ) : (
-                        <View style={styles.menuSegRow}>
-                          {availableSegmentKinds.map((kind) => (
-                            <MenuSegmentPill
-                              key={kind}
-                              label={kind.charAt(0).toUpperCase() + kind.slice(1)}
-                              checked={layerVisibility?.segmentTypes?.[kind] !== false}
-                              onPress={() => toggleSegmentKind(kind)}
-                            />
-                          ))}
-                        </View>
-                      )
-                    )}
-                  </View>
-                )}
-              </View>
-
-              {/* Control popover — same chrome and tile style as Layers. Opens
-                  unconditionally whenever a plan is loaded; the Layers tile itself is
-                  gated by canUseMissionControl (dim + toast if pressed while gated). */}
-              <View style={styles.mapToolsDivider} />
-              <View>
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.focusToolBtnGrouped,
-                    showControlMenu && { backgroundColor: COLORS.accentMuted },
-                    pressed && styles.focusToolBtnPressed,
-                  ]}
+                <MapToolChip
+                  icon={Layers}
+                  label="Controls"
+                  active={showControlMenu}
                   onPress={() => {
                     if (isHomePage) setShowMarkMenu(false);
-                    setShowLayersMenu(false);
-                    setShowControlMenu((v) => !v);
+                    setShowControlMenu((open) => {
+                      const next = !open;
+                      if (!next) {
+                        setShowLayersMenu(false);
+                        setShowLayersPlanSubmenu(false);
+                      }
+                      return next;
+                    });
                   }}
-                  accessibilityLabel="Control"
-                  accessibilityState={{ selected: showControlMenu }}
-                >
-                  <LayoutList
-                    color={showControlMenu ? COLORS.accentBrand : COLORS.accentBrand}
-                    size={18}
-                    strokeWidth={2.2}
-                  />
-                  <Text style={[styles.focusToolLabel, showControlMenu && { color: COLORS.accentBrand }]}>
-                    Control
-                  </Text>
-                </Pressable>
+                  accessibilityLabel="Controls"
+                />
 
                 {showControlMenu && (
                   <View
-                    style={[styles.menuPopover, { width: menuPopoverWidthFor(1, MENU_LAYER_TILE_W) }]}
+                    style={[
+                      styles.menuPopover,
+                      { width: menuPopoverWidthFor(Math.max(layerTiles.length, 1), MENU_LAYER_TILE_W) },
+                    ]}
                   >
                     <View style={styles.menuPopoverArrow} />
-                    <MenuSectionLabel label="Mission Control" />
 
+                    <MenuSectionLabel label="Mission Control" />
                     <View style={styles.menuTileRow}>
                       <MenuLayerTile
                         icon={LayoutList}
-                        label="Layers"
+                        label="Control mode"
                         checked={controlModeActive}
                         onPress={() => onToggleControlMode?.()}
                       />
@@ -1549,6 +1480,93 @@ export default function ModernHomeUI(props) {
                       <Text style={[styles.menuEmptyText, { marginTop: 4 }]}>
                         Finish aligning every uploaded file first.
                       </Text>
+                    ) : null}
+
+                    <View style={styles.menuDivider} />
+
+                    <Pressable
+                      onPress={() => {
+                        setShowLayersMenu((v) => !v);
+                        if (showLayersMenu) setShowLayersPlanSubmenu(false);
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel="Layers"
+                      accessibilityState={{ expanded: showLayersMenu }}
+                    >
+                      <View style={styles.menuGroupHeader}>
+                        <Layers color={COLORS.accentBrand} size={14} strokeWidth={2.3} />
+                        <Text style={styles.menuGroupTitle}>Layers</Text>
+                        <View style={styles.menuCountBadge}>
+                          <Text style={styles.menuCountText}>
+                            {layerTiles.filter((l) => l.checked).length}/{layerTiles.length}
+                          </Text>
+                        </View>
+                        <ChevronRight
+                          color={COLORS.textMuted}
+                          size={13}
+                          strokeWidth={2.6}
+                          style={{ transform: [{ rotate: showLayersMenu ? "90deg" : "0deg" }] }}
+                        />
+                      </View>
+                    </Pressable>
+
+                    {showLayersMenu ? (
+                      <>
+                        <MenuSectionLabel
+                          label="Map Layers"
+                          hint={`${layerTiles.filter((l) => l.checked).length}/${layerTiles.length}`}
+                        />
+                        <View style={styles.menuTileRow}>
+                          {layerTiles.map((tile) => (
+                            <MenuLayerTile
+                              key={tile.key}
+                              icon={tile.icon}
+                              label={tile.label}
+                              checked={tile.checked}
+                              onPress={tile.onPress}
+                            />
+                          ))}
+                        </View>
+
+                        <Pressable
+                          onPress={() => setShowLayersPlanSubmenu((v) => !v)}
+                          accessibilityRole="button"
+                        >
+                          <View style={styles.menuGroupHeader}>
+                            <ChevronRight
+                              color={COLORS.textMuted}
+                              size={13}
+                              strokeWidth={2.6}
+                              style={{ transform: [{ rotate: showLayersPlanSubmenu ? "90deg" : "0deg" }] }}
+                            />
+                            <Text style={styles.menuGroupTitle}>Plan Segments</Text>
+                            {availableSegmentKinds.length > 0 && (
+                              <View style={styles.menuCountBadge}>
+                                <Text style={styles.menuCountText}>
+                                  {availableSegmentKinds.filter((k) => layerVisibility?.segmentTypes?.[k] !== false).length}/{availableSegmentKinds.length}
+                                </Text>
+                              </View>
+                            )}
+                          </View>
+                        </Pressable>
+
+                        {showLayersPlanSubmenu ? (
+                          availableSegmentKinds.length === 0 ? (
+                            <Text style={styles.menuEmptyText}>No plan loaded</Text>
+                          ) : (
+                            <View style={styles.menuSegRow}>
+                              {availableSegmentKinds.map((kind) => (
+                                <MenuSegmentPill
+                                  key={kind}
+                                  label={kind.charAt(0).toUpperCase() + kind.slice(1)}
+                                  checked={layerVisibility?.segmentTypes?.[kind] !== false}
+                                  onPress={() => toggleSegmentKind(kind)}
+                                />
+                              ))}
+                            </View>
+                          )
+                        ) : null}
+                      </>
                     ) : null}
                   </View>
                 )}
@@ -2285,21 +2303,61 @@ const styles = StyleSheet.create({
   mapToolsGroupCard: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: COLORS.panelSolid,
-    borderRadius: 16,
+    backgroundColor: "rgba(18, 18, 22, 0.88)",
+    borderRadius: 999,
     paddingVertical: 4,
-    paddingHorizontal: 8,
-    gap: 4,
+    paddingHorizontal: 5,
+    gap: 3,
     borderWidth: 1,
-    borderColor: COLORS.panelBorder,
+    borderColor: "rgba(255,255,255,0.08)",
     ...SHADOWS.card,
     alignSelf: "flex-start",
   },
   mapToolsDivider: {
     width: 1,
-    height: 24,
-    backgroundColor: COLORS.panelBorder,
-    marginHorizontal: 4,
+    height: 16,
+    backgroundColor: "rgba(255,255,255,0.10)",
+    marginHorizontal: 3,
+    borderRadius: 1,
+  },
+  mapToolCompassWell: {
+    borderRadius: 999,
+    paddingVertical: 2,
+    paddingHorizontal: 4,
+    backgroundColor: "rgba(255,255,255,0.04)",
+  },
+  mapToolChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: 3,
+    paddingLeft: 3,
+    paddingRight: 10,
+    borderRadius: 999,
+    backgroundColor: "transparent",
+  },
+  mapToolChipOn: {
+    backgroundColor: COLORS.accentBrand,
+  },
+  mapToolChipIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(244, 193, 12, 0.12)",
+  },
+  mapToolChipIconOn: {
+    backgroundColor: "rgba(28, 28, 28, 0.16)",
+  },
+  mapToolChipLabel: {
+    color: COLORS.textMain,
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.15,
+  },
+  mapToolChipLabelOn: {
+    color: COLORS.accentText,
   },
   focusToolBtnGrouped: {
     flexDirection: "row",
@@ -2760,11 +2818,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    height: TOP_BAR_ITEM_HEIGHT,
-    paddingLeft: 6,
+    height: 32,
+    paddingLeft: 2,
     paddingRight: 4,
     gap: 4,
-    minWidth: 56,
+    minWidth: 52,
   },
   topBarCompassLabel: {
     color: COLORS.textMain,

@@ -90,6 +90,7 @@ export function PlanPreview({
   roverHeadingDeg,
   missionRunning = false,
   selectedPoints,
+  pathCsvPins,
   onSelectPoint,
   onMapPlacePoint,
   onGuidePointFocus,
@@ -155,7 +156,8 @@ export function PlanPreview({
   roverPosE?: number | null;
   roverHeadingDeg?: number | null;
   missionRunning?: boolean;
-  selectedPoints?: { x: number; y: number }[];
+  selectedPoints?: { x: number; y: number; lat?: number; lon?: number }[];
+  pathCsvPins?: { x: number; y: number; lat?: number; lon?: number }[];
   onSelectPoint?: (pt: { x: number; y: number }) => void;
   onMapPlacePoint?: (pt: { x: number; y: number }) => void;
   onGuidePointFocus?: (index: number) => void;
@@ -248,9 +250,10 @@ export function PlanPreview({
     [visibility]
   );
 
-  /** Guide / CSV / multi-point pins — hide when Layers → Ref points is off. */
+  /** Align guide pins — hide when Layers → Ref points is off. Path CSV vertices are independent. */
   const showRefPointsLayer = visibility.refPoints !== false;
   const visibleSelectedPoints = showRefPointsLayer ? selectedPoints : [];
+  const visiblePathCsvPins = pathCsvPins ?? [];
   const visibleSnapRefPoints = showRefPointsLayer ? snapRefPoints : undefined;
   const visibleShowRefPointLabels = showRefPointsLayer && showRefPointLabels;
 
@@ -889,8 +892,8 @@ export function PlanPreview({
     if (layer === "center") return "#d97706";
     if (layer === "transit") return "#94a3b8";
     if (layer === "extension") return "#8b5cf6";
-    if (layer === "marking_true") return "#16a34a"; // Dark green for marking (spray)
-    if (layer === "marking_false") return "#86efac"; // Light green for non-spray
+    if (layer === "marking_true") return "#f97316"; // Spray / path
+    if (layer === "marking_false") return "#fdba74"; // Non-spray path
     return "#475569";
   };
 
@@ -1079,6 +1082,7 @@ export function PlanPreview({
             highlightedLines={selectedLines}
             showCornerPoints={true}
             selectedPoints={visibleSelectedPoints}
+            pathCsvPins={visiblePathCsvPins}
           />
         ) : filtered.length === 0 && !hasRover ? (
           // No plan, no rover: show placeholder

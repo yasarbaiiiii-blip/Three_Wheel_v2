@@ -45,6 +45,14 @@ export const FIELDS_COLORS = {
   stepActive: "#f4c10c",
   stepDone: "#34d399",
   stepPending: "#3f3f46",
+  /** Upload path-CSV vertices (map + badges). */
+  pathCsv: "#14b8a6",
+  pathCsvMuted: "rgba(20, 184, 166, 0.14)",
+  pathCsvBorder: "rgba(20, 184, 166, 0.38)",
+  /** Align guide-CSV pins (map + badges). */
+  guideCsv: "#e11d48",
+  guideCsvMuted: "rgba(225, 29, 72, 0.14)",
+  guideCsvBorder: "rgba(225, 29, 72, 0.38)",
 };
 
 /** Shared layout tokens for the Fields right rail (alignment grid). */

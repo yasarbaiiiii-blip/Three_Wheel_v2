@@ -180,8 +180,8 @@ function refPointKey(p: { lat: number; lon: number }): string {
 // ── Layer colours (parity with legacy LAYER_COLORS in MapView.tsx) ──
 const LAYER_COLORS: Record<string, string> = {
   boundary: "#0f172a",
-  marking: "#16a34a",
-  marking_false: "#86efac",
+  marking: "#f97316",
+  marking_false: "#fdba74",
   center: "#f59e0b",
   transit: "#94a3b8",
   extension: "#8b5cf6",
@@ -386,6 +386,7 @@ export function MapViewNative(props: MapViewProps) {
     selectedLineId,
     highlightedLines,
     selectedPoints,
+    pathCsvPins,
     mode = "fields",
     placedItems,
     selectedItemIds,
@@ -623,6 +624,10 @@ export function MapViewNative(props: MapViewProps) {
   const activeSnapRefPointKey = dragPreview?.activeRefKey ?? null;
   const previewLengthLabelsFC = dragPreview?.lengthLabelsFC ?? null;
   const previewHandlesFC = dragPreview?.handlesFC ?? null;
+  // After a magnet lock commits, keep that guide pin highlighted so the operator
+  // can still see *which* CSV/ref point the plan is sitting on.
+  const [lastLockedRefKey, setLastLockedRefKey] = useState<string | null>(null);
+  const highlightedSnapRefKey = activeSnapRefPointKey ?? lastLockedRefKey;
 
   const [previewBoundary, setPreviewBoundary] = useState<{
     x: number;
@@ -1175,8 +1180,7 @@ export function MapViewNative(props: MapViewProps) {
     return featureCollection(features);
   }, [refPointsSig]);
 
-  // ── Selected alignment points (highlighted in yellow — or brighter/bigger, per
-  // isSnapActive, while the Multi-Point Fit plan is being dragged close to one of them) ──
+  // ── Selected alignment points (rose guide pins; darker when magnet-locked) ──
   const selectedPointsFC = useMemo(() => {
     if (!selectedPoints || selectedPoints.length === 0) {
       return featureCollection([]);
@@ -1196,19 +1200,18 @@ export function MapViewNative(props: MapViewProps) {
       };
 
       if (Number.isFinite(p.lat) && Number.isFinite(p.lon)) {
-        // Matched by VALUE (not index) against activeSnapRefPointKey — `selectedPoints` (every
-        // ref point) and the filtered, snap-eligible `snapRefPoints` can diverge in index when a
-        // tapped point hasn't had its lat/lon filled in yet, so index correspondence isn't safe.
+        // Matched by VALUE (not index) against the live snap key / last committed lock —
+        // `selectedPoints` and snap-eligible `snapRefPoints` can diverge in index when a
+        // tapped point hasn't had its lat/lon filled in yet.
         const isSnapActive =
-          activeSnapRefPointKey ===
-          refPointKey({ lat: p.lat as number, lon: p.lon as number });
-        // While the yellow dashed snap-guide is locked to this pin, omit the pin entirely
-        // so the dashed line does not terminate in a yellow endpoint blob.
-        if (isSnapActive) return;
+          highlightedSnapRefKey ===
+          refPointKey({ lat: p.lat as number, lon: p.lon as number })
+            ? "1"
+            : "0";
         features.push(
           pointFeature(toMapboxCoord(p.lat as number, p.lon as number), {
             ...planProps,
-            isSnapActive: 0,
+            isSnapActive,
           })
         );
         return;
@@ -1221,12 +1224,37 @@ export function MapViewNative(props: MapViewProps) {
       features.push(
         pointFeature(toMapboxCoord(gps.lat, gps.lon), {
           ...planProps,
-          isSnapActive: false,
+          isSnapActive: "0",
         })
       );
     });
     return featureCollection(features);
-  }, [selectedPoints, originSig, activeSnapRefPointKey]);
+  }, [selectedPoints, originSig, highlightedSnapRefKey]);
+
+  /** Upload path-CSV vertices — small teal dots, never numbered like Align guides. */
+  const pathCsvPinsFC = useMemo(() => {
+    if (!pathCsvPins || pathCsvPins.length === 0) return featureCollection([]);
+    const features: GeoJSON.Feature<GeoJSON.Point>[] = [];
+    for (let i = 0; i < pathCsvPins.length; i++) {
+      const p = pathCsvPins[i];
+      if (Number.isFinite(p.lat) && Number.isFinite(p.lon)) {
+        features.push(
+          pointFeature(toMapboxCoord(p.lat as number, p.lon as number), { id: `path-csv-${i}` })
+        );
+        continue;
+      }
+      if (!projectionOrigin) continue;
+      const gps = projectPlanNorthEastToGps(p.x, p.y, projectionOrigin);
+      features.push(pointFeature(toMapboxCoord(gps.lat, gps.lon), { id: `path-csv-${i}` }));
+    }
+    return featureCollection(features);
+  }, [pathCsvPins, originSig, projectionOrigin]);
+
+  useEffect(() => {
+    if (!selectedPoints || selectedPoints.length === 0) {
+      setLastLockedRefKey(null);
+    }
+  }, [selectedPoints?.length]);
 
   // Content-based signature so the log below fires only on real changes, not on every
   // FieldsPage render (selectedPoints is a fresh array reference each render there).
@@ -1776,9 +1804,8 @@ export function MapViewNative(props: MapViewProps) {
    */
   // Builds the Figma/Illustrator-style snap guide line from the reference point to the plan's
   // snap anchor. The point end uses its OWN lat/lon directly (no round-trip through local
-  // metres) — highlighting that same point is handled separately by selectedPointsFC's
-  // isSnapActive styling, driven off activeSnapRefPointKey. A `null` guide clears it (nothing
-  // nearby, or the gesture just ended).
+  // metres). The matching gold pin stays visible and turns green (isSnapActive)
+  // so the operator can still see the lock. A `null` guide clears the dashed line.
   const buildSnapGuideFC = useCallback(
     (guide: { point: SnapRefPoint; anchor: LocalMeters } | null): GeoJSON.FeatureCollection => {
       if (!guide || !projectionOrigin) return featureCollection([]);
@@ -2328,6 +2355,18 @@ export function MapViewNative(props: MapViewProps) {
           onPlanAttachedRef.current(becameAttached);
         }
 
+        const lockPoint = snapLockRef.current?.point;
+        if (
+          becameAttached &&
+          lockPoint &&
+          Number.isFinite(lockPoint.lat) &&
+          Number.isFinite(lockPoint.lon)
+        ) {
+          setLastLockedRefKey(refPointKey(lockPoint));
+        } else {
+          setLastLockedRefKey(null);
+        }
+
         // Clear atomic drag preview — parent state + placedItemsGeo are full quality now.
         setDragPreview(null);
         dragStartPositionsRef.current = {};
@@ -2455,6 +2494,7 @@ export function MapViewNative(props: MapViewProps) {
       gestureStartScreenRef.current = { x: touchX, y: touchY };
       snapLockRef.current = null; // each gesture starts with no held snap.
       resizeSessionRef.current = null;
+      setLastLockedRefKey(null);
 
       // Invalidate any in-flight hit-test from a previous gesture.
       const gestureGen = ++resizeGestureGenRef.current;
@@ -2761,8 +2801,9 @@ export function MapViewNative(props: MapViewProps) {
     // Always include selected alignment ref points — CSV-imported or tapped points may sit
     // outside the plan's own line bounds, and they must never end up framed off-screen.
     selectedPointsFC.features.forEach(pushFeatureCoords);
+    pathCsvPinsFC.features.forEach(pushFeatureCoords);
     return coords;
-  }, [mode, boundaryGeo, placedItemsGeo, planLinesFC, selectedPointsFC]);
+  }, [mode, boundaryGeo, placedItemsGeo, planLinesFC, selectedPointsFC, pathCsvPinsFC]);
 
   const fitToPlan = useCallback(() => {
     const coords = collectFitCoords();
@@ -3226,8 +3267,8 @@ export function MapViewNative(props: MapViewProps) {
             filter={["all", ["!=", ["get", "closedRing"], true], ["!=", ["get", "layer"], "virtual_boundary"]]}
             style={{
               lineColor: ["get", "color"],
-              lineWidth: 2,
-              lineOpacity: 0.85,
+              lineWidth: 2.25,
+              lineOpacity: 1,
               lineCap: "round",
               lineJoin: "round",
             }}
@@ -3237,8 +3278,8 @@ export function MapViewNative(props: MapViewProps) {
             filter={["all", ["==", ["get", "closedRing"], true], ["!=", ["get", "layer"], "virtual_boundary"]]}
             style={{
               lineColor: ["get", "color"],
-              lineWidth: 2,
-              lineOpacity: 0.85,
+              lineWidth: 2.25,
+              lineOpacity: 1,
               lineCap: "butt",
               lineJoin: "round",
             }}
@@ -3463,20 +3504,7 @@ export function MapViewNative(props: MapViewProps) {
           />
         </ShapeSource>
 
-        {/* ── Multi-Point Fit snap guide: dashed line only (butt caps — no end dots) ── */}
-        <ShapeSource id="ref-point-snap-guide" shape={snapGuideFC}>
-          <LineLayer
-            id="ref-point-snap-guide-line"
-            style={{
-              lineColor: "#f59e0b",
-              lineWidth: 2,
-              lineOpacity: 0.9,
-              lineDasharray: [3, 2],
-              lineCap: "butt",
-              lineJoin: "miter",
-            }}
-          />
-        </ShapeSource>
+
 
         {/* ── Live path lengths / resize W×H pill ── */}
         <ShapeSource id="plan-length-labels" shape={activeLengthLabelsFC}>
@@ -3556,55 +3584,7 @@ export function MapViewNative(props: MapViewProps) {
           />
         </ShapeSource>
 
-        {/* ── Multi-Point guide anchors (gold pins). Snap-active endpoint is omitted
-            from the FeatureCollection so the dashed snap line never ends on a yellow dot. ── */}
-        <ShapeSource
-          id="selected-points"
-          shape={selectedPointsFC}
-          onPress={
-            onGuidePointFocus || onSelectPoint ? handleMultiPointAnchorPress : undefined
-          }
-          hitbox={{ width: 56, height: 56 }}
-        >
-          <CircleLayer
-            id="selected-points-halo"
-            style={{
-              circleRadius: 14,
-              circleColor: "#fbbf24",
-              circleOpacity: 0.28,
-            }}
-          />
-          <CircleLayer
-            id="selected-points-body"
-            style={{
-              circleRadius: 10,
-              circleColor: "#f59e0b",
-              circleStrokeColor: "#ffffff",
-              circleStrokeWidth: 2.5,
-              circleOpacity: 1,
-            }}
-          />
-          <CircleLayer
-            id="selected-points-inner"
-            style={{
-              circleRadius: 6,
-              circleColor: "#ffffff",
-              circleOpacity: 1,
-            }}
-          />
-          <SymbolLayer
-            id="selected-points-index"
-            style={{
-              textField: ["to-string", ["get", "index"]],
-              textSize: 12,
-              textColor: "#b45309",
-              textFont: ["DIN Pro Bold"],
-              textAllowOverlap: true,
-              textIgnorePlacement: true,
-              textAnchor: "center",
-            }}
-          />
-        </ShapeSource>
+
 
         {/* ── Virtual bounding box: labels only (corner dots removed) ── */}
         <ShapeSource id="virtual-box-corners" shape={virtualBoxCornersFC}>
@@ -3724,12 +3704,96 @@ export function MapViewNative(props: MapViewProps) {
             id="placed-item-lines-layer"
             style={{
               // Selected items turn red to indicate selection.
-              lineColor: ["case", ["get", "selected"], "#ef4444", "#16a34a"],
+              lineColor: ["case", ["get", "selected"], "#ef4444", "#f97316"],
               lineWidth: ["case", ["get", "selected"], 3, 2],
               // sketchMode dims unselected items (parity with legacy renderPlacedItems).
               lineOpacity: ["case", ["get", "selected"], 1.0, sketchMode ? 0.2 : 0.8],
               lineCap: "round",
               lineJoin: "round",
+            }}
+          />
+        </ShapeSource>
+
+        {/* Path CSV: teal dots. Guide CSV: rose numbered pins. Never yellow / sky-blue. */}
+        <ShapeSource id="path-csv-pins" shape={pathCsvPinsFC}>
+          <CircleLayer
+            id="path-csv-pins-halo"
+            style={{
+              circleRadius: 4,
+              circleColor: "#14b8a6",
+              circleOpacity: 0.22,
+            }}
+          />
+          <CircleLayer
+            id="path-csv-pins-body"
+            style={{
+              circleRadius: 2.25,
+              circleColor: "#14b8a6",
+              circleStrokeColor: "#ecfdf5",
+              circleStrokeWidth: 1,
+              circleOpacity: 0.95,
+            }}
+          />
+        </ShapeSource>
+
+        {/* ── Multi-Point Fit snap guide + guide pins (above the DXF so a lock stays visible) ── */}
+        <ShapeSource id="ref-point-snap-guide" shape={snapGuideFC}>
+          <LineLayer
+            id="ref-point-snap-guide-line"
+            style={{
+              lineColor: "#e11d48",
+              lineWidth: 2,
+              lineOpacity: 0.9,
+              lineDasharray: [3, 2],
+              lineCap: "butt",
+              lineJoin: "miter",
+            }}
+          />
+        </ShapeSource>
+        <ShapeSource
+          id="selected-points"
+          shape={selectedPointsFC}
+          onPress={
+            onGuidePointFocus || onSelectPoint ? handleMultiPointAnchorPress : undefined
+          }
+          hitbox={{ width: 56, height: 56 }}
+        >
+          <CircleLayer
+            id="selected-points-halo"
+            style={{
+              circleRadius: ["case", ["==", ["get", "isSnapActive"], "1"], 9, 7],
+              circleColor: ["case", ["==", ["get", "isSnapActive"], "1"], "#fb7185", "#e11d48"],
+              circleOpacity: ["case", ["==", ["get", "isSnapActive"], "1"], 0.4, 0.22],
+            }}
+          />
+          <CircleLayer
+            id="selected-points-body"
+            style={{
+              circleRadius: ["case", ["==", ["get", "isSnapActive"], "1"], 6, 5],
+              circleColor: ["case", ["==", ["get", "isSnapActive"], "1"], "#be123c", "#e11d48"],
+              circleStrokeColor: "#ffffff",
+              circleStrokeWidth: ["case", ["==", ["get", "isSnapActive"], "1"], 1.75, 1.5],
+              circleOpacity: 1,
+            }}
+          />
+          <CircleLayer
+            id="selected-points-inner"
+            style={{
+              circleRadius: ["case", ["==", ["get", "isSnapActive"], "1"], 3, 2.75],
+              circleColor: "#ffffff",
+              circleOpacity: 1,
+            }}
+          />
+          <SymbolLayer
+            id="selected-points-index"
+            style={{
+              textField: ["to-string", ["get", "index"]],
+              textSize: 8,
+              textColor: ["case", ["==", ["get", "isSnapActive"], "1"], "#9f1239", "#9f1239"],
+              textFont: ["DIN Pro Bold"],
+              textAllowOverlap: true,
+              textIgnorePlacement: true,
+              textAnchor: "center",
             }}
           />
         </ShapeSource>

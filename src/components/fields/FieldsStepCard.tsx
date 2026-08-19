@@ -17,6 +17,9 @@ type FieldsStepCardProps = {
   scrollableBody?: boolean;
   bodyMaxHeight?: number;
   fillAvailable?: boolean;
+  /** Compact status chip to the right of the title (e.g. "12 guides"). */
+  badge?: string;
+  badgeVariant?: "guide" | "path";
 };
 
 const NODE: Record<StepStatus, { bg: string; fg: string; border: string }> = {
@@ -48,6 +51,8 @@ export function FieldsStepCard({
   scrollableBody = false,
   bodyMaxHeight = 360,
   fillAvailable = false,
+  badge,
+  badgeVariant = "guide",
 }: FieldsStepCardProps) {
   const node = NODE[status];
   const isScrolling = expanded && scrollableBody;
@@ -114,6 +119,17 @@ export function FieldsStepCard({
           >
             {title}
           </Text>
+
+          {badge ? (
+            <View style={[styles.badge, badgeVariant === "path" ? styles.badgePath : styles.badgeGuide]}>
+              <Text
+                style={[styles.badgeText, badgeVariant === "path" ? styles.badgeTextPath : styles.badgeTextGuide]}
+                numberOfLines={1}
+              >
+                {badge}
+              </Text>
+            </View>
+          ) : null}
 
           <View style={styles.chevronSlot}>
             {expanded ? (
@@ -212,6 +228,29 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     includeFontPadding: false,
   },
+  badge: {
+    flexShrink: 0,
+    maxWidth: 92,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  badgeGuide: {
+    backgroundColor: FIELDS_COLORS.guideCsvMuted,
+    borderColor: FIELDS_COLORS.guideCsvBorder,
+  },
+  badgePath: {
+    backgroundColor: FIELDS_COLORS.pathCsvMuted,
+    borderColor: FIELDS_COLORS.pathCsvBorder,
+  },
+  badgeText: {
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.2,
+  },
+  badgeTextGuide: { color: FIELDS_COLORS.guideCsv },
+  badgeTextPath: { color: FIELDS_COLORS.pathCsv },
   chevronSlot: {
     width: 24,
     height: NODE_SIZE,

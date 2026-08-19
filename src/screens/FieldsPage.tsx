@@ -176,6 +176,7 @@ export type FieldsPageProps = {
     roverPosE?: number | null;
     roverHeadingDeg?: number | null;
     selectedPoints?: { x: number; y: number; lat?: number; lon?: number }[];
+    pathCsvPins?: { x: number; y: number; lat?: number; lon?: number }[];
     onSelectPoint?: (pt: { x: number; y: number }) => void;
     onGuidePointFocus?: (index: number) => void;
     alignedRefPoints?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
@@ -230,6 +231,7 @@ export type FieldsPageProps = {
     patch: Partial<{ north: number; east: number; rotationDeg: number; scale: number }>
   ) => void;
   onRemoveTemplate?: (id: string) => void;
+  onRemoveUploadedFile?: (id: string) => void;
   pendingDxfAlignment?: Record<
     string,
     import("../types/uploadedFiles").PendingDxfAlignmentEntry
@@ -385,6 +387,7 @@ export function FieldsPage(props: FieldsPageProps) {
     onPlaceTemplate,
     onUpdateTemplateInstance,
     onRemoveTemplate,
+    onRemoveUploadedFile,
     pendingDxfAlignment = {},
     setPendingDxfAlignment,
     sharedOriginGps = null,
@@ -765,7 +768,7 @@ export function FieldsPage(props: FieldsPageProps) {
    * - no CSV guide file is loaded
    */
   const canTapGuidePoints =
-    activeStep === "align" &&
+    isSectionOpen("align") &&
     alignmentMethod === "least_squares" &&
     !autoOrigin &&
     !isVisualAlignmentMode &&
@@ -775,7 +778,7 @@ export function FieldsPage(props: FieldsPageProps) {
   const handleSelectPoint = useCallback(
     (pt: { x: number; y: number }) => {
       if (
-        activeStep !== "align" ||
+        !isSectionOpen("align") ||
         alignmentMethod !== "least_squares" ||
         autoOrigin ||
         isVisualAlignmentMode ||
@@ -783,7 +786,7 @@ export function FieldsPage(props: FieldsPageProps) {
         csvGuidePointsActive
       ) {
         console.log(
-          `[AlignDXF][Tap] Ignored (gated): step=${activeStep} method=${alignmentMethod} autoOrigin=${!!autoOrigin} visual=${!!isVisualAlignmentMode} editing=${!!isPlanEditingMode} csv=${csvGuidePointsActive}`
+          `[AlignDXF][Tap] Ignored (gated): alignOpen=${isSectionOpen("align")} method=${alignmentMethod} autoOrigin=${!!autoOrigin} visual=${!!isVisualAlignmentMode} editing=${!!isPlanEditingMode} csv=${csvGuidePointsActive}`
         );
         return;
       }
@@ -815,7 +818,7 @@ export function FieldsPage(props: FieldsPageProps) {
       });
     },
     [
-      activeStep,
+      isSectionOpen,
       alignmentMethod,
       autoOrigin,
       isVisualAlignmentMode,
@@ -938,7 +941,6 @@ export function FieldsPage(props: FieldsPageProps) {
         return;
       }
       if (entry.status === "needs_alignment") {
-        resetWorkingAlignState();
         setActiveStep("align");
         openOnlySection("align");
       } else {
@@ -950,7 +952,6 @@ export function FieldsPage(props: FieldsPageProps) {
       uploadedFiles,
       lines,
       onSelectLine,
-      resetWorkingAlignState,
       setActiveStep,
       openOnlySection,
     ]
@@ -1020,9 +1021,8 @@ export function FieldsPage(props: FieldsPageProps) {
   );
 
   /**
-   * Upload-plan CSV pins: same direct lat/lon draw path as guide/ref points
-   * (MapView selectedPointsFC). Always shown while a local CSV is loaded —
-   * not gated on Align step (Align is hidden for local CSV).
+   * Upload-plan path CSV vertices. Independent of Align guide pins — a path file
+   * must never replace guide CSV markers on the map.
    */
   const localCsvMapPins = useMemo(() => {
     if (!activeCsvPreview || activeCsvPreview.points.length === 0) return null;
@@ -1030,8 +1030,10 @@ export function FieldsPage(props: FieldsPageProps) {
   }, [activeCsvPreview]);
 
   const EMPTY_MAP_PINS = useMemo(() => [] as { x: number; y: number; lat?: number; lon?: number }[], []);
+  const alignSectionOpen = isSectionOpen("align");
+  /** Gold numbered guide pins — only while the Align DXF card is open. */
   const alignGuidePins = useMemo(() => {
-    if (activeStep !== "align") return EMPTY_MAP_PINS;
+    if (!alignSectionOpen) return EMPTY_MAP_PINS;
     return refPoints.map((point) => {
       const lat = parseFloat(point.lat);
       const lon = parseFloat(point.lon);
@@ -1041,8 +1043,9 @@ export function FieldsPage(props: FieldsPageProps) {
         ...(Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : {}),
       };
     });
-  }, [activeStep, refPoints, EMPTY_MAP_PINS]);
-  const selectedMapPoints = localCsvMapPins ?? alignGuidePins;
+  }, [alignSectionOpen, refPoints, EMPTY_MAP_PINS]);
+  /** Path vertices hide while Align is open so they cannot be mistaken for guides. */
+  const pathCsvPins = alignSectionOpen ? null : localCsvMapPins;
 
   const stepStatus = (id: FieldsStepId): "pending" | "active" | "done" => {
     switch (id) {
@@ -1230,17 +1233,10 @@ export function FieldsPage(props: FieldsPageProps) {
           roverPosN: previewRoverPoint?.north ?? null,
           roverPosE: previewRoverPoint?.east ?? null,
           roverHeadingDeg: telemetrySnapshot?.heading_ned_deg ?? null,
-          selectedPoints: selectedMapPoints,
-          onSelectPoint: localCsvMapPins
-            ? undefined
-            : canTapGuidePoints
-              ? handleSelectPoint
-              : undefined,
-          onGuidePointFocus: localCsvMapPins
-            ? undefined
-            : canTapGuidePoints
-              ? handleGuidePointFocus
-              : undefined,
+          selectedPoints: alignGuidePins,
+          pathCsvPins: pathCsvPins ?? undefined,
+          onSelectPoint: canTapGuidePoints ? handleSelectPoint : undefined,
+          onGuidePointFocus: alignSectionOpen ? handleGuidePointFocus : undefined,
           alignedRefPoints,
           stagedVerified: stagedWorkflow.staged === "verified",
           mapViewEnabled,
@@ -1265,7 +1261,7 @@ export function FieldsPage(props: FieldsPageProps) {
           sketchMode: false,
           showBoundaryPoints: true,
           snapRefPoints:
-            activeStep === "align" && alignmentMethod === "least_squares"
+            alignSectionOpen && alignmentMethod === "least_squares"
               ? refPoints
                   .map((p) => ({ lat: parseFloat(p.lat), lon: parseFloat(p.lon) }))
                   .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon))
@@ -1645,6 +1641,8 @@ export function FieldsPage(props: FieldsPageProps) {
           <FieldsStepCard
             stepNumber={1}
             title="Upload"
+            badge={activeCsvPreview ? "path CSV" : undefined}
+            badgeVariant="path"
             status={stepStatus("upload")}
             expanded={isSectionOpen("upload")}
             onToggle={() => toggleSection("upload", "upload")}
@@ -1706,6 +1704,12 @@ export function FieldsPage(props: FieldsPageProps) {
               uploadedFiles={uploadedFiles}
               selectedUploadedFileId={selectedUploadedFileId}
               onSelectUploadedFile={handleSelectUploadedFile}
+              onRemoveUploadedFile={(id) => {
+                if (blockProtectedWorkflowMutation("Removing a file")) return;
+                onRemoveUploadedFile?.(id);
+                if (selectedUploadedFileId === id) setSelectedUploadedFileId(null);
+                if (selectedTemplateId === id) setSelectedTemplateId(null);
+              }}
               onBeginLocalImportBatch={onBeginLocalImportBatch}
               missionLayers={missionLayers}
               controlModeActive={controlModeActive && canUseMissionControl}
@@ -1956,6 +1960,11 @@ export function FieldsPage(props: FieldsPageProps) {
               selectedPending
                 ? `Align · ${selectedPending.fileName}`
                 : "Align DXF"
+            }
+            badge={
+              refPoints.length > 0
+                ? `${refPoints.length} guide${refPoints.length === 1 ? "" : "s"}`
+                : undefined
             }
             status={stepStatus("align")}
             expanded={isSectionOpen("align")}

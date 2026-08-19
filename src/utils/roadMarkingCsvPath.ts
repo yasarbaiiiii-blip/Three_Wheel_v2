@@ -285,6 +285,50 @@ export function turningAngleDeg(
 }
 
 /** Deduplicate consecutive near-identical points. */
+/**
+ * Closest point on segment a→b to p (clamped).
+ */
+export function closestPointOnSegment(
+  a: RoadMarkingNedPoint,
+  b: RoadMarkingNedPoint,
+  p: RoadMarkingNedPoint
+): RoadMarkingNedPoint {
+  const abn = b.north - a.north;
+  const abe = b.east - a.east;
+  const len2 = abn * abn + abe * abe;
+  if (len2 < 1e-18) return { north: a.north, east: a.east };
+  let t = ((p.north - a.north) * abn + (p.east - a.east) * abe) / len2;
+  t = Math.max(0, Math.min(1, t));
+  return { north: a.north + t * abn, east: a.east + t * abe };
+}
+
+/**
+ * Force the painted polyline to start and end on the surveyed termini.
+ * Fillet/arc sampling + consecutive-point dedupe can leave the first/last sample
+ * a few centimetres off the CSV pins; at high zoom that reads as "path sits left
+ * of the point". Intermediate corners stay filleted (not re-inserted).
+ */
+export function pinFittedPathTermini(
+  samples: RoadMarkingNedPoint[],
+  source: RoadMarkingNedPoint[]
+): RoadMarkingNedPoint[] {
+  if (source.length < 2) return samples.slice();
+  const start = source[0];
+  const end = source[source.length - 1];
+  if (samples.length < 2) return [{ ...start }, { ...end }];
+  const out = samples.slice();
+  out[0] = { north: start.north, east: start.east };
+  out[out.length - 1] = { north: end.north, east: end.east };
+  if (dist(out[0], out[1]) < 1e-9) {
+    out.splice(1, 1);
+  }
+  if (out.length >= 2 && dist(out[out.length - 1], out[out.length - 2]) < 1e-9) {
+    out.splice(out.length - 2, 1);
+  }
+  return out.length >= 2 ? out : [{ ...start }, { ...end }];
+}
+
+/** Deduplicate consecutive near-identical points. */
 export function dedupeNearPoints(
   points: RoadMarkingNedPoint[],
   minDistM = 0.02
@@ -2958,10 +3002,14 @@ export function buildRoadMarkingFittedPath(
         [...points].reverse(),
         options
       );
-      return { ...result, samples: [...result.samples].reverse() };
+      return {
+        ...result,
+        samples: pinFittedPathTermini([...result.samples].reverse(), points),
+      };
     }
   }
-  return buildRoadMarkingFittedPathDirected(points, options);
+  const result = buildRoadMarkingFittedPathDirected(points, options);
+  return { ...result, samples: pinFittedPathTermini(result.samples, points) };
 }
 
 function buildRoadMarkingFittedPathDirected(

@@ -19,7 +19,7 @@
  * the EKF navigates*, seen as a −0.51 cm-per-metre-north placement walk at 13 °N.
  */
 
-import { metresPerDegreePx4, projectGpsToLocalMeters } from "./geoProjection";
+import { metresPerDegreePx4, projectGpsToLocalMeters, projectLocalMetersToGps } from "./geoProjection";
 import { MARK_CONTIGUOUS_GAP_M } from "./missionTrajectory";
 import { splitCsvCells } from "./refPointsCsv";
 import {
@@ -27,7 +27,7 @@ import {
   polylineLengthM,
   splitIntoOpenPathGroupsDetailed,
 } from "./roadMarkingCsvPath";
-import type { PlanLine } from "../types/plan";
+import type { DxfPoint, PlanLine } from "../types/plan";
 
 /** NED metres larger than this are almost certainly projected CRS, not local site metres. */
 export const PROJECTED_COORD_BLOCK_M = 10_000;
@@ -927,6 +927,41 @@ function groupSurveyRmsM(points: LocalPointCsvPoint[]): number | null {
   return worst;
 }
 
+const GPS_STAMP_SNAP_M = 0.02;
+
+/**
+ * Stamp WGS84 onto preview samples so Mapbox draws the stroke on the same
+ * lat/lon as the CSV pins (no rover-origin / −2 m NED round-trip).
+ * Source vertices reuse the CSV row's lat/lon; in-between samples invert via `anchor`.
+ */
+export function stampGpsOnPreviewPoints(
+  samples: Array<{ north: number; east: number }>,
+  source: LocalPointCsvPoint[],
+  anchor: { lat: number; lon: number } | null
+): DxfPoint[] {
+  if (samples.length === 0) return [];
+  const gpsSource = source.filter(
+    (p) =>
+      p.lat != null &&
+      p.lon != null &&
+      Number.isFinite(p.lat) &&
+      Number.isFinite(p.lon)
+  );
+  if (gpsSource.length === 0) {
+    return samples.map((s) => ({ north: s.north, east: s.east }));
+  }
+  const origin = anchor ?? { lat: gpsSource[0].lat as number, lon: gpsSource[0].lon as number };
+  return samples.map((s) => {
+    for (const p of gpsSource) {
+      if (Math.hypot(s.north - p.north_m, s.east - p.east_m) <= GPS_STAMP_SNAP_M) {
+        return { north: s.north, east: s.east, lat: p.lat, lon: p.lon };
+      }
+    }
+    const gps = projectLocalMetersToGps(s.north, s.east, origin.lat, origin.lon);
+    return { north: s.north, east: s.east, lat: gps.lat, lon: gps.lon };
+  });
+}
+
 /** Build one open road-marking PlanLine for a single already-split group of points. */
 function buildPlanLineForGroup(
   rawNed: RawNedPoint[],
@@ -935,12 +970,14 @@ function buildPlanLineForGroup(
   groupCount: number,
   groupLabel: string | undefined,
   surveyRmsM: number | null,
-  groupingWarnings: string[] = []
+  groupingWarnings: string[] = [],
+  sourcePoints: LocalPointCsvPoint[] = [],
+  gpsAnchor: { lat: number; lon: number } | null = null
 ): PlanLine | null {
   const id = planLineIdForGroup(pathIndex);
   const label = planLineLabelForGroup(pathIndex, groupCount, groupLabel, sourcePointCount);
   const fitted = buildRoadMarkingFittedPath(rawNed, { surveyRmsM });
-  const preview_points = fitted.samples;
+  const preview_points = stampGpsOnPreviewPoints(fitted.samples, sourcePoints, gpsAnchor);
   const extraWarnings = groupingWarnings.filter((w) => typeof w === "string" && w.length > 0);
 
   if (preview_points.length < 2) {
@@ -985,7 +1022,7 @@ function buildPlanLineForGroup(
           /** Raw survey rows for this group — Anchor candidate points (see roadMarkingCsvPath.ts). */
           source_points: rawNed.map((p) => ({ north: p.north, east: p.east })),
         },
-        preview_points: fallback,
+        preview_points: stampGpsOnPreviewPoints(fallback, sourcePoints, gpsAnchor),
       },
     };
   }
@@ -1053,7 +1090,10 @@ function buildPlanLineForGroup(
  * (Hyper fit, segment-then geometric joint fillets; never a closed ring).
  * Pin markers still use the raw CSV points via `localCsvToMapPins`.
  */
-export function localCsvPointsToPlanLines(points: LocalPointCsvPoint[]): PlanLine[] {
+export function localCsvPointsToPlanLines(
+  points: LocalPointCsvPoint[],
+  gpsAnchor?: { lat: number; lon: number } | null
+): PlanLine[] {
   if (points.length === 0) return [];
 
   const rawNed: RawNedPoint[] = points.map((p) => ({
@@ -1081,7 +1121,9 @@ export function localCsvPointsToPlanLines(points: LocalPointCsvPoint[]): PlanLin
       groups.length,
       groupLabel,
       groupSurveyRmsM(groupSourcePoints),
-      groupingWarnings
+      groupingWarnings,
+      groupSourcePoints,
+      gpsAnchor ?? null
     );
     if (line) lines.push(line);
   }

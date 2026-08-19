@@ -329,10 +329,18 @@ export function projectPlanLineToGpsSegments(
     return [];
   }
 
-  return renderPoints.map((pt) => {
+  const coords: [number, number][] = [];
+  for (const pt of renderPoints) {
+    if (Number.isFinite(pt.lat) && Number.isFinite(pt.lon)) {
+      coords.push([pt.lat as number, pt.lon as number]);
+      continue;
+    }
+    if (!Number.isFinite(pt.north) || !Number.isFinite(pt.east)) continue;
     const gps = projectPlanNorthEastToGps(pt.north, pt.east, origin);
-    return [gps.lat, gps.lon] as [number, number];
-  });
+    if (!Number.isFinite(gps.lat) || !Number.isFinite(gps.lon)) continue;
+    coords.push([gps.lat, gps.lon]);
+  }
+  return coords;
 }
 
 /** Default map tile centre when no mission geometry origin is available. */

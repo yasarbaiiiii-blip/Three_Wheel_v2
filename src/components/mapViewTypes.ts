@@ -67,6 +67,11 @@ export interface MapViewProps {
    * freshly tapped point that has no coordinate yet, so it still shows where it was tapped.
    */
   selectedPoints?: { x: number; y: number; lat?: number; lon?: number }[];
+  /**
+   * Upload-plan path CSV vertices. Separate from Align guide pins (`selectedPoints`)
+   * so a path file never replaces or hides guide CSV markers.
+   */
+  pathCsvPins?: { x: number; y: number; lat?: number; lon?: number }[];
 
   // Interactive templates mode support
   mode?: "fields" | "templates";

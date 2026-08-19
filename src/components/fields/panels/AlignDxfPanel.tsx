@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Platform, Pressable, Text, TextInput, View } from "react-native";
-import { Check, ChevronDown, Maximize2, Move, Upload, X } from "lucide-react-native";
+import { Check, ChevronDown, MapPin, Maximize2, Move, Plus, Upload, X } from "lucide-react-native";
 import * as DocumentPicker from "expo-document-picker";
 
 import * as pathApi from "../../../api/pathApi";
@@ -682,8 +682,8 @@ export function AlignDxfPanel({
             : selectedUiMethod === "visual_alignment"
             ? "Place the plan on the map, then capture its position. Map tap-to-pick is off."
             : csvGuidePointsActive
-            ? "CSV guide points loaded — map tap-to-pick is off. Move the plan into place."
-            : "Tap the plan (or import CSV) for guide points, then move the plan into place."}
+            ? "Guide pins are GPS marks for placing the DXF. They are not the Upload path CSV."
+            : "Tap the DXF or import a guide CSV. These pins are separate from any Upload path file."}
         </Text>
         {refPoints.length > 0 && selectedUiMethod !== "auto_origin" ? (
           <Pressable onPress={resetAlignment}>
@@ -946,51 +946,96 @@ export function AlignDxfPanel({
       ) : null}
 
       {alignmentMethod === "least_squares" && !isPlanEditingMode && !extractedCorners ? (
-        <View style={{ gap: 6 }}>
+        <View
+          style={{
+            gap: 10,
+            padding: 12,
+            borderRadius: 12,
+            backgroundColor: FIELDS_COLORS.surfaceSolid,
+            borderWidth: 1,
+            borderColor: csvGuidePointsActive ? FIELDS_COLORS.guideCsvBorder : FIELDS_COLORS.panelBorder,
+          }}
+        >
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <View
+              style={{
+                width: 22,
+                height: 22,
+                borderRadius: 11,
+                backgroundColor: FIELDS_COLORS.guideCsvMuted,
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <MapPin size={12} color={FIELDS_COLORS.guideCsv} strokeWidth={2.4} />
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "800" }}>
+                Guide points
+              </Text>
+              <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, marginTop: 1 }}>
+                Rose pins · Align only · not path CSV
+              </Text>
+            </View>
+            {refPoints.length > 0 ? (
+              <View
+                style={{
+                  paddingHorizontal: 8,
+                  paddingVertical: 3,
+                  borderRadius: 999,
+                  backgroundColor: FIELDS_COLORS.guideCsvMuted,
+                }}
+              >
+                <Text style={{ color: FIELDS_COLORS.guideCsv, fontSize: 11, fontWeight: "800" }}>
+                  {refPoints.length}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+
+          {guideCsvFileNames.length > 0 ? (
+            <View style={{ gap: 4 }}>
+              {guideCsvFileNames.map((name, i) => (
+                <Text
+                  key={`${name}-${i}`}
+                  numberOfLines={1}
+                  style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, fontWeight: "600" }}
+                >
+                  {name}
+                </Text>
+              ))}
+            </View>
+          ) : null}
+
           <Pressable
             onPress={handleUploadRefPointsCsv}
             disabled={isImportingCsv || isFixing || missionRunning}
             style={{
               height: 40,
-              borderRadius: 8,
+              borderRadius: 10,
+              backgroundColor: FIELDS_COLORS.guideCsvMuted,
               borderWidth: 1,
-              borderStyle: "dashed",
-              borderColor: FIELDS_COLORS.stepActive,
+              borderColor: FIELDS_COLORS.guideCsvBorder,
               flexDirection: "row",
               alignItems: "center",
               justifyContent: "center",
               gap: 6,
-              paddingHorizontal: 12,
               opacity: isImportingCsv || isFixing || missionRunning ? 0.5 : 1,
             }}
           >
-            <Upload color={FIELDS_COLORS.stepActive} size={15} />
-            <Text
-              numberOfLines={1}
-              style={{ color: FIELDS_COLORS.stepActive, fontSize: 13, fontWeight: "700", flexShrink: 1 }}
-            >
+            {guideCsvFileNames.length === 0 ? (
+              <Upload color={FIELDS_COLORS.guideCsv} size={15} />
+            ) : (
+              <Plus color={FIELDS_COLORS.guideCsv} size={15} />
+            )}
+            <Text style={{ color: FIELDS_COLORS.guideCsv, fontSize: 13, fontWeight: "800" }}>
               {isImportingCsv
-                ? "Importing CSV..."
+                ? "Importing…"
                 : guideCsvFileNames.length === 0
                   ? "Import guide CSV"
-                  : guideCsvFileNames.length === 1
-                    ? guideCsvFileNames[0]
-                    : `${guideCsvFileNames.length} CSV files · tap to add more`}
+                  : "Add another guide CSV"}
             </Text>
           </Pressable>
-          {guideCsvFileNames.length > 1 ? (
-            <View style={{ gap: 2 }}>
-              {guideCsvFileNames.map((name, i) => (
-                <Text
-                  key={`${name}-${i}`}
-                  numberOfLines={1}
-                  style={{ color: FIELDS_COLORS.textDim, fontSize: 11 }}
-                >
-                  • {name}
-                </Text>
-              ))}
-            </View>
-          ) : null}
         </View>
       ) : null}
 
@@ -1193,16 +1238,15 @@ export function AlignDxfPanel({
         </View>
       ) : isPlanEditingMode ? null : alignmentMethod !== "least_squares" ? null : refPoints.length === 0 ? (
         <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 12, fontStyle: "italic", textAlign: "center" }}>
-          Tap the plan to place control points (lat/lon fields appear for each), or upload a CSV guide file. CSV disables
-          map tap until Clear Points.
+          Tap the DXF to drop a guide pin, or import a guide CSV. Upload path files stay in Upload and do not replace these pins.
         </Text>
       ) : (
         <View style={{ gap: 10 }}>
           <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11 }}>
-            {refPoints.length} control point{refPoints.length === 1 ? "" : "s"}
+            {refPoints.length} guide pin{refPoints.length === 1 ? "" : "s"}
             {csvGuidePointsActive
-              ? " from CSV (map tap off). Use Move / Rotate Plan to place the drawing, then Use This Position."
-              : " — enter Latitude / Longitude for each, then Fix Alignment (1+ points). Or use Move / Rotate Plan as a visual guide."}
+              ? " from guide CSV. Move / Rotate the DXF onto them, then Use This Position."
+              : " — enter Lat / Lon for each, or use Move / Rotate Plan."}
           </Text>
           <View style={{ gap: 8 }}>
             {refPoints.map((point, index) => {

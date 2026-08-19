@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Alert, Platform, Pressable, TouchableOpacity, ScrollView, Switch, Text, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
-import { Plus, Upload, X } from "lucide-react-native";
+import { Plus, RefreshCw, Trash2, Upload, X } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
 import { DXF_PLANNER } from "../../../config/featureFlags";
@@ -80,6 +80,8 @@ type UploadAndPreviewStepProps = {
   uploadedFiles?: UploadedFileEntry[];
   /** Tap a file row → parent opens that file's section (Align when needed). */
   onSelectUploadedFile?: (fileId: string) => void;
+  /** Remove one file from the multi-file batch (keeps the others). */
+  onRemoveUploadedFile?: (fileId: string) => void;
   /** Currently selected file in the upload list. */
   selectedUploadedFileId?: string | null;
   /**
@@ -250,6 +252,7 @@ export function UploadAndPreviewStep({
   extensionStatus = null,
   uploadedFiles = [],
   onSelectUploadedFile,
+  onRemoveUploadedFile,
   selectedUploadedFileId = null,
   onBeginLocalImportBatch,
   missionLayers = [],
@@ -866,6 +869,62 @@ export function UploadAndPreviewStep({
     await pickAndImport({ append: true });
   };
 
+  const handleReplaceOneFile = async (fileId: string) => {
+    if (blockProtectedWorkflowMutation("Replacing a file")) return;
+    if (isUploading || !onRemoveUploadedFile) return;
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ["*/*"],
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (result.canceled || !result.assets || result.assets.length === 0) return;
+      const asset = result.assets[0];
+      const ext = asset.name.split(".").pop()?.toLowerCase();
+      if (ext !== "dxf" && ext !== "csv") {
+        Alert.alert("Invalid File", "Replace accepts one .dxf or .csv file.");
+        return;
+      }
+      const wasLast = uploadedFiles.length <= 1;
+      onRemoveUploadedFile(fileId);
+      if (wasLast) {
+        setImportedPlan(null);
+        setLocalCsvSummary(null);
+        setLoadedSourceFiles([]);
+        setLastLocalDxf(null);
+      }
+      await importAndPreviewFiles([asset], { append: !wasLast });
+    } catch (err) {
+      console.log("Error replacing file:", err);
+      Alert.alert("Replace Failed", "Could not replace that file.");
+    }
+  };
+
+  const handleDeleteOneFile = (file: UploadedFileEntry) => {
+    if (blockProtectedWorkflowMutation("Removing a file")) return;
+    if (!onRemoveUploadedFile) return;
+    Alert.alert("Remove file", `Remove ${file.fileName} from this mission? The other files stay.`, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Remove",
+        style: "destructive",
+        onPress: () => {
+          const wasLast = uploadedFiles.length <= 1;
+          onRemoveUploadedFile(file.id);
+          setLoadedSourceFiles((prev) => prev.filter((name) => name !== file.fileName));
+          if (wasLast) {
+            setImportedPlan(null);
+            setPreviewData(null);
+            setLocalCsvSummary(null);
+            setLoadedSourceFiles([]);
+            setLastLocalDxf(null);
+            setAppendOnImport(false);
+          }
+        },
+      },
+    ]);
+  };
+
   const handleRetryImport = async () => {
     if (pickedFiles.length === 0 || isUploading) return;
     await importAndPreviewFiles(pickedFiles, { append: appendOnImport });
@@ -1207,6 +1266,56 @@ export function UploadAndPreviewStep({
                           >
                             {assigned.number}
                           </Text>
+                        </View>
+                      ) : null}
+                      {onRemoveUploadedFile ? (
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                          <Pressable
+                            onPress={(e) => {
+                              e?.stopPropagation?.();
+                              void handleReplaceOneFile(f.id);
+                            }}
+                            disabled={protectedResident || isUploading}
+                            accessibilityLabel={`Replace ${f.fileName}`}
+                            accessibilityRole="button"
+                            hitSlop={6}
+                            style={{
+                              width: 30,
+                              height: 30,
+                              borderRadius: 8,
+                              alignItems: "center",
+                              justifyContent: "center",
+                              backgroundColor: FIELDS_COLORS.cardSolid,
+                              borderWidth: 1,
+                              borderColor: FIELDS_COLORS.panelBorder,
+                              opacity: protectedResident || isUploading ? 0.45 : 1,
+                            }}
+                          >
+                            <RefreshCw size={13} color={FIELDS_COLORS.textMuted} strokeWidth={2.3} />
+                          </Pressable>
+                          <Pressable
+                            onPress={(e) => {
+                              e?.stopPropagation?.();
+                              handleDeleteOneFile(f);
+                            }}
+                            disabled={protectedResident || isUploading}
+                            accessibilityLabel={`Remove ${f.fileName}`}
+                            accessibilityRole="button"
+                            hitSlop={6}
+                            style={{
+                              width: 30,
+                              height: 30,
+                              borderRadius: 8,
+                              alignItems: "center",
+                              justifyContent: "center",
+                              backgroundColor: FIELDS_COLORS.dangerMuted,
+                              borderWidth: 1,
+                              borderColor: FIELDS_COLORS.dangerBorder,
+                              opacity: protectedResident || isUploading ? 0.45 : 1,
+                            }}
+                          >
+                            <Trash2 size={13} color={FIELDS_COLORS.danger} strokeWidth={2.3} />
+                          </Pressable>
                         </View>
                       ) : null}
                       <View

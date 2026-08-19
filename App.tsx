@@ -3303,6 +3303,71 @@ function AppRoot() {
     setPlacedTemplates(placedTemplatesRef.current);
   }
 
+  function handleRemoveUploadedFile(id: string) {
+    const entry = uploadedFilesRef.current.find((f) => f.id === id);
+    if (!entry) return;
+
+    const remaining = uploadedFilesRef.current.filter((f) => f.id !== id);
+    if (remaining.length === 0) {
+      handleClearLocalCsv();
+      return;
+    }
+
+    if (entry.kind === "template") {
+      handleRemoveTemplate(id);
+      return;
+    }
+
+    setLines((prev) => sanitizePlanLines(removePrefixedLines(prev, entry.lineIdPrefix)));
+    uploadedFilesRef.current = remaining;
+    setUploadedFiles(remaining);
+    setMissionLayers((prev) => unassignFile(prev, id));
+    setPendingLayerAssignment((prev) => (prev?.fileEntryId === id ? null : prev));
+    setPendingDxfAlignment((prev) => {
+      if (!prev[id]) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+
+    if (entry.kind === "csv") {
+      const idx = localCsvParsesRef.current.findIndex((p) => p.fileName === entry.fileName);
+      if (idx >= 0) {
+        localCsvParsesRef.current = localCsvParsesRef.current.filter((_, i) => i !== idx);
+      }
+      const parses = localCsvParsesRef.current;
+      if (parses.length === 0) {
+        setLocalCsvPreview(null);
+      } else if (parses.length === 1) {
+        setLocalCsvPreview(parses[0]);
+      } else {
+        try {
+          setLocalCsvPreview(mergeLocalPointCsvResults(parses));
+        } catch {
+          setLocalCsvPreview(parses[parses.length - 1] ?? null);
+        }
+      }
+    }
+
+    if (!remaining.some((f) => f.kind === "dxf")) {
+      setLocalDxfMeta(null);
+    }
+    setIsGeographicDxf(remaining.some((f) => f.isGeographic));
+
+    setSelectedLineId((prev) =>
+      prev &&
+      (prev.startsWith(`${entry.lineIdPrefix}__`) || prev.startsWith(`${entry.lineIdPrefix}-`))
+        ? null
+        : prev
+    );
+
+    const stillNeedsAlign = remaining.some((f) => f.status === "needs_alignment");
+    demoteWorkflowAfterBatchChange(stillNeedsAlign);
+    if (!stillNeedsAlign) {
+      setStagedWorkflow((prev) => ({ ...prev, alignment: "verified" }));
+    }
+  }
+
   function handleRemoveTemplate(id: string) {
     const current = placedTemplatesRef.current.find((item) => item.id === id);
     if (!current) return;
@@ -3332,6 +3397,7 @@ function AppRoot() {
     setSelectedPathName(null);
     setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
+    setVisualAlignmentAnchor(null);
 
     // Local-NED has no GPS anchor — cannot join a GPS-anchored multi-file mission.
     if (data.kind !== "gps" || !data.anchor) {
@@ -3347,7 +3413,7 @@ function AppRoot() {
       setLocalCsvPreview(data);
       setLocalDxfMeta(null);
       const previewLines = chainMarkLinesByGeometry(
-        localCsvPointsToPlanLines(data.points)
+        localCsvPointsToPlanLines(data.points, data.anchor)
       );
       const transitLines = buildCsvTransitLines(previewLines);
       setLines(sanitizePlanLines([...previewLines, ...transitLines]));
@@ -3387,7 +3453,7 @@ function AppRoot() {
     const fileId = `${prefix}-csv`;
 
     const previewLines = chainMarkLinesByGeometry(
-      localCsvPointsToPlanLines(data.points)
+      localCsvPointsToPlanLines(data.points, data.anchor)
     );
     const transitLines = buildCsvTransitLines(previewLines);
     const integrated = integrateAnchoredLines(
@@ -5519,6 +5585,7 @@ function AppRoot() {
                             onPlaceTemplate={handlePlaceTemplate}
                             onUpdateTemplateInstance={handleUpdateTemplateInstance}
                             onRemoveTemplate={handleRemoveTemplate}
+                            onRemoveUploadedFile={handleRemoveUploadedFile}
                             pendingDxfAlignment={pendingDxfAlignment}
                             setPendingDxfAlignment={setPendingDxfAlignment}
                             sharedOriginGps={sharedOriginGps}
@@ -7176,6 +7243,7 @@ function SectionPages(props: {
     patch: Partial<{ north: number; east: number; rotationDeg: number; scale: number }>
   ) => void;
   onRemoveTemplate?: (id: string) => void;
+  onRemoveUploadedFile?: (id: string) => void;
   pendingDxfAlignment?: Record<string, PendingDxfAlignmentEntry>;
   setPendingDxfAlignment?: React.Dispatch<
     React.SetStateAction<Record<string, PendingDxfAlignmentEntry>>

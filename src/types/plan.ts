@@ -38,6 +38,9 @@ export interface PlanLine {
 export interface DxfPoint {
   north: number;
   east: number;
+  /** Optional WGS84 — when set, the map draws this sample here (no NED round-trip). */
+  lat?: number;
+  lon?: number;
 }
 
 export interface DxfEntity {
