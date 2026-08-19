@@ -39,7 +39,7 @@ import {
   MarkerView,
 } from "@rnmapbox/maps";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
-import { useSharedValue, runOnJS } from "react-native-reanimated";
+import { useSharedValue, runOnJS, type SharedValue } from "react-native-reanimated";
 
 import { initMapbox } from "../config/mapbox";
 
@@ -106,7 +106,7 @@ import { getLineLengthM, formatFinite } from "../utils/pathWorkflow";
 import { getPlanStartPoint, isPrimaryEditableLine } from "../utils/planGeometry";
 import { MAPBOX_STYLE_URL } from "../config/mapbox";
 import type { MapViewProps } from "./mapViewTypes";
-import { pixelDeltaToMetres, clampToIndent, type BoundingRect } from "../utils/mapGestureUtils";
+import { pixelDeltaToMetres, clampToIndent, gateTemplateGestureDeltas, type BoundingRect } from "../utils/mapGestureUtils";
 import { deriveMetersPerPixel, screenToGeo } from "../utils/mapScreenGeo";
 import type { MultiPointPlacementPhase } from "../types/fieldsWorkflow";
 
@@ -121,6 +121,56 @@ function getPlanStartTravelLine(lines: PlanLine[]): PlanLine | null {
 
 /** Max vertices per line while live-dragging plan-editing-group (LOD). Full quality on commit. */
 const DRAG_PREVIEW_MAX_VERTICES = 12;
+
+type GestureEditType = "items" | "boundary" | null;
+
+/**
+ * Shared pan+pinch+rotation session. Any tool can begin; only the last finger-up commits.
+ * Previously only Pan.onFinalize committed, so Scale/Rotate-only (no Drag) never baked.
+ */
+function startStickerGestureSession(
+  count: SharedValue<number>,
+  panDeltaN: SharedValue<number>,
+  panDeltaE: SharedValue<number>,
+  pinchScale: SharedValue<number>,
+  rotationDelta: SharedValue<number>,
+  x: number,
+  y: number,
+  onBegin: (x: number, y: number) => void,
+  setEditType: (t: GestureEditType) => void
+) {
+  "worklet";
+  if (count.value === 0) {
+    panDeltaN.value = 0;
+    panDeltaE.value = 0;
+    pinchScale.value = 1;
+    rotationDelta.value = 0;
+    runOnJS(onBegin)(x, y);
+    runOnJS(setEditType)("items");
+  }
+  count.value += 1;
+}
+
+function endStickerGestureSession(
+  count: SharedValue<number>,
+  panDeltaN: SharedValue<number>,
+  panDeltaE: SharedValue<number>,
+  pinchScale: SharedValue<number>,
+  rotationDelta: SharedValue<number>,
+  onCommit: (dN: number, dE: number, rotDeg: number, scaleF: number) => void,
+  setEditType: (t: GestureEditType) => void
+) {
+  "worklet";
+  if (count.value <= 0) return;
+  count.value -= 1;
+  if (count.value !== 0) return;
+  runOnJS(onCommit)(panDeltaN.value, panDeltaE.value, rotationDelta.value, pinchScale.value);
+  panDeltaN.value = 0;
+  panDeltaE.value = 0;
+  pinchScale.value = 1;
+  rotationDelta.value = 0;
+  runOnJS(setEditType)(null);
+}
 
 /** Stable string key for matching a SnapRefPoint against a `selectedPoints` entry by value. */
 function refPointKey(p: { lat: number; lon: number }): string {
@@ -488,7 +538,6 @@ export function MapViewNative(props: MapViewProps) {
   // ── Gesture state ──
   // GestureType enum for the in-progress gesture (items drag or boundary drag).
   // Only set during an active gesture — null = idle (no editing active).
-  type GestureEditType = "items" | "boundary" | null;
   const [gestureEditType, setGestureEditType] = useState<GestureEditType>(null);
 
   // Raw gesture deltas on the Reanimated UI thread — do NOT drive React state here.
@@ -497,6 +546,10 @@ export function MapViewNative(props: MapViewProps) {
   const panDeltaE = useSharedValue(0); // east delta in metres
   const pinchScale = useSharedValue(1); // multiplicative scale factor
   const rotationDelta = useSharedValue(0); // rotation delta in degrees
+  // How many of pan/pinch/rotate are currently down. Commit only when the last lifts.
+  const gestureSessionCount = useSharedValue(0);
+  const gestureToolsRef = useRef(gestureTools);
+  gestureToolsRef.current = gestureTools;
 
   // Cached meters-per-pixel at gesture start (calibrated once, used for all moves).
   // Uses a Reanimated shared value so worklets can read it without warnings.
@@ -579,6 +632,7 @@ export function MapViewNative(props: MapViewProps) {
 
   // rAF coalescing for preview updates — avoids full rebuilds on every native touch sample.
   const previewRafRef = useRef<number | null>(null);
+  const pendingDragDeltaRef = useRef<{ dN: number; dE: number; rotDeg: number; scaleF: number } | null>(null);
 
   // Stable fallback origin so the plan doesn't jitter with every telemetry tick during preview.
   // Prefer App's latched GPS when provided so Move/Rotate enter uses the same fallback frame.
@@ -1529,8 +1583,39 @@ export function MapViewNative(props: MapViewProps) {
 
   // ── Gesture editing flag ──
   // When true, the map's own pan/zoom must be suppressed to prevent fighting
-  // the editing gestures. Updated on the JS thread at gesture start/end.
+  // the editing gestures. Also locked immediately from gestureTools (see MapView).
   const isGestureEditing = gestureEditType !== null;
+
+  // Abort an in-flight session if the operator toggles Drag/Scale/Rotate mid-gesture.
+  const skipToolAbortOnMountRef = useRef(true);
+  useEffect(() => {
+    if (skipToolAbortOnMountRef.current) {
+      skipToolAbortOnMountRef.current = false;
+      return;
+    }
+    gestureSessionCount.value = 0;
+    panDeltaN.value = 0;
+    panDeltaE.value = 0;
+    pinchScale.value = 1;
+    rotationDelta.value = 0;
+    setGestureEditType(null);
+    if (previewRafRef.current !== null) {
+      cancelAnimationFrame(previewRafRef.current);
+      previewRafRef.current = null;
+    }
+    pendingDragDeltaRef.current = null;
+    setDragPreview(null);
+  }, [
+    gestureTools?.drag,
+    gestureTools?.scale,
+    gestureTools?.rotate,
+    multiTouchMode,
+    gestureSessionCount,
+    panDeltaN,
+    panDeltaE,
+    pinchScale,
+    rotationDelta,
+  ]);
 
   // ── Gesture: calibrate meters-per-pixel at gesture start ──
   // Async — called once per gesture-start to calibrate the synchronous
@@ -1967,7 +2052,11 @@ export function MapViewNative(props: MapViewProps) {
   );
 
   const applyDragMove = useCallback(
-    (dN: number, dE: number, rotDeg: number, scaleF: number) => {
+    (rawDN: number, rawDE: number, rawRotDeg: number, rawScaleF: number) => {
+      const { dN, dE, rotDeg, scaleF } = gateTemplateGestureDeltas(
+        { dN: rawDN, dE: rawDE, rotDeg: rawRotDeg, scaleF: rawScaleF },
+        gestureToolsRef.current
+      );
       const starts = dragStartPositionsRef.current;
       const phase = planPlacementPhaseRef.current;
       // Only manipulate explicitly selected items (tap-outside deselects).
@@ -2078,7 +2167,6 @@ export function MapViewNative(props: MapViewProps) {
   // frame: always remember the latest delta, but only do the expensive rebuild when a frame is
   // actually about to render, using whichever delta was most recent by then. (previewRafRef
   // already existed for onDragCommit to cancel — this is what was meant to schedule it.)
-  const pendingDragDeltaRef = useRef<{ dN: number; dE: number; rotDeg: number; scaleF: number } | null>(null);
   const onDragMove = useCallback(
     (dN: number, dE: number, rotDeg: number, scaleF: number) => {
       pendingDragDeltaRef.current = { dN, dE, rotDeg, scaleF };
@@ -2099,7 +2187,16 @@ export function MapViewNative(props: MapViewProps) {
    * Async: waits briefly for resize hit-test so a quick drag still commits after geo resolves.
    */
   const onDragCommit = useCallback(
-    (finalDN: number, finalDE: number, finalRotDeg: number, finalScaleF: number) => {
+    (rawDN: number, rawDE: number, rawRotDeg: number, rawScaleF: number) => {
+      const {
+        dN: finalDN,
+        dE: finalDE,
+        rotDeg: finalRotDeg,
+        scaleF: finalScaleF,
+      } = gateTemplateGestureDeltas(
+        { dN: rawDN, dE: rawDE, rotDeg: rawRotDeg, scaleF: rawScaleF },
+        gestureToolsRef.current
+      );
       // Cancel any pending RAF preview update — the commit below applies the final,
       // authoritative delta, so a stale coalesced frame must not land after it.
       if (previewRafRef.current !== null) {
@@ -2475,10 +2572,17 @@ export function MapViewNative(props: MapViewProps) {
         .minDistance(2)
         .onBegin((e) => {
           "worklet";
-          panDeltaN.value = 0;
-          panDeltaE.value = 0;
-          runOnJS(onDragBegin)(e.x, e.y);
-          runOnJS(setGestureEditType)("items");
+          startStickerGestureSession(
+            gestureSessionCount,
+            panDeltaN,
+            panDeltaE,
+            pinchScale,
+            rotationDelta,
+            e.x,
+            e.y,
+            onDragBegin,
+            setGestureEditType
+          );
         })
         .onChange((e) => {
           "worklet";
@@ -2488,65 +2592,105 @@ export function MapViewNative(props: MapViewProps) {
           // Pass all gesture values (pan + rotation + scale) for unified preview.
           runOnJS(onDragMove)(panDeltaN.value, panDeltaE.value, rotationDelta.value, pinchScale.value);
         })
-        .onFinalize((e, success) => {
+        .onFinalize(() => {
           "worklet";
-          // Commit with the final accumulated delta (regardless of success/cancel).
-          runOnJS(onDragCommit)(panDeltaN.value, panDeltaE.value, rotationDelta.value, pinchScale.value);
-          panDeltaN.value = 0;
-          panDeltaE.value = 0;
-          pinchScale.value = 1;
-          rotationDelta.value = 0;
-          runOnJS(setGestureEditType)(null);
+          endStickerGestureSession(
+            gestureSessionCount,
+            panDeltaN,
+            panDeltaE,
+            pinchScale,
+            rotationDelta,
+            onDragCommit,
+            setGestureEditType
+          );
         }),
-    [panDeltaN, panDeltaE, metersPerPixelSV, onDragBegin, onDragMove, onDragCommit, rotationDelta, pinchScale]
+    [
+      panDeltaN,
+      panDeltaE,
+      metersPerPixelSV,
+      onDragBegin,
+      onDragMove,
+      onDragCommit,
+      rotationDelta,
+      pinchScale,
+      gestureSessionCount,
+    ]
   );
 
   const pinchGesture = useMemo(
     () =>
       Gesture.Pinch()
-        .onBegin(() => {
+        .onBegin((e) => {
           "worklet";
+          startStickerGestureSession(
+            gestureSessionCount,
+            panDeltaN,
+            panDeltaE,
+            pinchScale,
+            rotationDelta,
+            e.focalX ?? 0,
+            e.focalY ?? 0,
+            onDragBegin,
+            setGestureEditType
+          );
           pinchScale.value = 1;
-          runOnJS(setGestureEditType)("items");
         })
         .onUpdate((e) => {
           "worklet";
           pinchScale.value = e.scale;
-          // Live preview with current pan + rotation + scale deltas.
           runOnJS(onDragMove)(panDeltaN.value, panDeltaE.value, rotationDelta.value, pinchScale.value);
-        })
-        .onEnd(() => {
-          "worklet";
-          // Don't commit here — pan's onFinalize handles the unified commit.
         })
         .onFinalize(() => {
           "worklet";
+          endStickerGestureSession(
+            gestureSessionCount,
+            panDeltaN,
+            panDeltaE,
+            pinchScale,
+            rotationDelta,
+            onDragCommit,
+            setGestureEditType
+          );
         }),
-    [pinchScale, panDeltaN, panDeltaE, rotationDelta, onDragMove]
+    [pinchScale, panDeltaN, panDeltaE, rotationDelta, onDragMove, onDragBegin, onDragCommit, gestureSessionCount]
   );
 
   const rotationGesture = useMemo(
     () =>
       Gesture.Rotation()
-        .onBegin(() => {
+        .onBegin((e) => {
           "worklet";
+          startStickerGestureSession(
+            gestureSessionCount,
+            panDeltaN,
+            panDeltaE,
+            pinchScale,
+            rotationDelta,
+            e.anchorX ?? 0,
+            e.anchorY ?? 0,
+            onDragBegin,
+            setGestureEditType
+          );
           rotationDelta.value = 0;
-          runOnJS(setGestureEditType)("items");
         })
         .onUpdate((e) => {
           "worklet";
           rotationDelta.value = (e.rotation * 180) / Math.PI;
-          // Live preview with current pan + rotation + scale deltas.
           runOnJS(onDragMove)(panDeltaN.value, panDeltaE.value, rotationDelta.value, pinchScale.value);
-        })
-        .onEnd(() => {
-          "worklet";
-          // Don't commit here — pan's onFinalize handles the unified commit.
         })
         .onFinalize(() => {
           "worklet";
+          endStickerGestureSession(
+            gestureSessionCount,
+            panDeltaN,
+            panDeltaE,
+            pinchScale,
+            rotationDelta,
+            onDragCommit,
+            setGestureEditType
+          );
         }),
-    [rotationDelta, panDeltaN, panDeltaE, pinchScale, onDragMove]
+    [rotationDelta, panDeltaN, panDeltaE, pinchScale, onDragMove, onDragBegin, onDragCommit, gestureSessionCount]
   );
 
   // Gate gestures based on multiTouchMode + plan phase, or independent gestureTools:
@@ -2554,7 +2698,9 @@ export function MapViewNative(props: MapViewProps) {
   // - "both": pan + pinch + rotation
   // - "scale": pan + pinch only (no rotation)
   // - "rotate": pan + rotation only (no pinch/scale)
-  // - gestureTools: each tool independently (Fields template Drag/Scale/Rotate)
+  // - gestureTools: each tool independently (Fields template Drag/Scale/Rotate).
+  //   Pinch and rotation own begin/commit via the session counter — they no longer
+  //   depend on Pan being present.
   const composedGesture = useMemo(
     () => {
       if (manualDrawingEnabled) {
@@ -2574,6 +2720,7 @@ export function MapViewNative(props: MapViewProps) {
       if (!resizing && allowScale) gestures.push(pinchGesture.enabled(selected));
       if (!resizing && allowRotate) gestures.push(rotationGesture.enabled(selected));
       if (gestures.length === 0) return Gesture.Pan().enabled(false);
+      if (gestures.length === 1) return gestures[0];
       return Gesture.Simultaneous(...gestures);
     },
     [
@@ -3046,11 +3193,14 @@ export function MapViewNative(props: MapViewProps) {
         logoEnabled={false}
         attributionEnabled={false}
         compassEnabled={false}
-        // During an active gesture or manual drawing, suppress map pan/zoom
-        scrollEnabled={!manualDrawingEnabled && !lockPanDrag && !isGestureEditing}
-        zoomEnabled={!manualDrawingEnabled && !lockZoom && !isGestureEditing}
+        // Lock the matching Mapbox camera gesture as soon as a sticker tool is
+        // armed — waiting for isGestureEditing (a JS setState after onBegin)
+        // lets Mapbox steal the first two-finger samples. That is why Scale /
+        // Rotate alone looked dead while Scale+Drag / Rotate+Drag worked.
+        scrollEnabled={!manualDrawingEnabled && !lockPanDrag && !isGestureEditing && !gestureTools?.drag}
+        zoomEnabled={!manualDrawingEnabled && !lockZoom && !isGestureEditing && !gestureTools?.scale}
         pitchEnabled={!manualDrawingEnabled}
-        rotateEnabled={!manualDrawingEnabled}
+        rotateEnabled={!manualDrawingEnabled && !isGestureEditing && !gestureTools?.rotate && !gestureTools?.scale}
       >
         <Camera
           ref={cameraRef}

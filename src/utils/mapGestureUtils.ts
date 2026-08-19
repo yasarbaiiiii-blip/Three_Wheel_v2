@@ -196,3 +196,37 @@ export function snapDistanceCheck(
   );
   return dist <= thresholdMetres ? target : null;
 }
+
+// ─────────────────────────────────────────────────────────────────
+// 7. gateTemplateGestureDeltas
+// ─────────────────────────────────────────────────────────────────
+
+export type TemplateGestureTools = {
+  drag?: boolean;
+  scale?: boolean;
+  rotate?: boolean;
+};
+
+export type GestureDeltas = {
+  dN: number;
+  dE: number;
+  rotDeg: number;
+  scaleF: number;
+};
+
+/**
+ * Zero out sticker deltas that the operator has not armed.
+ * `tools === null/undefined` means "all axes live" (Align sticker / Templates page).
+ */
+export function gateTemplateGestureDeltas(
+  deltas: GestureDeltas,
+  tools?: TemplateGestureTools | null
+): GestureDeltas {
+  if (!tools) return deltas;
+  return {
+    dN: tools.drag ? deltas.dN : 0,
+    dE: tools.drag ? deltas.dE : 0,
+    rotDeg: tools.rotate ? deltas.rotDeg : 0,
+    scaleF: tools.scale ? deltas.scaleF : 1,
+  };
+}

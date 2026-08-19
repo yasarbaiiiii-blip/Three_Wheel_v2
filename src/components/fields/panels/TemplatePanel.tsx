@@ -429,7 +429,7 @@ export function TemplatePanel(props: TemplatePanelProps) {
 
         {!toolsDisabled && (props.dragEnabled || props.scaleEnabled || props.rotateEnabled) ? (
           <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, lineHeight: 15 }}>
-            Tap the template on the map to apply. Tap empty space to deselect.
+            Drag: one finger. Scale: pinch. Rotate: two-finger twist. Each tool works on its own. Tap empty space to deselect.
           </Text>
         ) : null}
 

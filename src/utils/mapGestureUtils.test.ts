@@ -6,6 +6,7 @@ import {
   scaleAroundCentroid,
   clampToIndent,
   snapDistanceCheck,
+  gateTemplateGestureDeltas,
   type Point2D,
   type BoundingRect,
 } from "./mapGestureUtils";
@@ -311,5 +312,50 @@ describe("snapDistanceCheck", () => {
     expect(snapDistanceCheck(point, rover)).toBeNull();
     // same triangle, threshold = 6 → within
     expect(snapDistanceCheck(point, rover, 6)).toEqual(rover);
+  });
+});
+
+describe("gateTemplateGestureDeltas", () => {
+  const live = { dN: 1.5, dE: -0.8, rotDeg: 12, scaleF: 1.25 };
+
+  it("passes every axis through when tools are unset (Align / Templates page)", () => {
+    expect(gateTemplateGestureDeltas(live)).toEqual(live);
+    expect(gateTemplateGestureDeltas(live, null)).toEqual(live);
+  });
+
+  it("keeps only scale when Scale is on by itself", () => {
+    expect(gateTemplateGestureDeltas(live, { scale: true })).toEqual({
+      dN: 0,
+      dE: 0,
+      rotDeg: 0,
+      scaleF: 1.25,
+    });
+  });
+
+  it("keeps only rotation when Rotate is on by itself", () => {
+    expect(gateTemplateGestureDeltas(live, { rotate: true })).toEqual({
+      dN: 0,
+      dE: 0,
+      rotDeg: 12,
+      scaleF: 1,
+    });
+  });
+
+  it("keeps translation when Drag is on by itself", () => {
+    expect(gateTemplateGestureDeltas(live, { drag: true })).toEqual({
+      dN: 1.5,
+      dE: -0.8,
+      rotDeg: 0,
+      scaleF: 1,
+    });
+  });
+
+  it("combines any subset of tools", () => {
+    expect(gateTemplateGestureDeltas(live, { drag: true, rotate: true })).toEqual({
+      dN: 1.5,
+      dE: -0.8,
+      rotDeg: 12,
+      scaleF: 1,
+    });
   });
 });
