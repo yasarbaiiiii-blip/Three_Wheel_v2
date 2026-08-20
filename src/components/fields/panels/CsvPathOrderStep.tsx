@@ -5,7 +5,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import DraggableFlatList, { RenderItemParams, ScaleDecorator } from "react-native-draggable-flatlist";
-import { GripVertical } from "lucide-react-native";
+import { ArrowDownUp, GripVertical } from "lucide-react-native";
 
 import type { PlanLine } from "../../../types/plan";
 import { getLineFitMeta } from "../../../utils/csvGeometryReadiness";
@@ -23,12 +23,13 @@ import {
   detectDegenerateEntityWarnings,
   detectReversalWarnings,
   resolveOrderedPaintedLines,
+  reversePathOrder,
   selectMarkPlanLines,
   setPathPaint,
   type CsvPathOrderEntry,
   type CsvTransitPreview,
 } from "../../../utils/csvPathOrder";
-import { getLineLengthM } from "../../../utils/pathWorkflow";
+import { getLineLengthM, type SelectLineFn } from "../../../utils/pathWorkflow";
 import { CsvWarningsPanel } from "../CsvWarningsPanel";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
@@ -86,6 +87,9 @@ type ListRow = PathRow | TransitRow | ExtensionRow;
 type CsvPathOrderStepProps = {
   lines: PlanLine[];
   onOrderChange?: (orderedPaintedLines: PlanLine[], fullOrder: CsvPathOrderEntry[]) => void;
+  /** Shared with the map — tap a row to highlight that path on the plan. */
+  selectedLineId?: string | null;
+  onSelectLine?: SelectLineFn;
   /** Used for extension length totals / list rows only — toggle lives in Upload. */
   extensionConfig?: CsvExtensionConfig | null;
   /**
@@ -162,6 +166,8 @@ function buildInterleavedRows(
 export function CsvPathOrderStep({
   lines,
   onOrderChange,
+  selectedLineId = null,
+  onSelectLine,
   extensionConfig = null,
   listHeader = null,
   listFooter = null,
@@ -300,15 +306,45 @@ export function CsvPathOrderStep({
     <View style={{ gap: 8, flex: 1, minHeight: 0 }}>
       {/* One-line totals — pinned above the scroller so it never scrolls out of view */}
       {markLines.length > 0 ? (
-        <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
-          Paint {trajectory.totals.markLengthM.toFixed(1)} m
-          {trajectory.totals.travelLengthM > 0.05
-            ? `  ·  Transit ${trajectory.totals.travelLengthM.toFixed(1)} m`
-            : ""}
-          {extensionLengthM > 0.05
-            ? `  ·  Extension ${extensionLengthM.toFixed(1)} m`
-            : ""}
-        </Text>
+        <View style={{ gap: 6 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Text style={{ flex: 1, color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
+              Paint {trajectory.totals.markLengthM.toFixed(1)} m
+              {trajectory.totals.travelLengthM > 0.05
+                ? `  ·  Transit ${trajectory.totals.travelLengthM.toFixed(1)} m`
+                : ""}
+              {extensionLengthM > 0.05
+                ? `  ·  Extension ${extensionLengthM.toFixed(1)} m`
+                : ""}
+            </Text>
+            {order.length >= 2 ? (
+              <Pressable
+                onPress={() => setOrder((prev) => reversePathOrder(prev))}
+                hitSlop={8}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 6,
+                  paddingHorizontal: 10,
+                  paddingVertical: 6,
+                  borderRadius: 8,
+                  borderWidth: 1,
+                  borderColor: FIELDS_COLORS.panelBorder,
+                  backgroundColor: FIELDS_COLORS.cardSolid,
+                }}
+              >
+                <ArrowDownUp size={13} color={FIELDS_COLORS.textMuted} strokeWidth={2.2} />
+                <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 11, fontWeight: "700" }}>
+                  Reverse
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
+          <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, lineHeight: 14 }}>
+            Tap a path to highlight it on the map. Hold the grip to drag. Skip = not sprayed
+            (Send to Rover also will not drive that path).
+          </Text>
+        </View>
       ) : null}
 
       <CsvWarningsPanel
@@ -428,6 +464,7 @@ export function CsvPathOrderStep({
             const hasSharp =
               (fitMeta.cornerCounts?.sharp ?? 0) > 0 ||
               (fitMeta.cornerCounts?.reversal ?? 0) > 0;
+            const selected = selectedLineId === item.line.id;
 
             return (
               <ScaleDecorator>
@@ -441,11 +478,15 @@ export function CsvPathOrderStep({
                     minHeight: 44,
                     backgroundColor: isActive
                       ? FIELDS_COLORS.accentMuted
-                      : blocked
-                        ? FIELDS_COLORS.dangerMuted
-                        : FIELDS_COLORS.surfaceSolid,
+                      : selected
+                        ? FIELDS_COLORS.accentMuted
+                        : blocked
+                          ? FIELDS_COLORS.dangerMuted
+                          : FIELDS_COLORS.surfaceSolid,
                     borderBottomWidth: 1,
                     borderBottomColor: FIELDS_COLORS.panelBorder,
+                    borderLeftWidth: 3,
+                    borderLeftColor: selected ? FIELDS_COLORS.accentBrand : "transparent",
                     opacity: paint ? 1 : 0.5,
                   }}
                 >
@@ -465,55 +506,70 @@ export function CsvPathOrderStep({
                   >
                     <GripVertical size={14} color={FIELDS_COLORS.textDim} />
                   </Pressable>
-                  <Text
+                  <Pressable
+                    onPress={() => {
+                      if (!onSelectLine) return;
+                      const nextId = selected ? null : item.line.id;
+                      onSelectLine(nextId, { highlightLineIds: null });
+                    }}
                     style={{
-                      color: paint ? FIELDS_COLORS.accentBrand : FIELDS_COLORS.textDim,
-                      fontSize: 11,
-                      fontWeight: "800",
-                      minWidth: 18,
+                      flex: 1,
+                      minWidth: 0,
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 8,
                     }}
                   >
-                    {item.badge}
-                  </Text>
-                  <View style={{ flex: 1, minWidth: 0 }}>
                     <Text
                       style={{
-                        color: blocked ? FIELDS_COLORS.danger : FIELDS_COLORS.textMain,
-                        fontSize: 13,
-                        fontWeight: "600",
+                        color: paint ? FIELDS_COLORS.accentBrand : FIELDS_COLORS.textDim,
+                        fontSize: 11,
+                        fontWeight: "800",
+                        minWidth: 18,
                       }}
-                      numberOfLines={1}
                     >
-                      {item.line.label}
-                      {blocked ? " · bad" : ""}
+                      {item.badge}
                     </Text>
-                    {cornersChip ? (
+                    <View style={{ flex: 1, minWidth: 0 }}>
                       <Text
                         style={{
-                          color: hasSharp ? FIELDS_COLORS.warning : FIELDS_COLORS.textDim,
-                          fontSize: 10,
+                          color: blocked ? FIELDS_COLORS.danger : FIELDS_COLORS.textMain,
+                          fontSize: 13,
                           fontWeight: "600",
-                          marginTop: 1,
                         }}
                         numberOfLines={1}
                       >
-                        {cornersChip}
+                        {item.line.label}
+                        {blocked ? " · bad" : ""}
+                      </Text>
+                      {cornersChip ? (
+                        <Text
+                          style={{
+                            color: hasSharp ? FIELDS_COLORS.warning : FIELDS_COLORS.textDim,
+                            fontSize: 10,
+                            fontWeight: "600",
+                            marginTop: 1,
+                          }}
+                          numberOfLines={1}
+                        >
+                          {cornersChip}
+                        </Text>
+                      ) : null}
+                    </View>
+                    {lengthM != null && lengthM > 0 ? (
+                      <Text
+                        style={{
+                          color: FIELDS_COLORS.textDim,
+                          fontSize: 11,
+                          fontWeight: "600",
+                          minWidth: 44,
+                          textAlign: "right",
+                        }}
+                      >
+                        {lengthM.toFixed(1)} m
                       </Text>
                     ) : null}
-                  </View>
-                  {lengthM != null && lengthM > 0 ? (
-                    <Text
-                      style={{
-                        color: FIELDS_COLORS.textDim,
-                        fontSize: 11,
-                        fontWeight: "600",
-                        minWidth: 44,
-                        textAlign: "right",
-                      }}
-                    >
-                      {lengthM.toFixed(1)} m
-                    </Text>
-                  ) : null}
+                  </Pressable>
                   <Pressable
                     onPress={() => setOrder((prev) => setPathPaint(prev, item.line.id, !paint))}
                     style={{

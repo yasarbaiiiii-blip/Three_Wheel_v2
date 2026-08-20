@@ -115,6 +115,8 @@ export function PathOrderAndSprayStep({
   importedPlan,
   lines,
   setLines,
+  selectedLineId,
+  onSelectLine,
   onInvalidateWorkflow,
   verifiedAlignmentRequest,
   isGeographicDxf = false,
@@ -317,6 +319,8 @@ export function PathOrderAndSprayStep({
     <View style={{ flex: 1, minHeight: 0 }}>
       <CsvPathOrderStep
         lines={lines}
+        selectedLineId={selectedLineId}
+        onSelectLine={onSelectLine}
         extensionConfig={extensionConfig}
         onOrderChange={(_painted, fullOrder) => {
           onInvalidateWorkflow("spray");

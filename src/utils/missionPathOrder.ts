@@ -487,6 +487,15 @@ export function reorderPathOrder(
   return next;
 }
 
+/**
+ * Reverse walk sequence only — paint flags stay on the same path ids.
+ * Does not flip CAD direction (arcs/circles must not be reversed here).
+ */
+export function reversePathOrder(order: CsvPathOrderEntry[]): CsvPathOrderEntry[] {
+  if (order.length < 2) return order.slice();
+  return order.slice().reverse();
+}
+
 export function setPathPaint(
   order: CsvPathOrderEntry[],
   lineId: string,

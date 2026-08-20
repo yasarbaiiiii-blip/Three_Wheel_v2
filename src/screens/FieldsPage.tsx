@@ -1832,6 +1832,8 @@ export function FieldsPage(props: FieldsPageProps) {
               <View style={{ flex: 1, minHeight: 0 }}>
                 <CsvPathOrderStep
                   lines={lines}
+                  selectedLineId={selectedLineId}
+                  onSelectLine={handleMapSelectLine}
                   extensionConfig={csvExtensionConfig}
                   onOrderChange={(_painted, fullOrder) => {
                     setCsvPathOrder((prev) => {
@@ -2092,7 +2094,7 @@ export function FieldsPage(props: FieldsPageProps) {
               lines={lines}
               setLines={setLines}
               selectedLineId={selectedLineId}
-              onSelectLine={onSelectLine}
+              onSelectLine={handleMapSelectLine}
               onRefreshPaths={onRefreshPaths}
               onSelectPath={onSelectPath}
               onInvalidateWorkflow={onInvalidateWorkflow}

@@ -16,6 +16,7 @@ import {
   headingDeltaDeg,
   reorderPathOrder,
   resolveOrderedPaintedLines,
+  reversePathOrder,
   setPathPaint,
 } from "./csvPathOrder";
 import { buildExtensionTransitLines } from "./missionExtensions";
@@ -179,6 +180,31 @@ describe("order / paint / trajectory", () => {
     ]);
   });
 
+  it("reversePathOrder flips sequence and keeps paint flags on the same ids", () => {
+    let order = defaultPathOrder([a, b, c]);
+    order = setPathPaint(order, "b", false);
+    const reversed = reversePathOrder(order);
+    expect(reversed.map((e) => e.lineId)).toEqual(["c", "b", "a"]);
+    expect(reversed.find((e) => e.lineId === "b")?.paint).toBe(false);
+    expect(reversed.filter((e) => e.paint).map((e) => e.lineId)).toEqual(["c", "a"]);
+    const painted = resolveOrderedPaintedLines([a, b, c], reversed);
+    expect(painted.map((l) => l.id)).toEqual(["c", "a"]);
+    const { runs } = buildOrderedTrajectory([a, b, c], reversed, {
+      markSpeedMs: 0.35,
+      travelSpeedMs: 0.5,
+    });
+    expect(runs.filter((r) => r.kind === "mark").map((r) => r.label)).toEqual(["C", "A"]);
+  });
+
+  it("reversePathOrder is a no-op copy for fewer than two paths", () => {
+    const empty = reversePathOrder([]);
+    expect(empty).toEqual([]);
+    const one = defaultPathOrder([a]);
+    const out = reversePathOrder(one);
+    expect(out).toEqual(one);
+    expect(out).not.toBe(one);
+  });
+
   it("skip excludes path and neighbours get direct travel", () => {
     let order = defaultPathOrder([a, b, c]);
     order = setPathPaint(order, "b", false);
@@ -192,6 +218,20 @@ describe("order / paint / trajectory", () => {
     ]);
     expect(runs).toHaveLength(3);
     expect(runs[1].kind).toBe("travel");
+  });
+
+  it("applyCsvOrderToPlanLines after reverse walks last path first", () => {
+    const reversed = reversePathOrder(defaultPathOrder([a, b, c]));
+    const next = applyCsvOrderToPlanLines([a, b, c], reversed);
+    const marks = next.filter((l) => l.layer === "marking");
+    expect(marks.map((l) => l.id)).toEqual(["c", "b", "a"]);
+    const transit = next.filter((l) => l.layer === "transit");
+    expect(transit.length).toBeGreaterThanOrEqual(1);
+    // First transit: end of C (30,40) → start of B (10,20)
+    expect(transit[0].from.x).toBeCloseTo(30, 5);
+    expect(transit[0].from.y).toBeCloseTo(40, 5);
+    expect(transit[0].to.x).toBeCloseTo(10, 5);
+    expect(transit[0].to.y).toBeCloseTo(20, 5);
   });
 
   it("applyCsvOrderToPlanLines rebuilds transit end→start after reorder", () => {
