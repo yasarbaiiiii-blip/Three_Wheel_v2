@@ -196,7 +196,7 @@ import type {
   ActivityEntry,
   AppToast,
   DiscoveredRover,
-  RTKMode,
+  RTKStatus,
   SystemHealth,
   ToastTone,
 } from "./src/types/appRuntime";
@@ -205,7 +205,8 @@ import {
   SOCKET_CONNECT_TIMEOUT_MS,
   waitForSocketConnect,
 } from "./src/utils/socketConnect";
-import { normalizeTelemetryPacket, rtkModeFromStatus } from "./src/utils/telemetryDeadband";
+import { normalizeTelemetryPacket } from "./src/utils/telemetryDeadband";
+import { EMPTY_RTK_STATUS, fetchRtkStatus, normalizeRtkStatus } from "./src/api/rtkStatus";
 const SwoziPage = lazyDefault(
   () => import("./src/screens/SecondaryPages").then((m) => ({ default: m.SwoziPage })),
   "SwoziPage"
@@ -1063,10 +1064,8 @@ function AppRoot() {
   const [missionRunning, setMissionRunning] = useState(false);
   const [toast, setToast] = useState<AppToast | null>(null);
   const [rtkConnecting, setRtkConnecting] = useState(false);
-  const [rtkMode, setRtkMode] = useState<RTKMode>("idle");
-  const [rtkHealthy, setRtkHealthy] = useState(false);
+  const [rtkStatus, setRtkStatus] = useState<RTKStatus>(EMPTY_RTK_STATUS);
   const [isFloatingEStopEnabled, setIsFloatingEStopEnabled] = useState(false);
-  const rtkRunning = rtkMode === "ntrip" || rtkMode === "lora" || rtkMode === "stopping";
   const [toggleA, setToggleA] = useState(false);
   const [toggleB, setToggleB] = useState(false);
   const [toggleC, setToggleC] = useState(true);
@@ -4442,7 +4441,10 @@ function AppRoot() {
       Alert.alert("No backend", "Connect to a backend before starting RTK.");
       return;
     }
-    if (rtkRunning) return;
+    if (rtkStatus.running || rtkStatus.desired_mode === "ntrip") {
+      Alert.alert("RTK managed by backend", "NTRIP startup and recovery are managed by the rover backend.");
+      return;
+    }
     setRtkConnecting(true);
     try {
       showToast("RTK Injection", "Starting LoRA...", "info");
@@ -4461,8 +4463,7 @@ function AppRoot() {
         throw new Error(txt || "LoRA start failed.");
       }
       const data = await res.json().catch(() => ({}));
-      setRtkMode("lora");
-      setRtkHealthy(data?.healthy ?? true);
+      setRtkStatus(normalizeRtkStatus(data));
       Alert.alert("LoRA Started", "LoRA RTK stream started successfully.");
       showToast("LoRA Started", "LoRA RTK stream active.", "success");
     } catch (error) {
@@ -4478,8 +4479,9 @@ function AppRoot() {
       Alert.alert("No backend", "Connect to a backend before stopping RTK.");
       return;
     }
-    const previousMode = rtkMode;
-    setRtkMode("stopping");
+    if (rtkStatus.mode !== "lora" || !rtkStatus.running) return;
+    const previousStatus = rtkStatus;
+    setRtkStatus((current) => ({ ...current, source_state: "stopping" }));
     setRtkConnecting(true);
     try {
       showToast("RTK Injection", "Stopping RTK stream...", "warning");
@@ -4491,13 +4493,13 @@ function AppRoot() {
         const txt = await res.text();
         throw new Error(txt || "Failed to stop RTK correction stream.");
       }
-      setRtkMode("idle");
-      setRtkHealthy(false);
+      const data = await res.json().catch(() => null);
+      setRtkStatus(data ? normalizeRtkStatus(data) : EMPTY_RTK_STATUS);
       logAction("RTK_STOP_SUCCESS");
       Alert.alert("RTK Stopped", "RTK correction stream stopped successfully.");
       showToast("RTK Stopped", "RTK stream stopped.", "success");
     } catch (error) {
-      setRtkMode(previousMode);
+      setRtkStatus(previousStatus);
       Alert.alert("Stop Failed", error instanceof Error ? error.message : "Failed to stop RTK action.");
       showToast("Stop Failed", error instanceof Error ? error.message : "Failed to stop RTK action.", "error");
     } finally {
@@ -4506,23 +4508,39 @@ function AppRoot() {
   }
 
   useEffect(() => {
-    if (!apiBaseUrl) return;
-    const fetchRtkStatus = async () => {
-      if (rtkConnecting) return;
+    if (!apiBaseUrl) {
+      setRtkStatus(EMPTY_RTK_STATUS);
+      return;
+    }
+    let active = true;
+    let inFlight = false;
+    const pollRtkStatus = async () => {
+      if (rtkConnecting || inFlight) return;
+      inFlight = true;
       try {
-        const res = await fetch(`${apiBaseUrl}/api/rtk/status`);
-        if (res.ok) {
-          const data = await res.json();
-          setRtkMode(rtkModeFromStatus(data));
-          setRtkHealthy(data.healthy);
+        const next = await fetchRtkStatus(apiBaseUrl);
+        if (active) setRtkStatus(next);
+      } catch {
+        // Never leave an old green "streaming" indication on screen when the
+        // tablet can no longer verify the rover's correction process.
+        if (active) {
+          setRtkStatus((current) => ({
+            ...current,
+            healthy: false,
+            source_state: "unavailable",
+            last_error: "Rover RTK status is unavailable. Check the backend connection.",
+          }));
         }
-      } catch (err) {
-        console.log("Failed to fetch RTK status:", err);
+      } finally {
+        inFlight = false;
       }
     };
-    void fetchRtkStatus();
-    const interval = setInterval(fetchRtkStatus, 3000);
-    return () => clearInterval(interval);
+    void pollRtkStatus();
+    const interval = setInterval(pollRtkStatus, 3000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
   }, [apiBaseUrl, rtkConnecting]);
 
   // ── Staged Mission persistence ──────────────────────────────────────
@@ -5263,11 +5281,8 @@ function AppRoot() {
                   isPaused={isPaused}
                   setIsPaused={setIsPaused}
                   rtkConnecting={rtkConnecting}
-                  rtkMode={rtkMode}
+                  rtkStatus={rtkStatus}
                   startLora={startLora}
-                  stopRtk={stopRtk}
-                  rtkRunning={rtkRunning}
-                  rtkHealthy={rtkHealthy}
                   onParsePlan={parseDxfPlan}
                   apiBaseUrl={apiBaseUrl}
                   selectedPathName={selectedPathName}
@@ -5412,9 +5427,7 @@ function AppRoot() {
                             setMapViewEnabled={setMapViewEnabled}
                             isFloatingEStopEnabled={isFloatingEStopEnabled}
                             setIsFloatingEStopEnabled={setIsFloatingEStopEnabled}
-                            rtkRunning={rtkRunning}
-                            rtkHealthy={rtkHealthy}
-                            rtkMode={rtkMode}
+                            rtkStatus={rtkStatus}
                             stopRtk={stopRtk}
                             localCsvPreview={localCsvPreview}
                             localDxfMeta={localDxfMeta}
@@ -5688,11 +5701,8 @@ type HomeViewProps = {
   isPaused: boolean;
   setIsPaused: React.Dispatch<React.SetStateAction<boolean>>;
   rtkConnecting: boolean;
-  rtkMode: RTKMode;
+  rtkStatus: RTKStatus;
   startLora: () => Promise<void>;
-  stopRtk: () => Promise<void>;
-  rtkRunning: boolean;
-  rtkHealthy: boolean;
   onParsePlan: () => Promise<void>;
   apiBaseUrl?: string;
   selectedPathName?: string | null;
@@ -5779,11 +5789,8 @@ function HomeView(props: HomeViewProps) {
     isPaused,
     setIsPaused,
     rtkConnecting,
-    rtkMode,
+    rtkStatus,
     startLora,
-    stopRtk,
-    rtkRunning,
-    rtkHealthy,
     onParsePlan,
     apiBaseUrl,
     selectedPathName,
@@ -7001,9 +7008,7 @@ function SectionPages(props: {
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>>;
   isFloatingEStopEnabled: boolean;
   setIsFloatingEStopEnabled: React.Dispatch<React.SetStateAction<boolean>>;
-  rtkRunning: boolean;
-  rtkHealthy?: boolean;
-  rtkMode?: string;
+  rtkStatus: RTKStatus;
   stopRtk?: () => Promise<void>;
   onClearMission: () => Promise<void>;
   resetNorthCount?: number;

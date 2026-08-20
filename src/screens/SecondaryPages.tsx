@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import Slider from "@react-native-community/slider";
 import type { PlanLine } from "../types/plan";
+import type { RTKStatus } from "../types/appRuntime";
 import * as FileSystem from "expo-file-system/legacy";
 
 const TEAL = "#0f988f";
@@ -711,9 +712,7 @@ export function SettingsPage(props: {
   setToggleA: (v: boolean) => void;
   setToggleB: (v: boolean) => void;
   setToggleC: (v: boolean) => void;
-  rtkRunning?: boolean;
-  rtkHealthy?: boolean;
-  rtkMode?: string;
+  rtkStatus?: RTKStatus;
   stopRtk?: () => Promise<void>;
   apiBaseUrl?: string;
   selectedPathName?: string | null;

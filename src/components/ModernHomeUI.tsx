@@ -15,6 +15,7 @@ import { getPlanLineSegmentKind, isSegmentKindVisible } from "../utils/curveGeom
 import * as pathApi from "../api/pathApi";
 import { MissionLayerPills } from "./fields/MissionLayerPills";
 import { nonEmptyMissionLayers } from "../utils/missionLayerAssignment";
+import { EMPTY_RTK_STATUS, hasLiveCorrections, rtkStatusLabel } from "../api/rtkStatus";
 
 // Using 127.0.0.1:5001 as fallback if window location is unavailable
 const getApiBase = () => {
@@ -651,8 +652,8 @@ export default function ModernHomeUI(props) {
   const {
     lines = [], importedPlan, systemHealth, telemetrySnapshot, missionRunning,
     onNav, onToggleMenu, onArmVehicle, onSetMode, onEstopVehicle,
-    onStartPlan, onStopPlan, onClearMission, rtkRunning, rtkHealthy, rtkMode = "idle",
-    rtkConnecting = false, startLora, stopRtk, selectedLineId, onSelectLine,
+    onStartPlan, onStopPlan, onClearMission, rtkStatus = EMPTY_RTK_STATUS,
+    rtkConnecting = false, startLora, selectedLineId, onSelectLine,
     autoOriginEnabled, mapSourceLines, alignedRefPoints, autoOriginReference,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
     isPlanEditingMode,
@@ -676,6 +677,9 @@ export default function ModernHomeUI(props) {
   } = props;
 
   const isHomePage = currentPage === "home";
+  const rtkCorrectionsLive = hasLiveCorrections(rtkStatus);
+  const rtkLifecycleLabel = rtkStatusLabel(rtkStatus);
+  const canStartLora = !rtkStatus.running && rtkStatus.desired_mode === "idle";
   const isFieldsPage = currentPage === "fields";
   const PAGE_TO_NAV = {
     home: "main",
@@ -1132,9 +1136,9 @@ export default function ModernHomeUI(props) {
   }, [missionRunning, onSetMode, openManualJoystickPanel]);
 
   const handleStartLora = useCallback(() => {
-    if (rtkConnecting || rtkRunning) return;
+    if (rtkConnecting || !canStartLora) return;
     if (startLora) startLora();
-  }, [rtkConnecting, rtkRunning, startLora]);
+  }, [canStartLora, rtkConnecting, startLora]);
 
   const handleQuickAccessPress = useCallback(() => {
     setQuickAccessExpanded((v) => !v);
@@ -1568,23 +1572,21 @@ export default function ModernHomeUI(props) {
             <QuickSubNavDivider />
             <QuickSubNavSectionLabel label="RTK" />
             <QuickSubNavItem
-              icon={rtkRunning ? Activity : RadioTower}
-              label={rtkRunning
-                ? `${rtkMode === "lora" ? "LoRa" : "NTRIP"} ${rtkHealthy ? "Active" : "Starting"}`
-                : "NTRIP profiles"}
-              active={rtkRunning}
-              danger={rtkRunning && rtkMode === "stopping"}
+              icon={rtkStatus.running ? Activity : RadioTower}
+              label={rtkLifecycleLabel}
+              active={rtkCorrectionsLive || (rtkStatus.mode === "lora" && rtkStatus.healthy)}
+              danger={rtkStatus.source_state === "error" || rtkStatus.source_state === "unavailable"}
               signal
-              healthy={rtkHealthy}
-              disabled={rtkConnecting || rtkRunning}
+              healthy={rtkCorrectionsLive || (rtkStatus.mode === "lora" && rtkStatus.healthy)}
+              disabled={rtkConnecting || rtkStatus.running}
               onPress={() => {
                 // Backend owns NTRIP autostart. This is status-only when running
                 // and opens backend profile management when idle/unavailable.
-                if (rtkConnecting || rtkRunning) return;
+                if (rtkConnecting || rtkStatus.running) return;
                 onNav?.("settings");
               }}
             />
-            {!rtkRunning ? (
+            {canStartLora ? (
               <QuickSubNavItem
                 icon={Radio}
                 label="Start LoRa"

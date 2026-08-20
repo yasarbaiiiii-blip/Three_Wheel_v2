@@ -27,8 +27,9 @@ import {
 } from "lucide-react-native";
 import SchemaParamEditor from "./settings/SchemaParamEditor";
 import { NtripProfileConflictError } from "../api/rtkProfiles";
+import { EMPTY_RTK_STATUS, hasLiveCorrections, rtkStatusLabel } from "../api/rtkStatus";
 import { useNtripProfiles } from "../hooks/useNtripProfiles";
-import type { NtripProfile } from "../types/appRuntime";
+import type { NtripProfile, RTKStatus } from "../types/appRuntime";
 
 const COLORS = {
   bgBase: "#09090b",
@@ -61,9 +62,7 @@ type SprayMode = "continuous" | "dashed" | "point";
 type SettingsSection = "connection" | "drive" | "spray" | "general";
 
 type ModernSettingsPageProps = {
-  rtkRunning?: boolean;
-  rtkHealthy?: boolean;
-  rtkMode?: string;
+  rtkStatus?: RTKStatus;
   stopRtk?: () => Promise<void>;
   toggleA?: boolean;
   toggleB?: boolean;
@@ -188,29 +187,30 @@ const SettingsToggle = ({
 );
 
 const RtkStatusStrip = ({
-  running,
-  healthy,
-  mode,
+  status,
 }: {
-  running: boolean;
-  healthy: boolean;
-  mode: string;
+  status: RTKStatus;
 }) => {
-  const tone = running ? (healthy ? COLORS.success : COLORS.warning) : COLORS.textDim;
-  const barLevels = running ? (healthy ? [1, 1, 1, 1] : [1, 1, 0.35, 0.2]) : [0.15, 0.15, 0.15, 0.15];
+  const correctionsLive = hasLiveCorrections(status);
+  const failure = status.source_state === "error" || status.source_state === "unavailable";
+  const tone = correctionsLive
+    ? COLORS.success
+    : failure
+      ? COLORS.danger
+      : status.running || status.desired_mode !== "idle"
+        ? COLORS.warning
+        : COLORS.textDim;
+  const barLevels = correctionsLive ? [1, 1, 1, 1] : status.running ? [1, 1, 0.35, 0.2] : [0.15, 0.15, 0.15, 0.15];
   const barHeights = [5, 8, 11, 14];
-  const modeLabel = mode === "lora" ? "LoRa" : mode === "ntrip" ? "NTRIP" : null;
-  const statusLine = running
-    ? (healthy ? "Connected" : "Weak signal")
-    : "Not connected";
-
-  const statusText = [
-    statusLine,
-    modeLabel && running ? modeLabel : null,
-  ].filter(Boolean).join(" · ");
+  const statusText = rtkStatusLabel(status);
 
   return (
-    <View style={[styles.rtkStatusStrip, running && (healthy ? styles.rtkStatusLive : styles.rtkStatusWarn)]}>
+    <View style={[
+      styles.rtkStatusStrip,
+      correctionsLive ? styles.rtkStatusLive : null,
+      !correctionsLive && (status.running || status.desired_mode !== "idle") ? styles.rtkStatusWarn : null,
+      failure ? styles.profileErrorBanner : null,
+    ]}>
       <View style={styles.rtkBars}>
         {barHeights.map((h, i) => (
           <View
@@ -219,9 +219,9 @@ const RtkStatusStrip = ({
           />
         ))}
       </View>
-      {running ? <View style={[styles.liveDot, { backgroundColor: tone }]} /> : null}
+      {status.running ? <View style={[styles.liveDot, { backgroundColor: tone }]} /> : null}
       <Text
-        style={[styles.rtkStatusLine, { color: running ? tone : COLORS.textDim }]}
+        style={[styles.rtkStatusLine, { color: tone }]}
         numberOfLines={1}
         ellipsizeMode="tail"
       >
@@ -350,9 +350,7 @@ const ActionButton = ({
 
 export default function ModernSettingsPage(props: ModernSettingsPageProps) {
   const {
-    rtkRunning = false,
-    rtkHealthy = false,
-    rtkMode = "idle",
+    rtkStatus = EMPTY_RTK_STATUS,
     stopRtk,
     toggleA = false,
     toggleB = false,
@@ -371,6 +369,7 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
   const profiles = useNtripProfiles(apiBaseUrl);
   const [profileEditor, setProfileEditor] = useState<ProfileEditorMode | null>(null);
   const [profileForm, setProfileForm] = useState<ProfileForm>(EMPTY_PROFILE_FORM);
+  const profileEditorGenerationRef = useRef(0);
 
   const [isSprayMasterEnabled, setIsSprayMasterEnabled] = useState(false);
   const [isSprayMasterChanging, setIsSprayMasterChanging] = useState(false);
@@ -564,6 +563,7 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
   };
 
   const closeProfileEditor = useCallback(() => {
+    profileEditorGenerationRef.current += 1;
     setProfileEditor(null);
     // Passwords are intentionally held only in this transient form state.
     setProfileForm(EMPTY_PROFILE_FORM);
@@ -574,11 +574,13 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
   }, [apiBaseUrl, closeProfileEditor]);
 
   const openCreateProfile = useCallback(() => {
+    profileEditorGenerationRef.current += 1;
     setProfileForm(EMPTY_PROFILE_FORM);
     setProfileEditor({ kind: "create" });
   }, []);
 
   const openEditProfile = useCallback((profile: NtripProfile) => {
+    profileEditorGenerationRef.current += 1;
     setProfileForm({
       name: profile.name,
       host: profile.host,
@@ -592,6 +594,7 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
 
   const handleSaveProfile = useCallback(async () => {
     if (!profileEditor) return;
+    const editorGeneration = profileEditorGenerationRef.current;
     const name = profileForm.name.trim();
     const host = profileForm.host.trim();
     const mountpoint = profileForm.mountpoint.trim().replace(/^\/+/, "");
@@ -618,10 +621,11 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
 
     try {
       if (profileEditor.kind === "create") {
-        await profiles.createProfile({ name, host, port, mountpoint, username, password });
+        const saved = await profiles.createProfile({ name, host, port, mountpoint, username, password });
+        if (!saved || profileEditorGenerationRef.current !== editorGeneration) return;
         Alert.alert("Profile saved", `${name} is stored on the rover. Set it as default when ready.`);
       } else {
-        await profiles.updateProfile(profileEditor.profile.id, {
+        const saved = await profiles.updateProfile(profileEditor.profile.id, {
           name,
           host,
           port,
@@ -629,6 +633,7 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
           username,
           ...(password.length > 0 ? { password } : {}),
         });
+        if (!saved || profileEditorGenerationRef.current !== editorGeneration) return;
         const runtimeNote = profileEditor.profile.is_active
           ? " The current correction stream is unchanged."
           : "";
@@ -636,19 +641,23 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
       }
       closeProfileEditor();
     } catch (error) {
+      if (profileEditorGenerationRef.current !== editorGeneration) return;
       Alert.alert(
         error instanceof NtripProfileConflictError ? "Profiles changed" : "Save failed",
         error instanceof Error ? error.message : "Could not save the NTRIP profile."
       );
     } finally {
       // Clear the write-only secret after every submit attempt.
-      setProfileForm((current) => ({ ...current, password: "" }));
+      if (profileEditorGenerationRef.current === editorGeneration) {
+        setProfileForm((current) => ({ ...current, password: "" }));
+      }
     }
   }, [closeProfileEditor, profileEditor, profileForm, profiles]);
 
   const handleSetDefaultProfile = useCallback(async (profile: NtripProfile) => {
     try {
-      await profiles.setDefaultProfile(profile.id);
+      const saved = await profiles.setDefaultProfile(profile.id);
+      if (!saved) return;
       Alert.alert(
         "Default profile saved",
         `${profile.name} will be used on the next rover-server start. The current correction stream is unchanged.`
@@ -710,12 +719,26 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
       headerAction={addProfileAction}
     >
       <RtkStatusStrip
-        running={rtkRunning}
-        healthy={rtkHealthy}
-        mode={rtkMode}
+        status={rtkStatus}
       />
 
-      {rtkRunning ? (
+      <View style={styles.rtkLifecycleDetails}>
+        <Text style={styles.rtkLifecycleMeta}>
+          Desired: {rtkStatus.desired_mode.toUpperCase()} · State: {rtkStatus.source_state} · Frames: {rtkStatus.frames}
+        </Text>
+        <Text style={styles.rtkLifecycleMeta}>
+          Last frame: {rtkStatus.last_frame_age_s == null ? "never" : `${rtkStatus.last_frame_age_s.toFixed(1)} s ago`}
+          {` · Restarts: ${rtkStatus.supervisor_restarts}`}
+          {rtkStatus.active_profile_id ? ` · Active: ${rtkStatus.active_profile_id}` : ""}
+          {rtkStatus.active_profile_revision != null ? ` rev ${rtkStatus.active_profile_revision}` : ""}
+        </Text>
+        {rtkStatus.last_error ? <Text style={styles.rtkLifecycleError}>{rtkStatus.last_error}</Text> : null}
+        <Text style={styles.rtkReadinessNote}>
+          Correction status is not rover readiness. Verify PX4 reports RTK Fixed and acceptable GPS accuracy before driving or spraying.
+        </Text>
+      </View>
+
+      {rtkStatus.mode === "lora" && rtkStatus.running ? (
         <View style={styles.compactBlock}>
           <ActionButton
             label={isStoppingRtk ? "Stopping…" : "Stop RTK"}
@@ -731,6 +754,18 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
       {!apiBaseUrl ? (
         <View style={styles.noteBanner}>
           <Text style={styles.noteBannerText}>Connect and authenticate to the rover to manage NTRIP profiles.</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.noteBanner}>
+        <Text style={styles.noteBannerText}>
+          X-Rover-Token authenticates profile requests but does not encrypt HTTP traffic. Use trusted rover Wi-Fi, HTTPS, or a secure tunnel.
+        </Text>
+      </View>
+
+      {profiles.migration_warning ? (
+        <View style={[styles.noteBanner, styles.profileMigrationBanner]}>
+          <Text style={styles.profileMigrationText}>{profiles.migration_warning}</Text>
         </View>
       ) : null}
 
@@ -1700,6 +1735,33 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "600",
   },
+  rtkLifecycleDetails: {
+    backgroundColor: COLORS.cardSolid,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 4,
+  },
+  rtkLifecycleMeta: {
+    color: COLORS.textMuted,
+    fontSize: 10,
+    fontWeight: "600",
+    lineHeight: 14,
+  },
+  rtkLifecycleError: {
+    color: COLORS.danger,
+    fontSize: 10,
+    fontWeight: "700",
+    lineHeight: 14,
+  },
+  rtkReadinessNote: {
+    color: COLORS.warning,
+    fontSize: 10,
+    fontWeight: "600",
+    lineHeight: 14,
+  },
   rtkCredHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -1740,6 +1802,17 @@ const styles = StyleSheet.create({
   profileErrorBanner: {
     borderColor: COLORS.dangerBorder,
     backgroundColor: COLORS.dangerMuted,
+  },
+  profileMigrationBanner: {
+    borderColor: COLORS.warningBorder,
+    backgroundColor: COLORS.warningMuted,
+  },
+  profileMigrationText: {
+    flex: 1,
+    color: COLORS.warning,
+    fontSize: 10,
+    fontWeight: "600",
+    lineHeight: 15,
   },
   profileErrorText: {
     flex: 1,

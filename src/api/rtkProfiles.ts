@@ -62,6 +62,12 @@ function finiteInt(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
 }
 
+export function sanitizeMigrationWarning(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 256);
+  return cleaned || null;
+}
+
 /**
  * Treat every backend response as untrusted. This allow-list intentionally
  * drops password/pass/secret fields even if a backend regression returns one.
@@ -99,9 +105,11 @@ export function normalizeNtripRegistry(raw: unknown): NtripProfileRegistry {
     ? body.active_profile_id
     : profiles.find((profile) => profile.is_active)?.id ?? null;
   return {
+    schema_version: finiteInt(body.schema_version, 1),
     registry_revision: finiteInt(body.registry_revision),
     default_profile_id: defaultId,
     active_profile_id: activeId,
+    migration_warning: sanitizeMigrationWarning(body.migration_warning),
     profiles: profiles.map((profile) => ({
       ...profile,
       is_default: profile.is_default || profile.id === defaultId,

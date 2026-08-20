@@ -93,6 +93,21 @@ describe("rtkProfiles API", () => {
     expect(JSON.stringify(registry)).not.toContain("must-not-escape");
   });
 
+  it("preserves schema metadata and sanitizes migration warnings", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      schema_version: 1,
+      registry_revision: 1,
+      default_profile_id: null,
+      active_profile_id: null,
+      migration_warning: "Legacy config imported\nverify then remove old file\u0000",
+      profiles: [],
+    }), { status: 200 })) as typeof fetch;
+
+    const registry = await listNtripProfiles("http://192.168.1.102:5001");
+    expect(registry.schema_version).toBe(1);
+    expect(registry.migration_warning).toBe("Legacy config imported verify then remove old file");
+  });
+
   it("omits a blank edit password so the backend retains the saved secret", async () => {
     expect(buildNtripProfileUpdate({ name: "Renamed", password: "" })).toEqual({ name: "Renamed" });
 
