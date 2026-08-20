@@ -1062,17 +1062,9 @@ function AppRoot() {
   const [missionLoadedPanelOpenToken, setMissionLoadedPanelOpenToken] = useState(0);
   const [missionRunning, setMissionRunning] = useState(false);
   const [toast, setToast] = useState<AppToast | null>(null);
-  const [rtkModalOpen, setRtkModalOpen] = useState(false);
-  const [rtkCaster, setRtkCaster] = useState("");
-  const [rtkPort, setRtkPort] = useState("2101");
-  const [rtkMountPoint, setRtkMountPoint] = useState("");
-  const [rtkUsername, setRtkUsername] = useState("");
-  const [rtkPassword, setRtkPassword] = useState("");
   const [rtkConnecting, setRtkConnecting] = useState(false);
   const [rtkMode, setRtkMode] = useState<RTKMode>("idle");
-  const [rtkDefaultMode, setRtkDefaultMode] = useState("NTRIP");
   const [rtkHealthy, setRtkHealthy] = useState(false);
-  const [rtkAutoConnect, setRtkAutoConnect] = useState(false);
   const [isFloatingEStopEnabled, setIsFloatingEStopEnabled] = useState(false);
   const rtkRunning = rtkMode === "ntrip" || rtkMode === "lora" || rtkMode === "stopping";
   const [toggleA, setToggleA] = useState(false);
@@ -4445,59 +4437,6 @@ function AppRoot() {
     }
   }
 
-  async function startNtrip() {
-    if (!apiBaseUrl) {
-      Alert.alert("No backend", "Connect to a backend before starting RTK.");
-      return;
-    }
-    if (rtkRunning) return;
-    setRtkConnecting(true);
-    try {
-      if (!rtkCaster || !rtkPort || !rtkMountPoint) {
-        Alert.alert("Credentials needed", "Please fill in all RTK NTRIP credentials in Settings before connecting.");
-        setRtkConnecting(false);
-        return;
-      }
-      const host = rtkCaster;
-      const port = parseInt(rtkPort, 10);
-      const mountpoint = rtkMountPoint;
-      const user = rtkUsername;
-      const pass = rtkPassword;
-      logAction("RTK_CONNECT_REQUEST", { caster: host, port, mountpoint });
-      showToast("RTK Injection", "Connecting to NTRIP caster...", "info");
-      const res = await fetch(`${apiBaseUrl}/api/rtk/ntrip/start`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          host,
-          port,
-          mountpoint,
-          user,
-          pass,
-        }),
-      });
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(txt || "NTRIP start failed.");
-      }
-      const data = await res.json().catch(() => ({}));
-      setRtkMode("ntrip");
-      setRtkHealthy(data?.healthy ?? true);
-      logAction("RTK_CONNECT_SUCCESS", { caster: rtkCaster });
-      Alert.alert("RTK Started", "NTRIP RTK caster started successfully.");
-      showToast("RTK Started", "NTRIP RTK stream active.", "success");
-      setRtkModalOpen(false);
-    } catch (error) {
-      logAction("RTK_ACTION_FAILED", { error: error instanceof Error ? error.message : String(error) });
-      Alert.alert("RTK Action Failed", error instanceof Error ? error.message : "Failed to perform RTK action.");
-      showToast("RTK Failed", error instanceof Error ? error.message : "Failed to perform RTK action.", "error");
-    } finally {
-      setRtkConnecting(false);
-    }
-  }
-
   async function startLora() {
     if (!apiBaseUrl) {
       Alert.alert("No backend", "Connect to a backend before starting RTK.");
@@ -4526,7 +4465,6 @@ function AppRoot() {
       setRtkHealthy(data?.healthy ?? true);
       Alert.alert("LoRA Started", "LoRA RTK stream started successfully.");
       showToast("LoRA Started", "LoRA RTK stream active.", "success");
-      setRtkModalOpen(false);
     } catch (error) {
       Alert.alert("LoRA Failed", error instanceof Error ? error.message : "Failed to start LoRA.");
       showToast("LoRA Failed", error instanceof Error ? error.message : "Failed to start LoRA.", "error");
@@ -4558,7 +4496,6 @@ function AppRoot() {
       logAction("RTK_STOP_SUCCESS");
       Alert.alert("RTK Stopped", "RTK correction stream stopped successfully.");
       showToast("RTK Stopped", "RTK stream stopped.", "success");
-      setRtkModalOpen(false);
     } catch (error) {
       setRtkMode(previousMode);
       Alert.alert("Stop Failed", error instanceof Error ? error.message : "Failed to stop RTK action.");
@@ -4587,77 +4524,6 @@ function AppRoot() {
     const interval = setInterval(fetchRtkStatus, 3000);
     return () => clearInterval(interval);
   }, [apiBaseUrl, rtkConnecting]);
-
-  // ── RTK credential persistence ──────────────────────────────────────
-  const RTK_CREDS_KEY = "rtk_credentials";
-  const rtkCredsLoadedRef = useRef(false);
-
-  // Load saved RTK credentials once on mount
-  useEffect(() => {
-    (async () => {
-      try {
-        const raw = await SecureStore.getItemAsync(RTK_CREDS_KEY);
-        if (raw) {
-          const saved = JSON.parse(raw);
-          if (saved.caster) setRtkCaster(saved.caster);
-          if (saved.port) setRtkPort(saved.port);
-          if (saved.mountPoint) setRtkMountPoint(saved.mountPoint);
-          if (saved.username) setRtkUsername(saved.username);
-          if (saved.password) setRtkPassword(saved.password);
-          // defaultMode/autoConnect were added later — older saved blobs won't
-          // have them, so only apply when present rather than reset to falsy.
-          if (saved.defaultMode) setRtkDefaultMode(saved.defaultMode);
-          if (typeof saved.autoConnect === "boolean") setRtkAutoConnect(saved.autoConnect);
-          console.log("[RTK] Restored saved credentials from SecureStore");
-        }
-      } catch (err) {
-        console.warn("[RTK] Failed to load saved credentials:", err);
-      } finally {
-        rtkCredsLoadedRef.current = true;
-      }
-    })();
-  }, []);
-
-  // Save RTK credentials whenever they change (skip the initial load)
-  useEffect(() => {
-    if (!rtkCredsLoadedRef.current) return;
-    const creds = JSON.stringify({
-      caster: rtkCaster,
-      port: rtkPort,
-      mountPoint: rtkMountPoint,
-      username: rtkUsername,
-      password: rtkPassword,
-      defaultMode: rtkDefaultMode,
-      autoConnect: rtkAutoConnect,
-    });
-    SecureStore.setItemAsync(RTK_CREDS_KEY, creds).catch((err) =>
-      console.warn("[RTK] Failed to save credentials:", err)
-    );
-  }, [rtkCaster, rtkPort, rtkMountPoint, rtkUsername, rtkPassword, rtkDefaultMode, rtkAutoConnect]);
-
-  // ── RTK Auto Connect ──────────────────────────────────────────────────
-  // Fires once per socket connection: as soon as the WS reaches "connected",
-  // if Auto Connect is on and RTK isn't already running, start the saved
-  // default source. Gated on rtkCredsLoadedRef so this can't fire before
-  // SecureStore finishes restoring rtkAutoConnect/rtkDefaultMode/credentials
-  // — otherwise it could race and either use stale defaults or hit
-  // startNtrip's "Credentials needed" guard before creds are populated.
-  const autoConnectAttemptedRef = useRef(false);
-  useEffect(() => {
-    if (wsStatus !== "connected") {
-      autoConnectAttemptedRef.current = false;
-      return;
-    }
-    if (!rtkAutoConnect || rtkRunning || autoConnectAttemptedRef.current) return;
-    if (!rtkCredsLoadedRef.current) return;
-    autoConnectAttemptedRef.current = true;
-    console.log(`[RTK] Auto Connect triggered (mode=${rtkDefaultMode})`);
-    if ((rtkDefaultMode || "").toLowerCase() === "lora") {
-      void startLora();
-    } else {
-      void startNtrip();
-    }
-  }, [wsStatus, rtkAutoConnect, rtkRunning, rtkDefaultMode]);
 
   // ── Staged Mission persistence ──────────────────────────────────────
   const STAGED_MISSION_KEY = "staged_mission_cache";
@@ -5396,22 +5262,8 @@ function AppRoot() {
                   telemetryLoading={telemetryLoading}
                   isPaused={isPaused}
                   setIsPaused={setIsPaused}
-                  rtkModalOpen={rtkModalOpen}
-                  setRtkModalOpen={setRtkModalOpen}
-                  rtkCaster={rtkCaster}
-                  setRtkCaster={setRtkCaster}
-                  rtkPort={rtkPort}
-                  setRtkPort={setRtkPort}
-                  rtkMountPoint={rtkMountPoint}
-                  setRtkMountPoint={setRtkMountPoint}
-                  rtkUsername={rtkUsername}
-                  setRtkUsername={setRtkUsername}
-                  rtkPassword={rtkPassword}
-                  setRtkPassword={setRtkPassword}
                   rtkConnecting={rtkConnecting}
                   rtkMode={rtkMode}
-                  rtkDefaultMode={rtkDefaultMode}
-                  startNtrip={startNtrip}
                   startLora={startLora}
                   stopRtk={stopRtk}
                   rtkRunning={rtkRunning}
@@ -5560,23 +5412,9 @@ function AppRoot() {
                             setMapViewEnabled={setMapViewEnabled}
                             isFloatingEStopEnabled={isFloatingEStopEnabled}
                             setIsFloatingEStopEnabled={setIsFloatingEStopEnabled}
-                            rtkCaster={rtkCaster}
-                            setRtkCaster={setRtkCaster}
-                            rtkPort={rtkPort}
-                            setRtkPort={setRtkPort}
-                            rtkMountPoint={rtkMountPoint}
-                            setRtkMountPoint={setRtkMountPoint}
-                            rtkUsername={rtkUsername}
-                            setRtkUsername={setRtkUsername}
-                            rtkPassword={rtkPassword}
-                            setRtkPassword={setRtkPassword}
                             rtkRunning={rtkRunning}
                             rtkHealthy={rtkHealthy}
                             rtkMode={rtkMode}
-                            rtkDefaultMode={rtkDefaultMode}
-                            setRtkDefaultMode={setRtkDefaultMode}
-                            rtkAutoConnect={rtkAutoConnect}
-                            setRtkAutoConnect={setRtkAutoConnect}
                             stopRtk={stopRtk}
                             localCsvPreview={localCsvPreview}
                             localDxfMeta={localDxfMeta}
@@ -5849,22 +5687,8 @@ type HomeViewProps = {
   telemetryLoading: boolean;
   isPaused: boolean;
   setIsPaused: React.Dispatch<React.SetStateAction<boolean>>;
-  rtkModalOpen: boolean;
-  setRtkModalOpen: React.Dispatch<React.SetStateAction<boolean>>;
-  rtkCaster: string;
-  setRtkCaster: React.Dispatch<React.SetStateAction<string>>;
-  rtkPort: string;
-  setRtkPort: React.Dispatch<React.SetStateAction<string>>;
-  rtkMountPoint: string;
-  setRtkMountPoint: React.Dispatch<React.SetStateAction<string>>;
-  rtkUsername: string;
-  setRtkUsername: React.Dispatch<React.SetStateAction<string>>;
-  rtkPassword: string;
-  setRtkPassword: React.Dispatch<React.SetStateAction<string>>;
   rtkConnecting: boolean;
   rtkMode: RTKMode;
-  rtkDefaultMode?: string;
-  startNtrip: () => Promise<void>;
   startLora: () => Promise<void>;
   stopRtk: () => Promise<void>;
   rtkRunning: boolean;
@@ -5954,22 +5778,8 @@ function HomeView(props: HomeViewProps) {
     telemetryLoading,
     isPaused,
     setIsPaused,
-    rtkModalOpen,
-    setRtkModalOpen,
-    rtkCaster,
-    setRtkCaster,
-    rtkPort,
-    setRtkPort,
-    rtkMountPoint,
-    setRtkMountPoint,
-    rtkUsername,
-    setRtkUsername,
-    rtkPassword,
-    setRtkPassword,
     rtkConnecting,
     rtkMode,
-    rtkDefaultMode,
-    startNtrip,
     startLora,
     stopRtk,
     rtkRunning,
@@ -7191,23 +7001,9 @@ function SectionPages(props: {
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number, dxf_y: number, lat: number, lon: number }[] | null>>;
   isFloatingEStopEnabled: boolean;
   setIsFloatingEStopEnabled: React.Dispatch<React.SetStateAction<boolean>>;
-  rtkCaster: string;
-  setRtkCaster: React.Dispatch<React.SetStateAction<string>>;
-  rtkPort: string;
-  setRtkPort: React.Dispatch<React.SetStateAction<string>>;
-  rtkMountPoint: string;
-  setRtkMountPoint: React.Dispatch<React.SetStateAction<string>>;
-  rtkUsername: string;
-  setRtkUsername: React.Dispatch<React.SetStateAction<string>>;
-  rtkPassword: string;
-  setRtkPassword: React.Dispatch<React.SetStateAction<string>>;
   rtkRunning: boolean;
   rtkHealthy?: boolean;
   rtkMode?: string;
-  rtkDefaultMode?: string;
-  setRtkDefaultMode?: React.Dispatch<React.SetStateAction<string>>;
-  rtkAutoConnect?: boolean;
-  setRtkAutoConnect?: React.Dispatch<React.SetStateAction<boolean>>;
   stopRtk?: () => Promise<void>;
   onClearMission: () => Promise<void>;
   resetNorthCount?: number;

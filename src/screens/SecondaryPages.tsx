@@ -711,23 +711,9 @@ export function SettingsPage(props: {
   setToggleA: (v: boolean) => void;
   setToggleB: (v: boolean) => void;
   setToggleC: (v: boolean) => void;
-  rtkCaster?: string;
-  setRtkCaster?: React.Dispatch<React.SetStateAction<string>>;
-  rtkPort?: string;
-  setRtkPort?: React.Dispatch<React.SetStateAction<string>>;
-  rtkMountPoint?: string;
-  setRtkMountPoint?: React.Dispatch<React.SetStateAction<string>>;
-  rtkUsername?: string;
-  setRtkUsername?: React.Dispatch<React.SetStateAction<string>>;
-  rtkPassword?: string;
-  setRtkPassword?: React.Dispatch<React.SetStateAction<string>>;
   rtkRunning?: boolean;
   rtkHealthy?: boolean;
   rtkMode?: string;
-  rtkDefaultMode?: string;
-  setRtkDefaultMode?: React.Dispatch<React.SetStateAction<string>>;
-  rtkAutoConnect?: boolean;
-  setRtkAutoConnect?: React.Dispatch<React.SetStateAction<boolean>>;
   stopRtk?: () => Promise<void>;
   apiBaseUrl?: string;
   selectedPathName?: string | null;
@@ -1411,4 +1397,3 @@ export function RowSlider({ label, value, onChange }: { label: string; value: nu
 const secH = { fontSize: 66 / 2, color: "#515254", fontWeight: "700", marginTop: 10 } as const;
 const itemH = { fontSize: 50 / 2, color: "#55565a", fontWeight: "700", marginTop: 8 } as const;
 const itemT = { fontSize: 46 / 2, color: "#616266", marginTop: 4 } as const;
-
