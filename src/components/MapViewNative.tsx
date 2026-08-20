@@ -830,14 +830,11 @@ export function MapViewNative(props: MapViewProps) {
   // ── Plan lines (Fields) → FeatureCollection of LineStrings ──
   // Reuses projectPlanLineToGpsSegments (preview_points-first / from→to fallback).
   const planLinesFC = useMemo(() => {
-    // Full-plan stickers (Move / Visual Align) already draw the mission. A
-    // placed template sticker must leave the rest of the plan visible.
-    const isFullPlanSticker =
-      mode === "templates" &&
-      (placedItems ?? []).some(
-        (it) => it.id === "plan-editing-group" || it.id === "visual-alignment-group"
-      );
-    if (isFullPlanSticker || !projectionOrigin || lines.length === 0) {
+    // Stickers (Move / Visual Align / templates) draw their own copy. Other
+    // uploaded plans stay in `lines` so they remain visible as alignment
+    // context. PlanPreview already dropped the sticker's own ids from `lines`
+    // to avoid a ghost under the placed copy — do not empty the rest here.
+    if (!projectionOrigin || lines.length === 0) {
       return featureCollection([]);
     }
     const features: GeoJSON.Feature[] = [];
@@ -861,7 +858,7 @@ export function MapViewNative(props: MapViewProps) {
       }
     }
     return featureCollection(features);
-  }, [lines, originSig, mode, placedItemsSig]);
+  }, [lines, originSig]);
 
   // ── Offset ghost preview: live drag-only, never committed, not mode-gated ──
   // Offset only exists in Fields, so `ghostLines` is simply never populated when

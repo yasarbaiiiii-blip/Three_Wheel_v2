@@ -1,7 +1,7 @@
 import React from "react";
 import { View, Text, Pressable } from "react-native";
-import AnimatedReanimated from "react-native-reanimated";
-import { Menu, LayoutGrid, Crosshair, LocateFixed, Navigation as NavigationIcon, Circle, LogOut } from "lucide-react-native";
+import AnimatedReanimated, { interpolate, useAnimatedStyle } from "react-native-reanimated";
+import { Menu, X, LayoutGrid, Crosshair, LocateFixed, Navigation as NavigationIcon, Circle, LogOut } from "lucide-react-native";
 
 const NAV_SECTION_ITEMS = [
   { id: "main", icon: Crosshair, label: "Main Screen" },
@@ -10,47 +10,68 @@ const NAV_SECTION_ITEMS = [
   { id: "howto", icon: Circle, label: "How to" },
 ];
 
-function NavBarItem({ icon: Icon, label, active, expanded, onPress, danger = false, colors, styles }: any) {
+const LABEL_WIDTH = 168;
+
+function NavBarItem({
+  icon: Icon,
+  label,
+  active,
+  expanded,
+  expandProgress,
+  onPress,
+  danger = false,
+  colors,
+  styles,
+}: any) {
+  const labelAnimStyle = useAnimatedStyle(() => ({
+    opacity: expandProgress.value,
+    width: interpolate(expandProgress.value, [0, 1], [0, LABEL_WIDTH]),
+    marginLeft: interpolate(expandProgress.value, [0, 1], [0, 12]),
+  }));
+
   return (
     <Pressable
       style={[
         styles.navItem,
-        expanded && styles.navItemExpanded,
-        expanded && active && styles.navItemActive,
+        expanded && active && !danger && styles.navItemActive,
         danger && styles.navItemDanger,
       ]}
       onPress={onPress}
     >
-      <View style={[
-        styles.navIconWrap,
-        active && !danger && styles.navIconWrapActive,
-        active && !danger && !expanded && styles.navIconWrapActiveCollapsed,
-        danger && styles.navIconWrapDanger,
-      ]}>
+      <View
+        style={[
+          styles.navIconWrap,
+          active && !danger && styles.navIconWrapActive,
+          danger && styles.navIconWrapDanger,
+        ]}
+      >
         <Icon
           color={danger ? colors.danger : active ? colors.accentText : colors.textMuted}
           size={20}
           strokeWidth={2.2}
         />
       </View>
-      {expanded && (
-        <View style={styles.navLabelWrap}>
-          <Text style={[
+      <AnimatedReanimated.View style={[styles.navLabelWrap, labelAnimStyle]} pointerEvents="none">
+        <Text
+          numberOfLines={1}
+          style={[
             styles.navLabel,
             active && !danger && styles.navLabelActive,
             danger && styles.navLabelDanger,
-          ]}>
-            {label}
-          </Text>
-          {active && !danger && <View style={styles.navActiveDot} />}
-        </View>
-      )}
+          ]}
+        >
+          {label}
+        </Text>
+        {active && !danger ? <View style={styles.navActiveDot} /> : null}
+      </AnimatedReanimated.View>
     </Pressable>
   );
 }
 
 type NavbarProps = {
   navAnimatedStyle: any;
+  navExpandProgress: any;
+  navCompactProgress: any;
   navIconsVisible: boolean;
   navExpanded: boolean;
   isHomePage: boolean;
@@ -69,7 +90,7 @@ type NavbarProps = {
 
 function NavbarImpl({
   navAnimatedStyle,
-  navIconsVisible,
+  navExpandProgress,
   navExpanded,
   isHomePage,
   activeNav,
@@ -84,131 +105,117 @@ function NavbarImpl({
   colors,
   styles,
 }: NavbarProps) {
+  const menuLabelAnimStyle = useAnimatedStyle(() => ({
+    opacity: navExpandProgress.value,
+    width: interpolate(navExpandProgress.value, [0, 1], [0, LABEL_WIDTH]),
+    marginLeft: interpolate(navExpandProgress.value, [0, 1], [0, 12]),
+  }));
+
+  const markerAnimStyle = useAnimatedStyle(() => ({
+    opacity: navExpandProgress.value,
+    height: interpolate(navExpandProgress.value, [0, 1], [0, 28]),
+    marginTop: interpolate(navExpandProgress.value, [0, 1], [0, 6]),
+    overflow: "hidden" as const,
+  }));
+
+  const MenuGlyph = navExpanded ? X : Menu;
+
   return (
-    <AnimatedReanimated.View style={[styles.navbar, navAnimatedStyle, !navIconsVisible && styles.navbarCompact]}>
-      <View style={[styles.navMenuGroup, !navIconsVisible && styles.navMenuGroupCompact]}>
-        <Pressable
-          style={[
-            styles.navMenuPressable,
-            !navIconsVisible && styles.navMenuPressableCompact,
-            navIconsVisible && navExpanded && styles.navItemExpanded,
-            navIconsVisible && navExpanded && styles.navItemActive,
-          ]}
-          onPress={handleMenuPress}
-        >
-          {navExpanded && navIconsVisible ? (
-            <>
-              <View style={[styles.navIconWrap, styles.navIconWrapActive]}>
-                <Menu color={colors.accentText} size={20} strokeWidth={2.2} />
-              </View>
-              <View style={styles.navLabelWrap}>
-                <Text style={[styles.navLabel, styles.navLabelActive]}>Menu</Text>
-                <View style={styles.navActiveDot} />
-              </View>
-            </>
-          ) : (
-            <View style={styles.navMenuCollapsed}>
-              <View style={[
-                styles.navIconWrap,
-                navIconsVisible && styles.navIconWrapActive,
-                !navIconsVisible && styles.navIconWrapCompact,
-              ]}>
-                <Menu color={navIconsVisible ? colors.accentText : colors.textMuted} size={20} strokeWidth={2.2} />
-              </View>
-            </View>
-          )}
-        </Pressable>
-        {navIconsVisible && (
-          <>
-            <Text
-              style={[styles.navFieldMarkerLabel, navExpanded && styles.navFieldMarkerLabelExpanded]}
-              numberOfLines={2}
-            >
-              Field Marker
+    <AnimatedReanimated.View style={[styles.navbar, navAnimatedStyle]}>
+      <View style={styles.navMenuGroup}>
+        <Pressable style={styles.navMenuPressable} onPress={handleMenuPress}>
+          <View style={[styles.navIconWrap, styles.navIconWrapActive]}>
+            <MenuGlyph color={colors.accentText} size={20} strokeWidth={2.2} />
+          </View>
+          <AnimatedReanimated.View style={[styles.navLabelWrap, menuLabelAnimStyle]} pointerEvents="none">
+            <Text numberOfLines={1} style={[styles.navLabel, styles.navLabelActive]}>
+              Menu
             </Text>
-            <View style={styles.navGroupSeparator} />
-          </>
-        )}
+          </AnimatedReanimated.View>
+        </Pressable>
+
+        <AnimatedReanimated.View style={markerAnimStyle} pointerEvents="none">
+          <Text style={styles.navFieldMarkerLabel} numberOfLines={1}>
+            Field Marker
+          </Text>
+          <View style={styles.navGroupSeparator} />
+        </AnimatedReanimated.View>
       </View>
 
-      {navIconsVisible && (
-        <>
-          {isHomePage ? (
-            <>
-              <View style={styles.navGroupSeparator} />
-              <View
-                ref={quickAccessAnchorRef}
-                collapsable={false}
-                onLayout={updateQuickAccessAnchor}
-                style={styles.quickAccessAnchor}
-              >
-                <NavBarItem
-                  icon={LayoutGrid}
-                  label="Quick Access"
-                  active={quickAccessExpanded}
-                  expanded={navExpanded}
-                  onPress={handleQuickAccessPress}
-                  colors={colors}
-                  styles={styles}
-                />
-              </View>
-              <View style={styles.navGroupSeparator} />
-            </>
-          ) : null}
-
-          <View style={styles.navSection}>
-            {NAV_SECTION_ITEMS.map((item) => (
-              <NavBarItem
-                key={item.id}
-                icon={item.icon}
-                label={item.label}
-                active={activeNav === item.id}
-                expanded={navExpanded}
-                onPress={() => handleNavItemPress(item.id)}
-                colors={colors}
-                styles={styles}
-              />
-            ))}
+      <View style={styles.navRest} pointerEvents="auto">
+        {isHomePage ? (
+          <View
+            ref={quickAccessAnchorRef}
+            collapsable={false}
+            onLayout={updateQuickAccessAnchor}
+            style={styles.quickAccessAnchor}
+          >
+            <NavBarItem
+              icon={LayoutGrid}
+              label="Quick Access"
+              active={quickAccessExpanded}
+              expanded={navExpanded}
+              expandProgress={navExpandProgress}
+              onPress={handleQuickAccessPress}
+              colors={colors}
+              styles={styles}
+            />
           </View>
+        ) : null}
 
-          <View style={{ flex: 1 }} />
+        <View style={styles.navSection}>
+          {NAV_SECTION_ITEMS.map((item) => (
+            <NavBarItem
+              key={item.id}
+              icon={item.icon}
+              label={item.label}
+              active={activeNav === item.id}
+              expanded={navExpanded}
+              expandProgress={navExpandProgress}
+              onPress={() => handleNavItemPress(item.id)}
+              colors={colors}
+              styles={styles}
+            />
+          ))}
+        </View>
 
-          <View style={styles.navDivider} />
+        <View style={{ flex: 1 }} />
 
-          <NavBarItem
-            icon={LayoutGrid}
-            label="Cycle Map View"
-            active={false}
-            expanded={navExpanded}
-            onPress={onCycleMapStyle}
-            colors={colors}
-            styles={styles}
-          />
+        <View style={styles.navDivider} />
 
-          <NavBarItem
-            icon={LogOut}
-            label="Exit Session"
-            active={false}
-            expanded={navExpanded}
-            danger={true}
-            onPress={onExitSession}
-            colors={colors}
-            styles={styles}
-          />
-        </>
-      )}
+        <NavBarItem
+          icon={LayoutGrid}
+          label="Cycle Map View"
+          active={false}
+          expanded={navExpanded}
+          expandProgress={navExpandProgress}
+          onPress={onCycleMapStyle}
+          colors={colors}
+          styles={styles}
+        />
+
+        <NavBarItem
+          icon={LogOut}
+          label="Exit Session"
+          active={false}
+          expanded={navExpanded}
+          expandProgress={navExpandProgress}
+          danger={true}
+          onPress={onExitSession}
+          colors={colors}
+          styles={styles}
+        />
+      </View>
     </AnimatedReanimated.View>
   );
 }
 
 function arePropsEqual(prev: NavbarProps, next: NavbarProps): boolean {
-  // navAnimatedStyle is a Reanimated useAnimatedStyle() result: a new JS
-  // object every render by design (the animation itself runs on the UI
-  // thread via shared values, not via this reference), so it's deliberately
-  // excluded from the comparison below.
   return (
     prev.navIconsVisible === next.navIconsVisible &&
     prev.navExpanded === next.navExpanded &&
+    prev.navExpandProgress === next.navExpandProgress &&
+    prev.navCompactProgress === next.navCompactProgress &&
     prev.isHomePage === next.isHomePage &&
     prev.activeNav === next.activeNav &&
     prev.quickAccessExpanded === next.quickAccessExpanded &&

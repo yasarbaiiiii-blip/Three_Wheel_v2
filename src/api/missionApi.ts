@@ -16,7 +16,10 @@ export type LoadMissionOptions = {
   extensionLines?: import("../types/plan").PlanLine[] | null;
   manageBusy?: boolean;
   stagedInspection?: import("./pathApi").StagedMissionResponse | null;
-  /** Send already drew the staged path — skip a second hydrate. */
+  /**
+   * Keep operator DXF/CSV segments on the map. Densified rover waypoints
+   * collapse painted runs into one line and break per-segment spray toggles.
+   */
   skipMapHydration?: boolean;
   /** Start is already on Home — don't remount the page. */
   skipNavigate?: boolean;

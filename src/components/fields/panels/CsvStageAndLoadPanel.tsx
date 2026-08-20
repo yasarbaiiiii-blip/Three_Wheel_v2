@@ -21,7 +21,6 @@ import {
   type CsvPathOrderEntry,
 } from "../../../utils/csvPathOrder";
 import {
-  buildCsvExtensionLines,
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
 } from "../../../utils/csvExtensions";
@@ -34,17 +33,8 @@ import {
   type RoverPoseForEntry,
 } from "../../../utils/csvTrajectory";
 import type { LocalPointCsvResult } from "../../../utils/localPointCsv";
-import { sanitizePlanLines } from "../../../utils/pathWorkflow";
 import { yieldToUi } from "../../../utils/runtimeGuards";
-import {
-  buildMissionLayerLegCatalog,
-  tagLinesWithMissionLayer,
-} from "../../../utils/missionLayerLines";
-import {
-  hydrateStagedMissionForMap,
-  isStagedHydrationLineId,
-} from "../../../utils/stagedMissionHydration";
-import { recoverCornersAfterHydration } from "../../../utils/cornerLifecycle";
+import { isStagedHydrationLineId } from "../../../utils/stagedMissionHydration";
 import { SHARP_CORNER_MODE } from "../../../config/featureFlags";
 import { buildSurveyCsvExport, type SurveyCsvExport } from "../../../utils/surveyCsvExport";
 import { FIELDS_COLORS } from "../fieldsTheme";
@@ -66,11 +56,7 @@ type CsvStageAndLoadPanelProps = {
   mapPinCount?: number | null;
   /** Current map plan lines (CSV fitted marks / DXF entity paths + transit). */
   lines?: PlanLine[];
-  /**
-   * Mission layers + their file assignments — needed to recover mission-layer
-   * identity on the densified lines Send draws, so M-Layer pill visibility
-   * keeps affecting the map right after Send (not just after a later Load).
-   */
+  /** Mission layers + file assignments (kept for caller compatibility). */
   missionLayers?: MissionLayer[];
   uploadedFiles?: UploadedFileEntry[];
   /** Operator order/paint from CsvPathOrderStep; defaults to all marks painted in list order. */
@@ -96,6 +82,7 @@ type CsvStageAndLoadPanelProps = {
   missionName?: string | null;
   /** Parse/import warnings for readiness (DXF local warnings). */
   parseWarnings?: string[];
+  /** Kept so callers can still pass map setters; Send no longer overwrites operator geometry. */
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   onSelectLine: (id: string | null) => void;
   setStagedMissionId: React.Dispatch<React.SetStateAction<string | null>>;
@@ -151,8 +138,8 @@ export function CsvStageAndLoadPanel({
   localCsvPreview = null,
   mapPinCount: _mapPinCount = null,
   lines = [],
-  missionLayers = [],
-  uploadedFiles = [],
+  missionLayers: _missionLayers = [],
+  uploadedFiles: _uploadedFiles = [],
   pathOrder = null,
   extensionConfig = null,
   originGps = null,
@@ -160,12 +147,12 @@ export function CsvStageAndLoadPanel({
   onAppPlannedStartSnapshot,
   missionName = null,
   parseWarnings = [],
-  setLines,
-  onSelectLine,
+  setLines: _setLines,
+  onSelectLine: _onSelectLine,
   setStagedMissionId,
   setStagedPlanResult,
   setStagedMissionInspection,
-  setAlignedRefPoints,
+  setAlignedRefPoints: _setAlignedRefPoints,
   onWorkflowStep,
   onLoadSelectedPath,
   missionActionBusy,
@@ -173,6 +160,11 @@ export function CsvStageAndLoadPanel({
   onEndPathExclusive,
 }: CsvStageAndLoadPanelProps) {
   void _roverPose;
+  void _setLines;
+  void _onSelectLine;
+  void _setAlignedRefPoints;
+  void _missionLayers;
+  void _uploadedFiles;
   const extCfg = useMemo(
     () => normalizeCsvExtensionConfig(extensionConfig),
     [extensionConfig]
@@ -313,10 +305,7 @@ export function CsvStageAndLoadPanel({
       plan: pathApi.PathPlanResponse;
       stagedInspection?: pathApi.StagedMissionResponse;
     },
-    allowLoad: boolean,
-    preSendExtensionLines: PlanLine[] = [],
-    /** Pre-send painted marks (still carry geometry.corners) for lifecycle recovery. */
-    sourcePaintedLines: PlanLine[] = []
+    allowLoad: boolean
   ) => {
     const plan = result.plan;
     setStaged({ missionId: result.missionId, plan });
@@ -339,49 +328,17 @@ export function CsvStageAndLoadPanel({
     onWorkflowStep?.("staged", "verified");
     onWorkflowStep?.("loaded", "pending");
 
-    // Kick load immediately — map hydrate is local CPU and can overlap the rover POST.
-    let loadPromise: Promise<boolean> | null = null;
+    // Keep operator DXF/CSV segments on the map. Hydrating densified rover
+    // waypoints here collapsed every painted run into one `rover-path-N` line
+    // so Path Order could no longer toggle spray per original segment.
+    // Load still posts to the controller; skipMapHydration keeps `lines` intact.
     if (allowLoad) {
       setLoadBlocked(false);
       setStep("loadMission");
-      loadPromise = Promise.resolve(
-        onLoadSelectedPath(result.missionId, {
-          stagedInspection: result.stagedInspection ?? null,
-          skipMapHydration: true,
-        })
-      );
-    }
-
-    // Prefer stagedInspection (has anchor + waypoints). PathPlanResponse has no anchor —
-    // hydrating lines from plan alone caused frame desync under numbered pins.
-    // Extension catalog recovers pre/aft labels (artifact only has spray booleans).
-    const hydrated = hydrateStagedMissionForMap(result.stagedInspection ?? null, {
-      extensionLines: preSendExtensionLines,
-    });
-    if (hydrated) {
-      // Recover mission-layer identity lost when hydration strips file-prefixed
-      // ids, so M-Layer pill visibility keeps affecting the map right after Send
-      // (same recovery App.tsx's staged-Load path already does post-Start).
-      const layerCatalog = buildMissionLayerLegCatalog(
-        sourcePaintedLines,
-        uploadedFiles,
-        missionLayers,
-        extCfg
-      );
-      const missionLayerTagged = tagLinesWithMissionLayer(hydrated.lines, layerCatalog);
-      // Recover corner class / execution mode lost when densified ids replace source lines.
-      const cornerTagged = recoverCornersAfterHydration(
-        missionLayerTagged,
-        sourcePaintedLines,
-        SHARP_CORNER_MODE
-      );
-      setAlignedRefPoints?.(hydrated.alignedRefPoints);
-      setLines(sanitizePlanLines(cornerTagged));
-      onSelectLine(hydrated.selectedLineId);
-    }
-
-    if (loadPromise) {
-      await loadPromise;
+      await onLoadSelectedPath(result.missionId, {
+        stagedInspection: result.stagedInspection ?? null,
+        skipMapHydration: true,
+      });
     }
   };
 
@@ -416,11 +373,10 @@ export function CsvStageAndLoadPanel({
       );
       return;
     }
-    // Re-send guard: after a successful send, applyStagedSuccess replaces the
-    // map lines with the rover's densified staged waypoints. Sending THOSE
-    // would re-plan rover output as survey geometry (every 5 cm waypoint
-    // becomes a source vertex — field 2026-07-29 staged must_hit=122/123 and
-    // scored the day's worst curve RMS). Require a fresh import instead.
+    // Re-send guard: if the map is already rover densified (recovery / an older
+    // Send that hydrated waypoints), refuse — re-planning those 5 cm points as
+    // survey vertices staged must_hit=122/123 (2026-07-29). Fresh Send leaves
+    // original DXF/CSV segments in `lines`, so this only trips on stale geometry.
     if (appTrajectory.paintedLines.some((l) => isStagedHydrationLineId(l.id))) {
       Alert.alert(
         "Already staged — re-import to send again",
@@ -460,7 +416,6 @@ export function CsvStageAndLoadPanel({
         Alert.alert("Empty trajectory", detail);
         return;
       }
-      const preSendExtensions = buildCsvExtensionLines(appTrajectory.paintedLines, extCfg);
       const sourcePainted = appTrajectory.paintedLines;
 
       const result = await planAndStageAppTrajectory(apiBaseUrl, {
@@ -483,7 +438,7 @@ export function CsvStageAndLoadPanel({
         return;
       }
 
-      // Freeze source geometry after success — map hydration will replace lines with densified path.
+      // Freeze source geometry after success — Start restages from this snapshot.
       if (resolvedOriginGps) {
         onAppPlannedStartSnapshot?.(
           buildAppPlannedStartSnapshot({
@@ -503,9 +458,7 @@ export function CsvStageAndLoadPanel({
           plan: result.plan,
           stagedInspection: result.stagedInspection,
         },
-        result.echoVerification == null || result.echoVerification.ok,
-        preSendExtensions,
-        sourcePainted
+        result.echoVerification == null || result.echoVerification.ok
       );
     } catch (err) {
       const message = err instanceof Error && err.message ? err.message : "Could not send the path.";
@@ -570,9 +523,7 @@ export function CsvStageAndLoadPanel({
           plan: result.plan,
           stagedInspection: result.stagedInspection,
         },
-        true,
-        [],
-        lines
+        true
       );
     } catch (err) {
       const message = err instanceof Error && err.message ? err.message : "Could not send the path.";

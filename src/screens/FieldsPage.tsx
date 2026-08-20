@@ -304,6 +304,21 @@ export type FieldsPageProps = {
 
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
 
+/** Committed (verified) geometry plus every pending metric DXF still awaiting Fix Alignment. */
+function mergePendingDxfLines(
+  committedBase: PlanLine[],
+  pending: Record<string, { rawLines?: PlanLine[] } | undefined>
+): PlanLine[] {
+  const pendingRaw: PlanLine[] = [];
+  for (const entry of Object.values(pending)) {
+    if (entry?.rawLines?.length) pendingRaw.push(...entry.rawLines);
+  }
+  if (pendingRaw.length === 0) return committedBase;
+  const boundary = committedBase.filter((l) => l.layer === "virtual_boundary");
+  const committed = committedBase.filter((l) => l.layer !== "virtual_boundary");
+  return [...boundary, ...committed, ...pendingRaw];
+}
+
 export function FieldsPage(props: FieldsPageProps) {
   const {
     importedPlan,
@@ -957,39 +972,33 @@ export function FieldsPage(props: FieldsPageProps) {
     ]
   );
 
-  /** Map shows committed mission lines + selected (or sole) pending metric DXF. */
-  const mapDisplayLines = useMemo(() => {
-    // Prefer mission-layer-filtered geometry for committed marks when provided.
-    const committedBase = missionVisibleLines ?? lines;
-    const pendingIds = Object.keys(pendingDxfAlignment);
-    if (pendingIds.length === 0) return committedBase;
-    let pendingRaw: PlanLine[] = [];
-    if (selectedUploadedFileId && pendingDxfAlignment[selectedUploadedFileId]) {
-      pendingRaw = pendingDxfAlignment[selectedUploadedFileId].rawLines;
-    } else if (selectMarkPlanLines(lines).length === 0) {
-      // Nothing committed yet — show all pending so the map is not empty after upload.
-      pendingRaw = pendingIds.flatMap((id) => pendingDxfAlignment[id]?.rawLines ?? []);
-    } else if (activeStep === "align" && selectedPending) {
-      pendingRaw = selectedPending.rawLines;
-    }
-    if (pendingRaw.length === 0) return committedBase;
-    const boundary = committedBase.filter((l) => l.layer === "virtual_boundary");
-    const committed = committedBase.filter((l) => l.layer !== "virtual_boundary");
-    return [...boundary, ...committed, ...pendingRaw];
-  }, [
-    lines,
-    missionVisibleLines,
-    pendingDxfAlignment,
-    selectedUploadedFileId,
-    selectedPending,
-    activeStep,
-  ]);
+  /** Map shows committed mission lines + every pending metric DXF (not only the selected file). */
+  const mapDisplayLines = useMemo(
+    () => mergePendingDxfLines(missionVisibleLines ?? lines, pendingDxfAlignment),
+    [lines, missionVisibleLines, pendingDxfAlignment]
+  );
+
+  /** Raw (pre-auto-origin-shift) copy so Mapbox still sees sibling plans while aligning. */
+  const mapSourceWithPending = useMemo(
+    () =>
+      mergePendingDxfLines(
+        missionVisibleMapSourceLines ?? mapSourceLines ?? [],
+        pendingDxfAlignment
+      ),
+    [missionVisibleMapSourceLines, mapSourceLines, pendingDxfAlignment]
+  );
 
   const mapDisplayWithoutEditingTemplate = useMemo(() => {
     if (!selectedTemplate || !templateToolsOn) return mapDisplayLines;
     const token = `${selectedTemplate.lineIdPrefix}__`;
     return mapDisplayLines.filter((line) => !line.id.startsWith(token));
   }, [mapDisplayLines, selectedTemplate, templateToolsOn]);
+
+  const mapSourceWithoutEditingTemplate = useMemo(() => {
+    if (!selectedTemplate || !templateToolsOn) return mapSourceWithPending;
+    const token = `${selectedTemplate.lineIdPrefix}__`;
+    return mapSourceWithPending.filter((line) => !line.id.startsWith(token));
+  }, [mapSourceWithPending, selectedTemplate, templateToolsOn]);
 
   /**
    * Keep App's plan-manipulation handlers pointed at the geometry actually on screen.
@@ -1219,7 +1228,7 @@ export function FieldsPage(props: FieldsPageProps) {
           mapSourceLines:
             anchorSelectMode && anchorTarget
               ? anchorIsolatedLines
-              : missionVisibleMapSourceLines ?? mapSourceLines,
+              : mapSourceWithoutEditingTemplate,
           anchorCandidates: anchorSelectMode ? anchorCandidates : undefined,
           onAnchorCandidateSelect,
           autoOriginReference,

@@ -285,7 +285,9 @@ export function PathOrderAndSprayStep({
       onWorkflowStep?.("loaded", "pending");
 
       setLoadStep("loadMission");
-      const loaded = await onLoadSelectedPath(missionId);
+      // Do not replace operator DXF/CSV segments with densified rover-path-N
+      // strokes — Path Order spray toggles must stay per original entity.
+      const loaded = await onLoadSelectedPath(missionId, { skipMapHydration: true });
       if (!loaded) {
         return;
       }

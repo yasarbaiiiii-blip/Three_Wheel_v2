@@ -390,8 +390,10 @@ const RtkStreamPill = ({ mode, streaming, healthy, onPress }) => {
   );
 };
 
-const NAV_WIDTH_COLLAPSED = 72;
-const NAV_WIDTH_EXPANDED = 248;
+const NAV_ICON_SIZE = 44;
+const NAV_PAD_H = 14;
+const NAV_WIDTH_COLLAPSED = NAV_PAD_H * 2 + NAV_ICON_SIZE;
+const NAV_WIDTH_EXPANDED = 252;
 const NAV_WIDTH_COMPACT = 56;
 
 const NAV_HEIGHT_COMPACT = 56;
@@ -707,7 +709,8 @@ export default function ModernHomeUI(props) {
   const [quickAccessAnchor, setQuickAccessAnchor] = useState(QUICK_ACCESS_ANCHOR_FALLBACK);
   const navWidth = useSharedValue(NAV_WIDTH_COLLAPSED);
   const navHeight = useSharedValue(NAV_HEIGHT_FULL);
-  const navBgOpacity = useSharedValue(1);
+  const navExpandProgress = useSharedValue(0);
+  const navCompactProgress = useSharedValue(0);
   const quickAccessSubNavProgress = useSharedValue(0);
   const { height: windowHeight } = useWindowDimensions();
   // Usable rail height after the top gap, the gap between the two panels,
@@ -890,24 +893,20 @@ export default function ModernHomeUI(props) {
   }, [isHomePage, mapFullscreen]);
 
   const collapseNavbar = useCallback(() => {
-    setNavIconsVisible(false);
     setNavExpanded(false);
     setQuickAccessExpanded(false);
   }, []);
 
   useEffect(() => {
-    const isCompact = !navIconsVisible;
-    const targetWidth = isCompact
-      ? NAV_WIDTH_COMPACT
-      : navExpanded
-        ? NAV_WIDTH_EXPANDED
-        : NAV_WIDTH_COLLAPSED;
-    const targetHeight = isCompact ? NAV_HEIGHT_COMPACT : NAV_HEIGHT_FULL;
+    if (!navIconsVisible) setNavIconsVisible(true);
+  }, [navIconsVisible]);
 
+  useEffect(() => {
+    const targetWidth = navExpanded ? NAV_WIDTH_EXPANDED : NAV_WIDTH_COLLAPSED;
     navWidth.value = withTiming(targetWidth, NAV_TIMING);
-    navHeight.value = withTiming(targetHeight, NAV_TIMING);
-    navBgOpacity.value = withTiming(isCompact ? 0 : 1, NAV_TIMING);
-  }, [navExpanded, navIconsVisible, navWidth, navHeight, navBgOpacity]);
+    navHeight.value = withTiming(NAV_HEIGHT_FULL, NAV_TIMING);
+    navExpandProgress.value = withTiming(navExpanded ? 1 : 0, NAV_TIMING);
+  }, [navExpanded, navWidth, navHeight, navExpandProgress]);
 
   useEffect(() => {
     setActiveNav(PAGE_TO_NAV[currentPage] || "main");
@@ -1032,8 +1031,11 @@ export default function ModernHomeUI(props) {
   const navAnimatedStyle = useAnimatedStyle(() => ({
     width: navWidth.value,
     height: navHeight.value,
-    backgroundColor: navBgOpacity.value > 0.01 ? COLORS.navSolid : "transparent",
-    borderColor: navBgOpacity.value > 0.01 ? COLORS.panelBorder : "transparent",
+    paddingVertical: 12,
+    paddingHorizontal: NAV_PAD_H,
+    borderRadius: 22,
+    backgroundColor: COLORS.navSolid,
+    borderColor: COLORS.panelBorder,
   }));
 
   const compassAnimatedStyle = useAnimatedStyle(() => ({
@@ -1055,22 +1057,9 @@ export default function ModernHomeUI(props) {
   }));
 
   const handleMenuPress = useCallback(() => {
-    const now = Date.now();
-    const isDoubleTap = now - lastMenuTapRef.current < DOUBLE_TAP_MS;
-    lastMenuTapRef.current = now;
-
-    if (isDoubleTap) {
-      collapseNavbar();
-      return;
-    }
-
-    if (!navIconsVisible) {
-      setNavIconsVisible(true);
-      return;
-    }
-
+    lastMenuTapRef.current = Date.now();
     setNavExpanded((v) => !v);
-  }, [collapseNavbar, navIconsVisible]);
+  }, []);
 
   const handleEStop = () => {
     if (onEstopVehicle) onEstopVehicle();
@@ -1177,13 +1166,8 @@ export default function ModernHomeUI(props) {
   }, [rtkConnecting, rtkRunning, startLora]);
 
   const handleQuickAccessPress = useCallback(() => {
-    if (!navIconsVisible) {
-      setNavIconsVisible(true);
-      setQuickAccessExpanded(true);
-      return;
-    }
     setQuickAccessExpanded((v) => !v);
-  }, [navIconsVisible]);
+  }, []);
 
   const handleToggleMissionPanel = useCallback(() => {
     setShowMissionControl((v) => !v);
@@ -1660,19 +1644,9 @@ export default function ModernHomeUI(props) {
   };
 
   const handleNavItemPress = useCallback((id) => {
-    const now = Date.now();
-    const isDoubleTap =
-      lastNavTapRef.current.id === id &&
-      now - lastNavTapRef.current.time < DOUBLE_TAP_MS;
-    lastNavTapRef.current = { id, time: now };
-
-    if (isDoubleTap) {
-      collapseNavbar();
-      return;
-    }
-
+    lastNavTapRef.current = { id, time: Date.now() };
     handleNavPress(id);
-  }, [collapseNavbar, onNav]);
+  }, [onNav]);
 
   const onCycleMapStyle = useCallback(() => {
     setMapStyleIndex((prev) => (prev + 1) % MAPBOX_STYLES.length);
@@ -1685,6 +1659,8 @@ export default function ModernHomeUI(props) {
   const renderNavbar = () => (
     <Navbar
       navAnimatedStyle={navAnimatedStyle}
+      navExpandProgress={navExpandProgress}
+      navCompactProgress={navCompactProgress}
       navIconsVisible={navIconsVisible}
       navExpanded={navExpanded}
       isHomePage={isHomePage}
@@ -2335,9 +2311,12 @@ const styles = StyleSheet.create({
     paddingRight: 10,
     borderRadius: 999,
     backgroundColor: "transparent",
+    borderWidth: 1,
+    borderColor: "transparent",
   },
   mapToolChipOn: {
-    backgroundColor: COLORS.accentBrand,
+    backgroundColor: "rgba(255,255,255,0.07)",
+    borderColor: "rgba(244, 193, 12, 0.42)",
   },
   mapToolChipIcon: {
     width: 28,
@@ -2348,7 +2327,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(244, 193, 12, 0.12)",
   },
   mapToolChipIconOn: {
-    backgroundColor: "rgba(28, 28, 28, 0.16)",
+    backgroundColor: COLORS.accentBrand,
   },
   mapToolChipLabel: {
     color: COLORS.textMain,
@@ -2357,7 +2336,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.15,
   },
   mapToolChipLabelOn: {
-    color: COLORS.accentText,
+    color: COLORS.accentBrand,
   },
   focusToolBtnGrouped: {
     flexDirection: "row",
@@ -2984,113 +2963,83 @@ const styles = StyleSheet.create({
     position: "absolute",
     left: 20,
     top: 20,
-    borderRadius: 20,
+    borderRadius: 22,
     borderWidth: 1,
-    paddingVertical: 14,
-    paddingHorizontal: 10,
+    paddingVertical: 12,
+    paddingHorizontal: NAV_PAD_H,
     justifyContent: "flex-start",
-    gap: 8,
+    gap: 6,
     ...SHADOWS.panel,
     overflow: "hidden",
     zIndex: 90,
   },
-  navbarCompact: {
-    paddingVertical: 0,
-    paddingHorizontal: 0,
-    borderRadius: 14,
-    borderWidth: 0,
-    shadowOpacity: 0,
-    elevation: 0,
+  navRest: {
+    flex: 1,
+    overflow: "visible",
+    gap: 4,
   },
   navMenuGroup: {
-    gap: 6,
-    marginBottom: 2,
-    alignItems: "center",
-  },
-  navMenuGroupCompact: {
-    marginBottom: 0,
     gap: 0,
+    marginBottom: 2,
+    alignItems: "stretch",
+    width: "100%",
   },
   navMenuPressable: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 8,
-    paddingHorizontal: 6,
-    borderRadius: 14,
-    gap: 12,
-    width: "100%",
-  },
-  navMenuPressableCompact: {
-    paddingVertical: 0,
+    paddingVertical: 4,
     paddingHorizontal: 0,
-    width: NAV_WIDTH_COMPACT,
-    height: NAV_HEIGHT_COMPACT,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  navMenuCollapsed: {
-    alignItems: "center",
-    width: "100%",
-  },
-  navIconWrapCompact: {
-    width: NAV_WIDTH_COMPACT,
-    height: NAV_HEIGHT_COMPACT,
     borderRadius: 14,
-    backgroundColor: COLORS.navSolid,
-    borderColor: COLORS.panelBorder,
-    ...SHADOWS.panel,
+    gap: 0,
+    width: "100%",
+    overflow: "visible",
   },
   navFieldMarkerLabel: {
-    color: COLORS.textMuted,
-    fontSize: 9,
-    fontWeight: "700",
-    letterSpacing: 0.6,
-    textAlign: "center",
-    textTransform: "uppercase",
-    paddingHorizontal: 4,
-    lineHeight: 12,
-  },
-  navFieldMarkerLabelExpanded: {
-    alignSelf: "flex-start",
-    paddingLeft: 14,
-    fontSize: 10,
     color: COLORS.textDim,
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 1.1,
+    textAlign: "left",
+    textTransform: "uppercase",
+    paddingLeft: 2,
+    lineHeight: 14,
+    marginBottom: 8,
   },
   navGroupSeparator: {
     height: 1,
     backgroundColor: COLORS.panelBorder,
-    marginHorizontal: 10,
+    marginHorizontal: 2,
     alignSelf: "stretch",
   },
   navSection: { gap: 4 },
   navItem: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 8,
-    paddingHorizontal: 6,
-    borderRadius: 14,
-    gap: 12,
-  },
-  navItemExpanded: {
     justifyContent: "flex-start",
+    paddingVertical: 4,
+    paddingHorizontal: 0,
+    borderRadius: 14,
+    gap: 0,
     width: "100%",
+    overflow: "visible",
   },
   navItemActive: {
-    backgroundColor: COLORS.accentMuted,
-    borderWidth: 1,
-    borderColor: COLORS.accentBorder,
+    backgroundColor: "rgba(255,255,255,0.06)",
+  },
+  navItemDanger: {
+    backgroundColor: "transparent",
   },
 
   navIconWrap: {
-    width: 42,
-    height: 42,
-    borderRadius: 12,
+    width: NAV_ICON_SIZE,
+    height: NAV_ICON_SIZE,
+    borderRadius: 13,
     backgroundColor: COLORS.cardSolid,
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
     alignItems: "center",
     justifyContent: "center",
+    flexShrink: 0,
   },
   navIconWrapActive: {
     backgroundColor: COLORS.accentBrand,
@@ -3104,11 +3053,12 @@ const styles = StyleSheet.create({
     borderColor: COLORS.dangerBorder,
   },
   navLabelWrap: {
-    flex: 1,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingRight: 6,
+    overflow: "hidden",
+    gap: 8,
+    height: 44,
   },
   navLabel: { color: COLORS.textMuted, fontSize: 13, fontWeight: "600" },
   navLabelActive: { color: COLORS.textMain, fontWeight: "700" },
@@ -3122,8 +3072,8 @@ const styles = StyleSheet.create({
   navDivider: {
     height: 1,
     backgroundColor: COLORS.panelBorder,
-    marginVertical: 6,
-    marginHorizontal: 8,
+    marginVertical: 8,
+    marginHorizontal: 2,
   },
   navToolsSection: {
     gap: 4,
