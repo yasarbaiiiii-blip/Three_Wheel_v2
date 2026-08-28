@@ -4218,13 +4218,14 @@ function AppRoot() {
         let poseSource = picked.source;
 
         let startSnapshot = appPlannedStartSnapshot;
-        const layerScoped = !!(selectedStartLayerIds && selectedStartLayerIds.length > 0);
+        const scopedLayerIds = selectedStartLayerIds ?? [];
+        const layerScoped = scopedLayerIds.length > 0;
         if (layerScoped) {
           const scoped = buildLayerScopedStartSnapshot(
             appPlannedStartSnapshot,
             uploadedFiles,
             missionLayers,
-            selectedStartLayerIds
+            scopedLayerIds
           );
           if (!scoped.ok) {
             throw new Error(scoped.error);
@@ -6582,7 +6583,7 @@ function LineDetailsDrawer({
               label="Info"
               value={{
                 label: "Line geometry",
-                value: selectedLine ? `${getLineLengthM(selectedLine).toFixed(2)} m` : "n/a",
+                value: selectedLine ? `${(getLineLengthM(selectedLine) ?? 0).toFixed(2)} m` : "n/a",
                 tone: "#ffffff",
               }}
             />
@@ -6591,7 +6592,7 @@ function LineDetailsDrawer({
           {selectedLine ? (
             <>
               <View style={drawerStyles.stripRow}>
-                <StripMetric label="Length" value={`${getLineLengthM(selectedLine).toFixed(2)} m`} tone="#ffffff" />
+                <StripMetric label="Length" value={`${(getLineLengthM(selectedLine) ?? 0).toFixed(2)} m`} tone="#ffffff" />
                 <StripMetric label="Angle" value={`${lineAngleDeg(selectedLine).toFixed(2)}°`} tone="#ffffff" />
                 <StripMetric label="Width" value={`${selectedLine.width.toFixed(2)} m`} tone="#ffffff" />
               </View>
@@ -7226,10 +7227,48 @@ function SectionPages(props: {
           )}
         />
       ) : null}
-      {page === "swozi" ? <SwoziPage {...props} /> : null}
+      {page === "swozi" ? (
+        <SwoziPage
+          delayA={props.delayA}
+          delayB={props.delayB}
+          setDelayA={props.setDelayA}
+          setDelayB={props.setDelayB}
+          toggleA={props.toggleA}
+          toggleB={props.toggleB}
+          setToggleA={props.setToggleA}
+          setToggleB={props.setToggleB}
+          apiBaseUrl={props.apiBaseUrl}
+          isFloatingEStopEnabled={props.isFloatingEStopEnabled}
+          setIsFloatingEStopEnabled={props.setIsFloatingEStopEnabled}
+        />
+      ) : null}
       {page === "status" ? <StatusPage /> : null}
-      {page === "positioning" ? <PositioningPage {...props} /> : null}
-      {page === "settings" ? <SettingsPage {...props} /> : null}
+      {page === "positioning" ? (
+        <PositioningPage
+          toggleA={props.toggleA}
+          toggleB={props.toggleB}
+          toggleC={props.toggleC}
+          toggleD={props.toggleD}
+          setToggleA={props.setToggleA}
+          setToggleB={props.setToggleB}
+          setToggleC={props.setToggleC}
+          setToggleD={props.setToggleD}
+        />
+      ) : null}
+      {page === "settings" ? (
+        <SettingsPage
+          toggleA={props.toggleA}
+          toggleB={props.toggleB}
+          toggleC={props.toggleC}
+          setToggleA={props.setToggleA}
+          setToggleB={props.setToggleB}
+          setToggleC={props.setToggleC}
+          rtkStatus={props.rtkStatus}
+          stopRtk={props.stopRtk}
+          apiBaseUrl={props.apiBaseUrl}
+          selectedPathName={props.selectedPathName}
+        />
+      ) : null}
       {page === "howto" ? <HowToPage /> : null}
       {page === "about" ? <AboutPage /> : null}
     </View>

@@ -9,7 +9,6 @@ import { BoundaryEditor, PlacedItem } from "../components/BoundaryEditor";
 import { generateAlphabetLines, FontStyle, AlphabetType, NumberType, generateNumberLines, generateTextLines } from "../utils/characterTemplates";
 import { generateRoadSignLines, RoadSignType, ROAD_SIGN_LABELS } from "../utils/roadSignTemplates";
 import { generateTemplateLines, ShapeType, ArcType } from "../utils/shapeTemplates";
-import { generateSportsFieldLines, SportsFieldType, SPORTS_FIELD_LABELS, SPORTS_FIELD_BOUNDS } from "../utils/sportsFieldTemplates";
 import { linesToDxf } from "../utils/dxfGenerator";
 import { DesignDocument, DesignNode, isDesignInstance, isDesignEntity, createDesignDocument, createDesignInstance, createDesignEntity, createDesignVertex, DesignPreviewAnchor } from "../types/designDocument";
 import { TemplateRegistry, createTemplateDefinition, snapshotTemplateId } from "../utils/designTemplateRegistry";
@@ -315,13 +314,12 @@ export function TemplatesPage(props: TemplatesPageProps) {
   const [boundaryPosition, setBoundaryPosition] = useState({ x: 0, y: 0 });
   const [activeSnapPointId, setActiveSnapPointId] = useState<string | null>(null);
   
-  const [category, setCategory] = useState<"shapes" | "alphabets" | "numbers" | "road_signs" | "sports_fields" | "characters">("shapes");
+  const [category, setCategory] = useState<"shapes" | "alphabets" | "numbers" | "road_signs" | "characters">("shapes");
   const [fontStyle, setFontStyle] = useState<FontStyle>("smooth");
   const [shape, setShape] = useState<ShapeType>("square");
   const [selectedLetter, setSelectedLetter] = useState<AlphabetType>("A");
   const [selectedDigit, setSelectedDigit] = useState<NumberType>("0");
   const [selectedSign, setSelectedSign] = useState<RoadSignType>("am_01");
-  const [selectedField, setSelectedField] = useState<SportsFieldType>("cricket_icc");
   const [arcType, setArcType] = useState<ArcType>("full");
   const [sizeInput, setSizeInput] = useState("1.0");
   const [isParsing, setIsParsing] = useState(false);
@@ -337,14 +335,6 @@ export function TemplatesPage(props: TemplatesPageProps) {
   const [showBoundaryPoints, setShowBoundaryPoints] = useState(false);
 
   const parsedSize = Math.max(0.1, parseFloat(sizeInput) || 1.0);
-
-  useEffect(() => {
-    if (category === "sports_fields" && SPORTS_FIELD_BOUNDS[selectedField]) {
-      const bounds = SPORTS_FIELD_BOUNDS[selectedField];
-      const naturalSize = Math.max(bounds.naturalWidth, bounds.naturalHeight);
-      setSizeInput(naturalSize.toFixed(2));
-    }
-  }, [category, selectedField]);
 
   // PENDING values from text inputs
   const pendingWidth = parseFloat(boundaryWidthStr) || 4.0;
@@ -540,10 +530,9 @@ export function TemplatesPage(props: TemplatesPageProps) {
     if (category === "alphabets") return generateAlphabetLines(selectedLetter, parsedSize, fontStyle);
     if (category === "numbers") return generateNumberLines(selectedDigit, parsedSize, fontStyle);
     if (category === "road_signs") return generateRoadSignLines(selectedSign, parsedSize);
-    if (category === "sports_fields") return generateSportsFieldLines(selectedField, parsedSize);
     if (category === "characters") return generateTextLines(previewText, parsedSize, fontStyle, pendingCharSpacingCm / 100);
     return [];
-  }, [category, shape, selectedLetter, selectedDigit, selectedSign, selectedField, parsedSize, arcType, fontStyle, previewText, pendingCharSpacingCm]);
+  }, [category, shape, selectedLetter, selectedDigit, selectedSign, parsedSize, arcType, fontStyle, previewText, pendingCharSpacingCm]);
 
 
 
@@ -568,18 +557,6 @@ export function TemplatesPage(props: TemplatesPageProps) {
     const newHeight = bounds.height;
     
     // Boundary size validation ONLY for sports fields
-    if (category === "sports_fields") {
-      const safeW = bw - 2 * indent;
-      const safeH = bh - 2 * indent;
-      if (newWidth > safeW || newHeight > safeH) {
-        Alert.alert(
-          "Cannot Add Sports Field",
-          `This field (${newWidth.toFixed(1)}m × ${newHeight.toFixed(1)}m) is larger than your available boundary space (${safeW.toFixed(1)}m × ${safeH.toFixed(1)}m).\n\nPlease increase your boundary size first.`
-        );
-        return; // Block addition
-      }
-    }
-    
     let newX = 0;
     let newY = 0;
     
@@ -985,8 +962,6 @@ export function TemplatesPage(props: TemplatesPageProps) {
           return `Letter_${selectedLetter}_${fontStyle}_${parsedSize}m`;
         } else if (category === "numbers") {
           return `Number_${selectedDigit}_${fontStyle}_${parsedSize}m`;
-        } else if (category === "sports_fields") {
-          return `Sports_Field_${selectedField}_${parsedSize}m`;
         } else if (category === "characters") {
           return `Text_${previewText || "Empty"}_${parsedSize}m`;
         } else {
@@ -1043,19 +1018,7 @@ export function TemplatesPage(props: TemplatesPageProps) {
     
     const newWidth = bounds.width;
     const newHeight = bounds.height;
-    
-    if (category === "sports_fields") {
-      const safeW = bw - 2 * indent;
-      const safeH = bh - 2 * indent;
-      if (newWidth > safeW || newHeight > safeH) {
-        Alert.alert(
-          "Cannot Add Sports Field",
-          `This field (${newWidth.toFixed(1)}m × ${newHeight.toFixed(1)}m) is larger than your available boundary space (${safeW.toFixed(1)}m × ${safeH.toFixed(1)}m).\n\nPlease increase your boundary size first.`
-        );
-        return;
-      }
-    }
-    
+
     const newItem: PlacedItem = {
       id: "item-" + Date.now(),
       lines: previewLines,
@@ -1286,7 +1249,7 @@ export function TemplatesPage(props: TemplatesPageProps) {
                 Category
               </Text>
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
-                {(["shapes", "alphabets", "numbers", "road_signs", "sports_fields", "characters"] as const).map((c) => (
+                {(["shapes", "alphabets", "numbers", "road_signs", "characters"] as const).map((c) => (
                   <Pressable
                     key={c}
                     onPress={() => setCategory(c)}
@@ -1307,38 +1270,6 @@ export function TemplatesPage(props: TemplatesPageProps) {
                 ))}
               </View>
             </View>
-
-            {category === "sports_fields" && (
-              <View style={{ borderRadius: 14, padding: 14, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d8e1eb" }}>
-                <Text style={{ color: "#64748b", fontSize: 11, fontWeight: "800", letterSpacing: 1, textTransform: "uppercase", marginBottom: 12 }}>
-                  Sports Fields
-                </Text>
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                  {(Object.keys(SPORTS_FIELD_LABELS) as SportsFieldType[]).map((f) => (
-                    <Pressable
-                      key={f}
-                      onPress={() => setSelectedField(f)}
-                      style={{
-                        flexBasis: "47%",
-                        padding: 12,
-                        borderRadius: 12,
-                        backgroundColor: selectedField === f ? "#0f172a" : "#f1f5f9",
-                        borderWidth: 1,
-                        borderColor: selectedField === f ? "#0f172a" : "#e2e8f0",
-                        alignItems: "center",
-                      }}
-                    >
-                      <Text style={{ color: selectedField === f ? "#ffffff" : "#475569", fontSize: 12, fontWeight: "700", textAlign: "center" }}>
-                        {SPORTS_FIELD_LABELS[f]}
-                      </Text>
-                      <Text style={{ color: selectedField === f ? "#94a3b8" : "#94a3b8", fontSize: 10, marginTop: 2, textAlign: "center" }}>
-                        {SPORTS_FIELD_BOUNDS[f].naturalWidth}m × {SPORTS_FIELD_BOUNDS[f].naturalHeight}m
-                      </Text>
-                    </Pressable>
-                  ))}
-                </View>
-              </View>
-            )}
 
             {category === "characters" && (
               <View style={{ borderRadius: 14, padding: 14, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d8e1eb", gap: 12 }}>
@@ -1538,7 +1469,7 @@ export function TemplatesPage(props: TemplatesPageProps) {
                     <Slider
                       style={{ width: "100%", height: 40 }}
                       minimumValue={0.1}
-                      maximumValue={category === "sports_fields" ? 500.0 : 15.0}
+                      maximumValue={15.0}
                       step={0.1}
                       value={parsedSize}
                       onValueChange={(val) => setSizeInput(val.toFixed(2))}

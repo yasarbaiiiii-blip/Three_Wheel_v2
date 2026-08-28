@@ -193,9 +193,9 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     width: "100%",
-    height: 56,
-    paddingHorizontal: 16,
-    gap: 13,
+    height: 50,
+    paddingHorizontal: 14,
+    gap: 11,
     backgroundColor: "transparent",
   },
   headerRowOpen: {
@@ -268,9 +268,9 @@ const styles = StyleSheet.create({
     minHeight: 0,
   },
   bodyInner: {
-    paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 16,
-    gap: 12,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 14,
+    gap: 10,
   },
 });

@@ -79,7 +79,7 @@ export function PlanOffsetCard({
           </Text>
           <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
             {offsetMode === "buffer"
-              ? "Expand or shrink the marks by a distance. Local only — not saved to the rover."
+              ? "Inner shrinks toward the center; Outer expands away. Local only — not saved to the rover."
               : "Pick a scope and distance, then drag the dial to aim. Local only — not saved to the rover."}
           </Text>
         </View>
@@ -95,7 +95,7 @@ export function PlanOffsetCard({
             onPress={() => onOffsetModeChange("buffer")}
             style={{ flex: 1, paddingVertical: 6, alignItems: "center", backgroundColor: offsetMode === "buffer" ? FIELDS_COLORS.pillSecondary : "transparent", borderRadius: 4 }}
           >
-            <Text style={{ fontSize: 12, fontWeight: "700", color: offsetMode === "buffer" ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted }}>In / Out (Buffer)</Text>
+            <Text style={{ fontSize: 12, fontWeight: "700", color: offsetMode === "buffer" ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted }}>Inner / Outer</Text>
           </Pressable>
         </View>
 
@@ -105,13 +105,13 @@ export function PlanOffsetCard({
               onPress={() => onOffsetBufferDirectionChange("out")}
               style={{ flex: 1, paddingVertical: 6, alignItems: "center", backgroundColor: offsetBufferDirection === "out" ? FIELDS_COLORS.pillSecondary : "transparent", borderRadius: 4 }}
             >
-              <Text style={{ fontSize: 12, fontWeight: "700", color: offsetBufferDirection === "out" ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted }}>Out</Text>
+              <Text style={{ fontSize: 12, fontWeight: "700", color: offsetBufferDirection === "out" ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted }}>Outer</Text>
             </Pressable>
             <Pressable
               onPress={() => onOffsetBufferDirectionChange("in")}
               style={{ flex: 1, paddingVertical: 6, alignItems: "center", backgroundColor: offsetBufferDirection === "in" ? FIELDS_COLORS.pillSecondary : "transparent", borderRadius: 4 }}
             >
-              <Text style={{ fontSize: 12, fontWeight: "700", color: offsetBufferDirection === "in" ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted }}>In</Text>
+              <Text style={{ fontSize: 12, fontWeight: "700", color: offsetBufferDirection === "in" ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted }}>Inner</Text>
             </Pressable>
           </View>
         )}

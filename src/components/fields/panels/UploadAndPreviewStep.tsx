@@ -268,6 +268,10 @@ export function UploadAndPreviewStep({
   onUnassignFileFromLayer,
   offsetDistanceM = 0,
   offsetBearingDeg = 0,
+  offsetMode = "shift",
+  onOffsetModeChange,
+  offsetBufferDirection = "out",
+  onOffsetBufferDirectionChange,
   onOffsetDistanceChange,
   onOffsetBearingChange,
   onApplyOffset,
@@ -433,9 +437,9 @@ export function UploadAndPreviewStep({
     onCsvExtensionConfigChange != null &&
     csvExtensionConfig != null &&
     !!importedPlan;
-  /** Offset lives in the same slot/conditions as Extension — both are whole-plan,
-   * client-side-only adjustments applied before Path Order/Send. */
-  const showOffsetCard = (showCsvExtension || showLocalDxfExtension) && onApplyOffset != null;
+  /** Offset is always on the Upload step when the parent wired Apply — 360 shift
+   * and inner/outer buffer are local plan edits, not tied to Extension. */
+  const showOffsetCard = onApplyOffset != null;
 
   // Backend path preview for rover DXF / waypoints only — never local CSV or local DXF.
   useEffect(() => {
@@ -1645,10 +1649,10 @@ export function UploadAndPreviewStep({
         visible={showOffsetCard}
         offsetDistanceM={offsetDistanceM}
         offsetBearingDeg={offsetBearingDeg}
-        offsetMode={props.offsetMode ?? "shift"}
-        onOffsetModeChange={props.onOffsetModeChange ?? (() => {})}
-        offsetBufferDirection={props.offsetBufferDirection ?? "out"}
-        onOffsetBufferDirectionChange={props.onOffsetBufferDirectionChange ?? (() => {})}
+        offsetMode={offsetMode}
+        onOffsetModeChange={onOffsetModeChange ?? (() => {})}
+        offsetBufferDirection={offsetBufferDirection}
+        onOffsetBufferDirectionChange={onOffsetBufferDirectionChange ?? (() => {})}
         onOffsetDistanceChange={onOffsetDistanceChange ?? (() => {})}
         onOffsetBearingChange={onOffsetBearingChange ?? (() => {})}
         onApplyOffset={onApplyOffset ?? (() => {})}

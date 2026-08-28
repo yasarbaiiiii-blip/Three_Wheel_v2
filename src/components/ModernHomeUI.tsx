@@ -16,6 +16,7 @@ import * as pathApi from "../api/pathApi";
 import { MissionLayerPills } from "./fields/MissionLayerPills";
 import { nonEmptyMissionLayers } from "../utils/missionLayerAssignment";
 import { EMPTY_RTK_STATUS, hasLiveCorrections, rtkStatusLabel } from "../api/rtkStatus";
+import { AppErrorBoundary } from "./AppErrorBoundary";
 
 // Using 127.0.0.1:5001 as fallback if window location is unavailable
 const getApiBase = () => {
@@ -652,7 +653,7 @@ export default function ModernHomeUI(props) {
   const {
     lines = [], importedPlan, systemHealth, telemetrySnapshot, missionRunning,
     onNav, onToggleMenu, onArmVehicle, onSetMode, onEstopVehicle,
-    onStartPlan, onStopPlan, onClearMission, rtkStatus = EMPTY_RTK_STATUS,
+    onStartPlan, onStopPlan, onClearMission, rtkStatus: rtkStatusProp = EMPTY_RTK_STATUS,
     rtkConnecting = false, startLora, selectedLineId, onSelectLine,
     autoOriginEnabled, mapSourceLines, alignedRefPoints, autoOriginReference,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
@@ -677,6 +678,7 @@ export default function ModernHomeUI(props) {
   } = props;
 
   const isHomePage = currentPage === "home";
+  const rtkStatus = rtkStatusProp ?? EMPTY_RTK_STATUS;
   const rtkCorrectionsLive = hasLiveCorrections(rtkStatus);
   const rtkLifecycleLabel = rtkStatusLabel(rtkStatus);
   const canStartLora = !rtkStatus.running && rtkStatus.desired_mode === "idle";
@@ -2084,7 +2086,9 @@ export default function ModernHomeUI(props) {
           style={[styles.sectionContent, sectionContentAnimatedStyle, isFieldsPage && StyleSheet.absoluteFillObject]}
           pointerEvents="box-none"
         >
-          {renderSectionContent()}
+          <AppErrorBoundary name={currentPage || "page"}>
+            {renderSectionContent()}
+          </AppErrorBoundary>
         </AnimatedReanimated.View>
       ) : null}
       

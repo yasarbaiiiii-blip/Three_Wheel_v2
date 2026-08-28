@@ -719,7 +719,18 @@ export function SettingsPage(props: {
 }) {
   return (
     <Suspense fallback={<ActivityIndicator />}>
-      <ModernSettingsPage {...props} />
+      <ModernSettingsPage
+        rtkStatus={props.rtkStatus}
+        stopRtk={props.stopRtk}
+        toggleA={props.toggleA}
+        toggleB={props.toggleB}
+        toggleC={props.toggleC}
+        setToggleA={props.setToggleA}
+        setToggleB={props.setToggleB}
+        setToggleC={props.setToggleC}
+        apiBaseUrl={props.apiBaseUrl}
+        selectedPathName={props.selectedPathName}
+      />
     </Suspense>
   );
 }

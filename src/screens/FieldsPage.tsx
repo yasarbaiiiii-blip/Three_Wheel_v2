@@ -1397,21 +1397,21 @@ export function FieldsPage(props: FieldsPageProps) {
       <View
         style={{
           position: "absolute",
-          right: 12,
-          top: 12,
-          bottom: 12,
-          width: 360,
-          maxWidth: "36%",
+          right: 10,
+          top: 10,
+          bottom: 10,
+          width: 348,
+          maxWidth: "34%",
           backgroundColor: FIELDS_COLORS.panelSolid,
-          borderRadius: 16,
+          borderRadius: 20,
           borderWidth: 1,
-          borderColor: FIELDS_COLORS.panelBorder,
+          borderColor: "rgba(255,255,255,0.06)",
           overflow: "hidden",
-          elevation: 12,
+          elevation: 16,
           shadowColor: "#000",
-          shadowOffset: { width: 0, height: 8 },
-          shadowOpacity: 0.4,
-          shadowRadius: 18,
+          shadowOffset: { width: 0, height: 10 },
+          shadowOpacity: 0.45,
+          shadowRadius: 22,
           zIndex: 10,
         }}
       >
@@ -1424,10 +1424,10 @@ export function FieldsPage(props: FieldsPageProps) {
           style={{
             flex: 1,
             minHeight: 0,
-            paddingHorizontal: 14,
-            paddingTop: 12,
-            paddingBottom: 16,
-            gap: 8,
+            paddingHorizontal: 12,
+            paddingTop: 10,
+            paddingBottom: 12,
+            gap: 6,
           }}
         >
           {/*
@@ -1454,10 +1454,10 @@ export function FieldsPage(props: FieldsPageProps) {
           style={{
             flex: 1,
             minHeight: 0,
-            paddingHorizontal: 14,
-            paddingTop: 12,
-            paddingBottom: 16,
-            gap: 8,
+            paddingHorizontal: 12,
+            paddingTop: 10,
+            paddingBottom: 12,
+            gap: 6,
           }}
         >
           {/* Same rule as the local column: size to content, shrink only when out of room. */}
@@ -1490,25 +1490,7 @@ export function FieldsPage(props: FieldsPageProps) {
       <TemplatePanel
         apiBaseUrl={apiBaseUrl}
         onRefreshPaths={onRefreshPaths}
-        onSelectPath={(name) => {
-          onSelectPath(name);
-          setShowMapInteraction(true);
-          if (isPlanEditingMode !== true) {
-            onStartPlanEditing?.();
-          }
-          setActiveStep("align");
-          openOnlySection("align");
-        }}
-        boundaryMode={boundaryMode}
-        onToggleBoundaryMode={handleToggleBoundaryMode}
-        boundaryWidthStr={boundaryWidthStr}
-        onChangeBoundaryWidthStr={setBoundaryWidthStr}
-        boundaryHeightStr={boundaryHeightStr}
-        onChangeBoundaryHeightStr={setBoundaryHeightStr}
-        onApplyBoundary={handleApplyBoundary}
-        telemetryPosN={telemetrySnapshot?.pos_n ?? null}
-        telemetryPosE={telemetrySnapshot?.pos_e ?? null}
-        placementMode={isLocalFlow ? "csvLocal" : "dxf"}
+        onSelectPath={onSelectPath}
         canPlace={canPlaceTemplates}
         placeBlockedReason={placeBlockedReason}
         session={tplSession}
@@ -1579,7 +1561,6 @@ export function FieldsPage(props: FieldsPageProps) {
               }
             : undefined
         }
-        onAddLocalTemplateLines={undefined}
         placedTemplates={placedTemplates.map((tpl) => ({ id: tpl.id, fileName: tpl.fileName }))}
         selectedTemplateId={selectedTemplateId}
         onSelectPlacedTemplate={handleSelectPlacedTemplate}
@@ -2068,19 +2049,9 @@ export function FieldsPage(props: FieldsPageProps) {
             expanded={isSectionOpen("templates")}
             onToggle={() => toggleSection("templates")}
             scrollableBody
-            bodyMaxHeight={380}
+            bodyMaxHeight={420}
           >
-            <View
-              style={{
-                borderRadius: 10,
-                backgroundColor: FIELDS_COLORS.surfaceSolid,
-                borderWidth: 1,
-                borderColor: FIELDS_COLORS.panelBorder,
-                padding: 12,
-              }}
-            >
-              {renderTemplatePanel()}
-            </View>
+            {renderTemplatePanel()}
           </FieldsStepCard>
           ) : null}
 

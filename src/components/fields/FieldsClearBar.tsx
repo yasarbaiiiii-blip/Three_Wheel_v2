@@ -43,9 +43,9 @@ const styles = StyleSheet.create({
     backgroundColor: FIELDS_COLORS.navSolid,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: FIELDS_COLORS.panelBorder,
-    paddingHorizontal: FIELDS_LAYOUT.panelPad,
-    paddingTop: 14,
-    paddingBottom: 12,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 10,
   },
   row: {
     flexDirection: "row",
@@ -68,7 +68,7 @@ const styles = StyleSheet.create({
   },
   title: {
     color: FIELDS_COLORS.textMain,
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "700",
     letterSpacing: -0.2,
     lineHeight: 22,
