@@ -89,4 +89,24 @@ describe("computeOffsetResultLines", () => {
     const result = computeOffsetResultLines(lines, files, [], { kind: "universal" }, 0, 90);
     expect(result).toEqual({ ok: false, reason: "zero-distance" });
   });
+
+  it("buffer mode expands only the scoped file, leaves the rest, preserves order", () => {
+    const squareA = seg("north__a1", [0, 0], [0, 10]);
+    const squareB = seg("south__b1", [0, 0], [0, 10]);
+    const result = computeOffsetResultLines(
+      [squareA, squareB],
+      files,
+      [],
+      { kind: "file", fileId: "fa" },
+      1,
+      0,
+      { mode: "buffer", bufferDirection: "out" }
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.lines.map((l) => l.id)).toEqual(["north__a1", "south__b1"]);
+    const untouchedB = result.lines.find((l) => l.id === "south__b1")!;
+    expect(untouchedB.from.x).toBeCloseTo(0, 9);
+    expect(untouchedB.from.y).toBeCloseTo(0, 9);
+  });
 });

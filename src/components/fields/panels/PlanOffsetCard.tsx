@@ -1,23 +1,24 @@
 /**
- * Offset plan — whole-plan rigid shift toward an absolute compass bearing.
- * Fields Upload step, same slot as the Enable Extension card. Presentational
- * only: parent (App.tsx) owns the state and bakes the shift into `lines` on
- * Apply — see planOffset.ts for the geometry and handleApplyOffset in App.tsx.
- *
- * Layout is deliberately scope -> distance -> dial -> Apply/Reset: pick what
- * moves, decide how far, then aim (with the distance already set, the live
- * ghost preview shown while dragging the dial is immediately meaningful).
+ * Offset plan — either a whole-plan rigid shift toward an absolute compass
+ * bearing, or an inner/outer buffer of the marks. Fields Upload step, same
+ * slot as the Enable Extension card. Presentational only: parent (App.tsx)
+ * owns the state and bakes into `lines` on Apply.
  */
 import React, { useEffect, useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 
 import type { AnchorTarget, AnchorTargetOption } from "../../../utils/missionLayerLines";
+import type { PlanBufferDirection, PlanOffsetMode } from "../../../utils/planOffset";
 import { CompassDial } from "../CompassDial";
 import { PlanTargetDropdown } from "../PlanTargetDropdown";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
 export type PlanOffsetCardProps = {
   visible: boolean;
+  offsetMode: PlanOffsetMode;
+  onOffsetModeChange: (mode: PlanOffsetMode) => void;
+  offsetBufferDirection: PlanBufferDirection;
+  onOffsetBufferDirectionChange: (direction: PlanBufferDirection) => void;
   offsetDistanceM: number;
   offsetBearingDeg: number;
   onOffsetDistanceChange: (m: number) => void;
@@ -34,6 +35,10 @@ export type PlanOffsetCardProps = {
 
 export function PlanOffsetCard({
   visible,
+  offsetMode,
+  onOffsetModeChange,
+  offsetBufferDirection,
+  onOffsetBufferDirectionChange,
   offsetDistanceM,
   offsetBearingDeg,
   onOffsetDistanceChange,
@@ -73,9 +78,43 @@ export function PlanOffsetCard({
             Offset Plan
           </Text>
           <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-            Pick a scope and distance, then drag the dial to aim. Local only — not saved to the rover.
+            {offsetMode === "buffer"
+              ? "Expand or shrink the marks by a distance. Local only — not saved to the rover."
+              : "Pick a scope and distance, then drag the dial to aim. Local only — not saved to the rover."}
           </Text>
         </View>
+
+        <View style={{ flexDirection: "row", backgroundColor: FIELDS_COLORS.cardSolid, borderRadius: 6, padding: 3 }}>
+          <Pressable
+            onPress={() => onOffsetModeChange("shift")}
+            style={{ flex: 1, paddingVertical: 6, alignItems: "center", backgroundColor: offsetMode === "shift" ? FIELDS_COLORS.pillSecondary : "transparent", borderRadius: 4 }}
+          >
+            <Text style={{ fontSize: 12, fontWeight: "700", color: offsetMode === "shift" ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted }}>Direction (360)</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => onOffsetModeChange("buffer")}
+            style={{ flex: 1, paddingVertical: 6, alignItems: "center", backgroundColor: offsetMode === "buffer" ? FIELDS_COLORS.pillSecondary : "transparent", borderRadius: 4 }}
+          >
+            <Text style={{ fontSize: 12, fontWeight: "700", color: offsetMode === "buffer" ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted }}>In / Out (Buffer)</Text>
+          </Pressable>
+        </View>
+
+        {offsetMode === "buffer" && (
+          <View style={{ flexDirection: "row", backgroundColor: FIELDS_COLORS.cardSolid, borderRadius: 6, padding: 3 }}>
+            <Pressable
+              onPress={() => onOffsetBufferDirectionChange("out")}
+              style={{ flex: 1, paddingVertical: 6, alignItems: "center", backgroundColor: offsetBufferDirection === "out" ? FIELDS_COLORS.pillSecondary : "transparent", borderRadius: 4 }}
+            >
+              <Text style={{ fontSize: 12, fontWeight: "700", color: offsetBufferDirection === "out" ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted }}>Out</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => onOffsetBufferDirectionChange("in")}
+              style={{ flex: 1, paddingVertical: 6, alignItems: "center", backgroundColor: offsetBufferDirection === "in" ? FIELDS_COLORS.pillSecondary : "transparent", borderRadius: 4 }}
+            >
+              <Text style={{ fontSize: 12, fontWeight: "700", color: offsetBufferDirection === "in" ? FIELDS_COLORS.textMain : FIELDS_COLORS.textMuted }}>In</Text>
+            </Pressable>
+          </View>
+        )}
 
         <PlanTargetDropdown
           options={offsetTargetOptions}
@@ -117,11 +156,13 @@ export function PlanOffsetCard({
           />
         </View>
 
-        <CompassDial
-          bearingDeg={offsetBearingDeg}
-          onBearingChange={onOffsetBearingChange}
-          onDragStateChange={onOffsetDragStateChange}
-        />
+        {offsetMode === "shift" && (
+          <CompassDial
+            bearingDeg={offsetBearingDeg}
+            onBearingChange={onOffsetBearingChange}
+            onDragStateChange={onOffsetDragStateChange}
+          />
+        )}
 
         <Pressable
           onPress={onApplyOffset}

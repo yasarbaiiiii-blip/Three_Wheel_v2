@@ -289,6 +289,10 @@ export type FieldsPageProps = {
   /** Offset plan (whole-plan rigid shift toward an absolute compass bearing) — Upload step, before Path Order. */
   offsetDistanceM?: number;
   offsetBearingDeg?: number;
+  offsetMode?: "shift" | "buffer";
+  onOffsetModeChange?: (mode: "shift" | "buffer") => void;
+  offsetBufferDirection?: "out" | "in";
+  onOffsetBufferDirectionChange?: (direction: "out" | "in") => void;
   onOffsetDistanceChange?: (m: number) => void;
   onOffsetBearingChange?: (deg: number) => void;
   onApplyOffset?: () => void;
@@ -1755,6 +1759,10 @@ export function FieldsPage(props: FieldsPageProps) {
               extensionStatus={extensionStatus}
               offsetDistanceM={offsetDistanceM}
               offsetBearingDeg={offsetBearingDeg}
+              offsetMode={props.offsetMode}
+              onOffsetModeChange={props.onOffsetModeChange}
+              offsetBufferDirection={props.offsetBufferDirection}
+              onOffsetBufferDirectionChange={props.onOffsetBufferDirectionChange}
               onOffsetDistanceChange={onOffsetDistanceChange}
               onOffsetBearingChange={onOffsetBearingChange}
               onApplyOffset={onApplyOffset}

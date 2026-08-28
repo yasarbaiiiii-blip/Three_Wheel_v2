@@ -104,6 +104,10 @@ type UploadAndPreviewStepProps = {
    */
   offsetDistanceM?: number;
   offsetBearingDeg?: number;
+  offsetMode?: "shift" | "buffer";
+  onOffsetModeChange?: (mode: "shift" | "buffer") => void;
+  offsetBufferDirection?: "out" | "in";
+  onOffsetBufferDirectionChange?: (direction: "out" | "in") => void;
   onOffsetDistanceChange?: (m: number) => void;
   onOffsetBearingChange?: (deg: number) => void;
   onApplyOffset?: () => void;
@@ -1641,6 +1645,10 @@ export function UploadAndPreviewStep({
         visible={showOffsetCard}
         offsetDistanceM={offsetDistanceM}
         offsetBearingDeg={offsetBearingDeg}
+        offsetMode={props.offsetMode ?? "shift"}
+        onOffsetModeChange={props.onOffsetModeChange ?? (() => {})}
+        offsetBufferDirection={props.offsetBufferDirection ?? "out"}
+        onOffsetBufferDirectionChange={props.onOffsetBufferDirectionChange ?? (() => {})}
         onOffsetDistanceChange={onOffsetDistanceChange ?? (() => {})}
         onOffsetBearingChange={onOffsetBearingChange ?? (() => {})}
         onApplyOffset={onApplyOffset ?? (() => {})}

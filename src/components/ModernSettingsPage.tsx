@@ -9,27 +9,27 @@ import {
   Switch,
   Alert,
   useWindowDimensions,
-  Platform,
   ActivityIndicator,
 } from "react-native";
-import * as DocumentPicker from "expo-document-picker";
-import * as FileSystem from "expo-file-system/legacy";
 import {
   Settings,
   Droplets,
   Check,
-  Upload,
-  FileText,
   Power,
-  Radio,
   Satellite,
-  Lock,
-  Globe,
   Square,
   Gauge,
   SlidersHorizontal,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Trash2,
 } from "lucide-react-native";
 import SchemaParamEditor from "./settings/SchemaParamEditor";
+import { NtripProfileConflictError } from "../api/rtkProfiles";
+import { EMPTY_RTK_STATUS, hasLiveCorrections, rtkStatusLabel } from "../api/rtkStatus";
+import { useNtripProfiles } from "../hooks/useNtripProfiles";
+import type { NtripProfile, RTKStatus } from "../types/appRuntime";
 
 const COLORS = {
   bgBase: "#09090b",
@@ -62,23 +62,7 @@ type SprayMode = "continuous" | "dashed" | "point";
 type SettingsSection = "connection" | "drive" | "spray" | "general";
 
 type ModernSettingsPageProps = {
-  rtkCaster?: string;
-  setRtkCaster?: (v: string) => void;
-  rtkPort?: string;
-  setRtkPort?: (v: string) => void;
-  rtkMountPoint?: string;
-  setRtkMountPoint?: (v: string) => void;
-  rtkUsername?: string;
-  setRtkUsername?: (v: string) => void;
-  rtkPassword?: string;
-  setRtkPassword?: (v: string) => void;
-  rtkRunning?: boolean;
-  rtkHealthy?: boolean;
-  rtkMode?: string;
-  rtkDefaultMode?: string;
-  setRtkDefaultMode?: (mode: string) => void;
-  rtkAutoConnect?: boolean;
-  setRtkAutoConnect?: (v: boolean) => void;
+  rtkStatus?: RTKStatus;
   stopRtk?: () => Promise<void>;
   toggleA?: boolean;
   toggleB?: boolean;
@@ -90,27 +74,24 @@ type ModernSettingsPageProps = {
   selectedPathName?: string | null;
 };
 
-const parseRtkTxt = (content: string) => {
-  const result: Record<string, string> = {};
-  const lines = content.split(/\r?\n/);
+type ProfileEditorMode = { kind: "create" } | { kind: "edit"; profile: NtripProfile };
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const match = trimmed.match(/^([^:=]+)[:=](.*)$/);
-    if (!match) continue;
+type ProfileForm = {
+  name: string;
+  host: string;
+  port: string;
+  mountpoint: string;
+  username: string;
+  password: string;
+};
 
-    const key = match[1].trim().toLowerCase();
-    const val = match[2].trim();
-
-    if (key === "host" || key === "caster" || key === "caster host") result.caster = val;
-    else if (key === "port") result.port = val;
-    else if (key === "mountpoint" || key === "mount point") result.mountPoint = val;
-    else if (key === "username" || key === "user") result.username = val;
-    else if (key === "password" || key === "pass") result.password = val;
-  }
-
-  return result;
+const EMPTY_PROFILE_FORM: ProfileForm = {
+  name: "",
+  host: "",
+  port: "2101",
+  mountpoint: "",
+  username: "",
+  password: "",
 };
 
 const SettingsPanel = ({
@@ -206,32 +187,30 @@ const SettingsToggle = ({
 );
 
 const RtkStatusStrip = ({
-  running,
-  healthy,
-  mode,
-  fieldsLocked = false,
+  status,
 }: {
-  running: boolean;
-  healthy: boolean;
-  mode: string;
-  fieldsLocked?: boolean;
+  status: RTKStatus;
 }) => {
-  const tone = running ? (healthy ? COLORS.success : COLORS.warning) : COLORS.textDim;
-  const barLevels = running ? (healthy ? [1, 1, 1, 1] : [1, 1, 0.35, 0.2]) : [0.15, 0.15, 0.15, 0.15];
+  const correctionsLive = hasLiveCorrections(status);
+  const failure = status.source_state === "error" || status.source_state === "unavailable";
+  const tone = correctionsLive
+    ? COLORS.success
+    : failure
+      ? COLORS.danger
+      : status.running || status.desired_mode !== "idle"
+        ? COLORS.warning
+        : COLORS.textDim;
+  const barLevels = correctionsLive ? [1, 1, 1, 1] : status.running ? [1, 1, 0.35, 0.2] : [0.15, 0.15, 0.15, 0.15];
   const barHeights = [5, 8, 11, 14];
-  const modeLabel = mode === "lora" ? "LoRa" : mode === "ntrip" ? "NTRIP" : null;
-  const statusLine = running
-    ? (healthy ? "Connected" : "Weak signal")
-    : "Not connected";
-
-  const statusText = [
-    statusLine,
-    modeLabel && running ? modeLabel : null,
-    fieldsLocked ? "Stop RTK to edit" : null,
-  ].filter(Boolean).join(" · ");
+  const statusText = rtkStatusLabel(status);
 
   return (
-    <View style={[styles.rtkStatusStrip, running && (healthy ? styles.rtkStatusLive : styles.rtkStatusWarn)]}>
+    <View style={[
+      styles.rtkStatusStrip,
+      correctionsLive ? styles.rtkStatusLive : null,
+      !correctionsLive && (status.running || status.desired_mode !== "idle") ? styles.rtkStatusWarn : null,
+      failure ? styles.profileErrorBanner : null,
+    ]}>
       <View style={styles.rtkBars}>
         {barHeights.map((h, i) => (
           <View
@@ -240,44 +219,14 @@ const RtkStatusStrip = ({
           />
         ))}
       </View>
-      {running ? <View style={[styles.liveDot, { backgroundColor: tone }]} /> : null}
-      {fieldsLocked ? <Lock color={COLORS.warning} size={12} strokeWidth={2.2} /> : null}
+      {status.running ? <View style={[styles.liveDot, { backgroundColor: tone }]} /> : null}
       <Text
-        style={[styles.rtkStatusLine, { color: running ? tone : COLORS.textDim }]}
+        style={[styles.rtkStatusLine, { color: tone }]}
         numberOfLines={1}
         ellipsizeMode="tail"
       >
         {statusText}
       </Text>
-    </View>
-  );
-};
-
-const RtkModeToggle = ({
-  value,
-  onChange,
-}: {
-  value: "NTRIP" | "Lora";
-  onChange: (mode: "NTRIP" | "Lora") => void;
-}) => {
-  const isNtrip = value === "NTRIP";
-
-  return (
-    <View style={styles.rtkToggleTrack}>
-      <Pressable
-        style={[styles.rtkToggleOption, isNtrip && styles.rtkToggleOptionActive]}
-        onPress={() => onChange("NTRIP")}
-      >
-        <Globe color={isNtrip ? COLORS.accentText : COLORS.textMuted} size={13} strokeWidth={2.2} />
-        <Text style={[styles.rtkToggleText, isNtrip && styles.rtkToggleTextActive]}>NTRIP</Text>
-      </Pressable>
-      <Pressable
-        style={[styles.rtkToggleOption, !isNtrip && styles.rtkToggleOptionActive]}
-        onPress={() => onChange("Lora")}
-      >
-        <Radio color={!isNtrip ? COLORS.accentText : COLORS.textMuted} size={13} strokeWidth={2.2} />
-        <Text style={[styles.rtkToggleText, !isNtrip && styles.rtkToggleTextActive]}>LoRa</Text>
-      </Pressable>
     </View>
   );
 };
@@ -401,23 +350,7 @@ const ActionButton = ({
 
 export default function ModernSettingsPage(props: ModernSettingsPageProps) {
   const {
-    rtkCaster = "",
-    setRtkCaster,
-    rtkPort = "2101",
-    setRtkPort,
-    rtkMountPoint = "",
-    setRtkMountPoint,
-    rtkUsername = "",
-    setRtkUsername,
-    rtkPassword = "",
-    setRtkPassword,
-    rtkRunning = false,
-    rtkHealthy = false,
-    rtkMode = "idle",
-    rtkDefaultMode = "NTRIP",
-    setRtkDefaultMode,
-    rtkAutoConnect = false,
-    setRtkAutoConnect,
+    rtkStatus = EMPTY_RTK_STATUS,
     stopRtk,
     toggleA = false,
     toggleB = false,
@@ -433,17 +366,10 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
   const compactTabs = width < 720;
   const wide = width >= 720;
   const [section, setSection] = useState<SettingsSection>("connection");
-
-  const [localRtkMode, setLocalRtkMode] = useState(
-    rtkDefaultMode ? rtkDefaultMode : (rtkMode === "lora" ? "Lora" : "NTRIP")
-  );
-  const [importedFileName, setImportedFileName] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (rtkDefaultMode) setLocalRtkMode(rtkDefaultMode);
-    else if (rtkMode === "lora") setLocalRtkMode("Lora");
-    else if (rtkMode === "ntrip") setLocalRtkMode("NTRIP");
-  }, [rtkDefaultMode, rtkMode]);
+  const profiles = useNtripProfiles(apiBaseUrl);
+  const [profileEditor, setProfileEditor] = useState<ProfileEditorMode | null>(null);
+  const [profileForm, setProfileForm] = useState<ProfileForm>(EMPTY_PROFILE_FORM);
+  const profileEditorGenerationRef = useRef(0);
 
   const [isSprayMasterEnabled, setIsSprayMasterEnabled] = useState(false);
   const [isSprayMasterChanging, setIsSprayMasterChanging] = useState(false);
@@ -466,8 +392,6 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
     },
     [apiBaseUrl]
   );
-
-  const fieldsLocked = rtkRunning;
 
   useEffect(() => {
     if (!apiBaseUrl) return;
@@ -627,11 +551,6 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
     setIsSprayOn(false);
   };
 
-  const handleSetDefaultRtk = () => {
-    if (setRtkDefaultMode) setRtkDefaultMode(localRtkMode);
-    Alert.alert("Saved", `${localRtkMode} set as default RTK mode.`);
-  };
-
   const [isStoppingRtk, setIsStoppingRtk] = useState(false);
   const handleStopRtk = async () => {
     if (!stopRtk || isStoppingRtk) return;
@@ -643,104 +562,183 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
     }
   };
 
-  const handleImportRtkTxt = async () => {
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: ["text/plain", "text/*", "application/octet-stream", "*/*"],
-        copyToCacheDirectory: true,
-      });
+  const closeProfileEditor = useCallback(() => {
+    profileEditorGenerationRef.current += 1;
+    setProfileEditor(null);
+    // Passwords are intentionally held only in this transient form state.
+    setProfileForm(EMPTY_PROFILE_FORM);
+  }, []);
 
-      if (result.canceled || !result.assets?.length) return;
+  useEffect(() => {
+    closeProfileEditor();
+  }, [apiBaseUrl, closeProfileEditor]);
 
-      const asset = result.assets[0];
-      let content = "";
+  const openCreateProfile = useCallback(() => {
+    profileEditorGenerationRef.current += 1;
+    setProfileForm(EMPTY_PROFILE_FORM);
+    setProfileEditor({ kind: "create" });
+  }, []);
 
-      if (Platform.OS === "web" && (asset as { file?: File }).file) {
-        content = await (asset as { file: File }).file.text();
-      } else {
-        content = await FileSystem.readAsStringAsync(asset.uri, {
-          encoding: FileSystem.EncodingType.UTF8,
-        });
-      }
+  const openEditProfile = useCallback((profile: NtripProfile) => {
+    profileEditorGenerationRef.current += 1;
+    setProfileForm({
+      name: profile.name,
+      host: profile.host,
+      port: String(profile.port),
+      mountpoint: profile.mountpoint,
+      username: profile.username,
+      password: "",
+    });
+    setProfileEditor({ kind: "edit", profile });
+  }, []);
 
-      const parsed = parseRtkTxt(content);
-      let applied = 0;
+  const handleSaveProfile = useCallback(async () => {
+    if (!profileEditor) return;
+    const editorGeneration = profileEditorGenerationRef.current;
+    const name = profileForm.name.trim();
+    const host = profileForm.host.trim();
+    const mountpoint = profileForm.mountpoint.trim().replace(/^\/+/, "");
+    const username = profileForm.username.trim();
+    const password = profileForm.password;
+    const port = Number(profileForm.port);
 
-      if (parsed.caster && setRtkCaster) { setRtkCaster(parsed.caster); applied++; }
-      if (parsed.port && setRtkPort) { setRtkPort(parsed.port); applied++; }
-      if (parsed.mountPoint && setRtkMountPoint) { setRtkMountPoint(parsed.mountPoint); applied++; }
-      if (parsed.username && setRtkUsername) { setRtkUsername(parsed.username); applied++; }
-      if (parsed.password && setRtkPassword) { setRtkPassword(parsed.password); applied++; }
-
-      if (applied === 0) {
-        Alert.alert("Invalid File", "No matching RTK keys found. Use host, port, mountpoint, username, password.");
-        return;
-      }
-
-      setImportedFileName(asset.name || "credentials.txt");
-      Alert.alert("Imported", `Loaded ${applied} field${applied === 1 ? "" : "s"} from file.`);
-    } catch {
-      Alert.alert("Import Failed", "Could not read the RTK text file.");
+    if (!name || !host || !mountpoint || !username) {
+      Alert.alert("Missing details", "Enter a profile name, host, mountpoint, and username.");
+      return;
     }
-  };
+    if (/^https?:\/\//i.test(host)) {
+      Alert.alert("Invalid host", "Enter the caster hostname or IP without http:// or https://.");
+      return;
+    }
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      Alert.alert("Invalid port", "Port must be a whole number from 1 to 65535.");
+      return;
+    }
+    if (profileEditor.kind === "create" && password.length === 0) {
+      Alert.alert("Password required", "Enter the caster password for the new profile.");
+      return;
+    }
 
-  const isNtripMode = localRtkMode === "NTRIP";
-  const credentialsComplete = !!(rtkCaster && rtkPort && rtkMountPoint && rtkUsername && rtkPassword);
+    try {
+      if (profileEditor.kind === "create") {
+        const saved = await profiles.createProfile({ name, host, port, mountpoint, username, password });
+        if (!saved || profileEditorGenerationRef.current !== editorGeneration) return;
+        Alert.alert("Profile saved", `${name} is stored on the rover. Set it as default when ready.`);
+      } else {
+        const saved = await profiles.updateProfile(profileEditor.profile.id, {
+          name,
+          host,
+          port,
+          mountpoint,
+          username,
+          ...(password.length > 0 ? { password } : {}),
+        });
+        if (!saved || profileEditorGenerationRef.current !== editorGeneration) return;
+        const runtimeNote = profileEditor.profile.is_active
+          ? " The current correction stream is unchanged."
+          : "";
+        Alert.alert("Profile updated", `${name} was saved.${runtimeNote}`);
+      }
+      closeProfileEditor();
+    } catch (error) {
+      if (profileEditorGenerationRef.current !== editorGeneration) return;
+      Alert.alert(
+        error instanceof NtripProfileConflictError ? "Profiles changed" : "Save failed",
+        error instanceof Error ? error.message : "Could not save the NTRIP profile."
+      );
+    } finally {
+      // Clear the write-only secret after every submit attempt.
+      if (profileEditorGenerationRef.current === editorGeneration) {
+        setProfileForm((current) => ({ ...current, password: "" }));
+      }
+    }
+  }, [closeProfileEditor, profileEditor, profileForm, profiles]);
+
+  const handleSetDefaultProfile = useCallback(async (profile: NtripProfile) => {
+    try {
+      const saved = await profiles.setDefaultProfile(profile.id);
+      if (!saved) return;
+      Alert.alert(
+        "Default profile saved",
+        `${profile.name} will be used on the next rover-server start. The current correction stream is unchanged.`
+      );
+    } catch (error) {
+      Alert.alert(
+        error instanceof NtripProfileConflictError ? "Profiles changed" : "Default failed",
+        error instanceof Error ? error.message : "Could not set the default profile."
+      );
+    }
+  }, [profiles]);
+
+  const handleDeleteProfile = useCallback((profile: NtripProfile) => {
+    if (profile.is_default || profile.is_active) return;
+    Alert.alert(
+      "Delete NTRIP profile?",
+      `Delete ${profile.name} from the rover? This cannot be undone.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            void profiles.removeProfile(profile.id).catch((error) => {
+              Alert.alert(
+                error instanceof NtripProfileConflictError ? "Profiles changed" : "Delete failed",
+                error instanceof Error ? error.message : "Could not delete the NTRIP profile."
+              );
+            });
+          },
+        },
+      ]
+    );
+  }, [profiles]);
+
   const sectionCopy: Record<SettingsSection, { title: string; subtitle: string }> = {
-    connection: { title: "RTK / LoRa", subtitle: "Correction source and caster login" },
+    connection: { title: "RTK", subtitle: "Backend-managed NTRIP profiles" },
     drive: { title: "Drive", subtitle: "RPP speed, profile, and tracking knobs" },
     spray: { title: "Spray", subtitle: "Hardware, pattern, and spray variables" },
     general: { title: "General", subtitle: "Field operation preferences" },
   };
 
-  const rtkImportAction = (
+  const addProfileAction = (
     <Pressable
-      style={[styles.uploadBtn, fieldsLocked && styles.btnDisabled]}
-      onPress={handleImportRtkTxt}
-      disabled={fieldsLocked}
+      style={[styles.uploadBtn, (!apiBaseUrl || profiles.mutationKey !== null) && styles.btnDisabled]}
+      onPress={openCreateProfile}
+      disabled={!apiBaseUrl || profiles.mutationKey !== null}
     >
-      <Upload color={COLORS.accentText} size={15} strokeWidth={2.2} />
-      <Text style={styles.uploadBtnText}>Import .txt</Text>
+      <Plus color={COLORS.accentText} size={15} strokeWidth={2.2} />
+      <Text style={styles.uploadBtnText}>Add profile</Text>
     </Pressable>
   );
 
   const rtkSection = (
     <SettingsPanel
       icon={Satellite}
-      title="RTK / LoRa"
-      subtitle="Set your correction source and credentials"
-      headerAction={isNtripMode ? rtkImportAction : undefined}
+      title="RTK / NTRIP"
+      subtitle="Authenticated backend profiles; caster secrets are never stored on this tablet"
+      headerAction={addProfileAction}
     >
       <RtkStatusStrip
-        running={rtkRunning}
-        healthy={rtkHealthy}
-        mode={rtkMode}
-        fieldsLocked={fieldsLocked}
+        status={rtkStatus}
       />
 
-      <View style={styles.compactBlock}>
-        <View style={styles.rtkActionRow}>
-          <View style={styles.rtkToggleWrap}>
-            <RtkModeToggle
-              value={localRtkMode === "Lora" ? "Lora" : "NTRIP"}
-              onChange={setLocalRtkMode}
-            />
-          </View>
-          <Pressable style={[styles.rtkActionBtn, styles.rtkActionBtnSave]} onPress={handleSetDefaultRtk}>
-            <Check color={COLORS.accentText} size={13} strokeWidth={2.4} />
-            <Text style={styles.rtkActionBtnTextSave}>Save</Text>
-          </Pressable>
-        </View>
-        <SettingsToggle
-          label="Auto Connect"
-          hint="Start RTK on rover connect"
-          value={rtkAutoConnect}
-          onValueChange={(v) => setRtkAutoConnect?.(v)}
-          disabled={!setRtkAutoConnect}
-        />
+      <View style={styles.rtkLifecycleDetails}>
+        <Text style={styles.rtkLifecycleMeta}>
+          Desired: {rtkStatus.desired_mode.toUpperCase()} · State: {rtkStatus.source_state} · Frames: {rtkStatus.frames}
+        </Text>
+        <Text style={styles.rtkLifecycleMeta}>
+          Last frame: {rtkStatus.last_frame_age_s == null ? "never" : `${rtkStatus.last_frame_age_s.toFixed(1)} s ago`}
+          {` · Restarts: ${rtkStatus.supervisor_restarts}`}
+          {rtkStatus.active_profile_id ? ` · Active: ${rtkStatus.active_profile_id}` : ""}
+          {rtkStatus.active_profile_revision != null ? ` rev ${rtkStatus.active_profile_revision}` : ""}
+        </Text>
+        {rtkStatus.last_error ? <Text style={styles.rtkLifecycleError}>{rtkStatus.last_error}</Text> : null}
+        <Text style={styles.rtkReadinessNote}>
+          Correction status is not rover readiness. Verify PX4 reports RTK Fixed and acceptable GPS accuracy before driving or spraying.
+        </Text>
       </View>
 
-      {rtkRunning ? (
+      {rtkStatus.mode === "lora" && rtkStatus.running ? (
         <View style={styles.compactBlock}>
           <ActionButton
             label={isStoppingRtk ? "Stopping…" : "Stop RTK"}
@@ -753,35 +751,76 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
         </View>
       ) : null}
 
-      {isNtripMode ? (
+      {!apiBaseUrl ? (
+        <View style={styles.noteBanner}>
+          <Text style={styles.noteBannerText}>Connect and authenticate to the rover to manage NTRIP profiles.</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.noteBanner}>
+        <Text style={styles.noteBannerText}>
+          X-Rover-Token authenticates profile requests but does not encrypt HTTP traffic. Use trusted rover Wi-Fi, HTTPS, or a secure tunnel.
+        </Text>
+      </View>
+
+      {profiles.migration_warning ? (
+        <View style={[styles.noteBanner, styles.profileMigrationBanner]}>
+          <Text style={styles.profileMigrationText}>{profiles.migration_warning}</Text>
+        </View>
+      ) : null}
+
+      {profiles.error ? (
+        <View style={[styles.noteBanner, styles.profileErrorBanner]}>
+          <Text style={styles.profileErrorText}>{profiles.error}</Text>
+          <Pressable
+            style={styles.profileIconButton}
+            onPress={() => void profiles.reload()}
+            disabled={profiles.loading}
+            accessibilityLabel="Retry loading NTRIP profiles"
+          >
+            <RefreshCw color={COLORS.textMain} size={15} strokeWidth={2.2} />
+          </Pressable>
+        </View>
+      ) : null}
+
+      {profileEditor ? (
         <View style={styles.block}>
           <View style={styles.rtkCredHeader}>
-            <Text style={styles.rtkCredTitle}>Caster login</Text>
-            <View style={[styles.rtkCredPill, credentialsComplete ? styles.rtkCredPillOk : styles.rtkCredPillWarn]}>
-              <Text style={[styles.rtkCredPillText, credentialsComplete ? styles.rtkCredPillTextOk : styles.rtkCredPillTextWarn]}>
-                {credentialsComplete ? "Ready" : "Fill all fields"}
-              </Text>
-            </View>
+            <Text style={styles.rtkCredTitle}>
+              {profileEditor.kind === "create" ? "New NTRIP profile" : `Edit ${profileEditor.profile.name}`}
+            </Text>
+            <Text style={styles.profilePasswordHint}>
+              {profileEditor.kind === "edit" && profileEditor.profile.password_configured
+                ? "Password saved"
+                : "Password required"}
+            </Text>
           </View>
 
+          <SettingsField
+            label="Profile name"
+            value={profileForm.name}
+            onChangeText={(name) => setProfileForm((current) => ({ ...current, name }))}
+            placeholder="Chennai site"
+            editable={profiles.mutationKey === null}
+          />
           <View style={styles.fieldRow}>
             <View style={{ flex: 1.4 }}>
               <SettingsField
                 label="Host"
-                value={rtkCaster}
-                onChangeText={setRtkCaster || (() => {})}
+                value={profileForm.host}
+                onChangeText={(host) => setProfileForm((current) => ({ ...current, host }))}
                 placeholder="caster.example.com"
-                editable={!fieldsLocked && !!setRtkCaster}
+                editable={profiles.mutationKey === null}
               />
             </View>
             <View style={{ flex: 0.6 }}>
               <SettingsField
                 label="Port"
-                value={rtkPort}
-                onChangeText={setRtkPort || (() => {})}
+                value={profileForm.port}
+                onChangeText={(port) => setProfileForm((current) => ({ ...current, port }))}
                 placeholder="2101"
                 keyboardType="numeric"
-                editable={!fieldsLocked && !!setRtkPort}
+                editable={profiles.mutationKey === null}
               />
             </View>
           </View>
@@ -789,50 +828,129 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
             <View style={{ flex: 1 }}>
               <SettingsField
                 label="Mount"
-                value={rtkMountPoint}
-                onChangeText={setRtkMountPoint || (() => {})}
+                value={profileForm.mountpoint}
+                onChangeText={(mountpoint) => setProfileForm((current) => ({ ...current, mountpoint }))}
                 placeholder="MP23960a"
-                editable={!fieldsLocked && !!setRtkMountPoint}
+                editable={profiles.mutationKey === null}
               />
             </View>
             <View style={{ flex: 1 }}>
               <SettingsField
                 label="User"
-                value={rtkUsername}
-                onChangeText={setRtkUsername || (() => {})}
+                value={profileForm.username}
+                onChangeText={(username) => setProfileForm((current) => ({ ...current, username }))}
                 placeholder="Username"
-                editable={!fieldsLocked && !!setRtkUsername}
+                editable={profiles.mutationKey === null}
               />
             </View>
           </View>
           <SettingsField
             label="Password"
-            value={rtkPassword}
-            onChangeText={setRtkPassword || (() => {})}
-            placeholder="Password"
+            value={profileForm.password}
+            onChangeText={(password) => setProfileForm((current) => ({ ...current, password }))}
+            placeholder={profileEditor.kind === "edit" ? "Leave blank to keep saved password" : "Password"}
             secureTextEntry
-            editable={!fieldsLocked && !!setRtkPassword}
+            editable={profiles.mutationKey === null}
           />
-
-          {importedFileName ? (
-            <View style={styles.importBadge}>
-              <FileText color={COLORS.accentBrand} size={14} strokeWidth={2} />
-              <Text style={styles.importBadgeText} numberOfLines={1}>Imported: {importedFileName}</Text>
-            </View>
-          ) : null}
-
           <Text style={styles.helpText}>
-            Import a .txt with host, port, mountpoint, user, password — or type them here.
+            {profileEditor.kind === "edit"
+              ? "Leave password blank to retain the backend's saved password. Enter a new value to replace it."
+              : "The password is sent with your authenticated X-Rover-Token request and is never saved on this tablet."}
           </Text>
+          <View style={styles.profileEditorActions}>
+            <ActionButton
+              label="Cancel"
+              variant="secondary"
+              onPress={closeProfileEditor}
+              disabled={profiles.mutationKey !== null}
+            />
+            <ActionButton
+              label="Save profile"
+              icon={Check}
+              onPress={() => void handleSaveProfile()}
+              loading={profiles.mutationKey === "create" || profiles.mutationKey?.startsWith("edit:") === true}
+            />
+          </View>
         </View>
-      ) : (
-        <View style={styles.noteBanner}>
-          <Radio color={COLORS.accentBrand} size={14} strokeWidth={2.2} />
-          <Text style={styles.noteBannerText}>
-            Start LoRa RTK from the RTK button on the main screen.
-          </Text>
+      ) : null}
+
+      {apiBaseUrl && profiles.loading && profiles.profiles.length === 0 ? (
+        <View style={styles.profileLoading}>
+          <ActivityIndicator color={COLORS.accentBrand} size="small" />
+          <Text style={styles.noteBannerText}>Loading profiles from rover…</Text>
         </View>
-      )}
+      ) : null}
+
+      {apiBaseUrl && !profiles.loading && profiles.profiles.length === 0 && !profiles.error ? (
+        <View style={styles.profileEmpty}>
+          <Text style={styles.rtkCredTitle}>No NTRIP profiles configured</Text>
+          <Text style={styles.helpText}>Add the first caster profile, then set it as the rover default.</Text>
+          <ActionButton label="Add profile" icon={Plus} onPress={openCreateProfile} />
+        </View>
+      ) : null}
+
+      {profiles.profiles.map((profile) => {
+        const busy = profiles.mutationKey?.endsWith(`:${profile.id}`) === true;
+        const deleteLocked = profile.is_default || profile.is_active;
+        return (
+          <View key={profile.id} style={styles.profileCard}>
+            <View style={styles.profileCardHeader}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.profileName} numberOfLines={1}>{profile.name}</Text>
+                <Text style={styles.profileEndpoint} numberOfLines={1}>
+                  {profile.host}:{profile.port}/{profile.mountpoint}
+                </Text>
+              </View>
+              <View style={styles.profileBadges}>
+                {profile.is_default ? <Text style={styles.profileBadgeDefault}>DEFAULT</Text> : null}
+                {profile.is_active ? <Text style={styles.profileBadgeActive}>ACTIVE</Text> : null}
+                {profile.pending_apply ? <Text style={styles.profileBadgePending}>PENDING APPLY</Text> : null}
+              </View>
+            </View>
+            <Text style={styles.profileMeta} numberOfLines={1}>
+              User: {profile.username} · {profile.password_configured ? "Password saved" : "Password missing"}
+            </Text>
+            {profile.pending_apply ? (
+              <Text style={styles.profilePendingNote}>
+                {profile.is_default && !profile.is_active
+                  ? "Default saved. Current correction stream is unchanged."
+                  : "Saved edits will apply when this profile starts again. Current stream is unchanged."}
+              </Text>
+            ) : null}
+            <View style={styles.profileActions}>
+              {!profile.is_default ? (
+                <ActionButton
+                  label="Set default"
+                  variant="success"
+                  onPress={() => void handleSetDefaultProfile(profile)}
+                  loading={profiles.mutationKey === `default:${profile.id}`}
+                  disabled={profiles.mutationKey !== null && !busy}
+                />
+              ) : null}
+              <ActionButton
+                label="Edit"
+                icon={Pencil}
+                variant="secondary"
+                onPress={() => openEditProfile(profile)}
+                disabled={profiles.mutationKey !== null}
+              />
+              <ActionButton
+                label="Delete"
+                icon={Trash2}
+                variant="danger"
+                onPress={() => handleDeleteProfile(profile)}
+                loading={profiles.mutationKey === `delete:${profile.id}`}
+                disabled={deleteLocked || (profiles.mutationKey !== null && !busy)}
+              />
+            </View>
+            {deleteLocked ? (
+              <Text style={styles.profileDeleteHint}>
+                {profile.is_default ? "Choose another default before deleting." : "An active profile cannot be deleted."}
+              </Text>
+            ) : null}
+          </View>
+        );
+      })}
     </SettingsPanel>
   );
 
@@ -1617,6 +1735,33 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "600",
   },
+  rtkLifecycleDetails: {
+    backgroundColor: COLORS.cardSolid,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 4,
+  },
+  rtkLifecycleMeta: {
+    color: COLORS.textMuted,
+    fontSize: 10,
+    fontWeight: "600",
+    lineHeight: 14,
+  },
+  rtkLifecycleError: {
+    color: COLORS.danger,
+    fontSize: 10,
+    fontWeight: "700",
+    lineHeight: 14,
+  },
+  rtkReadinessNote: {
+    color: COLORS.warning,
+    fontSize: 10,
+    fontWeight: "600",
+    lineHeight: 14,
+  },
   rtkCredHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -1653,5 +1798,156 @@ const styles = StyleSheet.create({
   },
   rtkCredPillTextWarn: {
     color: COLORS.warning,
+  },
+  profileErrorBanner: {
+    borderColor: COLORS.dangerBorder,
+    backgroundColor: COLORS.dangerMuted,
+  },
+  profileMigrationBanner: {
+    borderColor: COLORS.warningBorder,
+    backgroundColor: COLORS.warningMuted,
+  },
+  profileMigrationText: {
+    flex: 1,
+    color: COLORS.warning,
+    fontSize: 10,
+    fontWeight: "600",
+    lineHeight: 15,
+  },
+  profileErrorText: {
+    flex: 1,
+    color: COLORS.danger,
+    fontSize: 11,
+    fontWeight: "600",
+    lineHeight: 16,
+  },
+  profileIconButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.surfaceSolid,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+  },
+  profilePasswordHint: {
+    color: COLORS.success,
+    fontSize: 10,
+    fontWeight: "700",
+  },
+  profileEditorActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 8,
+    marginTop: 2,
+  },
+  profileLoading: {
+    minHeight: 72,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    backgroundColor: COLORS.cardSolid,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+  },
+  profileEmpty: {
+    minHeight: 120,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    padding: 14,
+    backgroundColor: COLORS.cardSolid,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+  },
+  profileCard: {
+    backgroundColor: COLORS.cardSolid,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    padding: 10,
+    gap: 7,
+  },
+  profileCardHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  profileName: {
+    color: COLORS.textMain,
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  profileEndpoint: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontWeight: "500",
+    marginTop: 2,
+  },
+  profileMeta: {
+    color: COLORS.textDim,
+    fontSize: 10,
+    fontWeight: "600",
+  },
+  profileBadges: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+    gap: 4,
+    maxWidth: "48%",
+  },
+  profileBadgeDefault: {
+    color: COLORS.accentBrand,
+    backgroundColor: COLORS.accentMuted,
+    borderColor: COLORS.accentBorder,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    fontSize: 8,
+    fontWeight: "900",
+  },
+  profileBadgeActive: {
+    color: COLORS.success,
+    backgroundColor: COLORS.successMuted,
+    borderColor: COLORS.successBorder,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    fontSize: 8,
+    fontWeight: "900",
+  },
+  profileBadgePending: {
+    color: COLORS.warning,
+    backgroundColor: COLORS.warningMuted,
+    borderColor: COLORS.warningBorder,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    fontSize: 8,
+    fontWeight: "900",
+  },
+  profilePendingNote: {
+    color: COLORS.warning,
+    fontSize: 10,
+    fontWeight: "600",
+  },
+  profileActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    flexWrap: "wrap",
+    gap: 7,
+  },
+  profileDeleteHint: {
+    color: COLORS.textDim,
+    fontSize: 9,
+    textAlign: "right",
   },
 });

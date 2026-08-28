@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import Slider from "@react-native-community/slider";
 import type { PlanLine } from "../types/plan";
+import type { RTKStatus } from "../types/appRuntime";
 import * as FileSystem from "expo-file-system/legacy";
 
 const TEAL = "#0f988f";
@@ -711,23 +712,7 @@ export function SettingsPage(props: {
   setToggleA: (v: boolean) => void;
   setToggleB: (v: boolean) => void;
   setToggleC: (v: boolean) => void;
-  rtkCaster?: string;
-  setRtkCaster?: React.Dispatch<React.SetStateAction<string>>;
-  rtkPort?: string;
-  setRtkPort?: React.Dispatch<React.SetStateAction<string>>;
-  rtkMountPoint?: string;
-  setRtkMountPoint?: React.Dispatch<React.SetStateAction<string>>;
-  rtkUsername?: string;
-  setRtkUsername?: React.Dispatch<React.SetStateAction<string>>;
-  rtkPassword?: string;
-  setRtkPassword?: React.Dispatch<React.SetStateAction<string>>;
-  rtkRunning?: boolean;
-  rtkHealthy?: boolean;
-  rtkMode?: string;
-  rtkDefaultMode?: string;
-  setRtkDefaultMode?: React.Dispatch<React.SetStateAction<string>>;
-  rtkAutoConnect?: boolean;
-  setRtkAutoConnect?: React.Dispatch<React.SetStateAction<boolean>>;
+  rtkStatus?: RTKStatus;
   stopRtk?: () => Promise<void>;
   apiBaseUrl?: string;
   selectedPathName?: string | null;

@@ -15,6 +15,7 @@ import { getPlanLineSegmentKind, isSegmentKindVisible } from "../utils/curveGeom
 import * as pathApi from "../api/pathApi";
 import { MissionLayerPills } from "./fields/MissionLayerPills";
 import { nonEmptyMissionLayers } from "../utils/missionLayerAssignment";
+import { EMPTY_RTK_STATUS, hasLiveCorrections, rtkStatusLabel } from "../api/rtkStatus";
 
 // Using 127.0.0.1:5001 as fallback if window location is unavailable
 const getApiBase = () => {
@@ -651,10 +652,8 @@ export default function ModernHomeUI(props) {
   const {
     lines = [], importedPlan, systemHealth, telemetrySnapshot, missionRunning,
     onNav, onToggleMenu, onArmVehicle, onSetMode, onEstopVehicle,
-    onStartPlan, onStopPlan, onClearMission, rtkRunning, rtkHealthy, rtkMode = "idle",
-    rtkDefaultMode = "NTRIP",
-    rtkCaster = "", rtkPort = "", rtkMountPoint = "", rtkUsername = "", rtkPassword = "",
-    rtkConnecting = false, startNtrip, startLora, stopRtk, selectedLineId, onSelectLine,
+    onStartPlan, onStopPlan, onClearMission, rtkStatus = EMPTY_RTK_STATUS,
+    rtkConnecting = false, startLora, selectedLineId, onSelectLine,
     autoOriginEnabled, mapSourceLines, alignedRefPoints, autoOriginReference,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
     isPlanEditingMode,
@@ -678,6 +677,9 @@ export default function ModernHomeUI(props) {
   } = props;
 
   const isHomePage = currentPage === "home";
+  const rtkCorrectionsLive = hasLiveCorrections(rtkStatus);
+  const rtkLifecycleLabel = rtkStatusLabel(rtkStatus);
+  const canStartLora = !rtkStatus.running && rtkStatus.desired_mode === "idle";
   const isFieldsPage = currentPage === "fields";
   const PAGE_TO_NAV = {
     home: "main",
@@ -1133,37 +1135,10 @@ export default function ModernHomeUI(props) {
     }
   }, [missionRunning, onSetMode, openManualJoystickPanel]);
 
-  const hasNtripCredentials = Boolean(
-    rtkCaster?.trim() && rtkPort?.trim() && rtkMountPoint?.trim()
-  );
-
-  const handleStartNtrip = useCallback(() => {
-    if (rtkConnecting || rtkRunning) return;
-    if (!hasNtripCredentials) {
-      if (Platform.OS === "web") {
-        const openSettings = window.confirm(
-          "Credentials needed.\n\nPlease fill in all RTK NTRIP credentials in Settings before connecting.\n\nOpen Settings now?"
-        );
-        if (openSettings) onNav?.("settings");
-      } else {
-        Alert.alert(
-          "Credentials needed",
-          "Please fill in all RTK NTRIP credentials in Settings before connecting.",
-          [
-            { text: "Cancel", style: "cancel" },
-            { text: "Open Settings", onPress: () => onNav?.("settings") },
-          ]
-        );
-      }
-      return;
-    }
-    if (startNtrip) startNtrip();
-  }, [rtkConnecting, rtkRunning, hasNtripCredentials, startNtrip, onNav]);
-
   const handleStartLora = useCallback(() => {
-    if (rtkConnecting || rtkRunning) return;
+    if (rtkConnecting || !canStartLora) return;
     if (startLora) startLora();
-  }, [rtkConnecting, rtkRunning, startLora]);
+  }, [canStartLora, rtkConnecting, startLora]);
 
   const handleQuickAccessPress = useCallback(() => {
     setQuickAccessExpanded((v) => !v);
@@ -1597,23 +1572,28 @@ export default function ModernHomeUI(props) {
             <QuickSubNavDivider />
             <QuickSubNavSectionLabel label="RTK" />
             <QuickSubNavItem
-              icon={rtkRunning ? Activity : RadioTower}
-              label={rtkRunning ? `${rtkDefaultMode || "RTK"} Connected` : `RTK: ${rtkDefaultMode || "NTRIP"}`}
-              active={rtkRunning}
-              danger={rtkRunning && rtkMode === "stopping"}
+              icon={rtkStatus.running ? Activity : RadioTower}
+              label={rtkLifecycleLabel}
+              active={rtkCorrectionsLive || (rtkStatus.mode === "lora" && rtkStatus.healthy)}
+              danger={rtkStatus.source_state === "error" || rtkStatus.source_state === "unavailable"}
               signal
-              healthy={rtkHealthy}
-              disabled={rtkConnecting || rtkRunning}
+              healthy={rtkCorrectionsLive || (rtkStatus.mode === "lora" && rtkStatus.healthy)}
+              disabled={rtkConnecting || rtkStatus.running}
               onPress={() => {
-                // Stop RTK moved to Settings — this item is status-only once running.
-                if (rtkConnecting || rtkRunning) return;
-                if ((rtkDefaultMode || "").toLowerCase() === "lora") {
-                  handleStartLora();
-                } else {
-                  handleStartNtrip();
-                }
+                // Backend owns NTRIP autostart. This is status-only when running
+                // and opens backend profile management when idle/unavailable.
+                if (rtkConnecting || rtkStatus.running) return;
+                onNav?.("settings");
               }}
             />
+            {canStartLora ? (
+              <QuickSubNavItem
+                icon={Radio}
+                label="Start LoRa"
+                disabled={rtkConnecting}
+                onPress={handleStartLora}
+              />
+            ) : null}
 
             <QuickSubNavDivider />
             <QuickSubNavSectionLabel label="Panels" />

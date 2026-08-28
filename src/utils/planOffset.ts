@@ -15,6 +15,8 @@ import type { PlanLine } from "../types/plan";
 import { transformPlanLinesGeometry, translationTransform } from "./planLineTransform";
 
 export type NedVector = { north: number; east: number };
+export type PlanOffsetMode = "shift" | "buffer";
+export type PlanBufferDirection = "out" | "in";
 
 /** Wrap any bearing (including negative or >360) into [0, 360). */
 export function normalizeBearingDeg(deg: number): number {
