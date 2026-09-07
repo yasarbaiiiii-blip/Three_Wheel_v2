@@ -252,19 +252,13 @@ export function CsvPathOrderStep({
   const pathWarningItems = useMemo(() => {
     const items: string[] = [];
     for (const w of reversals) {
-      items.push(
-        `${w.fromLabel} → ${w.toLabel}: ${w.headingChangeDeg.toFixed(0)}° reversal`
-      );
+      items.push(`${w.fromLabel} → ${w.toLabel} · ${w.headingChangeDeg.toFixed(0)}°`);
     }
     for (const w of curveDirectionWarnings) {
-      items.push(
-        `${w.label}: curve direction adds ~${w.wastedM.toFixed(1)} m of avoidable transit`
-      );
+      items.push(`${w.label} · extra ${w.wastedM.toFixed(1)} m`);
     }
     for (const w of degenerateEntityWarnings) {
-      items.push(
-        `${w.label}: only ${(w.lengthM * 100).toFixed(1)} cm long — Skip it to remove its transit cost`
-      );
+      items.push(`${w.label} · ${(w.lengthM * 100).toFixed(0)} cm`);
     }
     return items;
   }, [reversals, curveDirectionWarnings, degenerateEntityWarnings]);
@@ -308,13 +302,13 @@ export function CsvPathOrderStep({
       {markLines.length > 0 ? (
         <View style={{ gap: 6 }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <Text style={{ flex: 1, color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}>
-              Paint {trajectory.totals.markLengthM.toFixed(1)} m
+            <Text style={{ flex: 1, color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "700" }}>
+              {trajectory.totals.markLengthM.toFixed(1)} m
               {trajectory.totals.travelLengthM > 0.05
-                ? `  ·  Transit ${trajectory.totals.travelLengthM.toFixed(1)} m`
+                ? `  ·  ${trajectory.totals.travelLengthM.toFixed(1)} m transit`
                 : ""}
               {extensionLengthM > 0.05
-                ? `  ·  Extension ${extensionLengthM.toFixed(1)} m`
+                ? `  ·  ${extensionLengthM.toFixed(1)} m ext`
                 : ""}
             </Text>
             {order.length >= 2 ? (
@@ -340,18 +334,14 @@ export function CsvPathOrderStep({
               </Pressable>
             ) : null}
           </View>
-          <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, lineHeight: 14 }}>
-            Tap a path to highlight it on the map. Hold the grip to drag. Skip = not sprayed
-            (Send to Rover also will not drive that path).
-          </Text>
         </View>
       ) : null}
 
       <CsvWarningsPanel
-        title="Path warnings"
+        title="Warnings"
         advisory={pathWarningItems}
         defaultExpanded={false}
-        maxVisible={8}
+        maxVisible={6}
       />
 
       {/*
@@ -396,8 +386,8 @@ export function CsvPathOrderStep({
             listHeader ? <View style={{ padding: 10, gap: 10 }}>{listHeader}</View> : null
           }
           ListEmptyComponent={
-            <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, padding: 10 }}>
-              No paths yet. Import a survey CSV or DXF first.
+            <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 12, padding: 12 }}>
+              No paths yet
             </Text>
           }
           ListFooterComponent={
@@ -419,7 +409,7 @@ export function CsvPathOrderStep({
                       borderBottomColor: FIELDS_COLORS.panelBorder,
                     }}
                   >
-                    <Text style={{ flex: 1, color: FIELDS_COLORS.textDim, fontSize: 10 }}>
+                    <Text style={{ flex: 1, color: FIELDS_COLORS.textDim, fontSize: 10, fontWeight: "700" }}>
                       transit
                     </Text>
                     <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, fontWeight: "600" }}>
@@ -460,10 +450,6 @@ export function CsvPathOrderStep({
             const fitMeta = getLineFitMeta(item.line);
             const blocked = !fitMeta.paintable;
             const lengthM = getLineLengthM(item.line);
-            const cornersChip = fitMeta.cornersSummary;
-            const hasSharp =
-              (fitMeta.cornerCounts?.sharp ?? 0) > 0 ||
-              (fitMeta.cornerCounts?.reversal ?? 0) > 0;
             const selected = selectedLineId === item.line.id;
 
             return (
@@ -520,42 +506,40 @@ export function CsvPathOrderStep({
                       gap: 8,
                     }}
                   >
-                    <Text
+                    <View
                       style={{
-                        color: paint ? FIELDS_COLORS.accentBrand : FIELDS_COLORS.textDim,
-                        fontSize: 11,
-                        fontWeight: "800",
-                        minWidth: 18,
+                        width: 24,
+                        height: 24,
+                        borderRadius: 7,
+                        alignItems: "center",
+                        justifyContent: "center",
+                        backgroundColor: paint
+                          ? FIELDS_COLORS.accentMuted
+                          : FIELDS_COLORS.panelSolid,
                       }}
                     >
-                      {item.badge}
-                    </Text>
-                    <View style={{ flex: 1, minWidth: 0 }}>
                       <Text
                         style={{
-                          color: blocked ? FIELDS_COLORS.danger : FIELDS_COLORS.textMain,
-                          fontSize: 13,
-                          fontWeight: "600",
+                          color: paint ? FIELDS_COLORS.accentBrand : FIELDS_COLORS.textDim,
+                          fontSize: 11,
+                          fontWeight: "800",
                         }}
-                        numberOfLines={1}
                       >
-                        {item.line.label}
-                        {blocked ? " · bad" : ""}
+                        {item.badge}
                       </Text>
-                      {cornersChip ? (
-                        <Text
-                          style={{
-                            color: hasSharp ? FIELDS_COLORS.warning : FIELDS_COLORS.textDim,
-                            fontSize: 10,
-                            fontWeight: "600",
-                            marginTop: 1,
-                          }}
-                          numberOfLines={1}
-                        >
-                          {cornersChip}
-                        </Text>
-                      ) : null}
                     </View>
+                    <Text
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        color: blocked ? FIELDS_COLORS.danger : FIELDS_COLORS.textMain,
+                        fontSize: 13,
+                        fontWeight: "600",
+                      }}
+                      numberOfLines={1}
+                    >
+                      {item.line.label}
+                    </Text>
                     {lengthM != null && lengthM > 0 ? (
                       <Text
                         style={{
@@ -573,13 +557,17 @@ export function CsvPathOrderStep({
                   <Pressable
                     onPress={() => setOrder((prev) => setPathPaint(prev, item.line.id, !paint))}
                     style={{
-                      paddingHorizontal: 8,
-                      paddingVertical: 5,
-                      borderRadius: 6,
-                      minWidth: 48,
+                      paddingHorizontal: 10,
+                      paddingVertical: 6,
+                      borderRadius: 8,
+                      minWidth: 52,
                       alignItems: "center",
                       backgroundColor: paint
                         ? FIELDS_COLORS.successMuted
+                        : FIELDS_COLORS.surfaceSolid,
+                      borderWidth: 1,
+                      borderColor: paint
+                        ? FIELDS_COLORS.successBorder
                         : FIELDS_COLORS.panelBorder,
                     }}
                   >

@@ -537,41 +537,31 @@ export function CsvStageAndLoadPanel({
     }
   };
 
-  const blockSummary = [
-    ...readiness.hardBlocks,
-    ...readiness.needsAck,
-  ].slice(0, 2);
-
   return (
     <View style={{ gap: 10 }}>
       {/* Compact status — only when something needs attention or send is running */}
-      {(busy || readinessBlocksSend || error || loadBlocked || staged) && (
+      {(busy || error || loadBlocked || staged) && (
         <Text
           style={{
-            color: error || loadBlocked || readiness.hardBlocks.length > 0
+            color: error || loadBlocked
               ? FIELDS_COLORS.danger
-              : readinessBlocksSend
-                ? FIELDS_COLORS.warning
-                : staged
-                  ? FIELDS_COLORS.success
-                  : FIELDS_COLORS.textMuted,
+              : staged
+                ? FIELDS_COLORS.success
+                : FIELDS_COLORS.textMuted,
             fontSize: 11,
             lineHeight: 15,
           }}
-          numberOfLines={3}
+          numberOfLines={2}
         >
           {busy
             ? stepLabel ?? "Working…"
             : error
               ? error
               : loadBlocked
-                ? "Load blocked — verify failed. Fix and re-send."
+                ? "Load blocked"
                 : staged
-                  ? `Loaded · mark ${metres(nullableNumber(staged.plan.mark_length_m))}`
-                  : blockSummary[0] ?? "Resolve warnings to send"}
-          {!busy && !error && !loadBlocked && !staged && blockSummary[1]
-            ? `\n${blockSummary[1]}`
-            : ""}
+                  ? `Loaded · ${metres(nullableNumber(staged.plan.mark_length_m))}`
+                  : ""}
         </Text>
       )}
 
@@ -592,8 +582,8 @@ export function CsvStageAndLoadPanel({
             borderColor: FIELDS_COLORS.warningBorder,
           }}
         >
-          <Text style={{ color: FIELDS_COLORS.warning, fontSize: 12, fontWeight: "700" }}>
-            Acknowledge warnings to enable Send
+          <Text style={{ color: FIELDS_COLORS.warning, fontSize: 12, fontWeight: "800" }}>
+            Acknowledge
           </Text>
         </TouchableOpacity>
       ) : null}
@@ -609,20 +599,28 @@ export function CsvStageAndLoadPanel({
           justifyContent: "center",
           flexDirection: "row",
           gap: 8,
-          backgroundColor: disabled ? FIELDS_COLORS.textDim : "#7c3aed",
+          backgroundColor: disabled ? FIELDS_COLORS.surfaceSolid : FIELDS_COLORS.accentBrand,
+          borderWidth: 1,
+          borderColor: disabled ? FIELDS_COLORS.panelBorder : FIELDS_COLORS.accentBorder,
         }}
       >
-        {busy ? <ActivityIndicator size="small" color="#fff" /> : null}
-        <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>
+        {busy ? <ActivityIndicator size="small" color={FIELDS_COLORS.accentText} /> : null}
+        <Text
+          style={{
+            color: disabled ? FIELDS_COLORS.textDim : FIELDS_COLORS.accentText,
+            fontSize: 14,
+            fontWeight: "800",
+          }}
+        >
           {busy
             ? (stepLabel ?? "Working…")
             : !apiBaseUrl
-              ? "Connect rover to send"
+              ? "Connect rover"
               : paintedCount < 1
-                ? "Paint a path first"
+                ? "Paint a path"
                 : readinessBlocksSend
                   ? "Send blocked"
-                  : "Send to Rover"}
+                  : "Send"}
         </Text>
       </TouchableOpacity>
     </View>

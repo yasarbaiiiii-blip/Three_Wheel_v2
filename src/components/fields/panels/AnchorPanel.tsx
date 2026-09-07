@@ -62,18 +62,7 @@ export function AnchorPanel({
         )}
         <View style={{ flex: 1 }}>
           <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "800" }}>
-            Anchor point
-          </Text>
-          <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-            {pendingAnchor
-              ? "Point selected — confirm to re-order the plan from there."
-              : anchorTarget
-                ? "Tap a point on the map to set the new start."
-                : anchorSelectMode
-                  ? "Choose which file, layer, or whole plan to anchor."
-                  : anchorAvailable
-                    ? "Change where this plan starts."
-                    : "Load a plan to change its start point."}
+            Anchor
           </Text>
         </View>
 
@@ -133,7 +122,7 @@ export function AnchorPanel({
             }}
           >
             <Check size={16} color="#fff" strokeWidth={2.6} />
-            <Text style={{ color: "#fff", fontSize: 13, fontWeight: "800" }}>Confirm new anchor</Text>
+            <Text style={{ color: "#fff", fontSize: 13, fontWeight: "800" }}>Confirm</Text>
           </Pressable>
         </View>
       ) : null}

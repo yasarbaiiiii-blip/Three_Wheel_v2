@@ -57,15 +57,30 @@ export const FIELDS_COLORS = {
 
 /** Shared layout tokens for the Fields right rail (alignment grid). */
 export const FIELDS_LAYOUT = {
-  panelPad: 14,
-  cardGap: 8,
+  panelPad: 12,
+  cardGap: 6,
   cardRadius: 14,
-  headerMinH: 52,
+  headerMinH: 50,
   rowPadH: 14,
   rowPadV: 12,
   bodyPad: 14,
   nodeSize: 28,
   iconBtn: 36,
+  /** Modest bump from the original 348 overlay — map stays the hero. */
+  railWidth: 408,
+  railMaxPct: 0.39,
+  railInset: 10,
+  mapChromeLeft: 78,
+  btnHeight: 44,
+  btnRadius: 12,
+};
+
+/** Rail slide — snappy, no overshoot past the map edge. */
+export const FIELDS_MOTION = {
+  damping: 24,
+  stiffness: 280,
+  mass: 0.85,
+  overshootClamping: true as const,
 };
 
 export const statusPillColors = (status: string) => {

@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fields — polish in place</title>
+  <style>
+    :root {
+      --bg: #09090b;
+      --panel: #121214;
+      --card: #1a1a1f;
+      --surface: #222228;
+      --nav: #0c0c0e;
+      --border: #2c2c34;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --dim: #71717a;
+      --gold: #f4c10c;
+      --gold-muted: #2a2410;
+      --gold-border: #5c4d12;
+      --success: #34d399;
+      --success-muted: #0f2a22;
+      --success-border: #166534;
+      --danger: #f87171;
+      --danger-muted: #2a1414;
+      --danger-border: #7f1d1d;
+      --path: #14b8a6;
+      --path-muted: rgba(20, 184, 166, 0.14);
+      --path-border: rgba(20, 184, 166, 0.38);
+      --guide: #e11d48;
+      --guide-muted: rgba(225, 29, 72, 0.14);
+      --guide-border: rgba(225, 29, 72, 0.38);
+      --warn: #fbbf24;
+      --warn-muted: #2a220f;
+      --warn-border: #854d0e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; background: #050506; }
+    body {
+      font-family: "Segoe UI", Inter, system-ui, sans-serif;
+      color: var(--text);
+      overflow: hidden;
+    }
+
+    .device {
+      width: 1600px;
+      height: 900px;
+      display: flex;
+      background: var(--bg);
+      position: relative;
+    }
+
+    /* Left nav */
+    .nav {
+      width: 72px;
+      background: var(--nav);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px 0 20px;
+      gap: 10px;
+      z-index: 20;
+    }
+    .nav-logo {
+      width: 40px; height: 40px; border-radius: 12px;
+      background: var(--gold-muted); border: 1px solid var(--gold-border);
+      display: grid; place-items: center; margin-bottom: 8px;
+      color: var(--gold); font-weight: 800; font-size: 13px; letter-spacing: -0.4px;
+    }
+    .nav-btn {
+      width: 44px; height: 44px; border-radius: 12px;
+      display: grid; place-items: center; color: var(--dim);
+    }
+    .nav-btn.active {
+      background: var(--gold); color: #18181b;
+    }
+
+    /* Map */
+    .map {
+      flex: 1; position: relative; overflow: hidden;
+      background:
+        radial-gradient(1200px 700px at 40% 55%, #1a2420 0%, transparent 60%),
+        radial-gradient(800px 500px at 70% 30%, #15181c 0%, transparent 50%),
+        linear-gradient(180deg, #101214 0%, #0b0d0f 100%);
+    }
+    .map-grid {
+      position: absolute; inset: 0; opacity: 0.18;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.06) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.06) 1px, transparent 1px);
+      background-size: 48px 48px;
+    }
+    .plan {
+      position: absolute; left: 8%; top: 14%; width: 58%; height: 68%;
+      filter: drop-shadow(0 0 10px rgba(244,193,12,0.18));
+    }
+    .rover {
+      position: absolute; left: 36%; top: 62%;
+      width: 18px; height: 18px;
+      background: #22d3ee;
+      clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
+      transform: rotate(28deg);
+      filter: drop-shadow(0 0 8px rgba(34,211,238,0.7));
+    }
+    .pin {
+      position: absolute; width: 10px; height: 10px; border-radius: 50%;
+      background: var(--guide); border: 2px solid #fff;
+      box-shadow: 0 0 0 4px rgba(225,29,72,0.25);
+    }
+    .pin.p1 { left: 22%; top: 22%; }
+    .pin.p2 { left: 58%; top: 22%; }
+    .pin.p3 { left: 58%; top: 72%; }
+    .pin.p4 { left: 22%; top: 72%; }
+
+    .banner {
+      position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
+      background: rgba(15,15,20,0.88);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 999px;
+      padding: 8px 14px;
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; font-weight: 700; letter-spacing: 0.2px;
+      color: var(--text);
+      backdrop-filter: blur(10px);
+      white-space: nowrap;
+    }
+    .banner .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gold); }
+    .banner.align .dot { background: var(--success); }
+    .banner.send .dot { background: var(--path); }
+
+    .tools {
+      position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%);
+      display: flex; align-items: center; gap: 6px;
+      background: rgba(15,15,20,0.9);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 16px;
+      padding: 6px;
+      backdrop-filter: blur(12px);
+    }
+    .tool {
+      height: 40px; padding: 0 14px; border-radius: 12px;
+      display: flex; align-items: center; gap: 8px;
+      color: var(--muted); font-size: 12px; font-weight: 800;
+      background: transparent;
+    }
+    .tool.active { background: var(--gold); color: #18181b; }
+    .tool.ok { background: var(--success-muted); color: var(--success); border: 1px solid var(--success-border); }
+    .tool.sep { width: 1px; height: 22px; padding: 0; background: var(--border); }
+    .hud {
+      margin-left: 6px; padding: 0 10px;
+      font-variant-numeric: tabular-nums;
+      color: var(--dim); font-size: 11px; font-weight: 700;
+    }
+    .hud b { color: var(--text); font-weight: 800; }
+
+    .layers {
+      position: absolute; top: 18px; left: 16px;
+      display: flex; align-items: center; gap: 6px;
+      background: rgba(18,18,22,0.88);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 999px; padding: 5px 10px;
+      font-size: 10px; font-weight: 800; letter-spacing: 0.6px; color: var(--dim);
+    }
+    .layer {
+      min-width: 28px; height: 26px; padding: 0 8px; border-radius: 9px;
+      display: grid; place-items: center;
+      background: var(--gold-muted); color: var(--gold); font-size: 11px;
+    }
+    .layer.off { background: var(--surface); color: var(--dim); }
+
+    .rail-tab {
+      position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+      width: 36px; height: 88px; border-radius: 12px 0 0 12px;
+      background: var(--panel); border: 1px solid var(--border); border-right: 0;
+      display: none; place-items: center; color: var(--gold);
+      box-shadow: -8px 0 24px rgba(0,0,0,0.4);
+    }
+    body.collapsed .rail-tab { display: grid; }
+    body.collapsed .rail { display: none; }
+    body.collapsed .tools { left: 54%; }
+
+    /* Right rail */
+    .rail {
+      position: absolute; right: 12px; top: 12px; bottom: 12px;
+      width: 360px;
+      background: var(--panel);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 20px;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+      z-index: 10;
+    }
+    .header {
+      padding: 14px 14px 12px;
+      background: var(--nav);
+      border-bottom: 1px solid var(--border);
+    }
+    .header-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    }
+    .kicker {
+      color: var(--dim); font-size: 10px; font-weight: 700; letter-spacing: 1.4px;
+    }
+    .file {
+      color: var(--text); font-size: 16px; font-weight: 700; letter-spacing: -0.2px;
+      line-height: 22px; margin-top: 2px;
+    }
+    .icon-btn {
+      width: 36px; height: 36px; border-radius: 10px;
+      display: grid; place-items: center;
+      border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+    }
+    .icon-btn.danger { background: var(--danger-muted); border-color: var(--danger-border); color: var(--danger); }
+    .meta {
+      display: flex; align-items: center; gap: 6px; margin-top: 10px; flex-wrap: wrap;
+    }
+    .chip {
+      height: 22px; padding: 0 8px; border-radius: 999px;
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 10px; font-weight: 800; border: 1px solid;
+    }
+    .chip.warn { background: var(--warn-muted); border-color: var(--warn-border); color: var(--warn); }
+    .chip.ok { background: var(--success-muted); border-color: var(--success-border); color: var(--success); }
+    .chip.dim { background: var(--surface); border-color: var(--border); color: var(--dim); }
+    .chip.gold { background: var(--gold-muted); border-color: var(--gold-border); color: var(--gold); }
+    .cta {
+      margin-top: 10px; height: 40px; border-radius: 12px;
+      background: var(--gold); color: #18181b;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      font-size: 13px; font-weight: 800;
+    }
+    .cta.ghost {
+      background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    }
+
+    .steps {
+      flex: 1; min-height: 0; padding: 10px 12px 12px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .card {
+      border-radius: 14px; background: var(--card);
+      border: 1px solid var(--border); overflow: hidden; flex-shrink: 0;
+    }
+    .card-h {
+      height: 50px; padding: 0 14px; display: flex; align-items: center; gap: 11px;
+    }
+    body.upload .card.upload,
+    body.align .card.align,
+    body.send .card.send {
+      border-color: rgba(244,193,12,0.35); background: #1e1e24; flex: 1; min-height: 0;
+      display: flex; flex-direction: column;
+    }
+    body.upload .card.upload .card-h,
+    body.align .card.align .card-h,
+    body.send .card.send .card-h { background: rgba(255,255,255,0.02); }
+    .node {
+      width: 32px; height: 32px; border-radius: 10px; border: 1px solid transparent;
+      display: grid; place-items: center; font-size: 14px; font-weight: 800; flex-shrink: 0;
+    }
+    .node.done { background: var(--success-muted); color: var(--success); border-color: var(--success-border); }
+    .node.active { background: var(--gold-muted); color: var(--gold); border-color: var(--gold-border); }
+    .node.pending { background: var(--surface); color: var(--dim); }
+    .card-title { flex: 1; font-size: 15px; font-weight: 700; letter-spacing: -0.15px; }
+    .card-title.mute { color: var(--muted); }
+    .chev { color: var(--dim); }
+
+    .body {
+      border-top: 1px solid var(--border); background: var(--panel);
+      padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 10px;
+      flex: 1; min-height: 0; overflow: auto;
+    }
+
+    .drop {
+      height: 44px; border-radius: 12px; border: 1px dashed var(--gold-border);
+      background: var(--gold-muted); color: var(--gold);
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      font-size: 13px; font-weight: 800;
+    }
+    .file-row {
+      border-radius: 12px; border: 1px solid var(--border); background: var(--card);
+      padding: 10px 12px; display: flex; align-items: center; gap: 10px;
+    }
+    .file-row.sel { border-color: var(--gold); background: var(--gold-muted); }
+    .type {
+      width: 36px; height: 36px; border-radius: 10px;
+      display: grid; place-items: center; font-size: 9px; font-weight: 800; letter-spacing: 0.4px;
+    }
+    .type.dxf { background: var(--gold-muted); color: var(--gold); }
+    .type.csv { background: var(--guide-muted); color: var(--guide); }
+    .file-name { font-size: 13px; font-weight: 700; }
+    .file-sub { font-size: 11px; color: var(--dim); margin-top: 1px; font-weight: 600; }
+    .x { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; color: var(--danger); }
+
+    .tools-row { display: flex; gap: 8px; }
+    .sec {
+      flex: 1; height: 40px; border-radius: 10px;
+      border: 1px solid var(--border); background: var(--surface);
+      display: grid; place-items: center; font-size: 12px; font-weight: 800; color: var(--muted);
+    }
+
+    .seg {
+      display: flex; background: var(--surface); border-radius: 10px; padding: 3px; gap: 3px;
+    }
+    .seg button {
+      flex: 1; height: 34px; border: 0; border-radius: 8px;
+      background: transparent; color: var(--muted); font-weight: 800; font-size: 12px;
+      font-family: inherit;
+    }
+    .seg button.on { background: var(--gold); color: #18181b; }
+
+    .guide-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px; border-radius: 10px; background: var(--card); border: 1px solid var(--border);
+    }
+    .guide-row.on { border-color: var(--guide-border); background: var(--guide-muted); }
+    .gdot { width: 8px; height: 8px; border-radius: 50%; background: var(--guide); }
+    .guide-row span { flex: 1; font-size: 12px; font-weight: 700; }
+    .guide-row em { font-style: normal; color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+    .primary {
+      height: 44px; border-radius: 12px; background: var(--gold); color: #18181b;
+      display: grid; place-items: center; font-size: 14px; font-weight: 800;
+    }
+    .primary.disabled { background: var(--surface); color: var(--dim); border: 1px solid var(--border); }
+
+    .order {
+      display: flex; flex-direction: column; gap: 6px; flex: 1;
+    }
+    .row {
+      height: 40px; border-radius: 10px; background: var(--card); border: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px; padding: 0 10px;
+      font-size: 12px; font-weight: 700;
+    }
+    .row .idx { color: var(--dim); width: 16px; }
+    .swatch { width: 8px; height: 8px; border-radius: 50%; background: var(--path); }
+    .swatch.t { background: #a78bfa; }
+    .sticky {
+      margin-top: auto; padding-top: 8px; border-top: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .ready { font-size: 11px; color: var(--muted); font-weight: 700; }
+    .ready b { color: var(--text); }
+    .split { display: flex; gap: 8px; }
+    .split .primary { flex: 1; }
+    .load {
+      flex: 1; height: 44px; border-radius: 12px;
+      border: 1px solid var(--border); background: var(--surface);
+      display: grid; place-items: center; font-size: 14px; font-weight: 800; color: var(--text);
+    }
+
+    .hint { font-size: 11px; color: var(--dim); font-weight: 600; line-height: 15px; }
+
+    /* State visibility */
+    .only-upload, .only-align, .only-send { display: none !important; }
+    body.upload .only-upload { display: flex !important; }
+    body.align .only-align { display: flex !important; }
+    body.send .only-send { display: flex !important; }
+    body.upload .pin.only-align,
+    body.align .pin.only-align,
+    body.send .pin.only-align { display: none !important; }
+    body.align .pin.only-align { display: block !important; }
+    body.collapsed .pin.only-align { display: block !important; }
+    .card .body { display: none; }
+    body.upload .card.upload .body,
+    body.align .card.align .body,
+    body.send .card.send .body { display: flex; }
+    .chip.only-upload, .chip.only-align, .chip.only-send,
+    .cta.only-upload, .cta.only-align, .cta.only-send,
+    .banner.only-upload, .banner.only-align, .banner.send.only-send { }
+    .node.only-upload, .node.only-align, .node.only-send,
+    .card-title.only-upload, .card-title.only-align, .card-title.only-send { display: none !important; }
+    body.upload .node.only-upload,
+    body.align .node.only-align,
+    body.send .node.only-send,
+    body.upload .card-title.only-upload,
+    body.align .card-title.only-align,
+    body.send .card-title.only-send { display: flex !important; }
+    body.upload .card-title.only-upload,
+    body.align .card-title.only-align,
+    body.send .card-title.only-send { display: block !important; }
+
+    .caption {
+      position: absolute; left: 88px; bottom: 18px;
+      font-size: 11px; color: var(--dim); font-weight: 600; letter-spacing: 0.3px;
+      display: none;
+    }
+  </style>
+</head>
+<body class="upload">
+  <div class="device">
+    <aside class="nav">
+      <div class="nav-logo">R</div>
+      <div class="nav-btn">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>
+      </div>
+      <div class="nav-btn active">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M2 12h6"/><path d="M22 12h-6"/><circle cx="12" cy="12" r="3"/><path d="M12 2v4"/><path d="M12 22v-4"/></svg>
+      </div>
+      <div class="nav-btn">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </div>
+      <div class="nav-btn" style="margin-top:auto">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/></svg>
+      </div>
+    </aside>
+
+    <main class="map">
+      <div class="map-grid"></div>
+      <svg class="plan" viewBox="0 0 100 70" fill="none">
+        <rect x="8" y="6" width="84" height="58" rx="1.2" stroke="#f4c10c" stroke-width="0.7"/>
+        <line x1="50" y1="6" x2="50" y2="64" stroke="#f4c10c" stroke-width="0.45"/>
+        <circle cx="50" cy="35" r="8" stroke="#f4c10c" stroke-width="0.45"/>
+        <rect x="8" y="22" width="12" height="26" stroke="#f4c10c" stroke-width="0.45"/>
+        <rect x="80" y="22" width="12" height="26" stroke="#f4c10c" stroke-width="0.45"/>
+        <rect x="8" y="28" width="5" height="14" stroke="#f4c10c" stroke-width="0.4"/>
+        <rect x="87" y="28" width="5" height="14" stroke="#f4c10c" stroke-width="0.4"/>
+        <path d="M20 6 C20 18 20 22 8 22" stroke="#f4c10c" stroke-width="0.4"/>
+        <path d="M80 6 C80 18 80 22 92 22" stroke="#f4c10c" stroke-width="0.4"/>
+        <path d="M20 64 C20 52 20 48 8 48" stroke="#f4c10c" stroke-width="0.4"/>
+        <path d="M80 64 C80 52 80 48 92 48" stroke="#f4c10c" stroke-width="0.4"/>
+      </svg>
+      <div class="rover"></div>
+      <div class="pin p1 only-align"></div>
+      <div class="pin p2 only-align"></div>
+      <div class="pin p3 only-align"></div>
+      <div class="pin p4 only-align"></div>
+
+      <div class="layers">LAYERS <span class="layer">1</span><span class="layer off">2</span></div>
+
+      <div class="banner only-upload"><span class="dot"></span> Upload — preview on map</div>
+      <div class="banner align only-align"><span class="dot"></span> Aligning — drag plan or pick guides</div>
+      <div class="banner send only-send"><span class="dot"></span> Path order ready — 12 marks · 2 transits</div>
+
+      <div class="tools">
+        <div class="tool">Move</div>
+        <div class="tool">Resize</div>
+        <div class="tool ok">Confirm</div>
+        <div class="tool sep"></div>
+        <div class="hud">1.00× &nbsp;·&nbsp; 0° &nbsp;·&nbsp; <b>23.8 × 11.0 m</b></div>
+      </div>
+
+      <div class="rail-tab">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="15 18 9 12 15 6"/></svg>
+      </div>
+    </main>
+
+    <aside class="rail">
+      <div class="header">
+        <div class="header-row">
+          <div>
+            <div class="kicker">FIELDS</div>
+            <div class="file">tennis_itf.dxf</div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <div class="icon-btn" title="Collapse rail">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="9 18 15 12 9 6"/></svg>
+            </div>
+            <div class="icon-btn danger" title="Clear plan">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+            </div>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="chip warn only-upload">1 of 4 ready</span>
+          <span class="chip warn only-align">1 of 4 ready</span>
+          <span class="chip ok only-send">4 of 4 ready</span>
+          <span class="chip dim only-upload">Origin unanchored</span>
+          <span class="chip dim only-align">Origin unanchored</span>
+          <span class="chip gold only-send">Origin GPS</span>
+        </div>
+        <div class="cta only-upload">Align DXF →</div>
+        <div class="cta only-align">Fix Alignment</div>
+        <div class="cta only-send">Send to rover</div>
+      </div>
+
+      <div class="steps">
+        <!-- 1 Upload -->
+        <div class="card upload">
+          <div class="card-h">
+            <div class="node done">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div class="card-title">Upload</div>
+            <span class="chip gold" style="height:20px">DXF</span>
+            <span class="chev">▾</span>
+          </div>
+          <div class="body">
+            <div class="drop">+ Add files</div>
+            <div class="file-row sel">
+              <div class="type dxf">DXF</div>
+              <div style="flex:1;min-width:0">
+                <div class="file-name">tennis_itf.dxf</div>
+                <div class="file-sub">124 marks · needs align</div>
+              </div>
+              <div class="x">×</div>
+            </div>
+            <div class="file-row">
+              <div class="type csv">CSV</div>
+              <div style="flex:1;min-width:0">
+                <div class="file-name">corners_guide.csv</div>
+                <div class="file-sub">4 guide points</div>
+              </div>
+              <div class="x">×</div>
+            </div>
+            <div class="hint">Plan tools</div>
+            <div class="tools-row">
+              <div class="sec">Offset</div>
+              <div class="sec">Extensions</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2 Align -->
+        <div class="card align">
+          <div class="card-h">
+            <div class="node active only-upload">2</div>
+            <div class="node active only-align">2</div>
+            <div class="node done only-send">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div class="card-title only-upload">Align</div>
+            <div class="card-title only-align">Align</div>
+            <div class="card-title mute only-send">Align</div>
+            <span class="chip warn only-upload" style="height:20px">needed</span>
+            <span class="chip warn only-align" style="height:20px">needed</span>
+            <span class="chip ok only-send" style="height:20px">fixed</span>
+            <span class="chev">▾</span>
+          </div>
+          <div class="body">
+            <div class="seg">
+              <button class="on">Guides</button>
+              <button>Move on map</button>
+            </div>
+            <div class="guide-row on"><span class="gdot"></span><span>Corner A</span><em>31.9531, 35.9106</em></div>
+            <div class="guide-row"><span class="gdot"></span><span>Corner B</span><em>tap map</em></div>
+            <div class="guide-row"><span class="gdot"></span><span>Corner C</span><em>tap map</em></div>
+            <div class="guide-row"><span class="gdot"></span><span>Corner D</span><em>tap map</em></div>
+            <div class="primary">Fix Alignment</div>
+            <div class="hint">Fit the DXF onto the four guide points, then confirm.</div>
+          </div>
+        </div>
+
+        <!-- 3 Templates -->
+        <div class="card">
+          <div class="card-h">
+            <div class="node pending">3</div>
+            <div class="card-title mute">Templates</div>
+            <span class="chev">▸</span>
+          </div>
+        </div>
+
+        <!-- 4 Path order -->
+        <div class="card send">
+          <div class="card-h">
+            <div class="node pending only-upload">4</div>
+            <div class="node pending only-align">4</div>
+            <div class="node active only-send">4</div>
+            <div class="card-title only-upload mute">Path Order & Load</div>
+            <div class="card-title only-align mute">Path Order & Load</div>
+            <div class="card-title only-send">Path Order & Load</div>
+            <span class="chev">▸</span>
+          </div>
+          <div class="body">
+            <div class="order">
+              <div class="row"><span class="idx">1</span><span class="swatch"></span> Baseline · paint</div>
+              <div class="row"><span class="idx">2</span><span class="swatch"></span> Center circle · paint</div>
+              <div class="row"><span class="idx">3</span><span class="swatch t"></span> Transit to box</div>
+              <div class="row"><span class="idx">4</span><span class="swatch"></span> Penalty box · paint</div>
+            </div>
+            <div class="sticky">
+              <div class="ready"><b>12 marks</b> · 2 transits · 286 m</div>
+              <div class="split">
+                <div class="load">Load</div>
+                <div class="primary">Send</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(location.search);
+    const state = params.get("s") || "upload";
+    document.body.className = state;
+    if (state === "collapsed") {
+      document.body.classList.add("collapsed", "align");
+    }
+  </script>
+</body>
+</html>

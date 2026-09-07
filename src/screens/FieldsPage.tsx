@@ -1,5 +1,5 @@
-import React, { useCallback, useMemo, useState } from "react";
-import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Alert, Keyboard, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 
 import * as missionApi from "../api/missionApi";
 import * as pathApi from "../api/pathApi";
@@ -9,9 +9,10 @@ import {
 } from "../api/missionContract";
 import { type PlacedItem } from "../components/BoundaryEditor";
 import { FieldsStepCard } from "../components/fields/FieldsStepCard";
-import { FieldsClearBar } from "../components/fields/FieldsClearBar";
-import { MapPlanInteractionOverlay } from "../components/fields/MapPlanInteractionOverlay";
-import { FIELDS_COLORS } from "../components/fields/fieldsTheme";
+import { FieldsMapChrome } from "../components/fields/FieldsMapChrome";
+import { FieldsRail, railPixelWidth } from "../components/fields/FieldsRail";
+import { FieldsStatusHeader } from "../components/fields/FieldsStatusHeader";
+import { FIELDS_COLORS, FIELDS_LAYOUT } from "../components/fields/fieldsTheme";
 import { AlignDxfPanel } from "../components/fields/panels/AlignDxfPanel";
 import { AnchorPanel } from "../components/fields/panels/AnchorPanel";
 import { CsvPathOrderStep } from "../components/fields/panels/CsvPathOrderStep";
@@ -20,6 +21,7 @@ import { PathOrderAndSprayStep } from "../components/fields/panels/PathOrderAndS
 import { TemplatePanel } from "../components/fields/panels/TemplatePanel";
 import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPreviewStep";
 import { useFieldsWorkflow } from "../hooks/useFieldsWorkflow";
+import { deriveFieldsRailStatus } from "../utils/fieldsRailStatus";
 import { designObbFromLines } from "../utils/planResizeHandles";
 import {
   ghostLinesForPose,
@@ -1182,29 +1184,127 @@ export function FieldsPage(props: FieldsPageProps) {
     ? { lat: telemetrySnapshot.lat, lon: telemetrySnapshot.lon }
     : null;
 
-  // Compute transform HUD state from visualAlignmentItem
-  const hasTransform = !!(
-    visualAlignmentItem &&
-    (Math.abs(visualAlignmentItem.x ?? 0) > 0.01 ||
-      Math.abs(visualAlignmentItem.y ?? 0) > 0.01 ||
-      Math.abs(visualAlignmentItem.rotation ?? 0) > 0.1 ||
-      Math.abs((visualAlignmentItem.scale ?? 1) - 1) > 0.001)
-  );
+  const { width: windowWidth } = useWindowDimensions();
+  const railWidth = railPixelWidth(windowWidth);
+  const [railCollapsed, setRailCollapsed] = useState(false);
+  const autoCollapsedRef = useRef(false);
 
-  // Live bounding-box size in meters (design-space OBB × current scale) for the transform
-  // HUD — was hardcoded to 0 before since nothing computed it from the plan's own bounds.
-  const liveBoundingSizeM = useMemo(() => {
-    if (!visualAlignmentItem?.lines?.length) return { widthM: 0, heightM: 0 };
-    const obb = designObbFromLines(visualAlignmentItem.lines);
-    const scale = visualAlignmentItem.scale ?? 1;
-    const sE = visualAlignmentItem.scaleEast ?? scale;
-    const sN = visualAlignmentItem.scaleNorth ?? scale;
-    return { widthM: obb.width * sE, heightM: obb.height * sN };
+  const mapHeavy =
+    tplSession !== "idle" ||
+    !!isPlanEditingMode ||
+    !!isVisualAlignmentMode ||
+    !!anchorSelectMode;
+
+  useEffect(() => {
+    if (mapHeavy) {
+      Keyboard.dismiss();
+      setRailCollapsed((prev) => {
+        if (prev) return prev;
+        autoCollapsedRef.current = true;
+        return true;
+      });
+    } else if (autoCollapsedRef.current) {
+      autoCollapsedRef.current = false;
+      setRailCollapsed(false);
+    }
+  }, [mapHeavy]);
+
+  const expandRail = useCallback(() => {
+    autoCollapsedRef.current = false;
+    setRailCollapsed(false);
+  }, []);
+  const collapseRail = useCallback(() => {
+    autoCollapsedRef.current = false;
+    Keyboard.dismiss();
+    setRailCollapsed(true);
+  }, []);
+
+  const handleCancelPlace = useCallback(() => {
+    setTplSession("idle");
+    setTplDraft(null);
+    setTplGhostPose(null);
+  }, []);
+
+  const handleConfirmPlace = useCallback(() => {
+    if (!tplDraft || !tplGhostPose || !onPlaceTemplate) return;
+    if (blockProtectedWorkflowMutation("Placing a template")) return;
+    const placedId = onPlaceTemplate({
+      kind: tplDraft.kind,
+      fileName: tplDraft.fileName,
+      sourceLines: tplDraft.sourceLines,
+      north: tplGhostPose.north,
+      east: tplGhostPose.east,
+    });
+    setTplSession("idle");
+    setTplDraft(null);
+    setTplGhostPose(null);
+    setShowMapInteraction(true);
+    expandRail();
+    if (typeof placedId === "string") {
+      setSelectedTemplateId(placedId);
+      openOnlySection("templates");
+    }
   }, [
-    visualAlignmentItem?.lines,
-    visualAlignmentItem?.scale,
-    visualAlignmentItem?.scaleEast,
-    visualAlignmentItem?.scaleNorth,
+    tplDraft,
+    tplGhostPose,
+    onPlaceTemplate,
+    blockProtectedWorkflowMutation,
+    setShowMapInteraction,
+    expandRail,
+    openOnlySection,
+  ]);
+
+  const alignRequired = !isLocalCsvFlow || hasPendingAlignment;
+  const pathOrderReady = uploadDone && (!alignRequired || alignDone);
+  const stagedOrLoaded =
+    stagedWorkflow.staged === "verified" || stagedWorkflow.loaded === "verified";
+  const hasGpsOrigin = Boolean(
+    sharedOriginGps ||
+      isGeographicDxf ||
+      (Array.isArray(verifiedAlignmentRequest?.origin_gps) &&
+        verifiedAlignmentRequest.origin_gps.length >= 2)
+  );
+  const railStatus = deriveFieldsRailStatus({
+    primaryFileName:
+      uploadedFiles[0]?.fileName ??
+      importedPlan?.fileName ??
+      activeCsvPreview?.fileName ??
+      localDxfMeta?.fileName ??
+      selectedPathName ??
+      null,
+    fileCount: uploadedFiles.length > 0 ? uploadedFiles.length : hasPath ? 1 : 0,
+    uploadDone,
+    alignRequired,
+    alignDone,
+    templatesVisible: hasPath,
+    pathOrderReady,
+    stagedOrLoaded,
+    autoOrigin: !!autoOrigin,
+    hasGpsOrigin,
+  });
+
+  const handleHeaderCta = useCallback(() => {
+    expandRail();
+    if (railStatus.ctaId === "align") {
+      setActiveStep("align");
+      openOnlySection("align");
+      return;
+    }
+    if (railStatus.ctaId === "pathOrder") {
+      if (!isLocalFlow || isLocalDxfFlow) {
+        setActiveStep("orderAndSpray");
+        openOnlySection("orderAndSpray");
+      } else {
+        openOnlySection("pathOrder");
+      }
+    }
+  }, [
+    expandRail,
+    railStatus.ctaId,
+    isLocalFlow,
+    isLocalDxfFlow,
+    setActiveStep,
+    openOnlySection,
   ]);
 
   return (
@@ -1282,154 +1382,30 @@ export function FieldsPage(props: FieldsPageProps) {
         })}
       </View>
 
-      {/* Move / Resize chrome — visible as soon as Move/Rotate Plan is active */}
-      {isPlanEditingMode &&
-      (multiPointPlacementPhase === "placing" ||
-        multiPointPlacementPhase === "attached" ||
-        multiPointPlacementPhase === "resizing") ? (
-        <View
-          pointerEvents="box-none"
-          style={{
-            position: "absolute",
-            top: 24,
-            left: 0,
-            right: 0,
-            alignItems: "center",
-            zIndex: 60,
-          }}
-        >
-          <View
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 12,
-              backgroundColor: "rgba(15,23,42,0.92)",
-              borderRadius: 14,
-              paddingHorizontal: 16,
-              paddingVertical: 10,
-              borderWidth: 1,
-              borderColor:
-                multiPointPlacementPhase === "resizing"
-                  ? FIELDS_COLORS.stepActive
-                  : FIELDS_COLORS.success,
-              elevation: 12,
-              shadowColor: "#000",
-              shadowOffset: { width: 0, height: 4 },
-              shadowOpacity: 0.4,
-              shadowRadius: 10,
-            }}
-          >
-            <View style={{ alignItems: "flex-start" }}>
-              <Text
-                style={{
-                  color: FIELDS_COLORS.textMuted,
-                  fontSize: 10,
-                  fontWeight: "700",
-                  letterSpacing: 0.6,
-                }}
-              >
-                {multiPointPlacementPhase === "resizing" ? "RESIZE" : "MOVE"}
-              </Text>
-              <Text
-                style={{
-                  color: FIELDS_COLORS.textMain,
-                  fontSize: 16,
-                  fontWeight: "800",
-                  fontFamily: "monospace",
-                }}
-              >
-                {(visualAlignmentItem?.scale ?? 1).toFixed(2)}×
-              </Text>
-            </View>
-            {multiPointPlacementPhase === "resizing" ? (
-              <Pressable
-                onPress={() => onPlanResizeDone?.()}
-                style={({ pressed }) => ({
-                  paddingHorizontal: 18,
-                  paddingVertical: 10,
-                  borderRadius: 10,
-                  backgroundColor: pressed ? FIELDS_COLORS.success : "#10b981",
-                })}
-              >
-                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 14 }}>Done</Text>
-              </Pressable>
-            ) : (
-              <Pressable
-                onPress={() => onPlanEditResize?.()}
-                style={({ pressed }) => ({
-                  paddingHorizontal: 18,
-                  paddingVertical: 10,
-                  borderRadius: 10,
-                  backgroundColor: pressed ? FIELDS_COLORS.stepActive : "#0ea5e9",
-                })}
-              >
-                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 14 }}>Resize</Text>
-              </Pressable>
-            )}
-          </View>
-        </View>
-      ) : null}
-
-      {/* Map interaction overlay (floating icons on plan) */}
-      <MapPlanInteractionOverlay
-        visible={
-          showMapInteraction &&
-          hasPath &&
-          multiPointPlacementPhase !== "placing" &&
-          multiPointPlacementPhase !== "attached" &&
-          multiPointPlacementPhase !== "resizing"
-        }
-        transformData={{
-          scaleMultiplier: visualAlignmentItem?.scale ?? 1,
-          boundingWidthM: liveBoundingSizeM.widthM,
-          boundingHeightM: liveBoundingSizeM.heightM,
-          rotationDeg: visualAlignmentItem?.rotation ?? 0,
-          offsetMeters: {
-            x: visualAlignmentItem?.x ?? 0,
-            y: visualAlignmentItem?.y ?? 0,
-          },
-        }}
-        onConfirm={handleConfirmTransform}
-        hasTransform={hasTransform}
+      <FieldsMapChrome
+        railCollapsed={railCollapsed}
+        railWidth={railWidth}
+        tplSession={tplSession}
+        anchorSelectMode={anchorSelectMode}
+        onCancelPlace={handleCancelPlace}
+        onConfirmPlace={handleConfirmPlace}
       />
 
-      {/* Side panel — UI chrome only; workflow / expand logic unchanged */}
-      <View
-        style={{
-          position: "absolute",
-          right: 10,
-          top: 10,
-          bottom: 10,
-          width: 348,
-          maxWidth: "34%",
-          backgroundColor: FIELDS_COLORS.panelSolid,
-          borderRadius: 20,
-          borderWidth: 1,
-          borderColor: "rgba(255,255,255,0.06)",
-          overflow: "hidden",
-          elevation: 16,
-          shadowColor: "#000",
-          shadowOffset: { width: 0, height: 10 },
-          shadowOpacity: 0.45,
-          shadowRadius: 22,
-          zIndex: 10,
-        }}
-      >
-        <FieldsClearBar onClear={onClearMission} busy={missionActionBusy} />
+      {/* Side panel stays mounted while collapsed so Path Order / Align drafts survive. */}
+      <FieldsRail collapsed={railCollapsed} onExpand={expandRail}>
+        <FieldsStatusHeader
+          status={railStatus}
+          busy={missionActionBusy}
+          onCollapse={collapseRail}
+          onClear={onClearMission}
+          onCta={railStatus.ctaId === "none" ? undefined : handleHeaderCta}
+        />
         {/* Path Order uses DraggableFlatList (VirtualizedList) — never nest it
             inside the page ScrollView (same orientation). CSV and DXF both
             host that section outside ScrollView. */}
         {isLocalFlow ? (
-        <View
-          style={{
-            flex: 1,
-            minHeight: 0,
-            paddingHorizontal: 12,
-            paddingTop: 10,
-            paddingBottom: 12,
-            gap: 6,
-          }}
-        >
+        <View style={railColumnStyles.column}>
+          <View style={railColumnStyles.tray}>
           {/*
             These containers size to their content (flexGrow:0) and shrink only when the
             column runs out of room. Never flexGrow:1 — a scroller that grows past its
@@ -1438,8 +1414,8 @@ export function FieldsPage(props: FieldsPageProps) {
             leftover space is the open Path Order card, via `fillAvailable`.
           */}
           <ScrollView
-            style={{ flexGrow: 0, flexShrink: 1, minHeight: 0 }}
-            contentContainerStyle={{ gap: 8 }}
+            style={railColumnStyles.scroller}
+            contentContainerStyle={railColumnStyles.scrollerContent}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
             showsVerticalScrollIndicator={topSectionOpen}
@@ -1448,22 +1424,15 @@ export function FieldsPage(props: FieldsPageProps) {
           </ScrollView>
           {/* Path order list (VirtualizedList) + Verify & Load — outside ScrollView. */}
           {renderFieldsSteps("csvPathOrder")}
+          </View>
         </View>
         ) : (
-        <View
-          style={{
-            flex: 1,
-            minHeight: 0,
-            paddingHorizontal: 12,
-            paddingTop: 10,
-            paddingBottom: 12,
-            gap: 6,
-          }}
-        >
+        <View style={railColumnStyles.column}>
+          <View style={railColumnStyles.tray}>
           {/* Same rule as the local column: size to content, shrink only when out of room. */}
           <ScrollView
-            style={{ flexGrow: 0, flexShrink: 1, minHeight: 0 }}
-            contentContainerStyle={{ gap: 8, paddingBottom: 4 }}
+            style={railColumnStyles.scroller}
+            contentContainerStyle={railColumnStyles.scrollerContent}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
             showsVerticalScrollIndicator={topSectionOpen}
@@ -1472,9 +1441,10 @@ export function FieldsPage(props: FieldsPageProps) {
           </ScrollView>
           {/* DXF Path Order DraggableFlatList — outside ScrollView (fixes VirtualizedList warning). */}
           {renderFieldsSteps("dxfPathOrder")}
+          </View>
         </View>
         )}
-      </View>
+      </FieldsRail>
     </View>
   );
 
@@ -1513,30 +1483,8 @@ export function FieldsPage(props: FieldsPageProps) {
           setTplRotate(false);
           setShowMapInteraction(true);
         }}
-        onCancelPlace={() => {
-          setTplSession("idle");
-          setTplDraft(null);
-          setTplGhostPose(null);
-        }}
-        onConfirmPlace={() => {
-          if (!tplDraft || !tplGhostPose || !onPlaceTemplate) return;
-          if (blockProtectedWorkflowMutation("Placing a template")) return;
-          const placedId = onPlaceTemplate({
-            kind: tplDraft.kind,
-            fileName: tplDraft.fileName,
-            sourceLines: tplDraft.sourceLines,
-            north: tplGhostPose.north,
-            east: tplGhostPose.east,
-          });
-          setTplSession("idle");
-          setTplDraft(null);
-          setTplGhostPose(null);
-          setShowMapInteraction(true);
-          if (typeof placedId === "string") {
-            setSelectedTemplateId(placedId);
-            openOnlySection("templates");
-          }
-        }}
+        onCancelPlace={handleCancelPlace}
+        onConfirmPlace={handleConfirmPlace}
         onToggleDrag={() => {
           if (blockProtectedWorkflowMutation("Editing a template")) return;
           setTplDrag((v) => !v);
@@ -1801,7 +1749,7 @@ export function FieldsPage(props: FieldsPageProps) {
             showLocalDxfPathOrder) ? (
             <FieldsStepCard
               stepNumber={stepNo.pathOrder}
-              title="Path Order & Load"
+              title="Path Order"
               status={
                 stagedWorkflow.loaded === "verified" || stagedWorkflow.staged === "verified"
                   ? "done"
@@ -1937,13 +1885,13 @@ export function FieldsPage(props: FieldsPageProps) {
           ) : showCsvPathOrder ? (
             <FieldsStepCard
               stepNumber={stepNo.pathOrder}
-              title="Path Order & Load"
+              title="Path Order"
               status="pending"
               expanded={isSectionOpen("pathOrder")}
               onToggle={() => toggleSection("pathOrder")}
             >
-              <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, lineHeight: 16 }}>
-                Load a survey CSV or DXF first, then order paths, review transit, and verify & load.
+              <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 12 }}>
+                No file
               </Text>
             </FieldsStepCard>
           ) : null}
@@ -2059,7 +2007,7 @@ export function FieldsPage(props: FieldsPageProps) {
           {showDxfPathOrder && (
           <FieldsStepCard
             stepNumber={stepNo.pathOrder}
-            title="Path Order & Load"
+            title="Path Order"
             status={stepStatus("orderAndSpray")}
             expanded={isSectionOpen("orderAndSpray")}
             onToggle={() => toggleSection("orderAndSpray", "orderAndSpray")}
@@ -2104,3 +2052,32 @@ export function FieldsPage(props: FieldsPageProps) {
     );
   }
 }
+
+const railColumnStyles = StyleSheet.create({
+  column: {
+    flex: 1,
+    minHeight: 0,
+    paddingHorizontal: 10,
+    paddingTop: 2,
+    paddingBottom: 10,
+  },
+  tray: {
+    flex: 1,
+    minHeight: 0,
+    backgroundColor: "#111114",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+    padding: 6,
+    gap: FIELDS_LAYOUT.cardGap,
+  },
+  scroller: {
+    flexGrow: 0,
+    flexShrink: 1,
+    minHeight: 0,
+  },
+  scrollerContent: {
+    gap: FIELDS_LAYOUT.cardGap,
+    paddingBottom: 2,
+  },
+});

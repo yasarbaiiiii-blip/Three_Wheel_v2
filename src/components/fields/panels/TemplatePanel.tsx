@@ -149,27 +149,38 @@ function ToolBtn({
   onPress?: () => void;
 }) {
   return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      accessibilityRole="button"
-      accessibilityState={{ disabled, selected: active }}
-      style={{
-        flex: 1,
-        height: 40,
-        borderRadius: 10,
-        alignItems: "center",
-        justifyContent: "center",
-        borderWidth: 1.5,
-        backgroundColor: active ? FIELDS_COLORS.accentBrand : FIELDS_COLORS.surfaceSolid,
-        borderColor: active ? FIELDS_COLORS.accentBorder : FIELDS_COLORS.panelBorder,
-        opacity: disabled ? 0.4 : 1,
-      }}
-    >
-      <Text style={{ color: active ? "#18181b" : FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "800" }}>
-        {label}
-      </Text>
-    </Pressable>
+    <View style={{ flex: 1 }}>
+      <Pressable
+        onPress={onPress}
+        disabled={disabled}
+        accessibilityRole="button"
+        accessibilityState={{ disabled, selected: active }}
+        android_ripple={{ color: "rgba(255,255,255,0.08)" }}
+      >
+        <View
+          style={{
+            height: 40,
+            borderRadius: 10,
+            alignItems: "center",
+            justifyContent: "center",
+            borderWidth: 1.5,
+            backgroundColor: active ? FIELDS_COLORS.accentBrand : FIELDS_COLORS.surfaceSolid,
+            borderColor: active ? FIELDS_COLORS.accentBorder : FIELDS_COLORS.panelBorder,
+            opacity: disabled ? 0.4 : 1,
+          }}
+        >
+          <Text
+            style={{
+              color: active ? FIELDS_COLORS.accentText : FIELDS_COLORS.textMuted,
+              fontSize: 12,
+              fontWeight: "800",
+            }}
+          >
+            {label}
+          </Text>
+        </View>
+      </Pressable>
+    </View>
   );
 }
 
@@ -186,7 +197,7 @@ export function TemplatePanel(props: TemplatePanelProps) {
         disabled={placing}
         accessibilityRole="button"
         style={{
-          minHeight: 56,
+          minHeight: 48,
           borderRadius: 16,
           flexDirection: "row",
           alignItems: "center",
@@ -210,44 +221,10 @@ export function TemplatePanel(props: TemplatePanelProps) {
         >
           <LayoutGrid size={16} color={FIELDS_COLORS.accentBrand} />
         </View>
-        <View style={{ flex: 1 }}>
-          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 14, fontWeight: "800" }}>Library</Text>
-          <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, fontWeight: "600", marginTop: 1 }}>
-            Signs and text
-          </Text>
-        </View>
+        <Text style={{ flex: 1, color: FIELDS_COLORS.textMain, fontSize: 14, fontWeight: "800" }}>
+          Library
+        </Text>
       </Pressable>
-
-      {props.session === "picking" ? (
-        <View
-          style={{
-            borderRadius: 10,
-            padding: 10,
-            backgroundColor: "rgba(244,193,12,0.10)",
-            borderWidth: 1,
-            borderColor: FIELDS_COLORS.accentBorder,
-          }}
-        >
-          <Text style={{ color: FIELDS_COLORS.accentBrand, fontSize: 12, fontWeight: "700" }}>
-            Tap the map to place a ghost preview.
-          </Text>
-        </View>
-      ) : null}
-      {props.session === "ghost" ? (
-        <View
-          style={{
-            borderRadius: 10,
-            padding: 10,
-            backgroundColor: "rgba(244,193,12,0.10)",
-            borderWidth: 1,
-            borderColor: FIELDS_COLORS.accentBorder,
-          }}
-        >
-          <Text style={{ color: FIELDS_COLORS.accentBrand, fontSize: 12, fontWeight: "700" }}>
-            Ghost is on the map. Place it, or tap again to move.
-          </Text>
-        </View>
-      ) : null}
 
       {placing ? (
         <View style={{ flexDirection: "row", gap: 8 }}>
@@ -275,10 +252,10 @@ export function TemplatePanel(props: TemplatePanelProps) {
                 borderRadius: 10,
                 alignItems: "center",
                 justifyContent: "center",
-                backgroundColor: FIELDS_COLORS.teal,
+                backgroundColor: FIELDS_COLORS.accentBrand,
               }}
             >
-              <Text style={{ color: "#fff", fontWeight: "800" }}>Place</Text>
+              <Text style={{ color: FIELDS_COLORS.accentText, fontWeight: "800" }}>Place</Text>
             </Pressable>
           ) : (
             <View
@@ -304,9 +281,6 @@ export function TemplatePanel(props: TemplatePanelProps) {
       />
 
       <View style={{ gap: 8 }}>
-        <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, fontWeight: "800", letterSpacing: 0.6 }}>
-          TRANSFORM
-        </Text>
         <View style={{ flexDirection: "row", gap: 6 }}>
           <ToolBtn label="Drag" active={!!props.dragEnabled} disabled={!hasSelection} onPress={props.onToggleDrag} />
           <ToolBtn label="Scale" active={!!props.scaleEnabled} disabled={!hasSelection} onPress={props.onToggleScale} />

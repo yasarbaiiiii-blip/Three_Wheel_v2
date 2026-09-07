@@ -1,11 +1,13 @@
 import React, { memo, useCallback, useMemo, useState } from "react";
 import {
+  Alert,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
+  TouchableOpacity,
   StatusBar,
   StyleSheet,
   Text,
@@ -24,7 +26,7 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
-import { Minus, Plus, RotateCcw, RotateCw, X } from "lucide-react-native";
+import { AlertTriangle, Lock, Minus, Plus, RotateCcw, RotateCw, X } from "lucide-react-native";
 
 import type { PlanLine } from "../../types/plan";
 import { generateTextLines, type FontStyle } from "../../utils/characterTemplates";
@@ -101,24 +103,21 @@ function rotatePlanLines(lines: PlanLine[], deg: number): PlanLine[] {
 
 const CatalogTile = memo(function CatalogTile({
   item,
-  width,
-  gap,
   category,
   active,
   sizeM,
   fontStyle,
   onPress,
+  onAdd,
 }: {
   item: CatalogItem;
-  width: number;
-  gap: number;
   category: GalleryCategory;
   active: boolean;
   sizeM: number;
   fontStyle: FontStyle;
   onPress: (item: CatalogItem) => void;
+  onAdd?: () => void;
 }) {
-  const art = Math.min(124, Math.max(88, Math.round(width - 28)));
   const dim = `${(item.widthM * sizeM).toFixed(2)} × ${(item.heightM * sizeM).toFixed(2)} m`;
   return (
     <Pressable
@@ -128,19 +127,18 @@ const CatalogTile = memo(function CatalogTile({
       accessibilityState={{ selected: active }}
       style={({ pressed }) => [
         styles.card,
-        { width, marginBottom: gap },
         active ? styles.cardOn : styles.cardOff,
-        pressed && { opacity: 0.88 },
+        pressed && { opacity: 0.88, transform: [{ scale: 0.98 }] },
       ]}
     >
-      <View style={styles.cardArt}>
+      <View style={[styles.templatePreviewBox, active ? styles.templatePreviewBoxOn : styles.templatePreviewBoxOff]}>
         {category === "signs" ? (
-          <RoadSignThumbnail sign={item.id as RoadSignType} size={art} stroke={active ? GOLD : "#f4f4f5"} bare />
+          <RoadSignThumbnail sign={item.id as RoadSignType} size={124} strokeWidth={0.024} stroke={active ? GOLD : "#f4f4f5"} bare />
         ) : (
           <Text
             style={[
               styles.glyph,
-              { fontSize: Math.round(art * 0.55), color: active ? GOLD : "#f4f4f5" },
+              { fontSize: 82, color: active ? GOLD : "#f4f4f5" },
               fontStyle === "stencil" && styles.glyphStencil,
             ]}
           >
@@ -148,15 +146,29 @@ const CatalogTile = memo(function CatalogTile({
           </Text>
         )}
       </View>
-      <View style={[styles.pill, active && styles.pillOn]}>
-        <Text style={[styles.pillText, active && styles.pillTextOn]}>{category === "signs" ? "Sign" : "Text"}</Text>
+      <View style={styles.cardFooter}>
+        <Text style={[styles.cardName, active && styles.cardNameOn]} numberOfLines={1}>
+          {item.label}
+        </Text>
+        <Text style={[styles.cardDim, active && styles.cardDimOn]} numberOfLines={1}>
+          {dim}
+        </Text>
+        {active && onAdd ? (
+          <TouchableOpacity
+            onPress={(e) => {
+              e?.stopPropagation?.();
+              onAdd();
+            }}
+            accessibilityRole="button"
+            accessibilityLabel={`Add ${item.label} to map`}
+            style={styles.tileAddBtnOn}
+            activeOpacity={0.8}
+          >
+            <Plus size={14} color="#000000" strokeWidth={3} />
+            <Text style={styles.tileAddTextOn}>Add</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
-      <Text style={[styles.cardName, active && styles.cardNameOn]} numberOfLines={1}>
-        {item.label}
-      </Text>
-      <Text style={styles.cardDim} numberOfLines={1}>
-        {dim}
-      </Text>
     </Pressable>
   );
 });
@@ -227,12 +239,7 @@ function LibraryBody({
   const filmData = category === "signs" ? SIGN_CATALOG : CHAR_CATALOG;
   const selectedId = category === "signs" ? sign : customText.trim() ? "" : glyph;
 
-  const catalogW = split ? Math.min(560, Math.max(400, Math.round(width * 0.44))) : width - 32;
-  const cols = 2;
-  const tileWidth = Math.max(
-    140,
-    Math.floor(((listW > 0 ? listW : catalogW) - GRID_GAP * (cols - 1)) / cols)
-  );
+  const catalogW = split ? Math.min(500, Math.max(360, Math.round(width * 0.40))) : width - 32;
 
   const resetView = useCallback(() => {
     zoomSv.value = withTiming(1, { duration: 180 });
@@ -322,7 +329,14 @@ function LibraryBody({
   });
 
   const handleAdd = () => {
-    if (!canPlace || previewLines.length === 0) return;
+    if (!canPlace) {
+      Alert.alert(
+        "Cannot Place Yet",
+        placeBlockedReason || "Please import a survey or align a plan first so the template has a map frame."
+      );
+      return;
+    }
+    if (previewLines.length === 0) return;
     onAdd({
       kind: category === "characters" ? "characters" : "sign",
       fileName,
@@ -351,27 +365,27 @@ function LibraryBody({
     resetView();
   };
 
+  const addLocked = !canPlace || previewLines.length === 0;
+
   const renderItem = useCallback<ListRenderItem<CatalogItem>>(
-    ({ item, index }) => (
-      <View style={{ marginRight: index % cols === cols - 1 ? 0 : GRID_GAP }}>
+    ({ item }) => (
+      <View style={styles.tileWrapper}>
         <CatalogTile
           item={item}
-          width={tileWidth}
-          gap={GRID_GAP}
           category={category}
           active={item.id === selectedId}
           sizeM={sizeM}
           fontStyle={fontStyle}
           onPress={selectFilm}
+          onAdd={addLocked ? undefined : handleAdd}
         />
       </View>
     ),
-    [category, cols, fontStyle, selectFilm, selectedId, sizeM, tileWidth]
+    [addLocked, category, fontStyle, handleAdd, selectFilm, selectedId, sizeM]
   );
 
   const displayAngle = ((rotDeg % 360) + 360) % 360;
   const previewArt = Math.max(160, Math.min(stage.w - 8, stage.h - 72));
-  const addLocked = !canPlace || previewLines.length === 0;
   const topPad = Math.max(insets.top, StatusBar.currentHeight ?? 0, 12);
 
   const sizeHud = (
@@ -415,15 +429,29 @@ function LibraryBody({
               {displayName}
             </Text>
           </View>
-          <Pressable
-            onPress={onClose}
-            accessibilityRole="button"
-            accessibilityLabel="Close library"
-            hitSlop={8}
-            style={styles.closeBtn}
-          >
-            <X size={18} color={FIELDS_COLORS.textMain} />
-          </Pressable>
+          <View style={styles.topRightActions}>
+            <TouchableOpacity
+              onPress={handleAdd}
+              accessibilityRole="button"
+              style={styles.topAddBtn}
+              activeOpacity={0.8}
+            >
+              <Plus size={18} color="#09090b" strokeWidth={3} />
+              <Text style={styles.topAddText}>Add to Map</Text>
+            </TouchableOpacity>
+            <Pressable
+              onPress={onClose}
+              accessibilityRole="button"
+              accessibilityLabel="Close library"
+              hitSlop={8}
+              style={({ pressed }) => [
+                styles.closeBtn,
+                pressed && { opacity: 0.75, transform: [{ scale: 0.96 }] },
+              ]}
+            >
+              <X size={18} color={FIELDS_COLORS.textMain} />
+            </Pressable>
+          </View>
         </View>
 
         <View
@@ -465,19 +493,30 @@ function LibraryBody({
             {sizeHud}
             <View style={styles.rotateBar}>
               <Pressable onPress={() => snapRotate(-90)} accessibilityLabel="Rotate left 90" style={styles.rotateBtn}>
-                <RotateCcw size={15} color={FIELDS_COLORS.textMain} />
+                <RotateCcw size={16} color={FIELDS_COLORS.textMain} />
               </Pressable>
               <Text style={styles.rotateDeg}>{displayAngle.toFixed(0)}°</Text>
               <Pressable onPress={() => snapRotate(90)} accessibilityLabel="Rotate right 90" style={styles.rotateBtn}>
-                <RotateCw size={15} color={FIELDS_COLORS.textMain} />
+                <RotateCw size={16} color={FIELDS_COLORS.textMain} />
               </Pressable>
               <Pressable onPress={resetView} accessibilityLabel="Reset view" style={styles.rotateBtn}>
                 <Text style={styles.resetLabel}>reset</Text>
               </Pressable>
             </View>
+
+            <TouchableOpacity
+              onPress={handleAdd}
+              accessibilityRole="button"
+              accessibilityLabel="Add to Map"
+              style={styles.stageMainAddBtn}
+              activeOpacity={0.8}
+            >
+              <Plus size={20} color="#000000" strokeWidth={3.2} />
+              <Text style={styles.stageMainAddText}>Add to Map</Text>
+            </TouchableOpacity>
           </View>
 
-          <View style={[styles.rail, split ? { width: catalogW + 8 } : styles.dock]}>
+          <View style={[styles.rail, split ? { width: catalogW, flex: 0 } : styles.dock]}>
             <View onLayout={(e) => setSegW(e.nativeEvent.layout.width)} style={styles.seg}>
               <Animated.View style={[styles.segPill, tabPillStyle]} />
               {(
@@ -500,6 +539,14 @@ function LibraryBody({
                 );
               })}
             </View>
+
+            {addLocked && placeBlockedReason ? (
+              <View style={styles.blockedBanner}>
+                <AlertTriangle size={14} color={FIELDS_COLORS.warning} style={{ flexShrink: 0 }} />
+                <Text style={styles.blockedText}>{placeBlockedReason}</Text>
+              </View>
+            ) : null}
+
 
             {category === "characters" ? (
               <View style={styles.wordRow}>
@@ -527,37 +574,38 @@ function LibraryBody({
             ) : null}
 
             <FlatList
-              key={`${category}-${cols}`}
+              key={`${category}-2`}
               data={filmData}
               extraData={`${selectedId}:${fontStyle}:${sizeM}`}
               keyExtractor={(item) => item.id}
-              numColumns={cols}
+              numColumns={2}
+              columnWrapperStyle={styles.columnWrapper}
+              contentContainerStyle={styles.listContent}
               renderItem={renderItem}
               style={styles.listFlex}
-              onLayout={(e) => {
-                const w = e.nativeEvent.layout.width;
-                if (w > 0 && Math.abs(w - listW) > 1) setListW(w);
-              }}
-              contentContainerStyle={styles.listContent}
-              showsVerticalScrollIndicator={false}
+              showsVerticalScrollIndicator={true}
               keyboardShouldPersistTaps="handled"
-              initialNumToRender={6}
-              maxToRenderPerBatch={6}
+              initialNumToRender={8}
+              maxToRenderPerBatch={8}
               windowSize={5}
               removeClippedSubviews
               ListEmptyComponent={<Text style={styles.empty}>No templates in this set.</Text>}
             />
-
-            {addLocked && placeBlockedReason ? <Text style={styles.blocked}>{placeBlockedReason}</Text> : null}
-            <Pressable
-              onPress={handleAdd}
-              disabled={addLocked}
-              accessibilityRole="button"
-              style={({ pressed }) => [styles.addBtn, addLocked && styles.addBtnOff, pressed && !addLocked && { opacity: 0.9 }]}
-            >
-              <Plus size={16} color={FIELDS_COLORS.accentText} strokeWidth={2.6} />
-              <Text style={styles.addText}>{canPlace ? "Add to map" : "Locked"}</Text>
-            </Pressable>
+            
+            {!addLocked ? (
+              <View style={{ position: "absolute", bottom: 16, left: 16, right: 16, zIndex: 10 }}>
+                <TouchableOpacity
+                  onPress={handleAdd}
+                  accessibilityRole="button"
+                  accessibilityLabel="Add to Map"
+                  style={styles.railAddBtn}
+                  activeOpacity={0.8}
+                >
+                  <Plus size={18} color="#09090b" strokeWidth={3} />
+                  <Text style={styles.railAddText}>Add to Map</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
           </View>
         </View>
       </KeyboardAvoidingView>
@@ -589,12 +637,14 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   closeBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 42,
+    height: 42,
+    borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.06)",
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
   },
   split: {
     flex: 1,
@@ -612,7 +662,7 @@ const styles = StyleSheet.create({
   rail: {
     gap: 10,
     minHeight: 0,
-    flexShrink: 1,
+    alignSelf: "stretch",
   },
   dock: {
     flex: 1,
@@ -627,7 +677,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.08)",
   },
   stageCard: {
-    flex: 1.15,
+    flex: 1.2,
     minHeight: 0,
     borderRadius: 28,
     overflow: "hidden",
@@ -700,30 +750,32 @@ const styles = StyleSheet.create({
   sizeChipTextOn: { color: FIELDS_COLORS.accentText },
   rotateBar: {
     position: "absolute",
-    bottom: 12,
-    alignSelf: "center",
+    bottom: 16,
+    left: 16,
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
-    paddingHorizontal: 6,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "rgba(9,9,11,0.72)",
+    paddingHorizontal: 8,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: "rgba(18, 18, 24, 0.92)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
+    borderColor: "rgba(255, 255, 255, 0.16)",
+    zIndex: 999,
+    elevation: 20,
   },
-  rotateBtn: { width: 34, height: 34, borderRadius: 17, alignItems: "center", justifyContent: "center" },
+  rotateBtn: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
   rotateDeg: {
     color: FIELDS_COLORS.textMain,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: "800",
-    minWidth: 36,
+    minWidth: 38,
     textAlign: "center",
     fontVariant: ["tabular-nums"],
   },
   resetLabel: {
     color: FIELDS_COLORS.textMuted,
-    fontSize: 9,
+    fontSize: 10,
     fontWeight: "800",
     letterSpacing: 0.5,
     textTransform: "uppercase",
@@ -775,70 +827,175 @@ const styles = StyleSheet.create({
   fontLabel: { color: FIELDS_COLORS.textMuted, fontSize: 11, fontWeight: "800" },
   fontLabelOn: { color: GOLD },
   listFlex: { flex: 1, minHeight: 0 },
-  listContent: { paddingBottom: 8 },
+  listContent: { paddingBottom: 80 },
+  columnWrapper: {
+    gap: 10,
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
+  tileWrapper: {
+    flex: 1,
+    minWidth: 0,
+  },
   empty: { color: FIELDS_COLORS.textMuted, textAlign: "center", paddingVertical: 24, fontWeight: "600" },
   card: {
-    borderRadius: 16,
-    backgroundColor: "#17171b",
-    alignItems: "center",
-    paddingTop: 10,
-    paddingBottom: 10,
-    paddingHorizontal: 8,
+    width: "100%",
+    borderRadius: 12,
+    padding: 4,
     borderWidth: 1.5,
+    alignItems: "center",
+    justifyContent: "space-between",
   },
-  cardOff: { borderColor: "rgba(255,255,255,0.07)" },
-  cardOn: { borderColor: GOLD, backgroundColor: "#1c1a12" },
-  cardArt: {
-    alignSelf: "stretch",
-    height: 132,
+  cardOff: {
+    borderColor: "rgba(255, 255, 255, 0.12)",
+    backgroundColor: "#20212a",
+  },
+  cardOn: {
+    borderColor: GOLD,
+    borderWidth: 1.5,
+    backgroundColor: "#2a2518",
+  },
+  templatePreviewBox: {
+    width: "100%",
+    aspectRatio: 1.35,
+    borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 8,
+    borderWidth: 1,
   },
-  pill: {
-    paddingHorizontal: 8,
-    height: 18,
-    borderRadius: 9,
+  templatePreviewBoxOff: {
+    backgroundColor: "#0d0e12",
+    borderColor: "rgba(255, 255, 255, 0.08)",
+  },
+  templatePreviewBoxOn: {
+    backgroundColor: "rgba(244, 193, 12, 0.10)",
+    borderColor: "rgba(244, 193, 12, 0.35)",
+  },
+  cardFooter: {
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.06)",
-    marginBottom: 6,
+    width: "100%",
+    paddingTop: 3,
+    paddingBottom: 2,
   },
-  pillOn: { backgroundColor: "rgba(244,193,12,0.16)" },
-  pillText: { color: FIELDS_COLORS.textDim, fontSize: 9, fontWeight: "800", letterSpacing: 0.6 },
-  pillTextOn: { color: GOLD },
   cardName: {
     color: FIELDS_COLORS.textMain,
     fontSize: 13,
     fontWeight: "800",
     textAlign: "center",
+    letterSpacing: 0.2,
   },
   cardNameOn: { color: GOLD },
   cardDim: {
-    color: FIELDS_COLORS.textDim,
+    color: FIELDS_COLORS.textMuted,
     fontSize: 10,
     fontWeight: "600",
     marginTop: 2,
     textAlign: "center",
   },
-  glyph: { fontWeight: "700", includeFontPadding: false },
-  glyphStencil: { letterSpacing: 1, fontWeight: "800" },
-  blocked: {
+  cardDimOn: {
+    color: "#e4c66e",
+  },
+  glyph: { fontWeight: "500", includeFontPadding: false },
+  glyphStencil: { letterSpacing: 1, fontWeight: "600" },
+  tileAddBtnOn: {
+    width: "100%",
+    height: 34,
+    borderRadius: 8,
+    marginTop: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: "#f4c10c",
+    borderWidth: 1,
+    borderColor: "#ffffff",
+  },
+  tileAddTextOn: {
+    color: "#000000",
+    fontSize: 13,
+    fontWeight: "900",
+    letterSpacing: 0.3,
+  },
+  blockedBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    backgroundColor: "rgba(251, 191, 36, 0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(251, 191, 36, 0.25)",
+    flexShrink: 0,
+  },
+  blockedText: {
+    flex: 1,
     color: FIELDS_COLORS.warning,
     fontSize: 11,
     fontWeight: "600",
-    textAlign: "center",
+    lineHeight: 15,
   },
-  addBtn: {
-    height: 52,
-    borderRadius: 16,
+  topRightActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  topAddBtn: {
+    height: 42,
+    paddingHorizontal: 20,
+    borderRadius: 14,
+    backgroundColor: GOLD,
     alignItems: "center",
     justifyContent: "center",
     flexDirection: "row",
     gap: 8,
-    backgroundColor: GOLD,
-    flexShrink: 0,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.4)",
   },
-  addBtnOff: { opacity: 0.38, backgroundColor: "#3f3f46" },
-  addText: { color: FIELDS_COLORS.accentText, fontSize: 15, fontWeight: "800" },
+  topAddText: {
+    color: "#09090b",
+    fontSize: 14,
+    fontWeight: "800",
+    letterSpacing: 0.2,
+  },
+  railAddBtn: {
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: GOLD,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 8,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.3)",
+  },
+  railAddText: {
+    color: "#09090b",
+    fontSize: 14,
+    fontWeight: "800",
+    letterSpacing: 0.2,
+  },
+  stageMainAddBtn: {
+    position: "absolute",
+    top: 16,
+    left: 16,
+    height: 48,
+    paddingHorizontal: 24,
+    borderRadius: 24,
+    backgroundColor: "#f4c10c",
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 8,
+    borderWidth: 2,
+    borderColor: "#ffffff",
+    zIndex: 999,
+  },
+  stageMainAddText: {
+    color: "#000000",
+    fontSize: 15,
+    fontWeight: "900",
+    letterSpacing: 0.3,
+  },
 });

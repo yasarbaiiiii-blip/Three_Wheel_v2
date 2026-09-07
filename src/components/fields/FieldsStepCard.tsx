@@ -1,8 +1,14 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { ChevronDown, ChevronUp, Check } from "lucide-react-native";
+import Animated, {
+  interpolate,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from "react-native-reanimated";
+import { Check, ChevronDown } from "lucide-react-native";
 
-import { FIELDS_COLORS, FIELDS_LAYOUT } from "./fieldsTheme";
+import { FIELDS_COLORS, FIELDS_LAYOUT, FIELDS_MOTION } from "./fieldsTheme";
 
 type StepStatus = "pending" | "active" | "done";
 
@@ -57,6 +63,19 @@ export function FieldsStepCard({
   const node = NODE[status];
   const isScrolling = expanded && scrollableBody;
   const isFilling = expanded && fillAvailable;
+  const open = useSharedValue(expanded ? 1 : 0);
+  const [pressed, setPressed] = useState(false);
+
+  useEffect(() => {
+    open.value = withSpring(expanded ? 1 : 0, FIELDS_MOTION);
+  }, [expanded, open]);
+
+  const chevronStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${interpolate(open.value, [0, 1], [0, 180])}deg` }],
+  }));
+  const accentStyle = useAnimatedStyle(() => ({
+    opacity: open.value,
+  }));
 
   return (
     <View
@@ -67,6 +86,7 @@ export function FieldsStepCard({
         isFilling ? styles.cardFill : null,
       ]}
     >
+      <Animated.View pointerEvents="none" style={[styles.accent, accentStyle]} />
       {/*
         No `style` prop on the Pressable — deliberately.
 
@@ -79,20 +99,27 @@ export function FieldsStepCard({
       */}
       <Pressable
         onPress={disabled ? undefined : onToggle}
+        onPressIn={disabled ? undefined : () => setPressed(true)}
+        onPressOut={() => setPressed(false)}
         accessibilityRole="button"
         accessibilityState={{ expanded, disabled }}
         accessibilityLabel={`${title}, ${expanded ? "collapse" : "expand"}`}
         hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
-        android_ripple={{ color: "rgba(255,255,255,0.07)" }}
+        android_ripple={{ color: "rgba(255,255,255,0.08)" }}
       >
-        <View style={[styles.headerRow, expanded && styles.headerRowOpen]}>
-          {/* Number badge and heading sit on one horizontal line. */}
+        <View
+          style={[
+            styles.headerRow,
+            expanded && styles.headerRowOpen,
+            pressed && styles.headerRowPressed,
+          ]}
+        >
           <View
             style={[
               styles.node,
               {
                 backgroundColor: node.bg,
-                borderColor: expanded ? node.border : "transparent",
+                borderColor: expanded || status === "active" ? node.border : "transparent",
               },
             ]}
           >
@@ -109,7 +136,7 @@ export function FieldsStepCard({
               {
                 color: disabled
                   ? FIELDS_COLORS.textDim
-                  : expanded || status === "active"
+                  : expanded || status === "active" || status === "done"
                   ? FIELDS_COLORS.textMain
                   : FIELDS_COLORS.textMuted,
               },
@@ -131,13 +158,9 @@ export function FieldsStepCard({
             </View>
           ) : null}
 
-          <View style={styles.chevronSlot}>
-            {expanded ? (
-              <ChevronUp size={18} color={FIELDS_COLORS.textMuted} strokeWidth={2.2} />
-            ) : (
-              <ChevronDown size={18} color={FIELDS_COLORS.textDim} strokeWidth={2.2} />
-            )}
-          </View>
+          <Animated.View style={[styles.chevronSlot, chevronStyle]}>
+            <ChevronDown size={18} color={FIELDS_COLORS.textMuted} strokeWidth={2.2} />
+          </Animated.View>
         </View>
       </Pressable>
 
@@ -163,19 +186,19 @@ export function FieldsStepCard({
   );
 }
 
-const NODE_SIZE = 32;
+const NODE_SIZE = 30;
 
 const styles = StyleSheet.create({
   card: {
     borderRadius: FIELDS_LAYOUT.cardRadius,
-    backgroundColor: FIELDS_COLORS.cardSolid,
+    backgroundColor: "#16161c",
     borderWidth: 1,
-    borderColor: FIELDS_COLORS.panelBorder,
+    borderColor: "transparent",
     overflow: "hidden",
   },
   cardOpen: {
-    borderColor: "rgba(244, 193, 12, 0.35)",
-    backgroundColor: "#1e1e24",
+    borderColor: "rgba(255,255,255,0.12)",
+    backgroundColor: "#1c1c24",
   },
   cardDisabled: {
     opacity: 0.4,
@@ -184,48 +207,55 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 0,
   },
-  /**
-   * The single header line: [pad][badge][gap][title flex][gap][chevron][pad].
-   * `alignItems: "center"` is what puts the number and the heading on the same
-   * baseline-ish centre line; `height` keeps every collapsed row identical.
-   */
+  accent: {
+    position: "absolute",
+    left: 0,
+    top: 8,
+    bottom: 8,
+    width: 3,
+    borderRadius: 2,
+    backgroundColor: FIELDS_COLORS.accentBrand,
+  },
   headerRow: {
     flexDirection: "row",
     alignItems: "center",
     width: "100%",
     height: 50,
-    paddingHorizontal: 14,
-    gap: 11,
+    paddingHorizontal: 12,
+    paddingLeft: 12,
+    gap: 10,
     backgroundColor: "transparent",
   },
   headerRowOpen: {
-    backgroundColor: "rgba(255,255,255,0.02)",
+    backgroundColor: "rgba(255,255,255,0.03)",
+  },
+  headerRowPressed: {
+    backgroundColor: "rgba(255,255,255,0.08)",
   },
   node: {
     width: NODE_SIZE,
     height: NODE_SIZE,
-    borderRadius: 10,
+    borderRadius: 999,
     borderWidth: 1,
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
   },
   nodeText: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: "800",
     fontVariant: ["tabular-nums"],
-    lineHeight: 18,
+    lineHeight: 17,
     textAlign: "center",
     includeFontPadding: false,
   },
-  /** Takes the row's leftover width so the chevron stays pinned right. */
   title: {
     flex: 1,
     minWidth: 0,
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: "700",
-    letterSpacing: -0.15,
-    lineHeight: 20,
+    letterSpacing: -0.1,
+    lineHeight: 19,
     includeFontPadding: false,
   },
   badge: {
@@ -260,15 +290,15 @@ const styles = StyleSheet.create({
   },
   body: {
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: FIELDS_COLORS.panelBorder,
-    backgroundColor: FIELDS_COLORS.panelSolid,
+    borderTopColor: "rgba(255,255,255,0.07)",
+    backgroundColor: "#101014",
   },
   bodyFill: {
     flex: 1,
     minHeight: 0,
   },
   bodyInner: {
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     paddingTop: 12,
     paddingBottom: 14,
     gap: 10,

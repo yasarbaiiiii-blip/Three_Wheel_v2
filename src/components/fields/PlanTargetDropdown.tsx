@@ -22,7 +22,7 @@ export type PlanTargetDropdownProps = {
   disabled?: boolean;
 };
 
-const ACCENT = "#8b5cf6";
+const ACCENT = FIELDS_COLORS.accentBrand;
 
 /** Distinguishes all three AnchorTarget kinds — file/layer alone can't (neither field on "universal"). */
 function keyForTarget(target: AnchorTarget): string {
@@ -68,20 +68,22 @@ export function PlanTargetDropdown({
         accessibilityRole="button"
         accessibilityLabel={label ?? "Target dropdown"}
         accessibilityState={{ disabled: isDisabled, expanded: open }}
-        style={{
-          minHeight: 44,
-          borderRadius: 10,
-          borderWidth: 1.5,
-          borderColor: open ? ACCENT : FIELDS_COLORS.panelBorder,
-          backgroundColor: FIELDS_COLORS.surfaceSolid,
-          paddingHorizontal: 12,
-          paddingVertical: 8,
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 10,
-          opacity: isDisabled ? 0.5 : 1,
-        }}
       >
+        <View
+          style={{
+            minHeight: 44,
+            borderRadius: 12,
+            borderWidth: 1,
+            borderColor: open ? FIELDS_COLORS.accentBorder : "rgba(255,255,255,0.10)",
+            backgroundColor: "#16161c",
+            paddingHorizontal: 12,
+            paddingVertical: 8,
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 10,
+            opacity: isDisabled ? 0.5 : 1,
+          }}
+        >
         <View style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: ACCENT }} />
         <Text
           style={{ flex: 1, color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}
@@ -92,16 +94,17 @@ export function PlanTargetDropdown({
         <View style={{ transform: [{ rotate: open ? "180deg" : "0deg" }] }}>
           <ChevronDown size={16} color={FIELDS_COLORS.textMuted} />
         </View>
+        </View>
       </Pressable>
 
       {open ? (
         <View
           style={{
             marginTop: 6,
-            borderRadius: 10,
+            borderRadius: 12,
             borderWidth: 1,
-            borderColor: FIELDS_COLORS.panelBorder,
-            backgroundColor: FIELDS_COLORS.cardSolid,
+            borderColor: "rgba(255,255,255,0.10)",
+            backgroundColor: "#16161c",
             overflow: "hidden",
           }}
         >
@@ -121,7 +124,7 @@ export function PlanTargetDropdown({
                   flexDirection: "row",
                   alignItems: "center",
                   gap: 10,
-                  backgroundColor: isSelected ? "rgba(59, 130, 246, 0.08)" : "transparent",
+                  backgroundColor: isSelected ? FIELDS_COLORS.accentMuted : "transparent",
                   borderTopWidth: index === 0 ? 0 : 1,
                   borderTopColor: FIELDS_COLORS.panelBorder,
                 }}

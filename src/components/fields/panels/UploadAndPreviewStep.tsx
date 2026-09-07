@@ -945,15 +945,6 @@ export function UploadAndPreviewStep({
         ? pickedFiles[0].name
         : `${pickedFiles[0].name} + ${pickedFiles.length - 1} more`;
 
-  const loadedFilesLabel =
-    loadedSourceFiles.length > 1
-      ? `${loadedSourceFiles.length} files: ${loadedSourceFiles.slice(0, 3).join(", ")}${
-          loadedSourceFiles.length > 3 ? ` +${loadedSourceFiles.length - 3}` : ""
-        }`
-      : loadedSourceFiles.length === 1
-        ? loadedSourceFiles[0]
-        : null;
-
   /** Local CSV / app-planned DXF batch — can append more files after first load. */
   const canAddMoreFiles =
     !!targetPathName &&
@@ -962,14 +953,7 @@ export function UploadAndPreviewStep({
       (isLocalDxfPlanner && (lastLocalDxf != null || localDxfSnapshot != null)));
 
   return (
-    <View style={{ gap: 14 }}>
-      {/* File Upload Section */}
-      <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 17 }}>
-        {DXF_PLANNER === "app"
-          ? "Import one or more .csv / .dxf files (mixed types OK). Each file is tracked; metric DXFs need Align before Path Order & Load. Use + after load to add more. Waypoints still use the rover (one file)."
-          : "Import one or more .csv files (merged locally), or a single .dxf / .waypoints for the rover. Use + after load to add more CSV files."}
-      </Text>
-
+    <View style={{ gap: 10 }}>
       {pickedFiles.length === 0 && !targetPathName ? (
         <TouchableOpacity
           onPress={handlePickFile}
@@ -977,21 +961,21 @@ export function UploadAndPreviewStep({
           activeOpacity={0.8}
           style={{
             height: 52,
-            borderRadius: 12,
+            borderRadius: 14,
             alignItems: "center",
             justifyContent: "center",
             flexDirection: "row",
             gap: 8,
-            backgroundColor: FIELDS_COLORS.surfaceSolid,
-            borderWidth: 1.5,
-            borderColor: FIELDS_COLORS.stepActive,
+            backgroundColor: FIELDS_COLORS.accentMuted,
+            borderWidth: 1,
+            borderColor: FIELDS_COLORS.accentBorder,
             borderStyle: "dashed",
             opacity: protectedResident || isUploading ? 0.6 : 1,
           }}
         >
-          <Upload size={18} color={FIELDS_COLORS.stepActive} />
-          <Text style={{ color: FIELDS_COLORS.stepActive, fontSize: 14, fontWeight: "700" }}>
-            {isUploading ? "Loading preview…" : "Select File(s)"}
+          <Upload size={16} color={FIELDS_COLORS.accentBrand} />
+          <Text style={{ color: FIELDS_COLORS.accentBrand, fontSize: 13, fontWeight: "800" }}>
+            {isUploading ? "Loading preview…" : "Add files"}
           </Text>
         </TouchableOpacity>
       ) : pickedFiles.length > 0 ? (
@@ -1054,54 +1038,22 @@ export function UploadAndPreviewStep({
         </View>
       ) : targetPathName ? (
         <View style={{ gap: 8 }}>
-          {/* Current file indicator */}
+          {uploadedFiles.length === 0 ? (
           <View
             style={{
               flexDirection: "row",
               alignItems: "center",
               justifyContent: "space-between",
               padding: 10,
-              borderRadius: 10,
-              backgroundColor: FIELDS_COLORS.surfaceSolid,
+              borderRadius: 12,
+              backgroundColor: FIELDS_COLORS.cardSolid,
               borderWidth: 1,
-              borderColor: FIELDS_COLORS.successBorder,
+              borderColor: FIELDS_COLORS.panelBorder,
             }}
           >
-            <View style={{ flex: 1, paddingRight: 4 }}>
-              <Text style={{ color: FIELDS_COLORS.success, fontSize: 10, fontWeight: "800", letterSpacing: 0.5 }}>
-                LOADED
-              </Text>
-              <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700", marginTop: 2 }} numberOfLines={1}>
-                {targetPathName}
-              </Text>
-              {loadedFilesLabel && loadedSourceFiles.length > 1 ? (
-                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }} numberOfLines={2}>
-                  {loadedFilesLabel}
-                </Text>
-              ) : null}
-              {uploadedFiles.length > 1 ? (
-                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-                  {uploadedFiles.length} files in mission ·{" "}
-                  {uploadedFiles.filter((f) => f.status === "verified").length} verified
-                </Text>
-              ) : localCsvSummary ? (
-                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-                  {localCsvSummary.num_points} points · local {localCsvSummary.kind.toUpperCase()} ·{" "}
-                  {localCsvSummary.frame}
-                </Text>
-              ) : previewData ? (
-                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-                  {previewData.num_points ?? "?"} points · {previewData.frame ?? "DXF"}
-                </Text>
-              ) : isLocalDxfPlanner && (lastLocalDxf || localDxfSnapshot) ? (
-                <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-                  {(lastLocalDxf ?? localDxfSnapshot)!.entityCount} path(s) ·{" "}
-                  {(lastLocalDxf ?? localDxfSnapshot)!.isGeographic ? "geo DXF" : "metric DXF"}
-                  {loadedSourceFiles.length > 1 ? ` · ${loadedSourceFiles.length} files` : ""}
-                </Text>
-              ) : null}
-            </View>
-            {/* + adds more files into this plan (forgot a file after first pick). */}
+            <Text style={{ flex: 1, color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }} numberOfLines={1}>
+              {targetPathName}
+            </Text>
             {canAddMoreFiles ? (
               <Pressable
                 onPress={() => {
@@ -1116,12 +1068,12 @@ export function UploadAndPreviewStep({
                   borderRadius: 10,
                   alignItems: "center",
                   justifyContent: "center",
-                  backgroundColor: FIELDS_COLORS.stepActive,
+                  backgroundColor: FIELDS_COLORS.accentBrand,
                   opacity: protectedResident || isUploading ? 0.5 : 1,
                   marginRight: 4,
                 }}
               >
-                <Plus size={20} color="#fff" strokeWidth={2.5} />
+                <Plus size={20} color={FIELDS_COLORS.accentText} strokeWidth={2.5} />
               </Pressable>
             ) : null}
             <Pressable
@@ -1139,15 +1091,10 @@ export function UploadAndPreviewStep({
               <X size={18} color={FIELDS_COLORS.textDim} />
             </Pressable>
           </View>
+          ) : null}
 
-          {/* Per-file status list (multi-type batch) */}
           {uploadedFiles.length > 0 ? (
             <View style={{ gap: 6 }}>
-              {controlModeActive ? (
-                <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, marginBottom: 2 }}>
-                  Control mode — tap + to assign a file to a mission layer
-                </Text>
-              ) : null}
               {uploadedFiles.map((f) => {
                 const selected = selectedUploadedFileId === f.id;
                 const verified = f.status === "verified";
@@ -1168,33 +1115,64 @@ export function UploadAndPreviewStep({
                   <View key={f.id} style={{ gap: 6 }}>
                     <Pressable
                       onPress={() => onSelectUploadedFile?.(f.id)}
-                      style={{
-                        flexDirection: "row",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: 8,
-                        paddingVertical: 8,
-                        paddingHorizontal: 10,
-                        borderRadius: 8,
-                        borderWidth: 1,
-                        borderColor: selected
-                          ? FIELDS_COLORS.stepActive
-                          : pendingHere
-                            ? FIELDS_COLORS.accentBorder
-                            : FIELDS_COLORS.panelBorder,
-                        backgroundColor: FIELDS_COLORS.surfaceSolid,
-                      }}
+                      android_ripple={{ color: "rgba(255,255,255,0.08)" }}
                     >
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 8,
+                          paddingVertical: 10,
+                          paddingHorizontal: 10,
+                          borderRadius: 12,
+                          borderWidth: 1,
+                          borderColor: selected
+                            ? FIELDS_COLORS.accentBrand
+                            : pendingHere
+                              ? FIELDS_COLORS.accentBorder
+                              : FIELDS_COLORS.panelBorder,
+                          backgroundColor: selected
+                            ? FIELDS_COLORS.accentMuted
+                            : FIELDS_COLORS.cardSolid,
+                        }}
+                      >
+                      <View
+                        style={{
+                          width: 36,
+                          height: 36,
+                          borderRadius: 999,
+                          alignItems: "center",
+                          justifyContent: "center",
+                          backgroundColor:
+                            f.kind === "csv"
+                              ? FIELDS_COLORS.pathCsvMuted
+                              : FIELDS_COLORS.accentMuted,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color:
+                              f.kind === "csv" ? FIELDS_COLORS.pathCsv : FIELDS_COLORS.accentBrand,
+                            fontSize: 9,
+                            fontWeight: "800",
+                            letterSpacing: 0.4,
+                          }}
+                        >
+                          {f.kind === "csv" ? "CSV" : f.kind === "dxf" ? "DXF" : "TPL"}
+                        </Text>
+                      </View>
                       <View style={{ flex: 1, minWidth: 0 }}>
                         <Text
-                          style={{ color: FIELDS_COLORS.textMain, fontSize: 12, fontWeight: "700" }}
+                          style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "700" }}
                           numberOfLines={1}
                         >
                           {f.fileName}
                         </Text>
-                        <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, marginTop: 1 }}>
+                        <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 11, marginTop: 1 }}>
                           {kindLabel}
-                          {assigned ? ` · mission layer ${assigned.number}` : ""}
+                          {verified ? "" : " · needs align"}
+                          {assigned ? ` · layer ${assigned.number}` : ""}
                         </Text>
                       </View>
                       {controlModeActive ? (
@@ -1346,6 +1324,7 @@ export function UploadAndPreviewStep({
                           {verified ? "Verified" : "Needs Alignment"}
                         </Text>
                       </View>
+                      </View>
                     </Pressable>
 
                     {controlModeActive && pendingHere ? (
@@ -1439,13 +1418,6 @@ export function UploadAndPreviewStep({
                   </View>
                 );
               })}
-              {controlModeActive && nonEmptyMissionLayers(missionLayers).length > 0 ? (
-                <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10, marginTop: 2 }}>
-                  {nonEmptyMissionLayers(missionLayers).length} mission layer
-                  {nonEmptyMissionLayers(missionLayers).length === 1 ? "" : "s"} · Hidden mission
-                  layers are not started — toggle them under Control
-                </Text>
-              ) : null}
             </View>
           ) : null}
 
@@ -1525,12 +1497,7 @@ export function UploadAndPreviewStep({
           >
             <View style={{ flex: 1, paddingRight: 10 }}>
               <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 13, fontWeight: "800" }}>
-                Enable Extension
-              </Text>
-              <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 11, marginTop: 2 }}>
-                {showLocalDxfExtension
-                  ? "Purple PRE/AFT at free chain ends. Built on device — not saved to the rover."
-                  : "Run-up / run-out (travel, no spray). Local only — not saved to the rover."}
+                Extension
               </Text>
             </View>
             <Switch
@@ -1556,17 +1523,15 @@ export function UploadAndPreviewStep({
 
           {csvExtensionConfig.enabled ? (
             <View style={{ padding: 12, paddingTop: 0, gap: 8 }}>
-              {extensionStatus ? (
+              {extensionStatus && extensionStatus.count === 0 && extensionStatus.hint ? (
                 <Text
                   style={{
-                    color: extensionStatus.count > 0 ? FIELDS_COLORS.textMuted : FIELDS_COLORS.warning,
-                    fontSize: 10,
-                    lineHeight: 14,
+                    color: FIELDS_COLORS.warning,
+                    fontSize: 11,
+                    lineHeight: 15,
                   }}
                 >
-                  {extensionStatus.count > 0
-                    ? `${extensionStatus.count} extension run(s) on the plan.`
-                    : extensionStatus.hint}
+                  {extensionStatus.hint}
                 </Text>
               ) : null}
 

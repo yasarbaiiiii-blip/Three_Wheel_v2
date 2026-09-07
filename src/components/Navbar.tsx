@@ -1,16 +1,25 @@
 import React from "react";
 import { View, Text, Pressable } from "react-native";
 import AnimatedReanimated, { interpolate, useAnimatedStyle } from "react-native-reanimated";
-import { Menu, X, LayoutGrid, Crosshair, LocateFixed, Navigation as NavigationIcon, Circle, LogOut } from "lucide-react-native";
+import {
+  Crosshair,
+  LocateFixed,
+  Settings,
+  CircleHelp,
+  Layers,
+  LogOut,
+} from "lucide-react-native";
+
+import { usePressScale } from "./fields/usePressScale";
 
 const NAV_SECTION_ITEMS = [
-  { id: "main", icon: Crosshair, label: "Main Screen" },
+  { id: "main", icon: Crosshair, label: "Home" },
   { id: "fields", icon: LocateFixed, label: "Fields" },
-  { id: "settings", icon: NavigationIcon, label: "Settings" },
-  { id: "howto", icon: Circle, label: "How to" },
+  { id: "settings", icon: Settings, label: "Settings" },
+  { id: "howto", icon: CircleHelp, label: "How to" },
 ];
 
-const LABEL_WIDTH = 168;
+const LABEL_WIDTH = 148;
 
 function NavBarItem({
   icon: Icon,
@@ -20,50 +29,71 @@ function NavBarItem({
   expandProgress,
   onPress,
   danger = false,
+  disclosure = false,
+  open = false,
   colors,
   styles,
 }: any) {
   const labelAnimStyle = useAnimatedStyle(() => ({
-    opacity: expandProgress.value,
+    opacity: expanded ? 1 : interpolate(expandProgress.value, [0, 0.15, 1], [0, 1, 1]),
     width: interpolate(expandProgress.value, [0, 1], [0, LABEL_WIDTH]),
     marginLeft: interpolate(expandProgress.value, [0, 1], [0, 12]),
   }));
+  const { style: pressStyle, onPressIn, onPressOut } = usePressScale(0.94);
 
   return (
     <Pressable
-      style={[
-        styles.navItem,
-        expanded && active && !danger && styles.navItemActive,
-        danger && styles.navItemDanger,
-      ]}
       onPress={onPress}
+      onPressIn={onPressIn}
+      onPressOut={onPressOut}
+      accessibilityRole="button"
+      accessibilityState={{ selected: active, expanded: disclosure ? !!open : undefined }}
+      accessibilityLabel={disclosure ? `${label}, submenu` : label}
+      android_ripple={{ color: "rgba(255,255,255,0.08)", borderless: true, radius: 26 }}
     >
       <View
         style={[
-          styles.navIconWrap,
-          active && !danger && styles.navIconWrapActive,
-          danger && styles.navIconWrapDanger,
+          styles.navItem,
+          expanded && active && !danger && !disclosure && styles.navItemActive,
         ]}
       >
-        <Icon
-          color={danger ? colors.danger : active ? colors.accentText : colors.textMuted}
-          size={20}
-          strokeWidth={2.2}
-        />
+        {disclosure ? (
+          <AnimatedReanimated.View style={[styles.navSubmenuSlot, pressStyle]}>
+            <View style={[styles.navSubmenuPill, open && styles.navSubmenuPillOpen]}>
+              <View style={[styles.navSubmenuDot, open && styles.navSubmenuDotOpen]} />
+              <View style={[styles.navSubmenuDot, styles.navSubmenuDotMid, open && styles.navSubmenuDotOpen]} />
+              <View style={[styles.navSubmenuDot, open && styles.navSubmenuDotOpen]} />
+            </View>
+          </AnimatedReanimated.View>
+        ) : (
+          <AnimatedReanimated.View
+            style={[
+              styles.navIconWrap,
+              active && !danger && styles.navIconWrapActive,
+              danger && styles.navIconWrapDanger,
+              pressStyle,
+            ]}
+          >
+            <Icon
+              color={danger ? colors.danger : active ? colors.accentText : "#e4e4e7"}
+              size={20}
+              strokeWidth={active ? 2.4 : 2.1}
+            />
+          </AnimatedReanimated.View>
+        )}
+        <AnimatedReanimated.View style={[styles.navLabelWrap, labelAnimStyle]} pointerEvents="none">
+          <Text
+            numberOfLines={1}
+            style={[
+              styles.navLabel,
+              active && !danger && styles.navLabelActive,
+              danger && styles.navLabelDanger,
+            ]}
+          >
+            {label}
+          </Text>
+        </AnimatedReanimated.View>
       </View>
-      <AnimatedReanimated.View style={[styles.navLabelWrap, labelAnimStyle]} pointerEvents="none">
-        <Text
-          numberOfLines={1}
-          style={[
-            styles.navLabel,
-            active && !danger && styles.navLabelActive,
-            danger && styles.navLabelDanger,
-          ]}
-        >
-          {label}
-        </Text>
-        {active && !danger ? <View style={styles.navActiveDot} /> : null}
-      </AnimatedReanimated.View>
     </Pressable>
   );
 }
@@ -105,44 +135,35 @@ function NavbarImpl({
   colors,
   styles,
 }: NavbarProps) {
-  const menuLabelAnimStyle = useAnimatedStyle(() => ({
-    opacity: navExpandProgress.value,
+  const brandLabelStyle = useAnimatedStyle(() => ({
+    opacity: navExpanded ? 1 : interpolate(navExpandProgress.value, [0, 0.15, 1], [0, 1, 1]),
     width: interpolate(navExpandProgress.value, [0, 1], [0, LABEL_WIDTH]),
     marginLeft: interpolate(navExpandProgress.value, [0, 1], [0, 12]),
   }));
-
-  const markerAnimStyle = useAnimatedStyle(() => ({
-    opacity: navExpandProgress.value,
-    height: interpolate(navExpandProgress.value, [0, 1], [0, 28]),
-    marginTop: interpolate(navExpandProgress.value, [0, 1], [0, 6]),
-    overflow: "hidden" as const,
-  }));
-
-  const MenuGlyph = navExpanded ? X : Menu;
+  const { style: brandPress, onPressIn, onPressOut } = usePressScale(0.94);
 
   return (
     <AnimatedReanimated.View style={[styles.navbar, navAnimatedStyle]}>
       <View style={styles.navMenuGroup}>
-        <Pressable style={styles.navMenuPressable} onPress={handleMenuPress}>
-          <View style={[styles.navIconWrap, styles.navIconWrapActive]}>
-            <MenuGlyph color={colors.accentText} size={20} strokeWidth={2.2} />
+        <Pressable
+          onPress={handleMenuPress}
+          onPressIn={onPressIn}
+          onPressOut={onPressOut}
+          accessibilityRole="button"
+          accessibilityLabel={navExpanded ? "Collapse menu" : "Expand menu"}
+          android_ripple={{ color: "rgba(255,255,255,0.08)", borderless: true, radius: 26 }}
+        >
+          <View style={styles.navMenuPressable}>
+            <AnimatedReanimated.View style={[styles.navIconWrap, styles.navBrandWrap, brandPress]}>
+              <Text style={styles.navBrandMark}>R</Text>
+            </AnimatedReanimated.View>
+            <AnimatedReanimated.View style={[styles.navLabelWrap, brandLabelStyle]} pointerEvents="none">
+              <Text numberOfLines={1} style={[styles.navLabel, styles.navLabelBrand]}>
+                Rover
+              </Text>
+            </AnimatedReanimated.View>
           </View>
-          <AnimatedReanimated.View style={[styles.navLabelWrap, menuLabelAnimStyle]} pointerEvents="none">
-            <Text numberOfLines={1} style={[styles.navLabel, styles.navLabelActive]}>
-              Menu
-            </Text>
-          </AnimatedReanimated.View>
         </Pressable>
-
-        <AnimatedReanimated.View style={markerAnimStyle} pointerEvents="none">
-          <Text style={styles.navFieldMarkerLabel} numberOfLines={1}>
-            Field Marker
-          </Text>
-          <View style={styles.navGroupSeparator} />
-        </AnimatedReanimated.View>
-      </View>
-
-      <View style={styles.navRest} pointerEvents="auto">
         {isHomePage ? (
           <View
             ref={quickAccessAnchorRef}
@@ -151,9 +172,10 @@ function NavbarImpl({
             style={styles.quickAccessAnchor}
           >
             <NavBarItem
-              icon={LayoutGrid}
               label="Quick Access"
               active={quickAccessExpanded}
+              disclosure
+              open={quickAccessExpanded}
               expanded={navExpanded}
               expandProgress={navExpandProgress}
               onPress={handleQuickAccessPress}
@@ -162,7 +184,9 @@ function NavbarImpl({
             />
           </View>
         ) : null}
+      </View>
 
+      <View style={styles.navRest} pointerEvents="auto">
         <View style={styles.navSection}>
           {NAV_SECTION_ITEMS.map((item) => (
             <NavBarItem
@@ -184,8 +208,8 @@ function NavbarImpl({
         <View style={styles.navDivider} />
 
         <NavBarItem
-          icon={LayoutGrid}
-          label="Cycle Map View"
+          icon={Layers}
+          label="Map"
           active={false}
           expanded={navExpanded}
           expandProgress={navExpandProgress}
@@ -196,11 +220,11 @@ function NavbarImpl({
 
         <NavBarItem
           icon={LogOut}
-          label="Exit Session"
+          label="Exit"
           active={false}
           expanded={navExpanded}
           expandProgress={navExpandProgress}
-          danger={true}
+          danger
           onPress={onExitSession}
           colors={colors}
           styles={styles}

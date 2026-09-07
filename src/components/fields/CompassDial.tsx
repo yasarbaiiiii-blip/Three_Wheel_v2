@@ -41,6 +41,8 @@ export type CompassDialProps = {
    * only an actual dial drag counts as "dragging."
    */
   onDragStateChange?: (dragging: boolean) => void;
+  /** Hide the degree text field under the dial — parent shows its own readout. */
+  hideDegreeInput?: boolean;
 };
 
 const NEEDLE_COLOR = "#8b5cf6";
@@ -54,6 +56,7 @@ export function CompassDial({
   size = 140,
   disabled = false,
   onDragStateChange,
+  hideDegreeInput = false,
 }: CompassDialProps) {
   const cx = size / 2;
   const r = size / 2 - 10;
@@ -147,6 +150,7 @@ export function CompassDial({
         </View>
       </GestureDetector>
 
+      {hideDegreeInput ? null : (
       <View style={{ flexDirection: "row", alignItems: "center", gap: 4, marginTop: 10 }}>
         <TextInput
           style={{
@@ -179,6 +183,7 @@ export function CompassDial({
         />
         <Text style={{ fontSize: 14, fontWeight: "700", color: FIELDS_COLORS.textMuted }}>°</Text>
       </View>
+      )}
     </View>
   );
 }

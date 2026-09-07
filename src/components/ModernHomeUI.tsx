@@ -408,10 +408,10 @@ const SIDE_GAP = 14;
 const MISSION_PANEL_HEIGHT_SHARE = 0.55; // mission gets 55% of usable rail height, telemetry the remaining 45%
 const NAV_TIMING = { duration: 420, easing: Easing.bezier(0.4, 0, 0.2, 1) };
 const PANEL_TIMING = { duration: 260, easing: Easing.bezier(0.4, 0, 0.2, 1) };
-const QUICK_ACCESS_ANCHOR_FALLBACK = { top: HUD_PAD + 96, height: 58 };
-const QUICK_ACCESS_SUBNAV_OFFSET = 24;
 const SCREEN_WIDTH = Dimensions.get("window").width;
 const SCREEN_HEIGHT = Dimensions.get("window").height;
+const QUICK_ACCESS_SUBNAV_OFFSET = -20;
+const QUICK_ACCESS_ANCHOR_FALLBACK = { top: HUD_PAD + 72, height: 44 };
 const PANEL_SLIDE_IN = new Keyframe({
   0: { opacity: 1, transform: [{ translateX: 44 }] },
   100: { opacity: 1, transform: [{ translateX: 0 }] },
@@ -555,12 +555,6 @@ const FloatingEStop = ({ visible, onTrigger }) => {
   );
 };
 
-const QuickSubNavSectionLabel = ({ label }) => (
-  <Text style={styles.quickSubNavSectionLabel}>{label}</Text>
-);
-
-const QuickSubNavDivider = () => <View style={styles.quickSubNavDivider} />;
-
 const QuickSubNavItem = ({
   icon: Icon,
   label,
@@ -570,12 +564,10 @@ const QuickSubNavItem = ({
   healthy = false,
   danger = false,
   disabled = false,
-  compact = false,
 }) => (
   <Pressable
     style={[
       styles.quickSubNavItem,
-      compact && styles.quickSubNavItemCompact,
       active && !danger && styles.quickSubNavItemActive,
       active && danger && styles.quickSubNavItemDangerActive,
       danger && !active && styles.quickSubNavItemDanger,
@@ -584,16 +576,17 @@ const QuickSubNavItem = ({
     onPress={onPress}
     disabled={disabled}
   >
-    <View style={[
-      styles.quickSubNavIconWrap,
-      compact && styles.quickSubNavIconWrapCompact,
-      active && !danger && styles.quickSubNavIconWrapActive,
-      active && danger && styles.quickSubNavIconWrapDangerActive,
-      danger && !active && styles.quickSubNavIconWrapDanger,
-    ]}>
+    <View
+      style={[
+        styles.quickSubNavIconWrap,
+        active && !danger && styles.quickSubNavIconWrapActive,
+        active && danger && styles.quickSubNavIconWrapDangerActive,
+        danger && !active && styles.quickSubNavIconWrapDanger,
+      ]}
+    >
       <Icon
         color={active ? (danger ? "#fff" : COLORS.accentText) : danger ? COLORS.danger : COLORS.textMuted}
-        size={compact ? 16 : 18}
+        size={18}
         strokeWidth={2.2}
       />
     </View>
@@ -601,7 +594,6 @@ const QuickSubNavItem = ({
       <Text
         style={[
           styles.quickSubNavLabel,
-          compact && styles.quickSubNavLabelCompact,
           active && !danger && styles.quickSubNavLabelActive,
           danger && styles.quickSubNavLabelDanger,
           disabled && styles.quickSubNavLabelDisabled,
@@ -1035,11 +1027,11 @@ export default function ModernHomeUI(props) {
   const navAnimatedStyle = useAnimatedStyle(() => ({
     width: navWidth.value,
     height: navHeight.value,
-    paddingVertical: 12,
+    paddingVertical: 16,
     paddingHorizontal: NAV_PAD_H,
-    borderRadius: 22,
-    backgroundColor: COLORS.navSolid,
-    borderColor: COLORS.panelBorder,
+    borderRadius: 28,
+    backgroundColor: "rgba(12,12,16,0.94)",
+    borderColor: "rgba(255,255,255,0.10)",
   }));
 
   const compassAnimatedStyle = useAnimatedStyle(() => ({
@@ -1549,74 +1541,6 @@ export default function ModernHomeUI(props) {
     );
   };
 
-  const renderQuickAccessSubNav = () => {
-    if (!isHomePage || !navIconsVisible || !quickAccessExpanded) return null;
-    return (
-      <AnimatedReanimated.View
-        style={[
-          styles.quickAccessSubNav,
-          quickAccessSubNavAnimatedStyle,
-          { top: quickAccessAnchor.top + QUICK_ACCESS_SUBNAV_OFFSET },
-        ]}
-        pointerEvents="box-none"
-      >
-        <View style={styles.quickAccessSubNavInner} pointerEvents="auto">
-          <View style={styles.quickAccessSubNavBridge} />
-          <View style={styles.quickAccessSubNavRow}>
-            <QuickSubNavSectionLabel label="Vehicle" />
-            <QuickSubNavItem
-              icon={vehicleMode === "MANUAL" ? Gamepad2 : vehicleMode === "OFFBOARD" ? Hexagon : Zap}
-              label={vehicleMode || "MANUAL"}
-              active={vehicleMode === "MANUAL"}
-              onPress={handleSetManualMode}
-            />
-
-            <QuickSubNavDivider />
-            <QuickSubNavSectionLabel label="RTK" />
-            <QuickSubNavItem
-              icon={rtkStatus.running ? Activity : RadioTower}
-              label={rtkLifecycleLabel}
-              active={rtkCorrectionsLive || (rtkStatus.mode === "lora" && rtkStatus.healthy)}
-              danger={rtkStatus.source_state === "error" || rtkStatus.source_state === "unavailable"}
-              signal
-              healthy={rtkCorrectionsLive || (rtkStatus.mode === "lora" && rtkStatus.healthy)}
-              disabled={rtkConnecting || rtkStatus.running}
-              onPress={() => {
-                // Backend owns NTRIP autostart. This is status-only when running
-                // and opens backend profile management when idle/unavailable.
-                if (rtkConnecting || rtkStatus.running) return;
-                onNav?.("settings");
-              }}
-            />
-            {canStartLora ? (
-              <QuickSubNavItem
-                icon={Radio}
-                label="Start LoRa"
-                disabled={rtkConnecting}
-                onPress={handleStartLora}
-              />
-            ) : null}
-
-            <QuickSubNavDivider />
-            <QuickSubNavSectionLabel label="Panels" />
-            <QuickSubNavItem
-              icon={Route}
-              label="Mission"
-              active={showMissionControl}
-              onPress={handleToggleMissionPanel}
-            />
-            <QuickSubNavItem
-              icon={MonitorPlay}
-              label="Telemetry"
-              active={showTelemetry}
-              onPress={handleToggleTelemetryPanel}
-            />
-          </View>
-        </View>
-      </AnimatedReanimated.View>
-    );
-  };
-
   const handleNavPress = (id) => {
     setActiveNav(id);
     if (id === "main") onNav("home");
@@ -1637,6 +1561,70 @@ export default function ModernHomeUI(props) {
   const onExitSession = useCallback(() => {
     onNav("connection");
   }, [onNav]);
+
+  const renderQuickAccessMenu = () => {
+    if (!isHomePage || !navIconsVisible || !quickAccessExpanded) return null;
+    return (
+      <AnimatedReanimated.View
+        style={[
+          styles.quickAccessSubNav,
+          quickAccessSubNavAnimatedStyle,
+          { top: quickAccessAnchor.top + QUICK_ACCESS_SUBNAV_OFFSET },
+        ]}
+        pointerEvents="box-none"
+      >
+        <View style={styles.quickAccessSubNavInner} pointerEvents="auto">
+          <View style={styles.quickAccessSubNavBridge} />
+          <View style={styles.quickAccessSubNavRow}>
+            <Text style={styles.quickSubNavSectionLabel}>Vehicle</Text>
+            <QuickSubNavItem
+              icon={vehicleMode === "MANUAL" ? Gamepad2 : vehicleMode === "OFFBOARD" ? Hexagon : Zap}
+              label={vehicleMode || "MANUAL"}
+              active={vehicleMode === "MANUAL"}
+              onPress={handleSetManualMode}
+            />
+            <View style={styles.quickSubNavDivider} />
+            <Text style={styles.quickSubNavSectionLabel}>RTK</Text>
+            <QuickSubNavItem
+              icon={rtkStatus.running ? Activity : RadioTower}
+              label={rtkLifecycleLabel}
+              active={rtkCorrectionsLive || (rtkStatus.mode === "lora" && rtkStatus.healthy)}
+              danger={rtkStatus.source_state === "error" || rtkStatus.source_state === "unavailable"}
+              signal
+              healthy={rtkCorrectionsLive || (rtkStatus.mode === "lora" && rtkStatus.healthy)}
+              disabled={rtkConnecting || rtkStatus.running}
+              onPress={() => {
+                if (rtkConnecting || rtkStatus.running) return;
+                onNav?.("settings");
+              }}
+            />
+            {canStartLora ? (
+              <QuickSubNavItem
+                icon={Radio}
+                label="Start LoRa"
+                disabled={rtkConnecting}
+                onPress={handleStartLora}
+              />
+            ) : null}
+            <View style={styles.quickSubNavDivider} />
+            <Text style={styles.quickSubNavSectionLabel}>Panels</Text>
+            <QuickSubNavItem
+              icon={Route}
+              label="Mission"
+              active={showMissionControl}
+              onPress={handleToggleMissionPanel}
+            />
+            <QuickSubNavItem
+              icon={MonitorPlay}
+              label="Telemetry"
+              active={showTelemetry}
+              onPress={handleToggleTelemetryPanel}
+            />
+          </View>
+        </View>
+      </AnimatedReanimated.View>
+    );
+  };
 
   const renderNavbar = () => (
     <Navbar
@@ -2096,7 +2084,7 @@ export default function ModernHomeUI(props) {
       {hudVisible ? (
         <View ref={hudLayerRef} style={styles.hudLayer} pointerEvents="box-none" collapsable={false}>
           {renderNavbar()}
-          {renderQuickAccessSubNav()}
+          {renderQuickAccessMenu()}
           {renderMapToolsColumn()}
           {isHomePage ? (
             <View style={styles.rightPanelRail} pointerEvents="box-none">
@@ -2681,10 +2669,6 @@ const styles = StyleSheet.create({
     borderColor: COLORS.panelBorder,
     minHeight: 46,
   },
-  quickSubNavItemCompact: {
-    minHeight: 42,
-    paddingVertical: 8,
-  },
   quickSubNavItemActive: {
     backgroundColor: COLORS.accentMuted,
     borderColor: COLORS.accentBorder,
@@ -2722,11 +2706,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  quickSubNavIconWrapCompact: {
-    width: 28,
-    height: 28,
-    borderRadius: 8,
-  },
   quickSubNavIconWrapActive: {
     backgroundColor: COLORS.accentBrand,
   },
@@ -2741,9 +2720,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     flex: 1,
-  },
-  quickSubNavLabelCompact: {
-    fontSize: 11,
   },
   quickSubNavLabelActive: {
     color: COLORS.textMain,
@@ -2947,33 +2923,36 @@ const styles = StyleSheet.create({
     position: "absolute",
     left: 20,
     top: 20,
-    borderRadius: 22,
+    borderRadius: 28,
     borderWidth: 1,
-    paddingVertical: 12,
+    paddingVertical: 16,
     paddingHorizontal: NAV_PAD_H,
     justifyContent: "flex-start",
-    gap: 6,
+    gap: 4,
     ...SHADOWS.panel,
     overflow: "hidden",
     zIndex: 90,
   },
+  navGoldEdge: {
+    height: 0,
+  },
   navRest: {
     flex: 1,
     overflow: "visible",
-    gap: 4,
+    gap: 8,
   },
   navMenuGroup: {
-    gap: 0,
-    marginBottom: 2,
+    gap: 10,
+    marginBottom: 4,
     alignItems: "stretch",
     width: "100%",
   },
   navMenuPressable: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 4,
+    paddingVertical: 0,
     paddingHorizontal: 0,
-    borderRadius: 14,
+    borderRadius: 999,
     gap: 0,
     width: "100%",
     overflow: "visible",
@@ -2995,69 +2974,147 @@ const styles = StyleSheet.create({
     marginHorizontal: 2,
     alignSelf: "stretch",
   },
-  navSection: { gap: 4 },
+  navSection: { gap: 8 },
   navItem: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "flex-start",
-    paddingVertical: 4,
-    paddingHorizontal: 0,
-    borderRadius: 14,
+    paddingVertical: 0,
+    paddingRight: 10,
+    borderRadius: 999,
     gap: 0,
     width: "100%",
     overflow: "visible",
   },
+  navItemNested: {
+    paddingLeft: 6,
+  },
   navItemActive: {
-    backgroundColor: "rgba(255,255,255,0.06)",
+    backgroundColor: "rgba(255,255,255,0.07)",
   },
   navItemDanger: {
     backgroundColor: "transparent",
+  },
+  navAccent: {
+    width: 0,
   },
 
   navIconWrap: {
     width: NAV_ICON_SIZE,
     height: NAV_ICON_SIZE,
-    borderRadius: 13,
-    backgroundColor: COLORS.cardSolid,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.06)",
     borderWidth: 1,
-    borderColor: COLORS.panelBorder,
+    borderColor: "rgba(255,255,255,0.08)",
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
   },
+  navSubmenuSlot: {
+    width: NAV_ICON_SIZE,
+    height: NAV_ICON_SIZE,
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  navSubmenuPill: {
+    width: 40,
+    height: 28,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(244,193,12,0.55)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+    paddingHorizontal: 8,
+  },
+  navSubmenuPillOpen: {
+    backgroundColor: COLORS.accentBrand,
+    borderColor: COLORS.accentBrand,
+    transform: [{ translateX: 0.5 }],
+  },
+  navSubmenuDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: "rgba(228,228,231,0.85)",
+  },
+  navSubmenuDotMid: {
+    backgroundColor: COLORS.accentBrand,
+  },
+  navSubmenuDotOpen: {
+    backgroundColor: COLORS.accentText,
+  },
+  navDiscShine: {
+    height: 0,
+  },
+  navIconWrapNested: {
+    width: 34,
+    height: 34,
+  },
   navIconWrapActive: {
     backgroundColor: COLORS.accentBrand,
-    borderColor: COLORS.accentBorder,
+    borderColor: COLORS.accentBrand,
   },
   navIconWrapActiveCollapsed: {
-    borderColor: COLORS.panelBorder,
+    borderColor: "transparent",
   },
   navIconWrapDanger: {
     backgroundColor: COLORS.dangerMuted,
-    borderColor: COLORS.dangerBorder,
+    borderColor: "rgba(248,113,113,0.25)",
+  },
+  navBrandWrap: {
+    backgroundColor: COLORS.accentBrand,
+    borderColor: COLORS.accentBrand,
+  },
+  navBrandMark: {
+    color: COLORS.accentText,
+    fontSize: 17,
+    fontWeight: "800",
+    letterSpacing: -0.6,
+    includeFontPadding: false,
+    lineHeight: 20,
+  },
+  navBrandRule: {
+    width: 16,
+    height: 2,
+    borderRadius: 2,
+    backgroundColor: "rgba(244,193,12,0.4)",
+    marginLeft: 14,
+    marginBottom: 2,
   },
   navLabelWrap: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
+    justifyContent: "flex-start",
     overflow: "hidden",
     gap: 8,
     height: 44,
+    minWidth: 0,
   },
-  navLabel: { color: COLORS.textMuted, fontSize: 13, fontWeight: "600" },
+  navLabel: {
+    color: COLORS.textMuted,
+    fontSize: 14,
+    fontWeight: "600",
+    letterSpacing: -0.1,
+    flexShrink: 0,
+  },
   navLabelActive: { color: COLORS.textMain, fontWeight: "700" },
+  navLabelBrand: { color: COLORS.textMain, fontWeight: "700" },
   navLabelDanger: { color: COLORS.danger, fontWeight: "700" },
   navActiveDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: COLORS.accentBrand,
+    width: 0,
+    height: 0,
   },
   navDivider: {
-    height: 1,
-    backgroundColor: COLORS.panelBorder,
+    width: 16,
+    height: 2,
+    borderRadius: 2,
+    backgroundColor: "rgba(244,193,12,0.4)",
     marginVertical: 8,
-    marginHorizontal: 2,
+    marginLeft: 14,
   },
   navToolsSection: {
     gap: 4,

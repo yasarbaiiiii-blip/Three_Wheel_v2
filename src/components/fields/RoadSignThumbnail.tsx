@@ -9,6 +9,7 @@ type RoadSignThumbnailProps = {
   sign: RoadSignType;
   size?: number;
   stroke?: string;
+  strokeWidth?: number;
   /** Draw only the mark, no chrome — for embedding in a parent tile. */
   bare?: boolean;
 };
@@ -17,6 +18,7 @@ export function RoadSignThumbnail({
   sign,
   size = 36,
   stroke = FIELDS_COLORS.textMain,
+  strokeWidth = 0.022,
   bare = false,
 }: RoadSignThumbnailProps) {
   const segments = SIGN_DATA[sign] ?? [];
@@ -31,7 +33,7 @@ export function RoadSignThumbnail({
           x2={seg[2]}
           y2={-seg[3]}
           stroke={stroke}
-          strokeWidth={0.02}
+          strokeWidth={strokeWidth}
           strokeLinecap="round"
         />
       ))}

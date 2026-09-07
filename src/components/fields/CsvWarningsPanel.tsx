@@ -36,7 +36,6 @@ export function CsvWarningsPanel({
     ...advisory.map((w) => ({ kind: "advisory" as const, text: w })),
   ];
   const shown = expanded ? all.slice(0, maxVisible) : [];
-  const hidden = total - shown.length;
 
   return (
     <View
@@ -68,8 +67,7 @@ export function CsvWarningsPanel({
             fontWeight: "700",
           }}
         >
-          {title}
-          {total > 0 ? ` (${total})` : ""}
+          {title} · {total}
         </Text>
         {expanded ? (
           <ChevronUp size={16} color={FIELDS_COLORS.textDim} />
@@ -86,15 +84,11 @@ export function CsvWarningsPanel({
             fontSize: 11,
             lineHeight: 15,
           }}
+          numberOfLines={2}
         >
-          • {w.text}
+          {w.text}
         </Text>
       ))}
-      {expanded && hidden > 0 ? (
-        <Text style={{ color: FIELDS_COLORS.textDim, fontSize: 10 }}>
-          Showing first {shown.length} of {total}.
-        </Text>
-      ) : null}
     </View>
   );
 }
