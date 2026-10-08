@@ -389,17 +389,24 @@ const GREEN = "#eef2f7";
 const GREEN_DARK = "#f8fafc";
 const TEAL = "#0f988f";
 const LOCAL_WS_CANDIDATES = [
+  "http://localhost:8000",
   "http://localhost:5001",
+  "http://127.0.0.1:8000",
   "http://127.0.0.1:5001",
 ];
-const PRIORITY_BACKEND_IPS: string[] = [];
+const PRIORITY_BACKEND_IPS: string[] = [
+  "192.168.42.1",
+  "10.42.0.1",
+  "192.168.1.102",
+  "192.168.3.101",
+];
 
 const DISCOVERY_REFRESH_MS = 5000;
-const DISCOVERY_PORT = 5001;
+const DISCOVERY_PORT = 8000;
 const SUBNET_HOST_MIN = 1;
 const SUBNET_HOST_MAX = 254;
-const SUBNET_SCAN_CONCURRENCY = 24;
-const DEFAULT_ROVER_BACKEND = "http://192.168.1.102:5001";
+const SUBNET_SCAN_CONCURRENCY = 28;
+const DEFAULT_ROVER_BACKEND = "http://192.168.42.1:8000";
 const MENU_ITEMS: Array<{ key: Page; label: string; icon: React.ReactNode }> = [
   { key: "fields", label: "Fields", icon: <File size={22} color="#fff" /> },
   { key: "templates", label: "Templates", icon: <LayoutTemplate size={22} color="#fff" /> },
@@ -4925,7 +4932,10 @@ function AppRoot() {
   }
 
   function priorityScanHosts() {
-    return PRIORITY_BACKEND_IPS.map((ip) => `http://${ip}:${DISCOVERY_PORT}`);
+    return PRIORITY_BACKEND_IPS.flatMap((ip) => [
+      `http://${ip}:8000`,
+      `http://${ip}:5001`,
+    ]);
   }
 
   // Probe a single host's /api/ping with retries. Lossy links (e.g. phone
@@ -4951,7 +4961,7 @@ function AppRoot() {
       const url = new URL(candidate);
       return {
         host: url.hostname,
-        port: Number(url.port || 5001),
+        port: Number(url.port || 8000),
       };
     } catch {
       return null;
@@ -4960,14 +4970,14 @@ function AppRoot() {
 
   async function probeBackendHost(candidate: string): Promise<number | null> {
     const start = Date.now();
-    const endpoints = ["/api/ping", "/api/healthz"];
+    const endpoints = ["/api/ping", "/api/healthz", "/api/health"];
     for (const endpoint of endpoints) {
       try {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 1200);
+        const timeout = setTimeout(() => controller.abort(), 600);
         const res = await fetch(`${candidate}${endpoint}`, { signal: controller.signal });
         clearTimeout(timeout);
-        if (res.ok) return Date.now() - start;
+        if (res.ok || (res.status === 401 && endpoint === "/api/health")) return Date.now() - start;
       } catch {
         // try next endpoint
       }
@@ -5008,31 +5018,17 @@ function AppRoot() {
       }
     }
 
-    // 3. Always include common private subnets
-    prefixes.add("192.168.1");
-    prefixes.add("192.168.0");
-    prefixes.add("192.168.2");
-    prefixes.add("10.0.0");
-    prefixes.add("172.16.0");
-
-    // 4. Extract subnet from manual host and add it as a priority scan
-    //    This helps when user enters an IP manually on a non-192.168.x network
-    try {
-      const seedParsed = parseHost(seedHost);
-      if (seedParsed && isPrivateLanIp(seedParsed.host)) {
-        const octets = seedParsed.host.split(".");
-        if (octets.length === 4) {
-          prefixes.add(octets.slice(0, 3).join("."));
-        }
-      }
-    } catch {
-      // ignore
+    // 3. Fallback only if no active subnet prefix was detected at all
+    if (prefixes.size === 0) {
+      prefixes.add("192.168.42");
+      prefixes.add("192.168.1");
     }
 
     const candidates: string[] = [];
     for (const prefix of prefixes) {
       for (let hostOctet = SUBNET_HOST_MIN; hostOctet <= SUBNET_HOST_MAX; hostOctet++) {
-        candidates.push(`http://${prefix}.${hostOctet}:${DISCOVERY_PORT}`);
+        candidates.push(`http://${prefix}.${hostOctet}:8000`);
+        candidates.push(`http://${prefix}.${hostOctet}:5001`);
       }
     }
     return candidates;

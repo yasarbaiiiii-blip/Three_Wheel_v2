@@ -88,6 +88,10 @@ import type {
 } from "../contract/prod/rest";
 import type { PlanLine } from "../types/plan";
 import { buildAppPlannedMissionFromLines } from "../utils/appPlannedMissionBuilder";
+import {
+  discoverRovers,
+  type DiscoveredRoverTarget,
+} from "../utils/roverDiscovery";
 
 interface DebugDriveScreenProps {
   onBack?: () => void;
@@ -102,6 +106,11 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
   const [socketStatus, setSocketStatus] = useState<ProdSocketStatus>("disconnected");
   const [socketError, setSocketError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+
+  // ---- Rover Discovery State ----
+  const [discovering, setDiscovering] = useState(false);
+  const [discoveryProgress, setDiscoveryProgress] = useState<string | null>(null);
+  const [discoveredRoversList, setDiscoveredRoversList] = useState<DiscoveredRoverTarget[]>([]);
 
   // ---- Heartbeat scheduler state ----
   const [heartbeatMetrics, setHeartbeatMetrics] = useState<HeartbeatMetrics>({
@@ -148,15 +157,63 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
   const vehiclePose = getDerivedVehiclePose();
   const overallStaleness = getOverallStaleness();
 
-  // Load saved credentials on mount
+  // Load saved credentials on mount + fast background probe
   useEffect(() => {
     void (async () => {
       const savedHost = await loadProdHost();
       const savedToken = await loadProdToken();
-      if (savedHost) setHostUrl(savedHost);
+      if (savedHost) {
+        setHostUrl(savedHost);
+      } else {
+        // Fast background probe on AP
+        void (async () => {
+          try {
+            const found = await discoverRovers({
+              seedHost: "http://192.168.42.1:8000",
+              includePrototype: false,
+            });
+            if (found.length > 0) {
+              setHostUrl(found[0].url);
+              setDiscoveredRoversList(found);
+            }
+          } catch {
+            // Ignore
+          }
+        })();
+      }
       if (savedToken) setToken(savedToken);
     })();
   }, []);
+
+  // Auto-discover rovers handler
+  const handleAutoDiscover = useCallback(async () => {
+    if (discovering) return;
+    setDiscovering(true);
+    setDiscoveryProgress("Probing AP...");
+    try {
+      const found = await discoverRovers({
+        seedHost: hostUrl,
+        preferredPort: 8000,
+        includePrototype: true,
+        concurrency: 28,
+        timeoutMs: 500,
+        onProgress: (scanned, total) => {
+          setDiscoveryProgress(`${scanned}/${total}`);
+        },
+      });
+      setDiscoveredRoversList(found);
+      if (found.length > 0) {
+        if (hostUrl === "http://192.168.42.1:8000" || !hostUrl) {
+          setHostUrl(found[0].url);
+        }
+      }
+    } catch {
+      // Ignore
+    } finally {
+      setDiscovering(false);
+      setDiscoveryProgress(null);
+    }
+  }, [discovering, hostUrl]);
 
   // Listen to socket status
   useEffect(() => {
@@ -596,7 +653,25 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
           <Text style={styles.cardTitle}>Rover Connection & Heartbeat Timing</Text>
           <View style={styles.rowWrap}>
             <View style={styles.inputGroup}>
-              <Text style={styles.inputLabel}>Rover Backend URL (Port 8000)</Text>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                <Text style={styles.inputLabel}>Rover Backend URL (Port 8000)</Text>
+                <Pressable
+                  style={styles.scanLinkBtn}
+                  onPress={handleAutoDiscover}
+                  disabled={discovering || socketStatus === "connected"}
+                >
+                  {discovering ? (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                      <ActivityIndicator size="small" color="#38bdf8" />
+                      <Text style={styles.scanLinkText}>
+                        {discoveryProgress || "Scanning..."}
+                      </Text>
+                    </View>
+                  ) : (
+                    <Text style={styles.scanLinkText}>🔍 Scan Rover</Text>
+                  )}
+                </Pressable>
+              </View>
               <TextInput
                 style={styles.input}
                 value={hostUrl}
@@ -605,6 +680,35 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
                 placeholder="http://192.168.42.1:8000"
                 placeholderTextColor="#64748b"
               />
+              {discoveredRoversList.length > 0 && (
+                <View style={styles.discoveredRow}>
+                  <Text style={styles.discoveredLabel}>Found:</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+                    {discoveredRoversList.map((r) => {
+                      const isSelected = hostUrl === r.url;
+                      return (
+                        <Pressable
+                          key={r.id}
+                          style={[
+                            styles.discoveredPill,
+                            isSelected && styles.discoveredPillActive,
+                          ]}
+                          onPress={() => setHostUrl(r.url)}
+                        >
+                          <Text
+                            style={[
+                              styles.discoveredPillText,
+                              isSelected && styles.discoveredPillTextActive,
+                            ]}
+                          >
+                            {r.generation === "production" ? "PROD" : "PROTO"} · {r.host}:{r.port} ({r.responseTimeMs}ms)
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+              )}
             </View>
 
             <View style={[styles.inputGroup, { flex: 1.2 }]}>
@@ -1325,6 +1429,51 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     color: "#94a3b8",
+  },
+  scanLinkBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    backgroundColor: "rgba(56, 189, 248, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(56, 189, 248, 0.3)",
+  },
+  scanLinkText: {
+    color: "#38bdf8",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  discoveredRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 6,
+  },
+  discoveredLabel: {
+    color: "#94a3b8",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  discoveredPill: {
+    backgroundColor: "#1e293b",
+    borderWidth: 1,
+    borderColor: "#334155",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  discoveredPillActive: {
+    backgroundColor: "rgba(16, 185, 129, 0.2)",
+    borderColor: "#10b981",
+  },
+  discoveredPillText: {
+    color: "#cbd5e1",
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  discoveredPillTextActive: {
+    color: "#34d399",
+    fontWeight: "800",
   },
   input: {
     backgroundColor: "#1e293b",
