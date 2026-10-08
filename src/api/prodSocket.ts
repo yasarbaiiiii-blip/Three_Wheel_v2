@@ -4,14 +4,19 @@
  * Rules:
  * 1. transports: ["websocket"] only.
  * 2. Handshake: auth: { token: string }.
- * 3. Automatic reconnect with exponential backoff.
+ * 3. Automatic reconnect with exponential backoff (capped at 5s).
+ * 4. Stop reconnecting on 401 / unauthorized -> set status "unauthorized".
+ * 5. Immediate "disconnected" status on disconnect.
+ * 6. AppState listener: tablet wake-up / app foregrounding checks connection immediately.
+ * 7. Fixed-rate heartbeat emit via socket "heartbeat" event (capped at 350ms).
  */
 
 import { io, type Socket } from "socket.io-client";
+import { AppState, type NativeEventSubscription } from "react-native";
 import type { TelemetryPacket, GatewayEventPacket } from "../contract/prod/realtime";
 import { applyProdTelemetrySnapshot, setProdGatewayConnected } from "../features/telemetry/prodTelemetryStore";
 
-export type ProdSocketStatus = "disconnected" | "connecting" | "connected" | "error";
+export type ProdSocketStatus = "disconnected" | "connecting" | "connected" | "error" | "unauthorized";
 export type SocketStatusListener = (status: ProdSocketStatus, detail?: string) => void;
 
 export class ProdSocketManager {
@@ -20,6 +25,32 @@ export class ProdSocketManager {
   private currentToken: string | null = null;
   private status: ProdSocketStatus = "disconnected";
   private listeners = new Set<SocketStatusListener>();
+  private appStateSubscription: NativeEventSubscription | null = null;
+
+  constructor() {
+    this.setupAppStateListener();
+  }
+
+  private setupAppStateListener() {
+    try {
+      if (AppState && typeof AppState.addEventListener === "function") {
+        this.appStateSubscription = AppState.addEventListener("change", (nextState) => {
+          if (nextState === "active") {
+            // Tablet woke up / app foregrounded: verify socket state immediately
+            if (this.socket) {
+              if (!this.socket.connected) {
+                this.setStatus("disconnected", "app_foreground_offline");
+                setProdGatewayConnected(false);
+                this.socket.connect();
+              }
+            }
+          }
+        });
+      }
+    } catch {
+      // In non-react-native environments (vitest / unit test runner)
+    }
+  }
 
   getStatus(): ProdSocketStatus {
     return this.status;
@@ -68,8 +99,6 @@ export class ProdSocketManager {
 
         const timer = setTimeout(() => {
           if (!resolved && this.status === "connecting") {
-            // Do not reject the entire flow if socket takes longer to handshake,
-            // but log warning.
             console.warn("[ProdSocket] Socket connect taking longer than 10s...");
           }
         }, 10000);
@@ -90,6 +119,26 @@ export class ProdSocketManager {
 
         this.socket.on("connect_error", (err) => {
           const msg = err instanceof Error ? err.message : String(err);
+          const isAuthError =
+            msg.includes("401") ||
+            msg.toLowerCase().includes("unauthoriz") ||
+            msg.toLowerCase().includes("forbidden") ||
+            (err as any)?.data?.status === 401 ||
+            (err as any)?.description === 401;
+
+          if (isAuthError) {
+            console.warn("[ProdSocket] 401/Unauthorized received. Stopping reconnect.");
+            if (this.socket) {
+              this.socket.disconnect();
+            }
+            this.setStatus("unauthorized", msg);
+            if (!resolved) {
+              resolved = true;
+              reject(err);
+            }
+            return;
+          }
+
           this.setStatus("error", msg);
           if (!resolved) {
             resolved = true;
@@ -100,7 +149,7 @@ export class ProdSocketManager {
         // Inbound production events
         this.socket.on("telemetry", (packet: TelemetryPacket | string) => {
           try {
-            let data: TelemetryPacket = typeof packet === "string" ? JSON.parse(packet) : packet;
+            const data: TelemetryPacket = typeof packet === "string" ? JSON.parse(packet) : packet;
             applyProdTelemetrySnapshot(data?.snapshot ?? null);
           } catch (e) {
             console.warn("[ProdSocket] Error parsing telemetry event:", e);
@@ -109,7 +158,7 @@ export class ProdSocketManager {
 
         this.socket.on("gateway", (packet: GatewayEventPacket | string) => {
           try {
-            let data: GatewayEventPacket = typeof packet === "string" ? JSON.parse(packet) : packet;
+            const data: GatewayEventPacket = typeof packet === "string" ? JSON.parse(packet) : packet;
             setProdGatewayConnected(Boolean(data?.connected));
           } catch (e) {
             console.warn("[ProdSocket] Error parsing gateway event:", e);
@@ -125,6 +174,82 @@ export class ProdSocketManager {
     });
   }
 
+  /**
+   * Sends heartbeat event with a hard timeout of <= 350 ms.
+   * Resolves { ok: true } on server ack.
+   */
+  async emitHeartbeat(timeoutMs = 350): Promise<{ ok: boolean; code?: string }> {
+    if (!this.socket || !this.socket.connected) {
+      throw new Error("Socket not connected");
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error("Heartbeat ack timeout"));
+        }
+      }, timeoutMs);
+
+      try {
+        this.socket!.emit("heartbeat", {}, (response: any) => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            if (response && response.ok === false) {
+              reject(new Error(response.code || "Heartbeat rejected"));
+            } else {
+              resolve(response ?? { ok: true });
+            }
+          }
+        });
+      } catch (err) {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      }
+    });
+  }
+
+  /**
+   * Emits e-stop assertion or clear over socket with ack.
+   */
+  async emitEstop(
+    asserted: boolean,
+    timeoutMs = 2000
+  ): Promise<{ ok: boolean; code?: string; delivered: boolean; reason?: string }> {
+    if (!this.socket || !this.socket.connected) {
+      throw new Error("Socket not connected");
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error("E-stop emit timeout"));
+        }
+      }, timeoutMs);
+
+      try {
+        this.socket!.emit("estop", { asserted }, (response: any) => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(response ?? { ok: true, delivered: true });
+          }
+        });
+      } catch (err) {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      }
+    });
+  }
+
   disconnect() {
     if (this.socket) {
       this.socket.removeAllListeners();
@@ -133,6 +258,15 @@ export class ProdSocketManager {
     }
     this.setStatus("disconnected");
     setProdGatewayConnected(false);
+  }
+
+  destroy() {
+    this.disconnect();
+    if (this.appStateSubscription) {
+      this.appStateSubscription.remove();
+      this.appStateSubscription = null;
+    }
+    this.listeners.clear();
   }
 
   getSocket(): Socket | null {
