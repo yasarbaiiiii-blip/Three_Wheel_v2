@@ -230,8 +230,9 @@ export class AppTransportService {
     await Promise.allSettled([socketPromise, restPromise]);
 
     if (!delivered) {
+      const errDetail = lastError ? (lastError as Error).message : "";
       throw new Error(
-        `E-stop command (${asserted ? "ASSERT" : "CLEAR"}) failed to reach rover across both Socket.IO and REST transports. ${lastError ? lastError.message : ""}`
+        `E-stop command (${asserted ? "ASSERT" : "CLEAR"}) failed to reach rover across both Socket.IO and REST transports. ${errDetail}`
       );
     }
   }
