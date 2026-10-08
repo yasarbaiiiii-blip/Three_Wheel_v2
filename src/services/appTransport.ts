@@ -64,7 +64,7 @@ export class AppTransportService {
         const res = await this.client.heartbeat();
         return { ok: Boolean(res.ok), transport: "rest" };
       } catch {
-        return { ok: false, transport: "none" };
+        return { ok: false };
       }
     }, 500);
 
@@ -159,6 +159,30 @@ export class AppTransportService {
 
     // Connect Socket.IO
     await this.socketMgr.connect(normalizedHost, this.activeToken);
+  }
+
+  /**
+   * Emergency stop: triggers via Socket.IO for minimal latency, and also
+   * dispatches REST POST /api/estop as a dual-path safety guarantee.
+   */
+  async estop(asserted = true): Promise<void> {
+    const socketPromise = (async () => {
+      try {
+        await this.socketMgr.emitEstop(asserted, 400);
+      } catch (err) {
+        console.warn("[AppTransport] Socket estop warning:", err);
+      }
+    })();
+
+    const restPromise = (async () => {
+      try {
+        await this.client.estop(asserted);
+      } catch (err) {
+        console.warn("[AppTransport] REST estop warning:", err);
+      }
+    })();
+
+    await Promise.allSettled([socketPromise, restPromise]);
   }
 
   /**

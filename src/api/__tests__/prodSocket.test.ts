@@ -49,7 +49,7 @@ describe("ProdSocketManager", () => {
     const connectErrorCall = mockSocket.on.mock.calls.find((call) => call[0] === "connect_error");
     expect(connectErrorCall).toBeDefined();
 
-    const errorHandler = connectErrorCall[1];
+    const errorHandler = connectErrorCall![1];
     errorHandler(new Error("401 Unauthorized handshake failed"));
 
     await expect(connectPromise).rejects.toThrow("401 Unauthorized");
@@ -62,14 +62,14 @@ describe("ProdSocketManager", () => {
 
     const connectCall = mockSocket.on.mock.calls.find((call) => call[0] === "connect");
     expect(connectCall).toBeDefined();
-    connectCall[1](); // trigger connect
+    connectCall![1](); // trigger connect
     await connectPromise;
 
     expect(manager.getStatus()).toBe("connected");
 
     const disconnectCall = mockSocket.on.mock.calls.find((call) => call[0] === "disconnect");
     expect(disconnectCall).toBeDefined();
-    disconnectCall[1]("io server disconnect");
+    disconnectCall![1]("io server disconnect");
 
     expect(manager.getStatus()).toBe("disconnected");
   });
@@ -84,7 +84,7 @@ describe("ProdSocketManager", () => {
 
     const connectPromise = manager.connect("http://localhost:8000", "good-token");
     const connectCall = mockSocket.on.mock.calls.find((call) => call[0] === "connect");
-    connectCall[1]();
+    connectCall![1]();
     await connectPromise;
 
     const ack = await manager.emitHeartbeat(350);
@@ -98,7 +98,7 @@ describe("ProdSocketManager", () => {
 
     const connectPromise = manager.connect("http://localhost:8000", "good-token");
     const connectCall = mockSocket.on.mock.calls.find((call) => call[0] === "connect");
-    connectCall[1]();
+    connectCall![1]();
     await connectPromise;
 
     await expect(manager.emitHeartbeat(50)).rejects.toThrow("Heartbeat ack timeout");

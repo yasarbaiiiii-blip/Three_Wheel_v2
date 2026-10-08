@@ -49,4 +49,19 @@ describe("AppTransportService", () => {
     expect(service.getStatus()).toBe("disconnected");
     expect(service.getHeartbeatMetrics().isRunning).toBe(false);
   });
+
+  it("dispatches estop across both socket and rest endpoints", async () => {
+    const socketMgr = service.getSocketManager();
+    const emitSpy = vi.spyOn(socketMgr, "emitEstop").mockResolvedValue({ ok: true, delivered: true });
+    const client = service.getClient();
+    const clientSpy = vi.spyOn(client, "estop").mockResolvedValue({ ok: true, verdict: "estop_asserted" } as any);
+
+    await service.estop(true);
+    expect(emitSpy).toHaveBeenCalledWith(true, 400);
+    expect(clientSpy).toHaveBeenCalledWith(true);
+
+    await service.estop(false);
+    expect(emitSpy).toHaveBeenCalledWith(false, 400);
+    expect(clientSpy).toHaveBeenCalledWith(false);
+  });
 });
