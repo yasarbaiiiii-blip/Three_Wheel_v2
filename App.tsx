@@ -200,6 +200,7 @@ import {
   clearProdTelemetry,
   getAdaptedTelemetrySnapshot,
   getDerivedVehiclePose,
+  getOverallStaleness,
   subscribeProdTelemetry,
 } from "./src/features/telemetry/prodTelemetryStore";
 import { buildAppPlannedMissionFromLines } from "./src/utils/appPlannedMissionBuilder";
@@ -4162,6 +4163,14 @@ function AppRoot() {
       if (!shaToStart) {
         throw new Error("No staged mission SHA available to start. Upload plan first.");
       }
+      const transport = getAppTransport();
+      if (transport.getStatus() !== "connected") {
+        throw new Error("Cannot start mission while disconnected from rover.");
+      }
+      const staleness = getOverallStaleness();
+      if (staleness.isDisconnected) {
+        throw new Error("Cannot start mission while telemetry is disconnected.");
+      }
       const client = getProdApiClient();
       await client.startMission(shaToStart);
       setMissionRunning(true);
@@ -4538,6 +4547,18 @@ function AppRoot() {
   }
 
   async function armVehicle(arm: boolean) {
+    if (arm) {
+      const transport = getAppTransport();
+      if (transport.getStatus() !== "connected") {
+        Alert.alert("Rover Disconnected", "Cannot arm vehicle while disconnected from rover.");
+        return;
+      }
+      const staleness = getOverallStaleness();
+      if (staleness.isDisconnected) {
+        Alert.alert("Telemetry Disconnected", "Cannot arm vehicle while telemetry is disconnected.");
+        return;
+      }
+    }
     setMissionActionBusy(true);
     try {
       showToast(arm ? "Arm" : "Disarm", arm ? "Arming vehicle..." : "Disarming vehicle...", "info");
@@ -4558,24 +4579,18 @@ function AppRoot() {
   }
 
   async function setVehicleMode(targetMode: "MANUAL") {
-    if (!apiBaseUrl) {
+    const transport = getAppTransport();
+    if (transport.getStatus() !== "connected") {
       Alert.alert("No backend", "Connect to a backend before sending commands.");
       return;
     }
-    logAction("SET_MODE_REQUEST", { apiBaseUrl, targetMode });
+    logAction("SET_MODE_REQUEST", { targetMode });
     setMissionActionBusy(true);
     try {
       showToast("Mode", `Switching to ${targetMode}...`, "info");
-      const res = await fetch(`${apiBaseUrl}/api/set_mode`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: targetMode })
-      });
-      if (!res.ok) {
-        const errMsg = await parseFetchError(res, "Set mode failed");
-        throw new Error(errMsg);
-      }
-      await refreshTelemetryPanel();
+      const client = getProdApiClient();
+      // On production stack, manual driving means disengaging offboard autonomous control
+      await client.setOffboard(false);
       logAction("SET_MODE_SUCCESS", { targetMode });
       Alert.alert("Mode Changed", `Vehicle mode set to ${targetMode}.`);
       showToast("Mode Changed", `Vehicle mode is now ${targetMode}.`, "success");
@@ -4602,11 +4617,16 @@ function AppRoot() {
         await getAppTransport().estop(true);
         logAction("ESTOP_SUCCESS");
         Alert.alert("EMERGENCY STOP", "Motors halted. Rover E-stop is active.");
+        showToast("E-STOP Active", "Rover emergency stop confirmed.", "success");
       } catch (error) {
         logAction("ESTOP_FAILED", {
           error: error instanceof Error ? error.message : String(error),
         });
-        Alert.alert("E-Stop Dispatched", "Emergency Stop command sent across available transports.");
+        Alert.alert(
+          "E-STOP DELIVERY FAILED",
+          "Rover did not acknowledge the software E-stop! HIT THE PHYSICAL RC TRANSMITTER E-STOP IMMEDIATELY!"
+        );
+        showToast("E-STOP FAILED", "Network delivery failed! Use RC transmitter!", "error");
       }
     } else {
       // Clearing E-stop requires confirmation
@@ -4626,8 +4646,8 @@ function AppRoot() {
                 showToast("E-Stop Cleared", "Rover ready.", "success");
               } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
-                Alert.alert("Clear Failed", msg);
-                showToast("Clear Failed", msg, "error");
+                Alert.alert("Clear Failed", `Could not clear E-stop: ${msg}`);
+                showToast("Clear Failed", "Could not clear E-stop.", "error");
               }
             },
           },
@@ -5597,85 +5617,6 @@ function HomeView(props: HomeViewProps) {
     (telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
       ? { north: telemetrySnapshot.pos_n as number, east: telemetrySnapshot.pos_e as number }
       : null);
-
-  const [sprayModalOpen, setSprayModalOpen] = useState(false);
-  const [sprayTab, setSprayTab] = useState<"continuous" | "dashed" | "point">("continuous");
-  const [dashDistanceOn, setDashDistanceOn] = useState("0.3");
-  const [dashDistanceOff, setDashDistanceOff] = useState("0.3");
-  const [pointExecutionMode, setPointExecutionMode] = useState<"auto" | "manual">("auto");
-  const [activeSprayMode, setActiveSprayMode] = useState<string>("continuous");
-  const [activePointExecutionMode, setActivePointExecutionMode] = useState<string>("auto");
-  const [isSprayMasterEnabled, setIsSprayMasterEnabled] = useState(false);
-  const [isSprayMasterChanging, setIsSprayMasterChanging] = useState(false);
-
-  const handleSetSprayMode = async () => {
-    if (!apiBaseUrl || !selectedPathName) return;
-    try {
-      let res;
-      if (sprayTab === "continuous") {
-        res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/continuous`, { 
-          method: "PUT",
-          headers: { "Content-Type": "application/json", "Accept": "application/json" },
-          body: JSON.stringify({})
-        });
-        if (!res.ok) throw new Error(`Server error: ${res.status} ${await res.text()}`);
-        setActiveSprayMode("continuous");
-      } else if (sprayTab === "dashed") {
-        res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/dash`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", "Accept": "application/json" },
-          body: JSON.stringify({
-            dash_on_distance_m: parseFloat(dashDistanceOn) || 0.3,
-            dash_off_distance_m: parseFloat(dashDistanceOff) || 0.3,
-            dash_phase_reset: "per_mark_region"
-          })
-        });
-        if (!res.ok) throw new Error(`Server error: ${res.status} ${await res.text()}`);
-        setActiveSprayMode("dashed");
-      } else if (sprayTab === "point") {
-        res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/point`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", "Accept": "application/json" },
-          body: JSON.stringify({
-            point_execution_mode: pointExecutionMode
-          })
-        });
-        if (!res.ok) throw new Error(`Server error: ${res.status} ${await res.text()}`);
-        setActiveSprayMode("point");
-        setActivePointExecutionMode(pointExecutionMode);
-      }
-      setSprayModalOpen(false);
-    } catch (err: any) {
-      Alert.alert("Error", err.message || "Failed to set spray mode.");
-    }
-  };
-
-  const handleSprayMasterToggle = async () => {
-    if (!apiBaseUrl) return;
-    const nextEnable = !isSprayMasterEnabled;
-    setIsSprayMasterChanging(true);
-    try {
-      const res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/spray/${nextEnable ? "enable" : "disable"}`, {
-        method: "POST",
-        headers: { Accept: "application/json" },
-      });
-      if (!res.ok) {
-        const errText = await res.text();
-        Alert.alert("Error", errText || `Failed to ${nextEnable ? "enable" : "disable"} master spray.`);
-        return;
-      }
-      const data = await res.json();
-      if (data.enabled !== undefined) {
-        setIsSprayMasterEnabled(!!data.enabled);
-      } else {
-        setIsSprayMasterEnabled(nextEnable);
-      }
-    } catch (err: any) {
-      Alert.alert("Error", err.message || "Failed to connect to backend.");
-    } finally {
-      setIsSprayMasterChanging(false);
-    }
-  };
 
   const stagedStartGate = useMemo(
     () => evaluateStagedStartGate(stagedWorkflow, loadedPathInspection, stagedMissionId),
