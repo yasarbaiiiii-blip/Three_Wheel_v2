@@ -35,6 +35,7 @@ export class HeartbeatScheduler {
   private sender: HeartbeatSender;
   private timerId: ReturnType<typeof setTimeout> | null = null;
   private isRunning = false;
+  private inFlight = false;
   private nextScheduledTime = 0;
   private lastTriggerTime = 0;
   private listeners = new Set<MetricsListener>();
@@ -107,6 +108,19 @@ export class HeartbeatScheduler {
     this.emit();
   }
 
+  /**
+   * Immediately triggers a heartbeat tick (e.g. app returning from background)
+   * while keeping schedule anchored.
+   */
+  triggerNow() {
+    if (!this.isRunning) return;
+    if (this.timerId !== null) {
+      clearTimeout(this.timerId);
+      this.timerId = null;
+    }
+    this.tick();
+  }
+
   private scheduleNextTick() {
     if (!this.isRunning) return;
 
@@ -150,6 +164,14 @@ export class HeartbeatScheduler {
     // This guarantees request latency (even 1.2s) CANNOT stretch the cadence.
     this.scheduleNextTick();
 
+    // Guard against overlapping requests: if a previous heartbeat is still in flight,
+    // do not spawn a concurrent request; record consecutive error.
+    if (this.inFlight) {
+      this.metrics.consecutiveErrors += 1;
+      this.emit();
+      return;
+    }
+
     // Fire asynchronous heartbeat sender in background with strict 350ms timeout
     void this.dispatchHeartbeat();
 
@@ -157,10 +179,12 @@ export class HeartbeatScheduler {
   }
 
   private async dispatchHeartbeat(): Promise<void> {
+    this.inFlight = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     try {
       // Enforce timeout strictly < 500 ms (350 ms)
       const timeoutPromise = new Promise<{ ok: false; timeout: true }>((resolve) => {
-        setTimeout(() => resolve({ ok: false, timeout: true }), HEARTBEAT_REQUEST_TIMEOUT_MS);
+        timer = setTimeout(() => resolve({ ok: false, timeout: true }), HEARTBEAT_REQUEST_TIMEOUT_MS);
       });
 
       const senderPromise = this.sender().then((res) => {
@@ -185,6 +209,10 @@ export class HeartbeatScheduler {
     } catch {
       this.metrics.consecutiveErrors += 1;
     } finally {
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+      this.inFlight = false;
       this.emit();
     }
   }

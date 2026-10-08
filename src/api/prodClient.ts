@@ -216,10 +216,10 @@ export class ProdApiClient {
   }
 
   /** POST /api/heartbeat */
-  async heartbeat(): Promise<HeartbeatResponse> {
+  async heartbeat(options?: { timeoutMs?: number }): Promise<HeartbeatResponse> {
     return this.request<HeartbeatResponse>("/api/heartbeat", {
       method: "POST",
-      timeoutMs: HEARTBEAT_REQUEST_TIMEOUT_MS,
+      timeoutMs: options?.timeoutMs ?? HEARTBEAT_REQUEST_TIMEOUT_MS,
     });
   }
 
