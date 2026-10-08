@@ -72,6 +72,7 @@ type ModernSettingsPageProps = {
   setToggleC?: (v: boolean) => void;
   apiBaseUrl?: string;
   selectedPathName?: string | null;
+  onOpenDebug?: () => void;
 };
 
 type ProfileEditorMode = { kind: "create" } | { kind: "edit"; profile: NtripProfile };
@@ -960,127 +961,27 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
       title="Spray"
       subtitle="Hardware, patterns, and testing"
     >
-      {!apiBaseUrl ? (
-        <View style={styles.noteBanner}>
-          <Text style={styles.noteBannerText}>Connect to the rover to use spray controls.</Text>
-        </View>
-      ) : null}
-
       <View style={styles.block}>
-        <SettingsToggle
-          label="Enable spray"
-          hint="Turns spray hardware on or off"
-          value={isSprayMasterEnabled}
-          onValueChange={handleSprayMasterToggle}
-          disabled={!apiBaseUrl || isSprayMasterChanging}
-        />
-        {sprayLive ? (
-          <View style={styles.liveBadge}>
-            <View style={styles.liveDot} />
-            <Text style={styles.liveBadgeText}>Spraying now</Text>
-          </View>
-        ) : null}
+        <View
+          style={[
+            styles.noteBanner,
+            {
+              backgroundColor: "#fef3c7",
+              borderColor: "#fde047",
+              padding: 16,
+              borderRadius: 14,
+              borderWidth: 1,
+            },
+          ]}
+        >
+          <Text style={[styles.noteBannerText, { color: "#854d0e", fontWeight: "800", fontSize: 14 }]}>
+            DEBUG GRADE — DRIVING ONLY (Saturday Test)
+          </Text>
+          <Text style={[styles.noteBannerText, { color: "#854d0e", marginTop: 6, fontSize: 13, lineHeight: 18 }]}>
+            All spray controls (master power, manual hold, pattern modes, and nozzle calibration) are disabled for rover driving verification.
+          </Text>
+        </View>
       </View>
-
-      {isSprayMasterEnabled ? (
-        <>
-          <View style={styles.block}>
-            <SettingsToggle
-              label="Spray on"
-              hint="Manual spray output"
-              value={isSprayOn}
-              onValueChange={handleSprayPowerToggle}
-              disabled={!apiBaseUrl || isSprayOnChanging || manualHoldActive}
-            />
-          </View>
-
-          <View style={styles.block}>
-            <Text style={styles.blockLabel}>Pattern mode</Text>
-            {selectedPathName ? (
-              <Text style={styles.pathHint} numberOfLines={1}>Current path: {selectedPathName}</Text>
-            ) : (
-              <Text style={styles.pathHintWarn}>Select a path on Fields first</Text>
-            )}
-            <SegmentControl
-              options={[
-                { id: "continuous", label: "Continuous" },
-                { id: "dashed", label: "Dashed" },
-                { id: "point", label: "Point" },
-              ]}
-              value={sprayMode}
-              onChange={(id) => setSprayMode(id as SprayMode)}
-            />
-
-            {sprayMode === "dashed" ? (
-              <View style={styles.fieldRow}>
-                <View style={{ flex: 1 }}>
-                  <SettingsField
-                    label="Dash ON (m)"
-                    value={dashDistanceOn}
-                    onChangeText={setDashDistanceOn}
-                    keyboardType="numeric"
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <SettingsField
-                    label="Dash OFF (m)"
-                    value={dashDistanceOff}
-                    onChangeText={setDashDistanceOff}
-                    keyboardType="numeric"
-                  />
-                </View>
-              </View>
-            ) : null}
-
-            {sprayMode === "point" ? (
-              <>
-                <Text style={styles.blockLabel}>Point execution</Text>
-                <SegmentControl
-                  options={[
-                    { id: "auto", label: "Auto" },
-                    { id: "manual", label: "Manual" },
-                  ]}
-                  value={pointExecutionMode}
-                  onChange={(id) => setPointExecutionMode(id as "auto" | "manual")}
-                />
-              </>
-            ) : null}
-
-            <ActionButton
-              label="Apply pattern"
-              icon={Check}
-              onPress={handleSetSprayMode}
-              loading={isSettingSprayMode}
-              disabled={!apiBaseUrl || !selectedPathName}
-            />
-          </View>
-
-          <View style={styles.block}>
-            <Text style={styles.blockLabel}>Hold to spray</Text>
-            <Text style={styles.blockHint}>Press and hold the button below while spraying manually.</Text>
-            <Pressable
-              onPressIn={startManualHold}
-              onPressOut={stopManualHold}
-              disabled={!apiBaseUrl}
-              style={({ pressed }) => [
-                styles.holdBtn,
-                manualHoldActive && styles.holdBtnActive,
-                pressed && styles.holdBtnPressed,
-                !apiBaseUrl && styles.btnDisabled,
-              ]}
-            >
-              <Power
-                color={manualHoldActive ? COLORS.accentText : COLORS.textMain}
-                size={18}
-                strokeWidth={2.2}
-              />
-              <Text style={[styles.holdBtnText, manualHoldActive && styles.holdBtnTextActive]}>
-                {manualHoldActive ? "Spraying…" : "Hold to spray"}
-              </Text>
-            </Pressable>
-          </View>
-        </>
-      ) : null}
     </SettingsPanel>
   );
 
@@ -1103,6 +1004,21 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
           onValueChange={setToggleC || (() => {})}
         />
       </View>
+
+      {props.onOpenDebug ? (
+        <View style={[styles.block, { marginTop: 12 }]}>
+          <Text style={styles.blockLabel}>Engineering & Diagnostics</Text>
+          <Text style={styles.blockHint}>
+            Access production rover diagnostics, fixed-rate heartbeat monitor, telemetry latency, and debug drive tools.
+          </Text>
+          <ActionButton
+            label="Open Engineering Panel"
+            icon={SlidersHorizontal}
+            variant="secondary"
+            onPress={props.onOpenDebug}
+          />
+        </View>
+      ) : null}
     </SettingsPanel>
   );
 
@@ -1144,17 +1060,8 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
           />
         ) : null}
         {section === "spray" ? (
-          <View style={wide ? styles.split : styles.stack}>
-            <View style={wide ? styles.splitCol : undefined}>{spraySection}</View>
-            <View style={wide ? styles.splitCol : undefined}>
-              <SchemaParamEditor
-                apiBaseUrl={apiBaseUrl}
-                family="spray"
-                title="Spray variables"
-                subtitle="Timing, nozzle, actuator"
-                icon={SlidersHorizontal}
-              />
-            </View>
+          <View style={styles.stack}>
+            {spraySection}
           </View>
         ) : null}
         {section === "general" ? generalSection : null}

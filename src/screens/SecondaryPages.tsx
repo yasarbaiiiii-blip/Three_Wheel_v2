@@ -716,6 +716,7 @@ export function SettingsPage(props: {
   stopRtk?: () => Promise<void>;
   apiBaseUrl?: string;
   selectedPathName?: string | null;
+  onOpenDebug?: () => void;
 }) {
   return (
     <Suspense fallback={<ActivityIndicator />}>

@@ -17,15 +17,15 @@ import { MissionLayerPills } from "./fields/MissionLayerPills";
 import { nonEmptyMissionLayers } from "../utils/missionLayerAssignment";
 import { EMPTY_RTK_STATUS, hasLiveCorrections, rtkStatusLabel } from "../api/rtkStatus";
 
-// Using 127.0.0.1:5001 as fallback if window location is unavailable
+// Using 127.0.0.1:8000 as fallback if window location is unavailable
 const getApiBase = () => {
   if (typeof window !== "undefined" && window.location && window.location.hostname) {
     const host = window.location.hostname;
     if (host && host !== "localhost" && host !== "127.0.0.1") {
-      return `http://${host}:5001`;
+      return `http://${host}:8000`;
     }
   }
-  return "http://127.0.0.1:5001";
+  return "http://127.0.0.1:8000";
 };
 
 // Theme Constants
@@ -1840,31 +1840,15 @@ export default function ModernHomeUI(props) {
           {showJoystick && vehicleMode === "MANUAL" && !missionRunning ? (
             <>
               <View style={styles.joystickCard}>
-                <ManualJoystick
-                  onChange={(vals) => {
-                    if (virtualJoystick) virtualJoystick.setIntent(vals.forward, vals.yaw);
-                  }}
-                  onRelease={() => {
-                    if (virtualJoystick) virtualJoystick.setIntent(0, 0);
-                  }}
-                  size={160}
-                  knobSize={50}
-                  disabled={!stickEnabled}
-                />
-                {!stickEnabled ? (
-                  <View style={styles.joystickOverlay}>
-                    <ShieldAlert color="#fff" size={18} strokeWidth={2} />
-                    <Text style={styles.joystickOverlayText}>
-                      {joystickState === "ACQUIRING"
-                        ? "Acquiring..."
-                        : isVehicleArmed
-                          ? "Preparing drive..."
-                          : missionActionBusy
-                            ? "Arming..."
-                            : "Waiting for arm..."}
-                    </Text>
-                  </View>
-                ) : null}
+                <View style={[styles.joystickOverlay, { position: "relative", backgroundColor: "rgba(15,23,42,0.94)", padding: 20, borderRadius: 20, alignItems: "center", justifyContent: "center" }]}>
+                  <Gamepad2 color="#f59e0b" size={32} strokeWidth={2} />
+                  <Text style={[styles.joystickOverlayText, { fontWeight: "800", color: "#f8fafc", textAlign: "center", marginTop: 10, fontSize: 13 }]}>
+                    PHYSICAL RC TRANSMITTER ONLY
+                  </Text>
+                  <Text style={{ color: "#94a3b8", fontSize: 11, textAlign: "center", marginTop: 4, lineHeight: 16 }}>
+                    Virtual joystick disabled for Saturday debug grade. Drive rover using handheld RC transmitter.
+                  </Text>
+                </View>
               </View>
 
               {/* Throttle & Steering readout at bottom */}
