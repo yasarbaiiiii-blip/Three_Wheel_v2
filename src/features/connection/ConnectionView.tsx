@@ -130,7 +130,7 @@ export function ConnectionView({
                 <Text style={connectionStyles.infoValue}>2</Text>
                 <Text style={connectionStyles.infoLabel}>Health</Text>
                 <Text style={connectionStyles.infoText}>{healthState}</Text>
-                <Text style={connectionStyles.infoDetail}>Socket.IO on port 5001</Text>
+                <Text style={connectionStyles.infoDetail}>Socket.IO on port 8000</Text>
               </View>
               <View style={connectionStyles.infoCard}>
                 <Text style={connectionStyles.infoValue}>3</Text>
@@ -178,7 +178,7 @@ export function ConnectionView({
               <TextInput
                 value={manualHost}
                 onChangeText={onManualHostChange}
-                placeholder="http://192.168.1.102:5001"
+                placeholder="http://192.168.42.1:8000"
                 placeholderTextColor="#94a3b8"
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -198,11 +198,10 @@ export function ConnectionView({
                 onChangeText={onPasswordChange}
                 placeholder={
                   hasStoredSession
-                    ? "Password optional for this backend; required after rover restart"
-                    : "Rover password"
+                    ? "Bearer token stored (paste to update)"
+                    : "Operator Bearer Token (paste token)"
                 }
                 placeholderTextColor="#94a3b8"
-                secureTextEntry
                 autoCapitalize="none"
                 autoCorrect={false}
                 style={{
@@ -459,7 +458,7 @@ export function ConnectionView({
               )}
 
               <Text style={{ color: "#64748b", fontSize: 12, lineHeight: 18 }}>
-                Backend runs on <Text style={{ color: "#334155", fontWeight: "700" }}>server/main.py</Text> via Socket.IO on port <Text style={{ color: "#334155", fontWeight: "700" }}>5001</Text>.
+                Production backend runs on <Text style={{ color: "#334155", fontWeight: "700" }}>dyx3_backend</Text> on port <Text style={{ color: "#334155", fontWeight: "700" }}>8000</Text>.
               </Text>
             </View>
           </View>

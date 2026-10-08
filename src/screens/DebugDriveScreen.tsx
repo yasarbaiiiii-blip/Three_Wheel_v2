@@ -63,6 +63,7 @@ import {
   HeartbeatScheduler,
   type HeartbeatMetrics,
 } from "../utils/heartbeatScheduler";
+import { getAppTransport } from "../services/appTransport";
 import {
   useProdTelemetry,
   getDerivedVehiclePose,
@@ -117,12 +118,15 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
     targetIntervalMs: 500,
     actualIntervalMs: 500,
     jitterMs: 0,
+    threadLagMs: 0,
+    maxThreadBlockMs: 0,
     lastSentAt: null,
     lastAckAt: null,
     consecutiveErrors: 0,
     totalSent: 0,
     totalAcks: 0,
     isRunning: false,
+    transport: "none",
   });
 
   const heartbeatRef = useRef<HeartbeatScheduler | null>(null);
@@ -215,62 +219,30 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
     }
   }, [discovering, hostUrl]);
 
-  // Listen to socket status
+  // Listen to socket status and heartbeat from unified AppTransportService
   useEffect(() => {
-    const socketMgr = getProdSocketManager();
-    const unsub = socketMgr.subscribeStatus((st, err) => {
+    const transport = getAppTransport();
+    const unsubStatus = transport.subscribeStatus((st, err) => {
       setSocketStatus(st);
       if (err) setSocketError(err);
       else if (st === "connected") setSocketError(null);
     });
-    return unsub;
-  }, []);
-
-  // Set up heartbeat scheduler
-  useEffect(() => {
-    const sender = async () => {
-      const client = getProdApiClient();
-      try {
-        await client.heartbeat();
-        return true;
-      } catch {
-        return false;
-      }
-    };
-
-    const scheduler = new HeartbeatScheduler(sender, 500);
-    heartbeatRef.current = scheduler;
-
-    const unsubMetrics = scheduler.subscribe((m) => {
+    const unsubMetrics = transport.subscribeHeartbeat((m) => {
       setHeartbeatMetrics(m);
     });
-
     return () => {
+      unsubStatus();
       unsubMetrics();
-      scheduler.stop();
-      heartbeatRef.current = null;
     };
   }, []);
 
-  // Handle Connect
+  // Handle Connect via unified transport
   const handleConnect = useCallback(async () => {
     setConnecting(true);
     setSocketError(null);
     try {
-      await saveProdHost(hostUrl);
-      await saveProdToken(token);
-
-      const client = initProdApiClient(hostUrl, token);
-
-      // Verify connection via ping / health
-      await client.ping();
-
-      // Start socket.io
-      const socketMgr = getProdSocketManager();
-      await socketMgr.connect(client.getBaseUrl(), token || null);
-
-      // Start 500ms heartbeat scheduler
-      heartbeatRef.current?.start();
+      const transport = getAppTransport();
+      await transport.connect(hostUrl, token);
 
       // Refresh RTK and missions list
       void refreshRtkStatus();
@@ -283,11 +255,9 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
     }
   }, [hostUrl, token]);
 
-  // Handle Disconnect
+  // Handle Disconnect via unified transport
   const handleDisconnect = useCallback(() => {
-    heartbeatRef.current?.stop();
-    getProdSocketManager().disconnect();
-    clearProdTelemetry();
+    getAppTransport().disconnect();
     setSocketStatus("disconnected");
   }, []);
 
@@ -798,6 +768,20 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
                   : heartbeatMetrics.isRunning
                     ? "HEALTHY"
                     : "STOPPED"}
+              </Text>
+            </View>
+            <View style={styles.metricBox}>
+              <Text style={styles.metricLabel}>Thread Lag / Max</Text>
+              <Text style={styles.metricVal}>
+                {heartbeatMetrics.isRunning
+                  ? `${heartbeatMetrics.threadLagMs} ms (max ${heartbeatMetrics.maxThreadBlockMs} ms)`
+                  : "--"}
+              </Text>
+            </View>
+            <View style={styles.metricBox}>
+              <Text style={styles.metricLabel}>Transport</Text>
+              <Text style={styles.metricVal}>
+                {heartbeatMetrics.isRunning ? heartbeatMetrics.transport.toUpperCase() : "--"}
               </Text>
             </View>
           </View>
