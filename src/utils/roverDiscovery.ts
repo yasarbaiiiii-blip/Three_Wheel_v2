@@ -44,10 +44,6 @@ export const KNOWN_HOT_TARGETS: ReadonlyArray<{ host: string; port: number; name
   { host: "192.168.1.102", port: 8000, name: "DYX 3WD (Static LAN)" },
   { host: "192.168.3.101", port: 8000, name: "DYX 3WD (Subnet 3)" },
   { host: "127.0.0.1", port: 8000, name: "DYX 3WD (Local Loopback)" },
-  // Prototype fallbacks
-  { host: "192.168.42.1", port: 5001, name: "DYX Proto (Jetson AP)" },
-  { host: "192.168.1.102", port: 5001, name: "DYX Proto (Static LAN)" },
-  { host: "192.168.3.101", port: 5001, name: "DYX Proto (Subnet 3)" },
 ];
 
 /** Extract host and port from a URL or host:port string */
