@@ -64,4 +64,22 @@ describe("AppTransportService", () => {
     expect(emitSpy).toHaveBeenCalledWith(false, 400);
     expect(clientSpy).toHaveBeenCalledWith(false);
   });
+
+  it("throws when both socket and rest estop fail", async () => {
+    const socketMgr = service.getSocketManager();
+    vi.spyOn(socketMgr, "emitEstop").mockRejectedValue(new Error("Socket network timeout"));
+    const client = service.getClient();
+    vi.spyOn(client, "estop").mockRejectedValue(new Error("REST connection refused"));
+
+    await expect(service.estop(true)).rejects.toThrow("failed to reach rover");
+  });
+
+  it("succeeds if REST succeeds even when Socket fails", async () => {
+    const socketMgr = service.getSocketManager();
+    vi.spyOn(socketMgr, "emitEstop").mockRejectedValue(new Error("Socket dropped"));
+    const client = service.getClient();
+    vi.spyOn(client, "estop").mockResolvedValue({ ok: true } as any);
+
+    await expect(service.estop(true)).resolves.toBeUndefined();
+  });
 });

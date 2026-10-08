@@ -31,10 +31,12 @@ import {
   HeartbeatScheduler,
   type HeartbeatMetrics,
   type MetricsListener,
+  HEARTBEAT_REQUEST_TIMEOUT_MS,
 } from "../utils/heartbeatScheduler";
 import {
   clearProdTelemetry,
 } from "../features/telemetry/prodTelemetryStore";
+import { AppState, type NativeEventSubscription } from "react-native";
 
 export class AppTransportService {
   private socketMgr: ProdSocketManager;
@@ -43,25 +45,35 @@ export class AppTransportService {
   private activeHost: string = "http://192.168.42.1:8000";
   private activeToken: string | null = null;
   private connectionListeners = new Set<SocketStatusListener>();
+  private appStateSubscription: NativeEventSubscription | null = null;
 
   constructor() {
     this.socketMgr = getProdSocketManager();
     this.client = getProdApiClient();
 
     // Fixed-rate heartbeat sender (independent of request latency)
+    // Total budget capped strictly at 350 ms (< 500 ms)
     this.heartbeatScheduler = new HeartbeatScheduler(async () => {
       const socket = this.socketMgr.getSocket();
       if (socket && socket.connected) {
         try {
-          const res = await this.socketMgr.emitHeartbeat(350);
+          // Socket heartbeat allocated 200 ms
+          const res = await this.socketMgr.emitHeartbeat(200);
           return { ok: Boolean(res.ok), transport: "socket" };
         } catch {
-          // Socket heartbeat failed or timed out, attempt REST fallback
+          // Socket heartbeat failed or timed out: REST fallback allocated remaining 150 ms
+        }
+        try {
+          const res = await this.client.heartbeat({ timeoutMs: 150 });
+          return { ok: Boolean(res.ok), transport: "rest" };
+        } catch {
+          return { ok: false };
         }
       }
 
+      // Socket disconnected: REST given full 350 ms budget
       try {
-        const res = await this.client.heartbeat();
+        const res = await this.client.heartbeat({ timeoutMs: HEARTBEAT_REQUEST_TIMEOUT_MS });
         return { ok: Boolean(res.ok), transport: "rest" };
       } catch {
         return { ok: false };
@@ -80,6 +92,31 @@ export class AppTransportService {
       }
       this.notifyListeners(status, detail);
     });
+
+    this.setupAppStateListener();
+  }
+
+  private setupAppStateListener() {
+    try {
+      if (AppState && typeof AppState.addEventListener === "function") {
+        this.appStateSubscription = AppState.addEventListener("change", (nextState) => {
+          if (nextState === "background" || nextState === "inactive") {
+            // Tablet sleep / background: pause heartbeat scheduler cleanly
+            this.heartbeatScheduler.stop();
+          } else if (nextState === "active") {
+            // Tablet wake-up / foregrounded: check socket and immediately trigger heartbeat
+            if (this.socketMgr.getStatus() === "connected") {
+              this.heartbeatScheduler.start();
+              this.heartbeatScheduler.triggerNow();
+            } else if (this.activeToken) {
+              void this.socketMgr.connect(this.activeHost, this.activeToken);
+            }
+          }
+        });
+      }
+    } catch {
+      // Unit test runner / non-RN environments
+    }
   }
 
   private notifyListeners(status: ProdSocketStatus, detail?: string) {
@@ -164,25 +201,39 @@ export class AppTransportService {
   /**
    * Emergency stop: triggers via Socket.IO for minimal latency, and also
    * dispatches REST POST /api/estop as a dual-path safety guarantee.
+   * Throws an error if NEITHER transport delivers the command to the rover.
    */
   async estop(asserted = true): Promise<void> {
+    let delivered = false;
+    let lastError: Error | null = null;
+
     const socketPromise = (async () => {
       try {
-        await this.socketMgr.emitEstop(asserted, 400);
+        const res = await this.socketMgr.emitEstop(asserted, 400);
+        if (res && res.ok !== false) delivered = true;
       } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
         console.warn("[AppTransport] Socket estop warning:", err);
       }
     })();
 
     const restPromise = (async () => {
       try {
-        await this.client.estop(asserted);
+        const res = await this.client.estop(asserted);
+        if (res && res.ok !== false) delivered = true;
       } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
         console.warn("[AppTransport] REST estop warning:", err);
       }
     })();
 
     await Promise.allSettled([socketPromise, restPromise]);
+
+    if (!delivered) {
+      throw new Error(
+        `E-stop command (${asserted ? "ASSERT" : "CLEAR"}) failed to reach rover across both Socket.IO and REST transports. ${lastError ? lastError.message : ""}`
+      );
+    }
   }
 
   /**
