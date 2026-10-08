@@ -2,9 +2,9 @@ import { useCallback, useRef, useSyncExternalStore } from "react";
 import type { TelemetrySnapshot } from "../../types/plan";
 import type { SystemHealth } from "../../types/appRuntime";
 import {
-  mergeSystemHealthFromTelemetry,
-  mergeTelemetrySnapshot,
-} from "../../utils/telemetryDeadband";
+  getAdaptedTelemetrySnapshot,
+  subscribeProdTelemetry,
+} from "./prodTelemetryStore";
 
 type Listener = () => void;
 
@@ -16,6 +16,29 @@ const healthListeners = new Set<Listener>();
 function emit(set: Set<Listener>) {
   set.forEach((l) => l());
 }
+
+// Single source of truth: continuously sync from ProdTelemetryStore
+subscribeProdTelemetry(() => {
+  const adapted = getAdaptedTelemetrySnapshot();
+  if (adapted !== telemetrySnapshot) {
+    telemetrySnapshot = adapted;
+    emit(telemetryListeners);
+  }
+  const nextHealth: SystemHealth | null = adapted
+    ? {
+        ros_node: true,
+        fcu_connected: Boolean(adapted.connected),
+        armed: Boolean(adapted.armed),
+        mode: adapted.mode ?? "MANUAL",
+        rpp_state: adapted.rpp_state_name ?? null,
+        mission_state: adapted.mission_state ?? "idle",
+      }
+    : null;
+  if (JSON.stringify(nextHealth) !== JSON.stringify(systemHealth)) {
+    systemHealth = nextHealth;
+    emit(healthListeners);
+  }
+});
 
 export function getTelemetrySnapshot(): TelemetrySnapshot | null {
   return telemetrySnapshot;
@@ -58,21 +81,11 @@ export function setSystemHealth(
 }
 
 /**
- * Apply a live socket/REST telemetry packet with deadband merge.
- * Store + React subscribers update synchronously so a hitch in requestAnimationFrame
- * cannot freeze the HUD/rover marker.
+ * Legacy prototype telemetry ingestion is disabled.
+ * The production rover telemetry store is the sole authority.
  */
-export function applyTelemetryPacket(data: TelemetrySnapshot) {
-  const merged = mergeTelemetrySnapshot(telemetrySnapshot, data);
-  if (merged !== telemetrySnapshot) {
-    telemetrySnapshot = merged;
-    emit(telemetryListeners);
-  }
-  const health = mergeSystemHealthFromTelemetry(systemHealth, data);
-  if (health !== systemHealth) {
-    systemHealth = health;
-    emit(healthListeners);
-  }
+export function applyTelemetryPacket(_data: TelemetrySnapshot) {
+  // Ignored in production: telemetry exclusively sourced from ProdTelemetryStore
 }
 
 export function patchTelemetryMissionState(state: string) {

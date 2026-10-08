@@ -7,9 +7,18 @@
  */
 
 import { useSyncExternalStore } from "react";
-import type { RoverTelemetrySnapshot } from "../../contract/prod/realtime";
+import type {
+  RoverTelemetrySnapshot,
+} from "../../contract/prod/realtime";
+import {
+  ArmingStateEnum,
+  FIX_TYPE_NAMES,
+  MISSION_STATE_NAMES,
+  RPP_STATE_NAMES,
+} from "../../contract/prod/realtime";
 import { evaluateStaleness, type StalenessInfo } from "./staleness";
 import { radToDeg, wrap360 } from "../../contract/prod/units";
+import type { TelemetrySnapshot } from "../../types/plan";
 
 export interface ProdTelemetryState {
   snapshot: RoverTelemetrySnapshot | null;
@@ -156,5 +165,60 @@ export function getDerivedVehiclePose(now = Date.now()): DerivedVehiclePose {
     navState: d.nav_state,
     failsafe: d.failsafe,
     staleness,
+  };
+}
+
+/**
+ * Adapts the production RoverTelemetrySnapshot into the UI TelemetrySnapshot shape
+ * consumed by Home, Map, HUD, and path planning screens.
+ *
+ * Guarantees honest staleness:
+ * - When disconnected (age > 2.5s or no telemetry), connected=false and pose_age_ms reflects truth.
+ * - Never shows frozen values as live.
+ */
+export function getAdaptedTelemetrySnapshot(now = Date.now()): TelemetrySnapshot | null {
+  if (!state.snapshot || !state.lastReceivedAt) {
+    return null;
+  }
+  const staleness = evaluateStaleness(state.lastReceivedAt, now);
+  const snap = state.snapshot;
+  const vs = snap.vehicle_state?.data;
+  const rpp = snap.rpp?.data;
+  const rtk = snap.rtk_status?.data;
+  const gnss = snap.gnss_report?.data;
+  const mission = snap.mission?.data;
+
+  const speed = vs
+    ? Math.sqrt(vs.velocity_north_mps * vs.velocity_north_mps + vs.velocity_east_mps * vs.velocity_east_mps)
+    : null;
+  const heading = vs ? wrap360(radToDeg(vs.heading_rad)) : null;
+
+  const fixType = rtk?.fix_type ?? gnss?.fix_type ?? null;
+  const fixName = fixType != null ? FIX_TYPE_NAMES[fixType] ?? `Fix ${fixType}` : "No Fix";
+
+  return {
+    pos_n: vs?.north_m ?? null,
+    pos_e: vs?.east_m ?? null,
+    heading_ned_deg: heading,
+    speed_m_s: speed,
+    measured_speed_m_s: speed,
+    lat: gnss?.latitude_deg ?? null,
+    lon: gnss?.longitude_deg ?? null,
+    alt: gnss?.altitude_msl_m ?? null,
+    gps_fix: fixType,
+    gps_fix_name: fixName,
+    gps_sat: rtk?.satellites_used ?? gnss?.satellites_used ?? 0,
+    hrms: rtk?.horizontal_accuracy_m ?? gnss?.horizontal_accuracy_m ?? null,
+    vrms: null,
+    xtrack_m: rpp?.cross_track_right_m ?? null,
+    rpp_state: rpp?.state ?? null,
+    rpp_state_name: rpp?.state != null ? RPP_STATE_NAMES[rpp.state] ?? "UNKNOWN" : null,
+    mission_state: mission?.state != null ? MISSION_STATE_NAMES[mission.state]?.toLowerCase() ?? "idle" : "idle",
+    armed: vs ? vs.arming_state === ArmingStateEnum.ARMED : false,
+    mode: vs ? (vs.nav_state === 14 ? "OFFBOARD" : "MANUAL") : "MANUAL",
+    pose_age_ms: staleness.ageMs,
+    connected: !staleness.isDisconnected,
+    battery_v: null,
+    battery_pct: null,
   };
 }
