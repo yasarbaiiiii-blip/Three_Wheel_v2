@@ -1,11 +1,12 @@
 import React from "react";
 import { View, Text, Pressable } from "react-native";
 import AnimatedReanimated, { interpolate, useAnimatedStyle } from "react-native-reanimated";
-import { Menu, X, LayoutGrid, Crosshair, LocateFixed, Navigation as NavigationIcon, Circle, LogOut } from "lucide-react-native";
+import { Menu, X, LayoutGrid, Crosshair, LocateFixed, Navigation as NavigationIcon, Circle, LogOut, Radio } from "lucide-react-native";
 
 const NAV_SECTION_ITEMS = [
   { id: "main", icon: Crosshair, label: "Main Screen" },
   { id: "fields", icon: LocateFixed, label: "Fields" },
+  { id: "debug", icon: Radio, label: "Debug Rover" },
   { id: "settings", icon: NavigationIcon, label: "Settings" },
   { id: "howto", icon: Circle, label: "How to" },
 ];

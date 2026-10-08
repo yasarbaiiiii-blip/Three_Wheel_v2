@@ -63,6 +63,7 @@ import {
 } from "react-native";
 
 import Slider from "@react-native-community/slider";
+import { DebugDriveScreen } from "./src/screens/DebugDriveScreen";
 import * as FileSystem from "expo-file-system/legacy";
 import * as DocumentPicker from "expo-document-picker";
 import * as Network from "expo-network";
@@ -4180,7 +4181,7 @@ function AppRoot() {
 
         let startSnapshot = appPlannedStartSnapshot;
         const layerScoped = !!(selectedStartLayerIds && selectedStartLayerIds.length > 0);
-        if (layerScoped) {
+        if (layerScoped && selectedStartLayerIds) {
           const scoped = buildLayerScopedStartSnapshot(
             appPlannedStartSnapshot,
             uploadedFiles,
@@ -5193,6 +5194,12 @@ function AppRoot() {
                   onManualHostChange={setManualHost}
                   onConnect={connectSelectedWebsocket}
                   onOfflinePreview={enterOfflinePreview}
+                  onOpenDebug={() => setPage("debug")}
+                />
+              ) : page === "debug" ? (
+                <DebugDriveScreen
+                  onBack={() => setPage("home")}
+                  currentPlanLines={lines}
                 />
               ) : (
                 <AppErrorBoundary name="Home">
@@ -6536,7 +6543,7 @@ function LineDetailsDrawer({
               label="Info"
               value={{
                 label: "Line geometry",
-                value: selectedLine ? `${getLineLengthM(selectedLine).toFixed(2)} m` : "n/a",
+                value: selectedLine && getLineLengthM(selectedLine) != null ? `${getLineLengthM(selectedLine)!.toFixed(2)} m` : "n/a",
                 tone: "#ffffff",
               }}
             />
@@ -6545,7 +6552,7 @@ function LineDetailsDrawer({
           {selectedLine ? (
             <>
               <View style={drawerStyles.stripRow}>
-                <StripMetric label="Length" value={`${getLineLengthM(selectedLine).toFixed(2)} m`} tone="#ffffff" />
+                <StripMetric label="Length" value={`${(getLineLengthM(selectedLine) ?? 0).toFixed(2)} m`} tone="#ffffff" />
                 <StripMetric label="Angle" value={`${lineAngleDeg(selectedLine).toFixed(2)}°`} tone="#ffffff" />
                 <StripMetric label="Width" value={`${selectedLine.width.toFixed(2)} m`} tone="#ffffff" />
               </View>

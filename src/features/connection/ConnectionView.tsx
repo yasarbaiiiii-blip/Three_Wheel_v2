@@ -18,6 +18,7 @@ export function ConnectionView({
   onManualHostChange,
   onConnect,
   onOfflinePreview,
+  onOpenDebug,
 }: {
   selectedWs: string;
   manualHost: string;
@@ -33,6 +34,7 @@ export function ConnectionView({
   onManualHostChange: (value: string) => void;
   onConnect: () => void;
   onOfflinePreview: () => void;
+  onOpenDebug?: () => void;
 }) {
   const selectedTarget = selectedWs || manualHost;
   const pingState =
@@ -419,6 +421,42 @@ export function ConnectionView({
                   <Text style={{ color: "#0f172a", fontSize: 11, fontWeight: "800" }}>Local</Text>
                 </View>
               </Pressable>
+
+              {onOpenDebug && (
+                <Pressable
+                  onPress={onOpenDebug}
+                  style={{
+                    padding: 14,
+                    borderRadius: 18,
+                    borderWidth: 2,
+                    borderColor: "#3b82f6",
+                    backgroundColor: "#eff6ff",
+                    flexDirection: "row",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 12,
+                  }}
+                >
+                  <View style={{ flex: 1, paddingRight: 4 }}>
+                    <Text style={{ color: "#1d4ed8", fontWeight: "900", fontSize: 15.5 }}>
+                      Engineering Debug Client
+                    </Text>
+                    <Text style={{ color: "#3b82f6", fontSize: 12, marginTop: 2, lineHeight: 16 }}>
+                      Production contract (Port 8000) · Driving & telemetry
+                    </Text>
+                  </View>
+                  <View
+                    style={{
+                      paddingHorizontal: 10,
+                      paddingVertical: 6,
+                      borderRadius: 999,
+                      backgroundColor: "#1d4ed8",
+                    }}
+                  >
+                    <Text style={{ color: "#ffffff", fontSize: 11, fontWeight: "800" }}>PROD 8000</Text>
+                  </View>
+                </Pressable>
+              )}
 
               <Text style={{ color: "#64748b", fontSize: 12, lineHeight: 18 }}>
                 Backend runs on <Text style={{ color: "#334155", fontWeight: "700" }}>server/main.py</Text> via Socket.IO on port <Text style={{ color: "#334155", fontWeight: "700" }}>5001</Text>.

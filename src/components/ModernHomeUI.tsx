@@ -1621,6 +1621,7 @@ export default function ModernHomeUI(props) {
     if (id === "settings") onNav("settings");
     if (id === "fields") onNav("fields");
     if (id === "howto") onNav("howto");
+    if (id === "debug") onNav("debug");
   };
 
   const handleNavItemPress = useCallback((id) => {

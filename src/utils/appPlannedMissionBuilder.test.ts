@@ -123,20 +123,20 @@ describe("Production contract - AppPlannedMissionBuilder", () => {
       {
         id: "line_1",
         label: "Line 1",
-        from: { x: 0, y: 0 },
-        to: { x: 10, y: 0 },
+        layer: "marking",
+        from: { id: 1, x: 0, y: 0 },
+        to: { id: 2, x: 10, y: 0 },
         width: 0.15,
         is_mark: true,
-        sprayEnabled: true,
       },
       {
         id: "line_2",
         label: "Line 2",
-        from: { x: 10, y: 5 },
-        to: { x: 20, y: 5 },
+        layer: "marking",
+        from: { id: 3, x: 10, y: 5 },
+        to: { id: 4, x: 20, y: 5 },
         width: 0.15,
         is_mark: true,
-        sprayEnabled: true,
       },
     ];
 
