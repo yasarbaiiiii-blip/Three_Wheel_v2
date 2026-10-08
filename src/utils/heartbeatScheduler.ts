@@ -1,48 +1,60 @@
 /**
- * Dedicated Heartbeat Scheduler for Production Backend (DYX_3WD).
+ * Dedicated Fixed-Rate Heartbeat Scheduler for Production Rover (DYX_3WD).
  *
  * Rules:
- * 1. Target interval: 500 ms. Timeout on rover: 1500 ms.
- * 2. Decoupled from React render cycles.
- * 3. Measures actual interval and jitter, reporting them for display in the debug UI.
+ * 1. Fixed rate: fires every 500 ms on a fixed clock, independent of request latency.
+ *    Never waits for the previous request before scheduling the next tick.
+ * 2. In-flight timeout: capped at 350 ms (< 500 ms), so it can never stretch cadence.
+ * 3. Primary path: Socket.IO "heartbeat" event. Fallback: REST POST /api/heartbeat.
+ * 4. Measures and reports actual interval, jitter, and JS thread blocking lag.
  */
 
 export interface HeartbeatMetrics {
   targetIntervalMs: number;
   actualIntervalMs: number;
   jitterMs: number;
+  threadLagMs: number;
+  maxThreadBlockMs: number;
   lastSentAt: number | null;
   lastAckAt: number | null;
   consecutiveErrors: number;
   totalSent: number;
   totalAcks: number;
   isRunning: boolean;
+  transport: "socket" | "rest" | "none";
 }
 
-export type HeartbeatSender = () => Promise<boolean | void>;
+export type HeartbeatSender = () => Promise<boolean | { ok: boolean; transport?: "socket" | "rest" }>;
 export type MetricsListener = (metrics: HeartbeatMetrics) => void;
+
+export const HEARTBEAT_INTERVAL_MS = 500;
+export const HEARTBEAT_REQUEST_TIMEOUT_MS = 350;
 
 export class HeartbeatScheduler {
   private targetIntervalMs: number;
   private sender: HeartbeatSender;
   private timerId: ReturnType<typeof setTimeout> | null = null;
   private isRunning = false;
+  private nextScheduledTime = 0;
   private lastTriggerTime = 0;
   private listeners = new Set<MetricsListener>();
 
   private metrics: HeartbeatMetrics = {
-    targetIntervalMs: 500,
-    actualIntervalMs: 500,
+    targetIntervalMs: HEARTBEAT_INTERVAL_MS,
+    actualIntervalMs: HEARTBEAT_INTERVAL_MS,
     jitterMs: 0,
+    threadLagMs: 0,
+    maxThreadBlockMs: 0,
     lastSentAt: null,
     lastAckAt: null,
     consecutiveErrors: 0,
     totalSent: 0,
     totalAcks: 0,
     isRunning: false,
+    transport: "none",
   };
 
-  constructor(sender: HeartbeatSender, targetIntervalMs = 500) {
+  constructor(sender: HeartbeatSender, targetIntervalMs = HEARTBEAT_INTERVAL_MS) {
     this.sender = sender;
     this.targetIntervalMs = targetIntervalMs;
     this.metrics.targetIntervalMs = targetIntervalMs;
@@ -79,9 +91,10 @@ export class HeartbeatScheduler {
     if (this.isRunning) return;
     this.isRunning = true;
     this.metrics.isRunning = true;
+    this.nextScheduledTime = Date.now();
     this.lastTriggerTime = Date.now();
     this.emit();
-    this.scheduleNext();
+    this.scheduleNextTick();
   }
 
   stop() {
@@ -94,45 +107,85 @@ export class HeartbeatScheduler {
     this.emit();
   }
 
-  private scheduleNext(delayMs = this.targetIntervalMs) {
+  private scheduleNextTick() {
     if (!this.isRunning) return;
+
+    // Advance next target time by targetIntervalMs on a fixed cadence
+    this.nextScheduledTime += this.targetIntervalMs;
+    const now = Date.now();
+
+    // If we fell far behind (e.g. app suspended), reset nextScheduledTime
+    if (this.nextScheduledTime < now) {
+      this.nextScheduledTime = now + this.targetIntervalMs;
+    }
+
+    const delay = Math.max(5, this.nextScheduledTime - now);
     this.timerId = setTimeout(() => {
-      void this.tick();
-    }, Math.max(10, delayMs));
+      this.tick();
+    }, delay);
   }
 
-  private async tick() {
+  private tick() {
     if (!this.isRunning) return;
 
     const now = Date.now();
     const actualInterval = this.lastTriggerTime > 0 ? now - this.lastTriggerTime : this.targetIntervalMs;
     this.lastTriggerTime = now;
 
+    // Calculate JS thread blocking lag:
+    // If actualInterval is significantly larger than target, JS event loop was blocked
+    const threadLag = Math.max(0, actualInterval - this.targetIntervalMs);
+    this.metrics.threadLagMs = threadLag;
+    if (threadLag > this.metrics.maxThreadBlockMs) {
+      this.metrics.maxThreadBlockMs = threadLag;
+    }
+
     this.metrics.actualIntervalMs = actualInterval;
     this.metrics.jitterMs = Math.abs(actualInterval - this.targetIntervalMs);
     this.metrics.lastSentAt = now;
     this.metrics.totalSent += 1;
 
-    // Next scheduled target time (drift compensation)
-    const nextTargetDelay = Math.max(
-      10,
-      this.targetIntervalMs - (Date.now() - now)
-    );
+    // CRITICAL (Owner Rule 4):
+    // Schedule the next tick IMMEDIATELY BEFORE awaiting asynchronous send work!
+    // This guarantees request latency (even 1.2s) CANNOT stretch the cadence.
+    this.scheduleNextTick();
 
+    // Fire asynchronous heartbeat sender in background with strict 350ms timeout
+    void this.dispatchHeartbeat();
+
+    this.emit();
+  }
+
+  private async dispatchHeartbeat(): Promise<void> {
     try {
-      const ok = await this.sender();
-      if (ok === false) {
-        this.metrics.consecutiveErrors += 1;
-      } else {
+      // Enforce timeout strictly < 500 ms (350 ms)
+      const timeoutPromise = new Promise<{ ok: false; timeout: true }>((resolve) => {
+        setTimeout(() => resolve({ ok: false, timeout: true }), HEARTBEAT_REQUEST_TIMEOUT_MS);
+      });
+
+      const senderPromise = this.sender().then((res) => {
+        if (typeof res === "boolean") {
+          return { ok: res, transport: undefined };
+        }
+        return res;
+      });
+
+      const result = await Promise.race([senderPromise, timeoutPromise]);
+
+      if (result.ok) {
         this.metrics.lastAckAt = Date.now();
         this.metrics.consecutiveErrors = 0;
         this.metrics.totalAcks += 1;
+        if ("transport" in result && result.transport) {
+          this.metrics.transport = result.transport;
+        }
+      } else {
+        this.metrics.consecutiveErrors += 1;
       }
     } catch {
       this.metrics.consecutiveErrors += 1;
     } finally {
       this.emit();
-      this.scheduleNext(nextTargetDelay);
     }
   }
 }
