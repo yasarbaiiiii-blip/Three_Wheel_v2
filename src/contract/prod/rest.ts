@@ -7,6 +7,9 @@
 
 export interface PingResponse {
   status: "ok" | string;
+  /** Stable rover identity (backend contract 1a); absent on older backends. */
+  rover_id?: string;
+  rover_name?: string;
 }
 
 export interface HealthResponse {

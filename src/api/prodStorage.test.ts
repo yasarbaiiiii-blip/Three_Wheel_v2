@@ -67,4 +67,28 @@ describe("per-rover token storage", () => {
     await s.saveProdTokenFor("http://192.168.3.100:8000", "fresh");
     expect(await s.loadProdTokenFor("http://192.168.3.100:8000")).toBe("fresh");
   });
+
+  it("keys a token by rover id so one token works on every network", async () => {
+    const s = await freshStorage();
+    await s.saveProdTokenForRover("dyx3-0a1b2c3d4e", "rover-token");
+    expect(await s.loadProdTokenForRover("dyx3-0a1b2c3d4e", "http://192.168.3.150:8000")).toBe("rover-token");
+    expect(await s.loadProdTokenForRover("dyx3-0a1b2c3d4e", "http://192.168.2.100:8000")).toBe("rover-token");
+    await s.saveProdTokenForRover("dyx3-0a1b2c3d4e", null);
+    expect(await s.loadProdTokenForRover("dyx3-0a1b2c3d4e")).toBeNull();
+  });
+
+  it("migrates a host-keyed token to the rover id on first use", async () => {
+    const s = await freshStorage();
+    await s.saveProdTokenFor("http://192.168.3.150:8000", "old-token");
+    expect(await s.loadProdTokenForRover("dyx3-x", "http://192.168.3.150:8000")).toBe("old-token");
+    expect(await s.loadProdTokenForRover("dyx3-x", "http://192.168.2.100:8000")).toBe("old-token");
+  });
+
+  it("remembers the last rover and has no fixed default host", async () => {
+    const s = await freshStorage();
+    expect(await s.loadProdHost()).toBe("");
+    expect(await s.loadLastRoverId()).toBeNull();
+    await s.saveLastRoverId("dyx3-x");
+    expect(await s.loadLastRoverId()).toBe("dyx3-x");
+  });
 });

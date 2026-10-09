@@ -64,7 +64,8 @@ export class ProdApiError extends Error {
 /** Normalizes a base URL to ensure scheme and default port 8000 if not specified. */
 export function normalizeProdBaseUrl(raw: string): string {
   let trimmed = raw.trim();
-  if (!trimmed) return "http://192.168.42.1:8000";
+  // No fixed default address: the rover is found by its beacon or typed by the operator.
+  if (!trimmed) return "";
 
   // Add http:// if missing
   if (!/^https?:\/\//i.test(trimmed)) {
@@ -327,7 +328,7 @@ let globalProdClient: ProdApiClient | null = null;
 
 export function getProdApiClient(): ProdApiClient {
   if (!globalProdClient) {
-    globalProdClient = new ProdApiClient({ baseUrl: "http://192.168.42.1:8000" });
+    globalProdClient = new ProdApiClient({ baseUrl: "" });
   }
   return globalProdClient;
 }

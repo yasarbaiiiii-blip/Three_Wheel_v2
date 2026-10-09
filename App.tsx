@@ -197,6 +197,8 @@ import {
   useTelemetrySnapshot,
 } from "./src/features/telemetry/telemetryStore";
 import { getAppTransport } from "./src/services/appTransport";
+import { roverBeaconListener, type BeaconRover } from "./src/services/roverBeacon";
+import { loadLastRoverId } from "./src/api/prodStorage";
 import { getProdApiClient, ProdApiError } from "./src/api/prodClient";
 import {
   clearProdTelemetry,
@@ -400,23 +402,17 @@ const TOP = "#ececee";
 const GREEN = "#eef2f7";
 const GREEN_DARK = "#f8fafc";
 const TEAL = "#0f988f";
-const LOCAL_WS_CANDIDATES = [
-  "http://localhost:8000",
-  "http://127.0.0.1:8000",
-];
-const PRIORITY_BACKEND_IPS: string[] = [
-  "192.168.42.1",
-  "10.42.0.1",
-  "192.168.1.102",
-  "192.168.3.101",
-];
+// No fixed rover addresses: rovers announce themselves by UDP beacon (src/services/roverBeacon.ts);
+// the HTTP sweep below is only a fallback over the tablet's own subnet.
+const LOCAL_WS_CANDIDATES: string[] = [];
+const PRIORITY_BACKEND_IPS: string[] = [];
 
 const DISCOVERY_REFRESH_MS = 5000;
 const DISCOVERY_PORT = 8000;
 const SUBNET_HOST_MIN = 1;
 const SUBNET_HOST_MAX = 254;
 const SUBNET_SCAN_CONCURRENCY = 28;
-const DEFAULT_ROVER_BACKEND = "http://192.168.42.1:8000";
+const DEFAULT_ROVER_BACKEND = "";
 const MENU_ITEMS: Array<{ key: Page; label: string; icon: React.ReactNode }> = [
   { key: "fields", label: "Fields", icon: <File size={22} color="#fff" /> },
   { key: "templates", label: "Templates", icon: <LayoutTemplate size={22} color="#fff" /> },
@@ -477,6 +473,11 @@ function AppRoot() {
   const [confirmPasswordInput, setConfirmPasswordInput] = useState("");
   const [passwordChangeBusy, setPasswordChangeBusy] = useState(false);
   const [discoveredRovers, setDiscoveredRovers] = useState<DiscoveredRover[]>([]);
+  // Rovers heard by UDP beacon (instant, any network, no fixed IP). Merged ahead of HTTP-sweep results.
+  const [beaconRovers, setBeaconRovers] = useState<BeaconRover[]>([]);
+  // After a manual Disconnect the app waits for the operator; otherwise it auto-connects to a known rover.
+  const userDisconnectedRef = useRef(false);
+  const autoConnectTriedRef = useRef<Set<string>>(new Set());
   const [backendPinned, setBackendPinned] = useState(false);
   const [fieldGeneratorOpen, setFieldGeneratorOpen] = useState(false);
   const [importedPlan, setImportedPlan] = useState<ImportedPlan | null>(null);
@@ -1978,7 +1979,7 @@ function AppRoot() {
       return;
     }
     void getAppTransport()
-      .getSavedTokenFor(target)
+      .getSavedTokenFor(target, roverBeaconListener.findByHost(target)?.roverId ?? null)
       .then((token) => {
         if (!cancelled) setHasSavedToken(Boolean(token));
       })
@@ -1988,7 +1989,37 @@ function AppRoot() {
     return () => {
       cancelled = true;
     };
-  }, [selectedWs, manualHost]);
+  }, [selectedWs, manualHost, beaconRovers]);
+
+  // Listen for rover beacons for the whole app lifetime (cheap: one UDP socket).
+  useEffect(() => roverBeaconListener.subscribe(setBeaconRovers), []);
+
+  // Auto-connect like the 4WD app: when a rover with a saved token is heard (last-used rover first),
+  // connect with that token. Each rover is tried once per screen visit; a manual Disconnect pauses it.
+  useEffect(() => {
+    if (page !== "connection" || userDisconnectedRef.current || beaconRovers.length === 0) return;
+    if (connectInFlightRef.current || wsStatusRef.current === "connecting" || wsStatusRef.current === "connected") return;
+    let cancelled = false;
+    void (async () => {
+      const lastId = await loadLastRoverId();
+      const ordered = [...beaconRovers].sort((a, b) => Number(b.roverId === lastId) - Number(a.roverId === lastId));
+      for (const rover of ordered) {
+        if (cancelled || autoConnectTriedRef.current.has(rover.roverId)) continue;
+        const token = await getAppTransport().getSavedTokenFor(rover.host, rover.roverId);
+        if (!token || cancelled) continue;
+        autoConnectTriedRef.current.add(rover.roverId);
+        logAction("AUTO_CONNECT", { roverId: rover.roverId, host: rover.host });
+        setSelectedWs(rover.host);
+        setManualHost(rover.host);
+        await connectSelectedWebsocket(rover.host, rover.roverId);
+        return;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [beaconRovers, page]);
 
   // Load saved credentials on startup
   useEffect(() => {
@@ -2000,16 +2031,20 @@ function AppRoot() {
     })();
   }, []);
 
-  const connectSelectedWebsocket = async () => {
-    const target = selectedWs || manualHost || "http://192.168.42.1:8000";
-    if (!target) return;
+  const connectSelectedWebsocket = async (targetOverride?: string, roverIdOverride?: string | null) => {
+    const target = targetOverride || selectedWs || manualHost;
+    if (!target) {
+      setWsError("No rover selected yet. Wait for it to appear below, or type its address.");
+      return;
+    }
+    const roverId = roverIdOverride ?? roverBeaconListener.findByHost(target)?.roverId ?? null;
     if (connectInFlightRef.current) {
       logAction("WS_CONNECT_SKIPPED", { reason: "already_connecting" });
       return;
     }
 
     const typedToken = operatorPassword.trim();
-    const savedToken = await getAppTransport().getSavedTokenFor(target);
+    const savedToken = await getAppTransport().getSavedTokenFor(target, roverId);
     const tokenToUse = typedToken || savedToken || "";
     if (!tokenToUse) {
       setWsError("Enter or paste the Operator Bearer Token to connect.");
@@ -2028,6 +2063,8 @@ function AppRoot() {
 
       setOperatorPassword("");
       setHasSavedToken(true);
+      userDisconnectedRef.current = false;
+      autoConnectTriedRef.current.clear();
       setSelectedWs(target);
       setManualHost(target);
       setBackendPinned(true);
@@ -2061,6 +2098,7 @@ function AppRoot() {
 
   const disconnectToConnectionScreen = () => {
     logAction("WS_DISCONNECT");
+    userDisconnectedRef.current = true;
     getAppTransport().disconnect();
     setSocket(null);
     setWsStatus("idle");
@@ -2073,8 +2111,9 @@ function AppRoot() {
   const forgetSavedTokenForTarget = async () => {
     const target = selectedWs || manualHost;
     if (!target) return;
-    logAction("FORGET_TOKEN", { target });
-    await getAppTransport().forgetSavedToken(target);
+    const roverId = roverBeaconListener.findByHost(target)?.roverId ?? null;
+    logAction("FORGET_TOKEN", { target, roverId });
+    await getAppTransport().forgetSavedToken(target, roverId);
     setOperatorPassword("");
     setHasSavedToken(false);
   };
@@ -5087,9 +5126,6 @@ function AppRoot() {
       }
     }
 
-    // Rover Hotspot default subnets
-    prefixes.add("192.168.42");
-    prefixes.add("10.42.0");
 
     // 1. Check seed host if it's a private IP
     const parsed = parseHost(seedHost);
@@ -5111,12 +5147,6 @@ function AppRoot() {
       }
     }
 
-    // 3. Always include common private subnets
-    prefixes.add("192.168.1");
-    prefixes.add("192.168.0");
-    prefixes.add("192.168.2");
-    prefixes.add("10.0.0");
-    prefixes.add("172.16.0");
 
     // 4. Extract subnet from manual host and add it as a priority scan
     //    This helps when user enters an IP manually on a non-192.168.x network
@@ -5292,11 +5322,24 @@ function AppRoot() {
                   hasStoredSession={hasSavedToken}
                   onForgetToken={() => void forgetSavedTokenForTarget()}
                   isOffline={isOffline}
-                  discoveredRovers={discoveredRovers}
+                  discoveredRovers={[
+                    ...beaconRovers.map((r) => ({
+                      id: r.roverId,
+                      name: r.roverName,
+                      host: r.ip,
+                      port: r.port,
+                      version: "beacon",
+                      responseTime: 0,
+                    })),
+                    ...discoveredRovers.filter((d) => !beaconRovers.some((b) => b.ip === d.host && b.port === d.port)),
+                  ]}
                   onRefresh={scanForWebsockets}
                   onSelect={handleSelectWebsocket}
                   onManualHostChange={setManualHost}
-                  onConnect={connectSelectedWebsocket}
+                  onConnect={() => {
+                    userDisconnectedRef.current = false;
+                    void connectSelectedWebsocket();
+                  }}
                   onOfflinePreview={enterOfflinePreview}
                   onOpenDebug={() => setPage("debug")}
                 />

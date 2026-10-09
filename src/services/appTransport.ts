@@ -24,8 +24,11 @@ import {
 import {
   loadProdHost,
   loadProdTokenFor,
+  loadProdTokenForRover,
+  saveLastRoverId,
   saveProdHost,
   saveProdTokenFor,
+  saveProdTokenForRover,
 } from "../api/prodStorage";
 import {
   HeartbeatScheduler,
@@ -43,7 +46,8 @@ export class AppTransportService {
   private socketMgr: ProdSocketManager;
   private client: ProdApiClient;
   private heartbeatScheduler: HeartbeatScheduler;
-  private activeHost: string = "http://192.168.42.1:8000";
+  private activeHost: string = "";
+  private activeRoverId: string | null = null;
   private activeToken: string | null = null;
   private connectionListeners = new Set<SocketStatusListener>();
   private appStateSubscription: NativeEventSubscription | null = null;
@@ -179,15 +183,22 @@ export class AppTransportService {
     return { host, token };
   }
 
-  /** The token saved for this rover address, or null. */
-  async getSavedTokenFor(rawHost: string): Promise<string | null> {
-    return loadProdTokenFor(normalizeProdBaseUrl(rawHost));
+  getActiveRoverId(): string | null {
+    return this.activeRoverId;
+  }
+
+  /** The token saved for this rover: by rover id when known (works on every network), else by address. */
+  async getSavedTokenFor(rawHost: string, roverId?: string | null): Promise<string | null> {
+    const host = normalizeProdBaseUrl(rawHost);
+    if (roverId) return loadProdTokenForRover(roverId, host || undefined);
+    return host ? loadProdTokenFor(host) : null;
   }
 
   /** Forgets the saved token for this rover only (other rovers keep theirs). */
-  async forgetSavedToken(rawHost: string): Promise<void> {
+  async forgetSavedToken(rawHost: string, roverId?: string | null): Promise<void> {
     const normalizedHost = normalizeProdBaseUrl(rawHost);
-    await saveProdTokenFor(normalizedHost, null);
+    if (roverId) await saveProdTokenForRover(roverId, null);
+    if (normalizedHost) await saveProdTokenFor(normalizedHost, null);
     if (normalizedHost === this.activeHost) {
       this.activeToken = null;
       this.client.setToken(null);
@@ -224,6 +235,20 @@ export class AppTransportService {
     // Connect Socket.IO (resolves only after the rover accepted the token)
     await this.socketMgr.connect(normalizedHost, this.activeToken);
     await saveProdTokenFor(normalizedHost, this.activeToken);
+
+    // Key the token by rover identity too, so it works when this rover is reached on another network.
+    this.activeRoverId = null;
+    try {
+      const ping = await this.client.ping();
+      const roverId = typeof ping?.rover_id === "string" ? ping.rover_id.trim() : "";
+      if (roverId) {
+        this.activeRoverId = roverId;
+        await saveProdTokenForRover(roverId, this.activeToken);
+        await saveLastRoverId(roverId);
+      }
+    } catch {
+      // Older backend without rover_id: the address-keyed token still works.
+    }
   }
 
   /**
@@ -279,7 +304,7 @@ export class AppTransportService {
    */
   async logout(): Promise<void> {
     this.disconnect();
-    await this.forgetSavedToken(this.activeHost);
+    await this.forgetSavedToken(this.activeHost, this.activeRoverId);
   }
 }
 

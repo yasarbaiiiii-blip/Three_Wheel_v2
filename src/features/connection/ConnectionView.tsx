@@ -180,7 +180,7 @@ export function ConnectionView({
               <TextInput
                 value={manualHost}
                 onChangeText={onManualHostChange}
-                placeholder="http://192.168.42.1:8000"
+                placeholder="Rover address, e.g. http://<rover-ip>:8000"
                 placeholderTextColor="#94a3b8"
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -328,8 +328,9 @@ export function ConnectionView({
                             </View>
                           </View>
                           <Text style={{ color: "#64748b", marginTop: 6, fontSize: 12 }}>
-                            {rover.version ? `v${rover.version}` : "Socket.IO backend"}
-                            {typeof rover.responseTime === "number" ? ` • ${rover.responseTime} ms` : ""}
+                            {rover.version === "beacon"
+                              ? "Live on this network"
+                              : `${rover.version ? `v${rover.version}` : "Socket.IO backend"}${typeof rover.responseTime === "number" ? ` • ${rover.responseTime} ms` : ""}`}
                           </Text>
                         </Pressable>
                       );

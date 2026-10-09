@@ -38,12 +38,8 @@ export interface DiscoveryOptions {
   onProgress?: (scanned: number, total: number) => void;
 }
 
+// No fixed rover addresses: rovers announce themselves by UDP beacon (src/services/roverBeacon.ts).
 export const KNOWN_HOT_TARGETS: ReadonlyArray<{ host: string; port: number; name: string }> = [
-  { host: "192.168.42.1", port: 8000, name: "DYX 3WD (Jetson AP)" },
-  { host: "10.42.0.1", port: 8000, name: "DYX 3WD (Ubuntu AP)" },
-  { host: "192.168.1.102", port: 8000, name: "DYX 3WD (Static LAN)" },
-  { host: "192.168.3.101", port: 8000, name: "DYX 3WD (Subnet 3)" },
-  { host: "127.0.0.1", port: 8000, name: "DYX 3WD (Local Loopback)" },
 ];
 
 /** Extract host and port from a URL or host:port string */
@@ -327,8 +323,6 @@ export async function discoverRovers(
   if (activeSubnet) {
     subnetsToSweep.push(activeSubnet);
   } else {
-    subnetsToSweep.push("192.168.42"); // Jetson SoftAP default
-    subnetsToSweep.push("192.168.1");  // Standard router default
   }
 
   // Build candidate IP list

@@ -101,7 +101,7 @@ interface DebugDriveScreenProps {
 
 export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenProps) {
   // ---- Connection state ----
-  const [hostUrl, setHostUrl] = useState("http://192.168.42.1:8000");
+  const [hostUrl, setHostUrl] = useState("");
   const [token, setToken] = useState("");
   const [showToken, setShowToken] = useState(false);
   const [socketStatus, setSocketStatus] = useState<ProdSocketStatus>("disconnected");
@@ -173,7 +173,7 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
         void (async () => {
           try {
             const found = await discoverRovers({
-              seedHost: "http://192.168.42.1:8000",
+              seedHost: "",
               includePrototype: false,
             });
             if (found.length > 0) {
@@ -207,7 +207,7 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
       });
       setDiscoveredRoversList(found);
       if (found.length > 0) {
-        if (hostUrl === "http://192.168.42.1:8000" || !hostUrl) {
+        if (!hostUrl) {
           setHostUrl(found[0].url);
         }
       }
@@ -647,7 +647,7 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
                 value={hostUrl}
                 onChangeText={setHostUrl}
                 autoCapitalize="none"
-                placeholder="http://192.168.42.1:8000"
+                placeholder="Rover address, e.g. http://<rover-ip>:8000"
                 placeholderTextColor="#64748b"
               />
               {discoveredRoversList.length > 0 && (

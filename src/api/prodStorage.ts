@@ -73,7 +73,8 @@ export async function loadProdHost(): Promise<string> {
     const val = localStorage.getItem(KEY_PROD_HOST);
     if (val?.trim()) return val.trim();
   }
-  return memoryFallback[KEY_PROD_HOST] || "http://192.168.42.1:8000";
+  // No fixed default: the rover is found by its beacon, or typed by the operator.
+  return memoryFallback[KEY_PROD_HOST] || "";
 }
 
 /*
@@ -153,4 +154,48 @@ export async function saveProdTokenFor(host: string, token: string | null): Prom
   if (value) map[key] = value;
   else delete map[key];
   await writeTokenMap(map);
+}
+
+/*
+ * Tokens keyed by rover identity (rover_id from /api/ping and the discovery beacon). One rover can be
+ * reached at several addresses (site router, Jetson hotspot); keying by rover_id lets one saved token
+ * work on all of them. Host-keyed entries remain as a fallback and migrate on first use.
+ */
+const KEY_LAST_ROVER_ID = "rover.prod.lastRoverId.v1";
+
+function roverIdKey(roverId: string): string {
+  return `rover:${roverId.trim()}`;
+}
+
+export async function loadProdTokenForRover(roverId: string, host?: string): Promise<string | null> {
+  const map = await readTokenMap();
+  const key = roverIdKey(roverId);
+  if (map[key]) return map[key];
+  if (host) {
+    const byHost = await loadProdTokenFor(host);
+    if (byHost) {
+      const fresh = await readTokenMap();
+      fresh[key] = byHost;
+      await writeTokenMap(fresh);
+      return byHost;
+    }
+  }
+  return null;
+}
+
+export async function saveProdTokenForRover(roverId: string, token: string | null): Promise<void> {
+  const map = await readTokenMap();
+  const key = roverIdKey(roverId);
+  const value = token?.trim();
+  if (value) map[key] = value;
+  else delete map[key];
+  await writeTokenMap(map);
+}
+
+export async function saveLastRoverId(roverId: string | null): Promise<void> {
+  await writeRaw(KEY_LAST_ROVER_ID, roverId?.trim() || null);
+}
+
+export async function loadLastRoverId(): Promise<string | null> {
+  return (await readRaw(KEY_LAST_ROVER_ID))?.trim() || null;
 }
