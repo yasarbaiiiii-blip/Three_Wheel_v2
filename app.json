@@ -23,7 +23,7 @@
       "softwareKeyboardLayoutMode": "pan"
     },
     "plugins": [
-      "./plugins/withRequiredMapboxToken",
+      "./plugins/withAndroidMapboxToken",
       "./plugins/withAndroidReleaseSigning",
       "expo-dev-client",
       [
