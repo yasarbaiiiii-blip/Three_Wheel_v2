@@ -411,7 +411,8 @@ const DISCOVERY_REFRESH_MS = 5000;
 const DISCOVERY_PORT = 8000;
 const SUBNET_HOST_MIN = 1;
 const SUBNET_HOST_MAX = 254;
-const SUBNET_SCAN_CONCURRENCY = 28;
+// The HTTP sweep is only the fallback when no beacon is heard; keep it short so it never stalls the UI.
+const SUBNET_SCAN_CONCURRENCY = 64;
 const DEFAULT_ROVER_BACKEND = "";
 const MENU_ITEMS: Array<{ key: Page; label: string; icon: React.ReactNode }> = [
   { key: "fields", label: "Fields", icon: <File size={22} color="#fff" /> },
@@ -2220,7 +2221,7 @@ function AppRoot() {
     const knownTarget = currentSelectedWs || currentManualHost;
     let manualHostReachable = false;
     if (knownTarget) {
-      manualHostReachable = await probeHostReachable(knownTarget, 2500, 2);
+      manualHostReachable = await probeHostReachable(knownTarget, 800, 0);
     }
     if (!discoveryStillOwnsUi()) {
       logAction("DISCOVERY_SCAN_ABORTED", { phase: "after_known_probe", scanGeneration });
@@ -5098,11 +5099,12 @@ function AppRoot() {
 
   async function probeBackendHost(candidate: string): Promise<number | null> {
     const start = Date.now();
-    const endpoints = ["/api/ping", "/api/healthz", "/api/health"];
+    // Production backend answers /api/ping without auth; one short probe per host keeps a /24 sweep ~3 s.
+    const endpoints = ["/api/ping"];
     for (const endpoint of endpoints) {
       try {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 1200);
+        const timeout = setTimeout(() => controller.abort(), 600);
         const res = await fetch(`${candidate}${endpoint}`, { signal: controller.signal });
         clearTimeout(timeout);
         if (res.ok) return Date.now() - start;

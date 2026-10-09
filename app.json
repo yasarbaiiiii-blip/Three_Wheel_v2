@@ -23,6 +23,7 @@
       "softwareKeyboardLayoutMode": "pan"
     },
     "plugins": [
+      "./plugins/withRequiredMapboxToken",
       "./plugins/withAndroidReleaseSigning",
       "expo-dev-client",
       [
@@ -33,7 +34,9 @@
             "enableMinifyInReleaseBuilds": true,
             "enableShrinkResourcesInReleaseBuilds": true,
             "useLegacyPackaging": true,
-            "buildArchs": ["arm64-v8a"]
+            "buildArchs": [
+              "arm64-v8a"
+            ]
           }
         }
       ],

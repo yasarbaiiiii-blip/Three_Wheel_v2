@@ -74,6 +74,7 @@ export type BeaconListenerCallback = (rovers: BeaconRover[]) => void;
 class RoverBeaconListener {
   private rovers = new Map<string, BeaconRover>();
   private socket: any = null;
+  private loggedFirstBeacon = false;
   private subscribers = new Set<BeaconListenerCallback>();
   private pruneTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -113,6 +114,10 @@ class RoverBeaconListener {
   ingest(raw: string, senderIp: string, now = Date.now()): void {
     const rover = parseDyx3Beacon(raw, senderIp, now);
     if (!rover) return;
+    if (!this.loggedFirstBeacon) {
+      this.loggedFirstBeacon = true;
+      console.log("[RoverBeacon] first beacon:", rover.roverId, rover.host);
+    }
     const prev = this.rovers.get(rover.roverId);
     this.rovers.set(rover.roverId, rover);
     if (!prev || prev.host !== rover.host || now - prev.lastSeen > BEACON_FRESH_MS) this.emit();
@@ -140,17 +145,24 @@ class RoverBeaconListener {
         }
       }, 1000);
     }
-    if (this.socket || !this.isAvailable) return;
+    if (this.socket) return;
+    if (!this.isAvailable) {
+      console.warn("[RoverBeacon] UDP unavailable (dgram:", dgram !== null, "platform:", Platform.OS, ")");
+      return;
+    }
     try {
+      console.log("[RoverBeacon] opening UDP", DYX3_BEACON_PORT);
       const socket = dgram.createSocket({ type: "udp4", reusePort: true, reuseAddr: true });
-      socket.on("error", (err: Error) => console.warn("[RoverBeacon] UDP error:", err));
+      socket.on("error", (err: Error) => console.warn("[RoverBeacon] UDP error:", String(err)));
       socket.on("message", (msg: { toString(): string }, rinfo: { address: string }) => {
         this.ingest(msg.toString(), rinfo?.address ?? "");
       });
-      socket.bind(DYX3_BEACON_PORT, "0.0.0.0");
+      socket.bind(DYX3_BEACON_PORT, "0.0.0.0", () => {
+        console.log("[RoverBeacon] listening on UDP", DYX3_BEACON_PORT);
+      });
       this.socket = socket;
     } catch (error) {
-      console.warn("[RoverBeacon] cannot listen on UDP", DYX3_BEACON_PORT, error);
+      console.warn("[RoverBeacon] cannot listen on UDP", DYX3_BEACON_PORT, String(error));
       this.socket = null;
     }
   }
