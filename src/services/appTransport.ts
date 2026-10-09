@@ -23,9 +23,9 @@ import {
 } from "../api/prodClient";
 import {
   loadProdHost,
-  loadProdToken,
+  loadProdTokenFor,
   saveProdHost,
-  saveProdToken,
+  saveProdTokenFor,
 } from "../api/prodStorage";
 import {
   HeartbeatScheduler,
@@ -171,7 +171,7 @@ export class AppTransportService {
    */
   async loadSavedCredentials(): Promise<{ host: string; token: string | null }> {
     const host = await loadProdHost();
-    const token = await loadProdToken();
+    const token = await loadProdTokenFor(normalizeProdBaseUrl(host));
     this.activeHost = host;
     this.activeToken = token;
     this.client.setBaseUrl(host);
@@ -179,18 +179,33 @@ export class AppTransportService {
     return { host, token };
   }
 
+  /** The token saved for this rover address, or null. */
+  async getSavedTokenFor(rawHost: string): Promise<string | null> {
+    return loadProdTokenFor(normalizeProdBaseUrl(rawHost));
+  }
+
+  /** Forgets the saved token for this rover only (other rovers keep theirs). */
+  async forgetSavedToken(rawHost: string): Promise<void> {
+    const normalizedHost = normalizeProdBaseUrl(rawHost);
+    await saveProdTokenFor(normalizedHost, null);
+    if (normalizedHost === this.activeHost) {
+      this.activeToken = null;
+      this.client.setToken(null);
+      setAuthRuntime({ token: null, baseUrl: null });
+    }
+  }
+
   /**
    * Connects to a production rover via REST client + Socket.IO.
-   * Caches credentials securely.
+   * The host is saved at once; the token is saved for this rover only after the rover accepts it,
+   * so a mistyped token is never remembered.
    */
   async connect(rawHost: string, token: string | null): Promise<void> {
     const normalizedHost = normalizeProdBaseUrl(rawHost);
     this.activeHost = normalizedHost;
     this.activeToken = token?.trim() || null;
 
-    // Save to SecureStore
     await saveProdHost(normalizedHost);
-    await saveProdToken(this.activeToken);
 
     // Initialize REST client
     this.client = initProdApiClient(normalizedHost, this.activeToken);
@@ -206,8 +221,9 @@ export class AppTransportService {
       // ignore
     }
 
-    // Connect Socket.IO
+    // Connect Socket.IO (resolves only after the rover accepted the token)
     await this.socketMgr.connect(normalizedHost, this.activeToken);
+    await saveProdTokenFor(normalizedHost, this.activeToken);
   }
 
   /**
@@ -259,14 +275,11 @@ export class AppTransportService {
   }
 
   /**
-   * Logs out and clears stored token.
+   * Disconnects and forgets the saved token for the active rover.
    */
   async logout(): Promise<void> {
     this.disconnect();
-    this.activeToken = null;
-    await saveProdToken(null);
-    this.client.setToken(null);
-    setAuthRuntime({ token: null, baseUrl: null });
+    await this.forgetSavedToken(this.activeHost);
   }
 }
 

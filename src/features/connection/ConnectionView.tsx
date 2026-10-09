@@ -11,6 +11,7 @@ export function ConnectionView({
   password,
   onPasswordChange,
   hasStoredSession,
+  onForgetToken,
   isOffline,
   discoveredRovers,
   onRefresh,
@@ -27,6 +28,7 @@ export function ConnectionView({
   password: string;
   onPasswordChange: (value: string) => void;
   hasStoredSession: boolean;
+  onForgetToken?: () => void;
   isOffline: boolean;
   discoveredRovers: Array<{ id: string; name: string; host: string; port: number; version?: string; responseTime?: number }>;
   onRefresh: () => void;
@@ -198,7 +200,7 @@ export function ConnectionView({
                 onChangeText={onPasswordChange}
                 placeholder={
                   hasStoredSession
-                    ? "Bearer token stored (paste to update)"
+                    ? "Token saved for this rover (paste only to replace)"
                     : "Operator Bearer Token (paste token)"
                 }
                 placeholderTextColor="#94a3b8"
@@ -214,6 +216,19 @@ export function ConnectionView({
                   backgroundColor: "#f8fafc",
                 }}
               />
+
+              {hasStoredSession ? (
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                  <Text style={{ color: "#047857", fontWeight: "700", fontSize: 13 }}>
+                    Token saved for this rover. Just tap Connect.
+                  </Text>
+                  {onForgetToken ? (
+                    <Pressable onPress={onForgetToken} hitSlop={8}>
+                      <Text style={{ color: "#b91c1c", fontWeight: "800", fontSize: 13 }}>Forget saved token</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : null}
 
               {wsError ? (
                 <View style={{ padding: 12, borderRadius: 14, backgroundColor: "#fef2f2", borderWidth: 1, borderColor: "#fecaca", marginTop: 4 }}>

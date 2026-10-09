@@ -198,7 +198,6 @@ import {
 } from "./src/features/telemetry/telemetryStore";
 import { getAppTransport } from "./src/services/appTransport";
 import { getProdApiClient, ProdApiError } from "./src/api/prodClient";
-import { loadProdHost, loadProdToken } from "./src/api/prodStorage";
 import {
   clearProdTelemetry,
   applyProdTelemetrySnapshot,
@@ -470,6 +469,8 @@ function AppRoot() {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [operatorSession, setOperatorSession] = useState<authApi.OperatorSession | null>(null);
   const [operatorPassword, setOperatorPassword] = useState("");
+  // True when the rover address on the connect screen has a saved operator token.
+  const [hasSavedToken, setHasSavedToken] = useState(false);
   const [passwordChangeOpen, setPasswordChangeOpen] = useState(false);
   const [currentPasswordInput, setCurrentPasswordInput] = useState("");
   const [newPasswordInput, setNewPasswordInput] = useState("");
@@ -1501,7 +1502,7 @@ function AppRoot() {
       setSocket(null);
       setWsStatus("idle");
       setPage("connection");
-      setWsError("Session expired. Enter the rover password again.");
+      setWsError("The rover rejected the token (401). Paste a new token for this rover.");
       clearTelemetryRuntime();
     } catch (err) {
       console.error("[AUTH] invalid session handler failed:", err);
@@ -1513,12 +1514,15 @@ function AppRoot() {
   }, [operatorSession?.token]);
 
   useEffect(() => {
+    // The production rover token lives in AppTransportService; the prototype session is a fallback.
+    // Without this, a change of apiBaseUrl after connect reset the runtime token to null and every
+    // authenticated fetch (e.g. NTRIP profiles) lost its Bearer header.
     authApi.setAuthRuntime({
-      token: operatorSession?.token ?? null,
+      token: operatorSession?.token ?? getAppTransport().getActiveToken() ?? null,
       baseUrl: apiBaseUrl || null,
       onInvalidSession: handleInvalidSession,
     });
-  }, [apiBaseUrl, handleInvalidSession, operatorSession?.token]);
+  }, [apiBaseUrl, handleInvalidSession, operatorSession?.token, wsStatus]);
 
   const logAction = useCallback((action: string, details?: Record<string, unknown>) => {
     const stamp = new Date().toISOString();
@@ -1965,6 +1969,27 @@ function AppRoot() {
     return unsub;
   }, []);
 
+  // Show whether the rover on the connect screen already has a saved token.
+  useEffect(() => {
+    const target = selectedWs || manualHost;
+    let cancelled = false;
+    if (!target) {
+      setHasSavedToken(false);
+      return;
+    }
+    void getAppTransport()
+      .getSavedTokenFor(target)
+      .then((token) => {
+        if (!cancelled) setHasSavedToken(Boolean(token));
+      })
+      .catch(() => {
+        if (!cancelled) setHasSavedToken(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedWs, manualHost]);
+
   // Load saved credentials on startup
   useEffect(() => {
     void (async () => {
@@ -1983,8 +2008,9 @@ function AppRoot() {
       return;
     }
 
-    const savedToken = await loadProdToken();
-    const tokenToUse = operatorPassword.trim() || savedToken || "";
+    const typedToken = operatorPassword.trim();
+    const savedToken = await getAppTransport().getSavedTokenFor(target);
+    const tokenToUse = typedToken || savedToken || "";
     if (!tokenToUse) {
       setWsError("Enter or paste the Operator Bearer Token to connect.");
       return;
@@ -2001,6 +2027,7 @@ function AppRoot() {
       await transport.connect(target, tokenToUse);
 
       setOperatorPassword("");
+      setHasSavedToken(true);
       setSelectedWs(target);
       setManualHost(target);
       setBackendPinned(true);
@@ -2019,7 +2046,13 @@ function AppRoot() {
         message.toLowerCase().includes("unauthoriz") ||
         message.toLowerCase().includes("forbidden");
       setWsStatus(isAuth ? "unauthorized" : "ready");
-      setWsError(isAuth ? "Invalid token: unauthorized (401). Paste valid rover token." : message);
+      setWsError(
+        isAuth
+          ? typedToken
+            ? "Invalid token: unauthorized (401). Paste a valid token for this rover."
+            : "The saved token for this rover was rejected (401). Paste a new token for this rover."
+          : message
+      );
       logAction("WS_CONNECT_FAILED", { error: message });
     } finally {
       connectInFlightRef.current = false;
@@ -2037,11 +2070,13 @@ function AppRoot() {
     clearTelemetryRuntime();
   };
 
-  const logoutToConnectionScreen = async () => {
-    logAction("LOGOUT");
-    await getAppTransport().logout();
+  const forgetSavedTokenForTarget = async () => {
+    const target = selectedWs || manualHost;
+    if (!target) return;
+    logAction("FORGET_TOKEN", { target });
+    await getAppTransport().forgetSavedToken(target);
     setOperatorPassword("");
-    disconnectToConnectionScreen();
+    setHasSavedToken(false);
   };
 
   const submitPasswordChange = async () => {
@@ -5254,7 +5289,8 @@ function AppRoot() {
                   wsStatus={wsStatus}
                   password={operatorPassword}
                   onPasswordChange={setOperatorPassword}
-                  hasStoredSession={Boolean(operatorSession)}
+                  hasStoredSession={hasSavedToken}
+                  onForgetToken={() => void forgetSavedTokenForTarget()}
                   isOffline={isOffline}
                   discoveredRovers={discoveredRovers}
                   onRefresh={scanForWebsockets}
@@ -5315,7 +5351,7 @@ function AppRoot() {
                     setPage(p);
                     setMenuOpen(false);
                   }}
-                  onDisconnect={() => void logoutToConnectionScreen()}
+                  onDisconnect={disconnectToConnectionScreen}
                   onOpenPasswordChange={() => setPasswordChangeOpen(true)}
                   layerVisibility={layerVisibility}
                   setLayerVisibility={setLayerVisibility}
