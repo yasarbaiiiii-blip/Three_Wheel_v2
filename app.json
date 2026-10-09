@@ -23,6 +23,7 @@
       "softwareKeyboardLayoutMode": "pan"
     },
     "plugins": [
+      "./plugins/withAndroidReleaseSigning",
       "expo-dev-client",
       [
         "expo-build-properties",

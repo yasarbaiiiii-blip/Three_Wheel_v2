@@ -453,10 +453,19 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
     if (!apiBaseUrl || isSprayOnChanging || !isSprayMasterEnabled) return;
     setIsSprayOnChanging(true);
     try {
-      const res = await fetch(sprayApiUrl(nextOn ? "/api/spray/on" : "/api/spray/off"), {
-        method: "POST",
-        headers: { Accept: "application/json" },
-      });
+      let res: Response;
+      if (apiBaseUrl.includes(":8000")) {
+        res = await fetch(sprayApiUrl("/api/spray/manual"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({ on: nextOn }),
+        });
+      } else {
+        res = await fetch(sprayApiUrl(nextOn ? "/api/spray/on" : "/api/spray/off"), {
+          method: "POST",
+          headers: { Accept: "application/json" },
+        });
+      }
       if (!res.ok) {
         const errText = await res.text();
         Alert.alert("Error", errText || `Failed to turn spray ${nextOn ? "on" : "off"}.`);
@@ -520,12 +529,28 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
   const startManualHold = async () => {
     if (!apiBaseUrl || manualHoldActive || manualHeartbeatRef.current || !isSprayMasterEnabled) return;
     try {
-      await fetch(sprayApiUrl("/api/spray/on"), { method: "POST" });
+      if (apiBaseUrl.includes(":8000")) {
+        await fetch(sprayApiUrl("/api/spray/manual"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ on: true }),
+        });
+      } else {
+        await fetch(sprayApiUrl("/api/spray/on"), { method: "POST" });
+      }
       setManualHoldActive(true);
       setSprayLive(true);
       manualHeartbeatRef.current = setInterval(async () => {
         try {
-          await fetch(sprayApiUrl("/api/spray/on"), { method: "POST" });
+          if (apiBaseUrl.includes(":8000")) {
+            await fetch(sprayApiUrl("/api/spray/manual"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ on: true }),
+            });
+          } else {
+            await fetch(sprayApiUrl("/api/spray/on"), { method: "POST" });
+          }
         } catch {
           // keep heartbeat best-effort
         }
@@ -542,7 +567,15 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
       manualHeartbeatRef.current = null;
     }
     try {
-      await fetch(sprayApiUrl("/api/spray/off"), { method: "POST" });
+      if (apiBaseUrl.includes(":8000")) {
+        await fetch(sprayApiUrl("/api/spray/manual"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ on: false }),
+        });
+      } else {
+        await fetch(sprayApiUrl("/api/spray/off"), { method: "POST" });
+      }
     } catch {
       // best-effort off
     }

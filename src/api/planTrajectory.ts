@@ -268,10 +268,75 @@ export function buildPlanTrajectoryRequest(args: {
   return body;
 }
 
-export function planTrajectory(
+export async function planTrajectory(
   apiBaseUrl: string,
   payload: PlanTrajectoryRequest
 ): Promise<Response> {
+  if (apiBaseUrl.includes(":8000")) {
+    try {
+      const runs = payload.runs.map((r) => ({
+        type: (r.kind === "mark" ? "mark" : "travel") as "mark" | "travel",
+        points: r.points.map((pt, pIdx): [number, number, number] => {
+          let flags = r.kind === "mark" ? 1 : 0;
+          if (r.must_hit_indices && r.must_hit_indices.includes(pIdx)) {
+            flags |= 2;
+          }
+          return [pt[0], pt[1], flags];
+        }),
+      }));
+
+      const planBody = {
+        client: "rover_app_react_native",
+        client_version: "2.1.0",
+        name: payload.mission_name || "app_planned_mission",
+        frame: "local_ned",
+        origin_ne_m: [0.0, 0.0],
+        runs,
+      };
+
+      const res = await fetch(apiUrl(apiBaseUrl, "/api/missions/plan"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(planBody),
+      });
+
+      if (res.ok) {
+        const prodData = await res.json();
+        const sha256 = prodData.sha256 || prodData.artifact_id || prodData.mission_id;
+        const ptsCount = prodData.points_count || prodData.num_points || 0;
+        const markLen = prodData.mark_length_m || 0;
+        const transitLen = prodData.transit_length_m || 0;
+
+        const syntheticResponse: PlanTrajectoryResponse = {
+          source: "app_plan",
+          mission_id: sha256,
+          num_waypoints: ptsCount,
+          mark_length_m: markLen,
+          transit_length_m: transitLen,
+          total_length_m: markLen + transitLen,
+          run_echo: payload.runs.map((r, i) => ({
+            index: i,
+            kind: r.kind,
+            num_points: r.points.length,
+            length_m: 0,
+            label: r.label,
+          })),
+          warnings: [],
+        };
+
+        return new Response(JSON.stringify(syntheticResponse), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    } catch (prodErr) {
+      console.warn("[planTrajectory] /api/missions/plan attempt failed, trying fallback:", prodErr);
+    }
+  }
+
   return fetch(apiUrl(apiBaseUrl, "/api/path/plan-trajectory"), {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },

@@ -112,6 +112,7 @@ function shouldAttachToken(input: RequestInfo | URL): boolean {
 function withAuthHeader(init: RequestInit | undefined, token: string): RequestInit {
   const headers = new Headers(init?.headers ?? {});
   headers.set(TOKEN_HEADER, token);
+  headers.set("Authorization", `Bearer ${token}`);
   return { ...init, headers };
 }
 

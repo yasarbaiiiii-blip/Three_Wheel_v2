@@ -44,6 +44,10 @@ const ModernSettingsPage = lazyDefault(
   () => import("./src/components/ModernSettingsPage"),
   "ModernSettingsPage"
 );
+const DebugDriveScreen = lazyDefault(
+  () => import("./src/screens/DebugDriveScreen"),
+  "DebugDriveScreen"
+);
 import {
   ActivityIndicator,
   Alert,
@@ -192,6 +196,16 @@ import {
   useSystemHealth,
   useTelemetrySnapshot,
 } from "./src/features/telemetry/telemetryStore";
+import { getAppTransport } from "./src/services/appTransport";
+import { getProdApiClient, ProdApiError } from "./src/api/prodClient";
+import { loadProdHost, loadProdToken } from "./src/api/prodStorage";
+import {
+  clearProdTelemetry,
+  applyProdTelemetrySnapshot,
+  setProdGatewayConnected,
+  getAdaptedTelemetrySnapshot,
+  subscribeProdTelemetry,
+} from "./src/features/telemetry/prodTelemetryStore";
 import type {
   ActivityEntry,
   AppToast,
@@ -388,17 +402,22 @@ const GREEN = "#eef2f7";
 const GREEN_DARK = "#f8fafc";
 const TEAL = "#0f988f";
 const LOCAL_WS_CANDIDATES = [
-  "http://localhost:5001",
-  "http://127.0.0.1:5001",
+  "http://localhost:8000",
+  "http://127.0.0.1:8000",
 ];
-const PRIORITY_BACKEND_IPS: string[] = [];
+const PRIORITY_BACKEND_IPS: string[] = [
+  "192.168.42.1",
+  "10.42.0.1",
+  "192.168.1.102",
+  "192.168.3.101",
+];
 
 const DISCOVERY_REFRESH_MS = 5000;
-const DISCOVERY_PORT = 5001;
+const DISCOVERY_PORT = 8000;
 const SUBNET_HOST_MIN = 1;
 const SUBNET_HOST_MAX = 254;
-const SUBNET_SCAN_CONCURRENCY = 24;
-const DEFAULT_ROVER_BACKEND = "http://192.168.1.102:5001";
+const SUBNET_SCAN_CONCURRENCY = 28;
+const DEFAULT_ROVER_BACKEND = "http://192.168.42.1:8000";
 const MENU_ITEMS: Array<{ key: Page; label: string; icon: React.ReactNode }> = [
   { key: "fields", label: "Fields", icon: <File size={22} color="#fff" /> },
   { key: "templates", label: "Templates", icon: <LayoutTemplate size={22} color="#fff" /> },
@@ -446,7 +465,7 @@ function AppRoot() {
     }
     return DEFAULT_ROVER_BACKEND;
   });
-  const [wsStatus, setWsStatus] = useState<"idle" | "scanning" | "ready" | "connecting" | "connected" | "error">("idle");
+  const [wsStatus, setWsStatus] = useState<"idle" | "scanning" | "ready" | "connecting" | "connected" | "disconnected" | "unauthorized" | "error">("idle");
   const [wsError, setWsError] = useState<string>("");
   const [socket, setSocket] = useState<Socket | null>(null);
   const [operatorSession, setOperatorSession] = useState<authApi.OperatorSession | null>(null);
@@ -1903,175 +1922,105 @@ function AppRoot() {
     });
   };
 
+  // Listen to AppTransport connection status and honest staleness
+  useEffect(() => {
+    const transport = getAppTransport();
+    const unsub = transport.subscribeStatus((status, detail) => {
+      if (status === "connected") {
+        setWsStatus("connected");
+      } else if (status === "disconnected") {
+        setWsStatus("disconnected");
+      } else if (status === "unauthorized") {
+        setWsStatus("unauthorized");
+        setWsError("Session expired or token rejected (401). Paste valid rover token.");
+        setPage("connection");
+      } else if (status === "error") {
+        setWsStatus("ready");
+        if (detail) setWsError(detail);
+      }
+    });
+    return unsub;
+  }, []);
+
+  // Listen to live telemetry from unified production store
+  useEffect(() => {
+    const unsub = subscribeProdTelemetry(() => {
+      const snap = getAdaptedTelemetrySnapshot();
+      if (snap) {
+        noteTelemetryForLiveEntry({
+          pos_n: snap.pos_n,
+          pos_e: snap.pos_e,
+          lat: snap.lat,
+          lon: snap.lon,
+          gps_fix: snap.gps_fix,
+          pose_age_ms: snap.pose_age_ms,
+        });
+
+        if (snap.mission_state) {
+          setMissionRunning(snap.mission_state === "running");
+          setIsPaused(snap.mission_state === "paused");
+        }
+      }
+    });
+    return unsub;
+  }, []);
+
+  // Load saved credentials on startup
+  useEffect(() => {
+    void (async () => {
+      const creds = await getAppTransport().loadSavedCredentials();
+      if (creds.host) {
+        setManualHost(creds.host);
+      }
+    })();
+  }, []);
+
   const connectSelectedWebsocket = async () => {
-    const target = selectedWs || manualHost;
+    const target = selectedWs || manualHost || "http://192.168.42.1:8000";
     if (!target) return;
     if (connectInFlightRef.current) {
       logAction("WS_CONNECT_SKIPPED", { reason: "already_connecting" });
       return;
     }
 
-    const canReuse = authApi.canReuseSession(operatorSession, target);
-    const passwordEntered = Boolean(operatorPassword.trim());
-    if (!canReuse && !passwordEntered) {
-      setWsError(
-        operatorSession && !authApi.sessionMatchesHost(operatorSession, target)
-          ? "Saved session is for a different backend. Enter the rover password."
-          : "Enter the rover password to connect."
-      );
+    const savedToken = await loadProdToken();
+    const tokenToUse = operatorPassword.trim() || savedToken || "";
+    if (!tokenToUse) {
+      setWsError("Enter or paste the Operator Bearer Token to connect.");
       return;
     }
 
     connectInFlightRef.current = true;
-    // Drop any in-flight discovery results — they must not reset wsStatus after connect.
     discoveryScanGenerationRef.current += 1;
-    logAction("WS_CONNECT", { selectedWs: target, reuseSession: canReuse && !passwordEntered });
+    logAction("WS_CONNECT", { selectedWs: target });
     setWsStatus("connecting");
     setWsError("");
 
-    let usedStoredSession = false;
-    let nextSocket: Socket | null = null;
-
     try {
-      let session: authApi.OperatorSession;
-      if (canReuse && !passwordEntered) {
-        session = operatorSession!;
-        usedStoredSession = true;
-        logAction("AUTH_SESSION_REUSE", { target, session_id: session.session_id });
-      } else {
-        logAction("AUTH_LOGIN_START", { target });
-        session = await authApi.login(target, operatorPassword);
-        logAction("AUTH_LOGIN_OK", { target, session_id: session.session_id });
-      }
+      const transport = getAppTransport();
+      await transport.connect(target, tokenToUse);
 
-      setOperatorSession(session);
       setOperatorPassword("");
-      await authApi.saveStoredSession(session);
-      authApi.setAuthRuntime({
-        token: session.token,
-        baseUrl: target,
-        onInvalidSession: handleInvalidSession,
-      });
-
-      pendingSocketRef.current?.disconnect();
-      // Defer socket.io-client until connect so the connection screen JS stays lighter.
-      const { io } = await import("socket.io-client");
-      nextSocket = io(target, {
-        transports: ["websocket"], // Use websocket ONLY - polling is unreliable in APK builds
-        timeout: 20000,
-        forceNew: true,
-        auth: { token: session.token },
-      });
-      pendingSocketRef.current = nextSocket;
-
-      await waitForSocketConnect(nextSocket, SOCKET_CONNECT_TIMEOUT_MS);
-
-      nextSocket.on("disconnect", (reason) => {
-        console.log(`[SOCKET] Disconnected from ${target} — reason: ${reason}`);
-      });
-
-      nextSocket.on("auth_revoked", () => {
-        handleInvalidSession();
-      });
-
-      nextSocket.on("error", (err) => {
-        console.error("[SOCKET] Error:", err);
-      });
-
-      nextSocket.on("telemetry", (rawData: any) => {
-        // Never let a bad packet force-close a release APK (uncaught JS → process kill).
-        try {
-          let parsed = rawData;
-          if (typeof rawData === "string") {
-            try {
-              parsed = JSON.parse(rawData);
-            } catch (e) {
-              console.error("[SOCKET] Failed to parse telemetry JSON:", e);
-              return;
-            }
-          }
-          const data = normalizeTelemetryPacket(parsed);
-          if (!data) {
-            console.warn("[SOCKET] Invalid telemetry format:", rawData);
-            return;
-          }
-
-          try {
-            virtualJoystickRef.current?.reconcileTelemetry?.(data);
-          } catch (vjErr) {
-            console.warn("[SOCKET] reconcileTelemetry failed:", vjErr);
-          }
-
-          // Always refresh live-entry pose cache — even when React deadband skips setState.
-          noteTelemetryForLiveEntry({
-            pos_n: data.pos_n,
-            pos_e: data.pos_e,
-            lat: data.lat,
-            lon: data.lon,
-            gps_fix: data.gps_fix,
-            pose_age_ms: data.pose_age_ms,
-          });
-
-          applyTelemetryPacket(data);
-          telemetrySnapshotRef.current = getTelemetrySnapshot() ?? data;
-        } catch (err) {
-          console.error("[SOCKET] telemetry handler crash suppressed:", err);
-        }
-      });
-
-      nextSocket.on("mission_status", (rawData: any) => {
-        try {
-        let data = rawData;
-        if (typeof rawData === "string") {
-          try {
-            data = JSON.parse(rawData);
-          } catch (e) {
-            console.error("[SOCKET] Failed to parse mission_status JSON:", e);
-            return;
-          }
-        }
-        if (!data || typeof data !== "object") {
-          console.warn("[SOCKET] Invalid mission_status format:", data);
-          return;
-        }
-
-        if (data.state) {
-          setMissionRunning(data.state === "running");
-          setIsPaused(data.state === "paused");
-          patchTelemetryMissionState(String(data.state));
-          void refreshMissionIdentity();
-        }
-        } catch (err) {
-          console.error("[SOCKET] mission_status handler crash suppressed:", err);
-        }
-      });
-
-      pendingSocketRef.current = null;
-      setSocket(nextSocket);
-      setWsStatus("connected");
       setSelectedWs(target);
       setManualHost(target);
       setBackendPinned(true);
+      setWsStatus("connected");
+
       // Defer home navigation one tick so connect UI settles before Mapbox mounts
-      // (avoids release-only race: socket up + map native init on same frame).
       requestAnimationFrame(() => {
         setPage("home");
         setMenuOpen(true);
       });
       logAction("WS_CONNECTED", { apiBaseUrl: target });
     } catch (error) {
-      nextSocket?.disconnect();
-      if (pendingSocketRef.current === nextSocket) {
-        pendingSocketRef.current = null;
-      }
-      if (usedStoredSession) {
-        setOperatorSession(null);
-        await authApi.saveStoredSession(null);
-      }
-      const message = formatSocketConnectError(error);
-      setWsStatus("ready");
-      setWsError(message);
-      logAction("WS_CONNECT_FAILED", { error: message, reusedSession: usedStoredSession });
+      const message = error instanceof Error ? error.message : String(error);
+      const isAuth =
+        message.includes("401") ||
+        message.toLowerCase().includes("unauthoriz") ||
+        message.toLowerCase().includes("forbidden");
+      setWsStatus(isAuth ? "unauthorized" : "ready");
+      setWsError(isAuth ? "Invalid token: unauthorized (401). Paste valid rover token." : message);
+      logAction("WS_CONNECT_FAILED", { error: message });
     } finally {
       connectInFlightRef.current = false;
     }
@@ -2079,7 +2028,7 @@ function AppRoot() {
 
   const disconnectToConnectionScreen = () => {
     logAction("WS_DISCONNECT");
-    socket?.disconnect();
+    getAppTransport().disconnect();
     setSocket(null);
     setWsStatus("idle");
     setBackendPinned(false);
@@ -2090,11 +2039,7 @@ function AppRoot() {
 
   const logoutToConnectionScreen = async () => {
     logAction("LOGOUT");
-    if (apiBaseUrl && operatorSession) {
-      await authApi.logout(apiBaseUrl);
-    }
-    await authApi.saveStoredSession(null);
-    setOperatorSession(null);
+    await getAppTransport().logout();
     setOperatorPassword("");
     disconnectToConnectionScreen();
   };
@@ -4490,19 +4435,36 @@ function AppRoot() {
     setRtkConnecting(true);
     try {
       showToast("RTK Injection", "Starting LoRA...", "info");
-      const res = await fetch(`${apiBaseUrl}/api/rtk/lora/start`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          baudrate: 115200,
-          serial_port: "/dev/ttyUSB0",
-        }),
-      });
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(txt || "LoRA start failed.");
+      let res: Response;
+      if (apiBaseUrl.includes(":8000")) {
+        await fetch(`${apiBaseUrl}/api/rtk/source`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source: "LORA" }),
+        });
+        res = await fetch(`${apiBaseUrl}/api/rtk/start`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        });
+        if (!res.ok) {
+          const txt = await res.text();
+          throw new Error(txt || "LoRA start failed.");
+        }
+      } else {
+        res = await fetch(`${apiBaseUrl}/api/rtk/lora/start`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            baudrate: 115200,
+            serial_port: "/dev/ttyUSB0",
+          }),
+        });
+        if (!res.ok) {
+          const txt = await res.text();
+          throw new Error(txt || "LoRA start failed.");
+        }
       }
       const data = await res.json().catch(() => ({}));
       setRtkStatus(normalizeRtkStatus(data));
@@ -4624,7 +4586,8 @@ function AppRoot() {
   }, [stagedWorkflow.staged, stagedMissionId, selectedPathName, importedPlan]);
 
   async function stopMissionOnBackend() {
-    if (!apiBaseUrl) {
+    const transport = getAppTransport();
+    if (transport.getStatus() !== "connected" && !apiBaseUrl) {
       Alert.alert("No backend", "Connect to a backend before stopping a mission.");
       return;
     }
@@ -4634,18 +4597,25 @@ function AppRoot() {
     try {
       showToast("Stop", "Stopping mission...", "warning");
       SecureStore.deleteItemAsync(STAGED_MISSION_KEY).catch(() => {});
-      const res = await missionApi.stopMission(apiBaseUrl);
-
-      if (!res.ok) {
-        const errMsg = await parseFetchError(res, "Stop failed");
-        throw new Error(errMsg);
+      if (transport.getStatus() === "connected") {
+        const prodClient = getProdApiClient();
+        const verdict = await prodClient.abortMission("operator");
+        if (!verdict.ok) {
+          throw new Error(verdict.reason || "Stop failed");
+        }
+      } else {
+        const res = await missionApi.stopMission(apiBaseUrl);
+        if (!res.ok) {
+          const errMsg = await parseFetchError(res, "Stop failed");
+          throw new Error(errMsg);
+        }
       }
 
       setMissionRunning(false);
       void refreshTelemetryPanel();
       logAction("STOP_SUCCESS");
-      Alert.alert("Stopped", "Mission stop command sent to the backend.");
-      showToast("Mission stopped", "Stop command accepted by the backend.", "success");
+      Alert.alert("Stopped", "Mission stop command sent to the rover.");
+      showToast("Mission stopped", "Stop command accepted by the rover.", "success");
     } catch (error) {
       logAction("STOP_FAILED", {
         error: error instanceof Error ? error.message : String(error),
@@ -4758,17 +4728,26 @@ function AppRoot() {
   }
 
   async function pauseMissionOnBackend() {
-    if (!apiBaseUrl) return;
+    const transport = getAppTransport();
+    if (transport.getStatus() !== "connected" && !apiBaseUrl) return;
     setMissionActionBusy(true);
     try {
       showToast("Pause", "Pausing mission...", "info");
-      const res = await missionApi.pauseMission(apiBaseUrl);
-      if (!res.ok) {
-        const errMsg = await parseFetchError(res, "Pause failed");
-        throw new Error(errMsg);
+      if (transport.getStatus() === "connected") {
+        const prodClient = getProdApiClient();
+        const verdict = await prodClient.pauseMission();
+        if (!verdict.ok) {
+          throw new Error(verdict.reason || "Pause failed");
+        }
+      } else {
+        const res = await missionApi.pauseMission(apiBaseUrl);
+        if (!res.ok) {
+          const errMsg = await parseFetchError(res, "Pause failed");
+          throw new Error(errMsg);
+        }
       }
       setIsPaused(true);
-      showToast("Mission paused", "Mission has been paused.", "success");
+      showToast("Mission paused", "Mission has been paused.", "info");
       void refreshTelemetryPanel();
     } catch (error) {
       Alert.alert("Pause failed", error instanceof Error ? error.message : "Could not pause the mission.");
@@ -4779,14 +4758,23 @@ function AppRoot() {
   }
 
   async function resumeMissionOnBackend() {
-    if (!apiBaseUrl) return;
+    const transport = getAppTransport();
+    if (transport.getStatus() !== "connected" && !apiBaseUrl) return;
     setMissionActionBusy(true);
     try {
       showToast("Resume", "Resuming mission...", "info");
-      const res = await missionApi.resumeMission(apiBaseUrl);
-      if (!res.ok) {
-        const errMsg = await parseFetchError(res, "Resume failed");
-        throw new Error(errMsg);
+      if (transport.getStatus() === "connected") {
+        const prodClient = getProdApiClient();
+        const verdict = await prodClient.resumeMission();
+        if (!verdict.ok) {
+          throw new Error(verdict.reason || "Resume failed");
+        }
+      } else {
+        const res = await missionApi.resumeMission(apiBaseUrl);
+        if (!res.ok) {
+          const errMsg = await parseFetchError(res, "Resume failed");
+          throw new Error(errMsg);
+        }
       }
       setIsPaused(false);
       showToast("Mission resumed", "Mission has been resumed.", "success");
@@ -4800,7 +4788,8 @@ function AppRoot() {
   }
 
   async function armVehicle(arm: boolean) {
-    if (!apiBaseUrl) {
+    const transport = getAppTransport();
+    if (transport.getStatus() !== "connected" && !apiBaseUrl) {
       Alert.alert("No backend", "Connect to a backend before sending commands.");
       return;
     }
@@ -4808,19 +4797,27 @@ function AppRoot() {
     setMissionActionBusy(true);
     try {
       showToast(arm ? "Arm" : "Disarm", arm ? "Arming vehicle..." : "Disarming vehicle...", "info");
-      const res = await fetch(`${apiBaseUrl}/api/arm`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ arm }),
-      });
-      let data;
-      try { data = await res.clone().json(); } catch (e) { }
+      if (transport.getStatus() === "connected") {
+        const prodClient = getProdApiClient();
+        const verdict = await prodClient.arm(arm);
+        if (!verdict.ok) {
+          throw new Error(verdict.reason || (arm ? "Arm failed" : "Disarm failed"));
+        }
+      } else {
+        const res = await fetch(`${apiBaseUrl}/api/arm`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ arm }),
+        });
+        let data;
+        try { data = await res.clone().json(); } catch (e) { }
 
-      if (!res.ok || (data && data.success === false)) {
-        const errMsg = data?.message || (await parseFetchError(res, arm ? "Arm failed" : "Disarm failed"));
-        throw new Error(errMsg);
+        if (!res.ok || (data && data.success === false)) {
+          const errMsg = data?.message || (await parseFetchError(res, arm ? "Arm failed" : "Disarm failed"));
+          throw new Error(errMsg);
+        }
       }
       void refreshTelemetryPanel();
       logAction("ARM_SUCCESS", { arm });
@@ -4839,7 +4836,8 @@ function AppRoot() {
   }
 
   async function setVehicleMode(targetMode: "MANUAL") {
-    if (!apiBaseUrl) {
+    const transport = getAppTransport();
+    if (transport.getStatus() !== "connected" && !apiBaseUrl) {
       Alert.alert("No backend", "Connect to a backend before sending commands.");
       return;
     }
@@ -4847,14 +4845,23 @@ function AppRoot() {
     setMissionActionBusy(true);
     try {
       showToast("Mode", `Switching to ${targetMode}...`, "info");
-      const res = await fetch(`${apiBaseUrl}/api/set_mode`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: targetMode })
-      });
-      if (!res.ok) {
-        const errMsg = await parseFetchError(res, "Set mode failed");
-        throw new Error(errMsg);
+      if (transport.getStatus() === "connected") {
+        const prodClient = getProdApiClient();
+        // In production PX4/ROS graph, manual driving disables offboard mode
+        const verdict = await prodClient.setOffboard(false);
+        if (!verdict.ok) {
+          throw new Error(verdict.reason || "Set mode failed");
+        }
+      } else {
+        const res = await fetch(`${apiBaseUrl}/api/set_mode`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: targetMode })
+        });
+        if (!res.ok) {
+          const errMsg = await parseFetchError(res, "Set mode failed");
+          throw new Error(errMsg);
+        }
       }
       await refreshTelemetryPanel();
       logAction("SET_MODE_SUCCESS", { targetMode });
@@ -4873,33 +4880,48 @@ function AppRoot() {
     }
   }
 
-  async function estopVehicle() {
-    if (!apiBaseUrl) {
-      Alert.alert("No backend", "Connect to a backend before sending commands.");
-      return;
-    }
-    virtualJoystick.handleEStop();
-    logAction("ESTOP_REQUEST", { apiBaseUrl });
-    setMissionActionBusy(true);
-    try {
-      showToast("E-Stop", "Sending EMERGENCY STOP...", "error");
-      
-      // Send E-Stop via HTTP API to halt motors immediately
-      await fetch(`${apiBaseUrl}/api/estop`, { method: "POST" }).catch((err) => {
-        console.warn("HTTP E-Stop failed:", err);
-      });
-
-      logAction("ESTOP_SUCCESS");
-      Alert.alert("E-STOP Sent", "Emergency Stop command accepted.");
-      showToast("E-STOP Sent", "Emergency Stop command active.", "success");
-    } catch (error) {
-      logAction("ESTOP_FAILED", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      Alert.alert("E-Stop failed", error instanceof Error ? error.message : "Command rejected.");
-      showToast("E-Stop failed", error instanceof Error ? error.message : "Command rejected.", "error");
-    } finally {
-      setMissionActionBusy(false);
+  async function estopVehicle(asserted: boolean = true) {
+    if (asserted) {
+      virtualJoystick.handleEStop();
+      logAction("ESTOP_REQUEST", { asserted: true });
+      showToast("E-Stop", "EMERGENCY STOP DISPATCHED!", "error");
+      try {
+        await getAppTransport().estop(true);
+        logAction("ESTOP_SUCCESS");
+        Alert.alert("EMERGENCY STOP", "Motors halted. Rover E-stop is active.");
+        showToast("E-STOP Active", "Rover emergency stop confirmed.", "success");
+      } catch (error) {
+        logAction("ESTOP_FAILED", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        Alert.alert(
+          "E-STOP DELIVERY FAILED",
+          "Rover did not acknowledge the software E-stop! HIT THE PHYSICAL RC TRANSMITTER E-STOP IMMEDIATELY!"
+        );
+        showToast("E-STOP FAILED", "Network delivery failed! Use RC transmitter!", "error");
+      }
+    } else {
+      Alert.alert(
+        "Clear Emergency Stop",
+        "Clear E-stop and restore rover motor readiness?",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Clear E-Stop",
+            style: "destructive",
+            onPress: async () => {
+              try {
+                showToast("E-Stop", "Clearing E-stop...", "info");
+                await getAppTransport().estop(false);
+                Alert.alert("E-Stop Cleared", "Rover E-stop cleared successfully.");
+                showToast("E-Stop Cleared", "Rover ready.", "success");
+              } catch (error) {
+                Alert.alert("Clear Failed", error instanceof Error ? error.message : "Could not clear E-stop.");
+              }
+            },
+          },
+        ]
+      );
     }
   }
 
@@ -5002,7 +5024,7 @@ function AppRoot() {
 
   async function probeBackendHost(candidate: string): Promise<number | null> {
     const start = Date.now();
-    const endpoints = ["/api/ping", "/api/healthz"];
+    const endpoints = ["/api/ping", "/api/healthz", "/api/health"];
     for (const endpoint of endpoints) {
       try {
         const controller = new AbortController();
@@ -5029,6 +5051,10 @@ function AppRoot() {
         prefixes.add(octets.slice(0, 3).join("."));
       }
     }
+
+    // Rover Hotspot default subnets
+    prefixes.add("192.168.42");
+    prefixes.add("10.42.0");
 
     // 1. Check seed host if it's a private IP
     const parsed = parseHost(seedHost);
@@ -5236,7 +5262,15 @@ function AppRoot() {
                   onManualHostChange={setManualHost}
                   onConnect={connectSelectedWebsocket}
                   onOfflinePreview={enterOfflinePreview}
+                  onOpenDebug={() => setPage("debug")}
                 />
+              ) : page === "debug" ? (
+                <Suspense fallback={<ActivityIndicator />}>
+                  <DebugDriveScreen
+                    onBack={() => setPage("home")}
+                    currentPlanLines={lines}
+                  />
+                </Suspense>
               ) : (
                 <AppErrorBoundary name="Home">
                 <HomeView

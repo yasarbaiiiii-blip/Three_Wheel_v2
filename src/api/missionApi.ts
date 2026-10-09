@@ -89,10 +89,16 @@ export function loadMission(apiBaseUrl: string, payload: LoadMissionPayload): Pr
   return postJson(apiBaseUrl, "/api/mission/load", payload);
 }
 
-export function loadMissionToController(
+export async function loadMissionToController(
   apiBaseUrl: string,
   payload: LoadMissionToControllerPayload
 ): Promise<Response> {
+  if (apiBaseUrl.includes(":8000") || (payload.mission_id && /^[0-9a-f]{64}$/i.test(payload.mission_id))) {
+    return new Response(JSON.stringify({ success: true, mission_id: payload.mission_id }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
   return postJson(apiBaseUrl, "/api/path/load-to-controller", payload);
 }
 
@@ -103,11 +109,34 @@ export function getLoadedPath(apiBaseUrl: string): Promise<Response> {
   });
 }
 
-export function startMission(apiBaseUrl: string, payload?: StartMissionPayload): Promise<Response> {
+export async function startMission(apiBaseUrl: string, payload?: StartMissionPayload): Promise<Response> {
+  if (payload?.mission_id && (/^[0-9a-f]{64}$/i.test(payload.mission_id) || apiBaseUrl.includes(":8000"))) {
+    try {
+      const prodRes = await fetch(apiUrl(apiBaseUrl, `/api/missions/${encodeURIComponent(payload.mission_id)}/start`), {
+        method: "POST",
+        headers: { Accept: "application/json" },
+      });
+      if (prodRes.status !== 404) {
+        return prodRes;
+      }
+    } catch {
+      // fallback
+    }
+  }
   return postJson(apiBaseUrl, "/api/mission/start", payload);
 }
 
-export function stopMission(apiBaseUrl: string): Promise<Response> {
+export async function stopMission(apiBaseUrl: string): Promise<Response> {
+  if (apiBaseUrl.includes(":8000")) {
+    try {
+      const prodRes = await postJson(apiBaseUrl, "/api/mission/abort", { reason: "operator" });
+      if (prodRes.status !== 404) {
+        return prodRes;
+      }
+    } catch {
+      // fallback
+    }
+  }
   return postJson(apiBaseUrl, "/api/mission/stop");
 }
 

@@ -18,6 +18,7 @@ export function ConnectionView({
   onManualHostChange,
   onConnect,
   onOfflinePreview,
+  onOpenDebug,
 }: {
   selectedWs: string;
   manualHost: string;
@@ -33,6 +34,7 @@ export function ConnectionView({
   onManualHostChange: (value: string) => void;
   onConnect: () => void;
   onOfflinePreview: () => void;
+  onOpenDebug?: () => void;
 }) {
   const selectedTarget = selectedWs || manualHost;
   const pingState =
@@ -128,7 +130,7 @@ export function ConnectionView({
                 <Text style={connectionStyles.infoValue}>2</Text>
                 <Text style={connectionStyles.infoLabel}>Health</Text>
                 <Text style={connectionStyles.infoText}>{healthState}</Text>
-                <Text style={connectionStyles.infoDetail}>Socket.IO on port 5001</Text>
+                <Text style={connectionStyles.infoDetail}>Socket.IO on port 8000</Text>
               </View>
               <View style={connectionStyles.infoCard}>
                 <Text style={connectionStyles.infoValue}>3</Text>
@@ -176,7 +178,7 @@ export function ConnectionView({
               <TextInput
                 value={manualHost}
                 onChangeText={onManualHostChange}
-                placeholder="http://192.168.1.102:5001"
+                placeholder="http://192.168.42.1:8000"
                 placeholderTextColor="#94a3b8"
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -196,11 +198,10 @@ export function ConnectionView({
                 onChangeText={onPasswordChange}
                 placeholder={
                   hasStoredSession
-                    ? "Password optional for this backend; required after rover restart"
-                    : "Rover password"
+                    ? "Bearer token stored (paste to update)"
+                    : "Operator Bearer Token (paste token)"
                 }
                 placeholderTextColor="#94a3b8"
-                secureTextEntry
                 autoCapitalize="none"
                 autoCorrect={false}
                 style={{
@@ -420,8 +421,44 @@ export function ConnectionView({
                 </View>
               </Pressable>
 
+              {onOpenDebug && (
+                <Pressable
+                  onPress={onOpenDebug}
+                  style={{
+                    padding: 14,
+                    borderRadius: 18,
+                    borderWidth: 2,
+                    borderColor: "#3b82f6",
+                    backgroundColor: "#eff6ff",
+                    flexDirection: "row",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 12,
+                  }}
+                >
+                  <View style={{ flex: 1, paddingRight: 4 }}>
+                    <Text style={{ color: "#1d4ed8", fontWeight: "900", fontSize: 15.5 }}>
+                      Engineering Debug Client
+                    </Text>
+                    <Text style={{ color: "#3b82f6", fontSize: 12, marginTop: 2, lineHeight: 16 }}>
+                      Production contract (Port 8000) · Driving & telemetry
+                    </Text>
+                  </View>
+                  <View
+                    style={{
+                      paddingHorizontal: 10,
+                      paddingVertical: 6,
+                      borderRadius: 999,
+                      backgroundColor: "#1d4ed8",
+                    }}
+                  >
+                    <Text style={{ color: "#ffffff", fontSize: 11, fontWeight: "800" }}>PROD 8000</Text>
+                  </View>
+                </Pressable>
+              )}
+
               <Text style={{ color: "#64748b", fontSize: 12, lineHeight: 18 }}>
-                Backend runs on <Text style={{ color: "#334155", fontWeight: "700" }}>server/main.py</Text> via Socket.IO on port <Text style={{ color: "#334155", fontWeight: "700" }}>5001</Text>.
+                Production backend runs on <Text style={{ color: "#334155", fontWeight: "700" }}>dyx3_backend</Text> on port <Text style={{ color: "#334155", fontWeight: "700" }}>8000</Text>.
               </Text>
             </View>
           </View>

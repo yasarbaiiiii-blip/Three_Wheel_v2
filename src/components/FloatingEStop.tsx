@@ -50,14 +50,13 @@ export function FloatingEStop({
       translateY.value = withSpring(clampedY, { damping: 20, stiffness: 200 });
     });
 
-  const doubleTapGesture = Gesture.Tap()
-    .numberOfTaps(2)
-    .maxDelay(260)
+  const singleTapGesture = Gesture.Tap()
+    .numberOfTaps(1)
     .onEnd((_event, success) => {
       if (success) runOnJS(triggerEStop)();
     });
 
-  const composedGesture = Gesture.Exclusive(doubleTapGesture, panGesture);
+  const composedGesture = Gesture.Exclusive(singleTapGesture, panGesture);
 
   if (!visible) return null;
 
@@ -100,15 +99,14 @@ export function FloatingEStop({
           <Text
             style={{
               color: "#ffffff",
-              fontSize: 11,
+              fontSize: 13,
               fontWeight: "900",
               textAlign: "center",
-              lineHeight: 13,
+              lineHeight: 15,
             }}
           >
             E-STOP
           </Text>
-          <Text style={{ color: "#fecaca", fontSize: 8, fontWeight: "800", marginTop: 2 }}>2 TAP</Text>
         </AnimatedReanimated.View>
       </GestureDetector>
     </View>

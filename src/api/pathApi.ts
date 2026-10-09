@@ -264,7 +264,33 @@ export function planAndStage(apiBaseUrl: string, pathName: string, payload: Plan
   return postJson(apiBaseUrl, `/api/path/${encodeURIComponent(pathName)}/plan-and-stage`, payload);
 }
 
-export function getStagedMission(apiBaseUrl: string, missionId: string): Promise<Response> {
+export async function getStagedMission(apiBaseUrl: string, missionId: string): Promise<Response> {
+  if (missionId && (/^[0-9a-f]{64}$/i.test(missionId) || apiBaseUrl.includes(":8000"))) {
+    try {
+      const prodRes = await fetch(apiUrl(apiBaseUrl, `/api/missions/${encodeURIComponent(missionId)}/path`), {
+        method: "GET",
+        headers: { Accept: "application/json" },
+      });
+      if (prodRes.ok) {
+        const prodData = await prodRes.json();
+        const pts: number[][] = prodData.points || [];
+        const synthesized: StagedMissionResponse = {
+          mission_id: missionId,
+          num_waypoints: pts.length,
+          waypoints: pts.map((p) => [p[0], p[1]]),
+          spray_flags: pts.map((p) => Boolean(p[2] & 1)),
+          segment_runs: [],
+        };
+        return new Response(JSON.stringify(synthesized), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    } catch {
+      // fallback
+    }
+  }
+
   return fetch(apiUrl(apiBaseUrl, `/api/path/staged/${encodeURIComponent(missionId)}`), {
     method: "GET",
     headers: { Accept: "application/json" },

@@ -520,7 +520,13 @@ function PanelContent({
                       onPress={async () => {
                         try {
                           if (missionRunning) {
-                            const resp = await fetch(resolveApiUrl(`/api/mission/stop`), { method: "POST" });
+                            const resp = await (apiBaseUrl?.includes(":8000")
+                              ? fetch(resolveApiUrl(`/api/mission/abort`), {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ reason: "operator" }),
+                                })
+                              : fetch(resolveApiUrl(`/api/mission/stop`), { method: "POST" }));
                             if (!resp.ok) {
                               const txt = await resp.text();
                               console.error("Stop failed:", resp.status, txt);
