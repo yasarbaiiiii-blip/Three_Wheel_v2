@@ -1043,6 +1043,7 @@ export function TemplatesPage(props: TemplatesPageProps) {
         <View style={{ flex: 1, borderRadius: 20, overflow: "hidden", backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d8e1eb" }}>
           {(boundaryMode || placedItems.length > 0) && props.mapViewEnabled ? (
             <MapView
+              standalone
               mode="templates"
               visible={true}
               telemetrySnapshot={props.telemetrySnapshot}

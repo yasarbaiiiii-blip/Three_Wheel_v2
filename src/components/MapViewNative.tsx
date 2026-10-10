@@ -105,6 +105,9 @@ import { toMapboxCoord, fromMapboxCoord } from "../utils/mapboxCoords";
 import { getLineLengthM, formatFinite } from "../utils/pathWorkflow";
 import { getPlanStartPoint, isPrimaryEditableLine } from "../utils/planGeometry";
 import { MAPBOX_STYLE_URL } from "../config/mapbox";
+import { useTelemetrySnapshot } from "../features/telemetry/telemetryStore";
+import { resolveRoverMarker, type RoverFix } from "../utils/roverFixHold";
+import { registerMapHandle, type MapHandle } from "./sharedMap/sharedMapStore";
 import type { MapViewProps } from "./mapViewTypes";
 import { pixelDeltaToMetres, clampToIndent, gateTemplateGestureDeltas, type BoundingRect } from "../utils/mapGestureUtils";
 import { deriveMetersPerPixel, screenToGeo } from "../utils/mapScreenGeo";
@@ -343,10 +346,19 @@ function PulsingDot({
  * as it appears on the (possibly rotated) map — i.e. it turns WITH the map
  * instead of appearing to drift/spin against it.
  */
-function RoverVehicle({ heading, mapBearing }: { heading: number | null | undefined; mapBearing?: number }) {
+function RoverVehicle({
+  heading,
+  mapBearing,
+  stale = false,
+}: {
+  heading: number | null | undefined;
+  mapBearing?: number;
+  /** Telemetry is older than the freshness window: last known spot, drawn dimmed. */
+  stale?: boolean;
+}) {
   const rotationDeg = (heading ?? 0) - (mapBearing ?? 0);
   return (
-    <View style={{ transform: [{ rotate: `${rotationDeg}deg` }] }}>
+    <View style={{ opacity: stale ? 0.4 : 1, transform: [{ rotate: `${rotationDeg}deg` }] }}>
       <Svg width={40} height={40} viewBox="-20 -20 40 40">
         <SvgCircle cx={0} cy={0} r={18.7} fill="rgba(14,165,233,0.12)" />
         <SvgPolygon
@@ -366,9 +378,15 @@ function RoverVehicle({ heading, mapBearing }: { heading: number | null | undefi
   );
 }
 
+/** Last position the rover was actually seen at (map coordinates + heading). */
+let lastRoverFix: RoverFix<Coord> | null = null;
+
 export function MapViewNative(props: MapViewProps) {
+  // The map owns the full-rate subscription so the rover marker stays smooth while the
+  // screens above it (App / Home / Fields) re-render at the throttled rate.
+  const liveTelemetry = useTelemetrySnapshot(props.parked !== true);
   const {
-    telemetrySnapshot,
+    telemetrySnapshot: telemetrySnapshotProp,
     lines,
     ghostLines,
     alignedRefPoints,
@@ -426,6 +444,7 @@ export function MapViewNative(props: MapViewProps) {
     anchorCandidates,
     onAnchorCandidateSelect,
   } = props;
+  const telemetrySnapshot = liveTelemetry ?? telemetrySnapshotProp;
 
   const planPlacementPhaseRef = useRef<MultiPointPlacementPhase>(planPlacementPhase);
   useEffect(() => {
@@ -453,6 +472,17 @@ export function MapViewNative(props: MapViewProps) {
 
   const cameraRef = useRef<Camera>(null);
   const mapViewRef = useRef<RNMapboxMapView>(null);
+  // Expose the visible bounds so Settings can download an offline pack for what is on screen.
+  useEffect(() => {
+    const handle: MapHandle = {
+      getVisibleBounds: async () => {
+        const b = await mapViewRef.current?.getVisibleBounds();
+        return b && b.length === 2 ? [[b[0][0], b[0][1]], [b[1][0], b[1][1]]] : null;
+      },
+    };
+    registerMapHandle(handle);
+    return () => registerMapHandle(null);
+  }, []);
   const hasAutoCenteredRef = useRef(false);
   /** Native map style finished loading — setCamera before this can SIGSEGV on some devices. */
   const mapLoadedRef = useRef(false);
@@ -1432,6 +1462,16 @@ export function MapViewNative(props: MapViewProps) {
     lines,
     originSig,
   ]);
+
+  // The telemetry adapter reports a position only while the gateway marks it fresh (<= 1 s
+  // old) — correct for numbers, wrong for an icon: any packet gap, or a JS stall such as a
+  // large file import, made the marker vanish. Keep drawing the last known fix, dimmed, so
+  // "stale" reads as stale instead of "rover gone". Held in map coordinates, so it stays
+  // put on the ground even if the plan's projection origin changes under it.
+  // Module-level so it also survives the map remounting on every page change.
+  const resolvedRover = resolveRoverMarker<Coord>(roverGeo, lastRoverFix);
+  lastRoverFix = resolvedRover.last;
+  const roverMarker = resolvedRover.marker;
 
   // ── Placed items (Templates): lines + bounding boxes ──
   // Circle/arc entities are intentionally NOT special-cased here — they flow through the same
@@ -3902,9 +3942,9 @@ export function MapViewNative(props: MapViewProps) {
         })()}
 
         {/* ── Rover vehicle marker + heading ── */}
-        {showRover && roverGeo.center && (
-          <MarkerView coordinate={roverGeo.center} anchor={{ x: 0.5, y: 0.5 }} allowOverlap>
-            <RoverVehicle heading={roverGeo.heading} mapBearing={cameraBearing} />
+        {showRover && roverMarker && (
+          <MarkerView coordinate={roverMarker.center} anchor={{ x: 0.5, y: 0.5 }} allowOverlap>
+            <RoverVehicle heading={roverMarker.heading} mapBearing={cameraBearing} stale={roverMarker.stale} />
           </MarkerView>
         )}
 

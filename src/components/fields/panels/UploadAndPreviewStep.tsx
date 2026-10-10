@@ -45,6 +45,8 @@ type UploadAndPreviewStepProps = {
   onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
   blockProtectedWorkflowMutation: (action: string) => boolean;
   protectedResident: boolean;
+  /** Clears the mission resident on the rover (unblocks upload). */
+  onClearMission?: () => Promise<void> | void;
   /**
    * Local-only CSV parse result (no backend). Parent draws map points from this.
    * Mission Select File .csv never calls parse-point-* / upload / preview.
@@ -246,6 +248,7 @@ export function UploadAndPreviewStep({
   onInvalidateWorkflow,
   blockProtectedWorkflowMutation,
   protectedResident,
+  onClearMission,
   onLocalCsvParsed,
   onLocalDxfParsed,
   onClearLocalCsv,
@@ -832,13 +835,21 @@ export function UploadAndPreviewStep({
   const pickAndImport = async (opts?: { append?: boolean }) => {
     if (blockProtectedWorkflowMutation(opts?.append ? "Adding files to the plan" : "Uploading a new path"))
       return;
-    if (isUploading) return;
+    if (isUploading) {
+      // Silent returns read as "the button is dead" — say why.
+      Alert.alert("Import in progress", "Wait for the current import to finish, then try again.");
+      return;
+    }
     try {
       setAppendOnImport(!!opts?.append);
       const result = await DocumentPicker.getDocumentAsync({
         type: ["*/*"],
         copyToCacheDirectory: true,
         multiple: true,
+        // expo-document-picker 14 base64-encodes every picked file by default. We read the
+        // cached copy ourselves, so that was pure overhead (and a bridge-sized string for a
+        // big DXF).
+        base64: false,
       });
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const valid = result.assets.filter((asset) => {
@@ -864,6 +875,13 @@ export function UploadAndPreviewStep({
     } catch (err) {
       setAppendOnImport(false);
       console.log("Error picking file:", err);
+      const message = err instanceof Error ? err.message : String(err);
+      Alert.alert(
+        "Could not open the file picker",
+        /in progress/i.test(message)
+          ? "A previous file picker is still open or was interrupted. Close it (or restart the app) and try again."
+          : message || "The system file picker failed to open."
+      );
     }
   };
 
@@ -885,6 +903,7 @@ export function UploadAndPreviewStep({
         type: ["*/*"],
         copyToCacheDirectory: true,
         multiple: false,
+        base64: false,
       });
       if (result.canceled || !result.assets || result.assets.length === 0) return;
       const asset = result.assets[0];
@@ -957,7 +976,7 @@ export function UploadAndPreviewStep({
       {pickedFiles.length === 0 && !targetPathName ? (
         <TouchableOpacity
           onPress={handlePickFile}
-          disabled={protectedResident || isUploading}
+          disabled={isUploading}
           activeOpacity={0.8}
           style={{
             height: 52,
@@ -1010,7 +1029,7 @@ export function UploadAndPreviewStep({
           {!isUploading ? (
             <TouchableOpacity
               onPress={handleRetryImport}
-              disabled={protectedResident}
+              disabled={false}
               activeOpacity={0.85}
               style={{
                 height: 40,
@@ -1059,7 +1078,7 @@ export function UploadAndPreviewStep({
                 onPress={() => {
                   void handleAddMoreFiles();
                 }}
-                disabled={protectedResident || isUploading}
+                disabled={isUploading}
                 accessibilityLabel="Add more files"
                 accessibilityRole="button"
                 style={{
@@ -1261,7 +1280,7 @@ export function UploadAndPreviewStep({
                               e?.stopPropagation?.();
                               void handleReplaceOneFile(f.id);
                             }}
-                            disabled={protectedResident || isUploading}
+                            disabled={isUploading}
                             accessibilityLabel={`Replace ${f.fileName}`}
                             accessibilityRole="button"
                             hitSlop={6}
@@ -1284,7 +1303,7 @@ export function UploadAndPreviewStep({
                               e?.stopPropagation?.();
                               handleDeleteOneFile(f);
                             }}
-                            disabled={protectedResident || isUploading}
+                            disabled={isUploading}
                             accessibilityLabel={`Remove ${f.fileName}`}
                             accessibilityRole="button"
                             hitSlop={6}
@@ -1428,7 +1447,7 @@ export function UploadAndPreviewStep({
                 onPress={() => {
                   void handleAddMoreFiles();
                 }}
-                disabled={protectedResident || isUploading}
+                disabled={isUploading}
                 style={{
                   flex: 1,
                   height: 36,
@@ -1451,7 +1470,7 @@ export function UploadAndPreviewStep({
             ) : null}
             <Pressable
               onPress={handlePickFile}
-              disabled={protectedResident || isUploading}
+              disabled={isUploading}
               style={{
                 flex: 1,
                 height: 36,
@@ -1630,9 +1649,42 @@ export function UploadAndPreviewStep({
       />
 
       {protectedResident && (
-        <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11 }}>
-          A protected mission is currently resident. Upload is blocked.
-        </Text>
+        <View
+          style={{
+            gap: 8,
+            padding: 10,
+            borderRadius: 10,
+            borderWidth: 1,
+            borderColor: FIELDS_COLORS.warning,
+            backgroundColor: "rgba(245,158,11,0.10)",
+          }}
+        >
+          <Text style={{ color: FIELDS_COLORS.warning, fontSize: 12, fontWeight: "700" }}>
+            A mission is already loaded on the rover, so adding or changing files is blocked.
+          </Text>
+          {onClearMission ? (
+            <TouchableOpacity
+              onPress={() => {
+                Alert.alert("Clear mission", "Remove the loaded mission from the rover so you can upload a new plan?", [
+                  { text: "Cancel", style: "cancel" },
+                  { text: "Clear mission", style: "destructive", onPress: () => void onClearMission() },
+                ]);
+              }}
+              activeOpacity={0.85}
+              accessibilityRole="button"
+              accessibilityLabel="Clear loaded mission"
+              style={{
+                height: 36,
+                borderRadius: 8,
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: FIELDS_COLORS.warning,
+              }}
+            >
+              <Text style={{ color: "#1c1c1c", fontSize: 12, fontWeight: "800" }}>Clear mission</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
       )}
     </View>
   );

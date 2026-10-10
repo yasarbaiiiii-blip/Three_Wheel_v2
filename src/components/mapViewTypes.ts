@@ -23,6 +23,16 @@ export interface MapViewProps {
   ghostLines?: PlanLine[] | null;
   alignedRefPoints: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
   visible: boolean;
+  /**
+   * Opt out of the app-wide shared map and own a private native map (used by the Templates
+   * designer, whose map lives in an inset card rather than behind the whole screen).
+   */
+  standalone?: boolean;
+  /**
+   * Set by the shared-map host while no map screen is showing (Settings etc.). The native map
+   * stays mounted so coming back is instant, but live telemetry work is paused.
+   */
+  parked?: boolean;
   /** Layers filter: whether the rover marker itself is drawn. Defaults to visible when omitted. */
   showRover?: boolean;
   /**

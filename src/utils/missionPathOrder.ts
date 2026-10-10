@@ -341,7 +341,7 @@ function greedyChainFrom(
 }
 
 /** Sum of the transit gaps between consecutive entries — the quantity a chain minimizes. */
-function totalGapM(chain: PlanLine[]): number {
+export function totalGapM(chain: PlanLine[]): number {
   let total = 0;
   for (let i = 0; i < chain.length - 1; i++) {
     const a = lineEndpoints(chain[i]);
@@ -359,6 +359,13 @@ function totalGapM(chain: PlanLine[]): number {
  * pathological input.
  */
 export const CHAIN_MULTI_START_MAX_MARKS = 200;
+
+/**
+ * Upper bound on inner-loop steps for the multi-start search (see chainMarkLinesByGeometry).
+ * ~2.5M steps is ~0.1 s on a desktop and about a second on a phone running Hermes; every
+ * file of up to ~110 paths still tries every seed.
+ */
+export const CHAIN_MULTI_START_MAX_STEPS = 2_500_000;
 
 /**
  * Order painted paths into one continuous walk, flipping any path drawn against it.
@@ -401,31 +408,131 @@ export function chainMarkLinesByGeometry(lines: PlanLine[]): PlanLine[] {
   }
   if (placeable.length < 2) return [...marks, ...others];
 
-  let bestChain: PlanLine[] = greedyChainFrom(placeable, 0, false);
-  let bestTotal = totalGapM(bestChain);
+  // Search on precomputed endpoints, materialise only the winner. The old version rebuilt
+  // every candidate chain (reversing preview_points of each flipped line) and re-sampled
+  // every line's polyline inside the inner loop — seconds on a few hundred paths on a phone.
+  const ends = chainEndpoints(placeable);
+  let best = walkChain(ends, 0, false);
 
   if (placeable.length <= CHAIN_MULTI_START_MAX_MARKS) {
-    for (let i = 0; i < placeable.length; i++) {
+    // Bound the work, not the wall clock (results must not depend on device speed): each
+    // seed costs ~2 walks of ~n^2/2 steps. Small files try every seed exactly as before;
+    // big ones try an evenly strided subset that always includes the file-order seed.
+    const n = placeable.length;
+    const maxSeeds = Math.max(1, Math.floor(CHAIN_MULTI_START_MAX_STEPS / (n * n)));
+    const stride = Math.max(1, Math.ceil(n / maxSeeds));
+    for (let i = 0; i < placeable.length; i += stride) {
       if (i > 0) {
-        const forward = greedyChainFrom(placeable, i, false);
-        const forwardTotal = totalGapM(forward);
-        if (forwardTotal < bestTotal) {
-          bestTotal = forwardTotal;
-          bestChain = forward;
-        }
+        const forward = walkChain(ends, i, false);
+        if (forward.gap < best.gap) best = forward;
       }
-      if (isLineLikePlanLine(placeable[i])) {
-        const reversed = greedyChainFrom(placeable, i, true);
-        const reversedTotal = totalGapM(reversed);
-        if (reversedTotal < bestTotal) {
-          bestTotal = reversedTotal;
-          bestChain = reversed;
-        }
+      if (ends.lineLike[i] === 1) {
+        const reversed = walkChain(ends, i, true);
+        if (reversed.gap < best.gap) best = reversed;
       }
     }
   }
 
+  const bestChain = best.order.map((idx, k) =>
+    best.reversed[k] === 1 ? reversePlanLineDirection(placeable[idx]) : placeable[idx]
+  );
   return [...bestChain, ...unplaceable, ...others];
+}
+
+type ChainEndpoints = {
+  /** Per placeable line: start/end as [north, east] flattened. */
+  sN: Float64Array;
+  sE: Float64Array;
+  eN: Float64Array;
+  eE: Float64Array;
+  /** 1 when the line may be driven backwards (see isLineLikePlanLine). */
+  lineLike: Uint8Array;
+};
+
+function chainEndpoints(placeable: PlanLine[]): ChainEndpoints {
+  const n = placeable.length;
+  const out: ChainEndpoints = {
+    sN: new Float64Array(n),
+    sE: new Float64Array(n),
+    eN: new Float64Array(n),
+    eE: new Float64Array(n),
+    lineLike: new Uint8Array(n),
+  };
+  for (let i = 0; i < n; i++) {
+    const ends = lineEndpoints(placeable[i])!; // placeable ⇒ endpoints exist
+    out.sN[i] = ends.start[0];
+    out.sE[i] = ends.start[1];
+    out.eN[i] = ends.end[0];
+    out.eE[i] = ends.end[1];
+    out.lineLike[i] = isLineLikePlanLine(placeable[i]) ? 1 : 0;
+  }
+  return out;
+}
+
+/**
+ * Same walk as {@link greedyChainFrom} (nearest endpoint, strict `<`, candidates scanned in
+ * original order so ties resolve identically) but over indices and numbers only. `gap` is the
+ * summed distance of every hop, which is exactly what totalGapM measured on the built chain.
+ */
+function walkChain(
+  e: ChainEndpoints,
+  seedIdx: number,
+  seedReversed: boolean
+): { order: number[]; reversed: Uint8Array; gap: number } {
+  const n = e.sN.length;
+  const used = new Uint8Array(n);
+  const order: number[] = [seedIdx];
+  const reversed = new Uint8Array(n);
+  used[seedIdx] = 1;
+  reversed[0] = seedReversed ? 1 : 0;
+  let curN = seedReversed ? e.sN[seedIdx] : e.eN[seedIdx];
+  let curE = seedReversed ? e.sE[seedIdx] : e.eE[seedIdx];
+  let gap = 0;
+
+  for (let step = 1; step < n; step++) {
+    let bestIdx = -1;
+    let bestD2 = Infinity;
+    let bestRev = 0;
+    let firstUnused = -1;
+    // Squared distances in the scan: Math.hypot is an order of magnitude slower and this
+    // loop runs ~n^3 times. hypot is applied once per hop below so `gap` matches totalGapM.
+    for (let i = 0; i < n; i++) {
+      if (used[i] === 1) continue;
+      if (firstUnused < 0) firstUnused = i;
+      const fdn = e.sN[i] - curN;
+      const fde = e.sE[i] - curE;
+      const forward = fdn * fdn + fde * fde;
+      if (forward < bestD2) {
+        bestD2 = forward;
+        bestIdx = i;
+        bestRev = 0;
+      }
+      if (e.lineLike[i] !== 1) continue;
+      const bdn = e.eN[i] - curN;
+      const bde = e.eE[i] - curE;
+      const backward = bdn * bdn + bde * bde;
+      if (backward < bestD2) {
+        bestD2 = backward;
+        bestIdx = i;
+        bestRev = 1;
+      }
+    }
+    // All-NaN distances: original defaulted to the first remaining line, forward.
+    if (bestIdx < 0) {
+      bestIdx = firstUnused;
+      bestRev = 0;
+    }
+    const hopN = (bestRev === 1 ? e.eN[bestIdx] : e.sN[bestIdx]) - curN;
+    const hopE = (bestRev === 1 ? e.eE[bestIdx] : e.sE[bestIdx]) - curE;
+    const bestDist = Math.hypot(hopN, hopE);
+    used[bestIdx] = 1;
+    order.push(bestIdx);
+    reversed[step] = bestRev;
+    gap += bestDist;
+    curN = bestRev === 1 ? e.sN[bestIdx] : e.eN[bestIdx];
+    curE = bestRev === 1 ? e.sE[bestIdx] : e.eE[bestIdx];
+  }
+  return { order, reversed, gap };
 }
 
 /**

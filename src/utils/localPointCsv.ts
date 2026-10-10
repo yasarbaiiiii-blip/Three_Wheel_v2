@@ -444,14 +444,33 @@ function robustGpsAnchor(
   if (rows.length === 1) return { lat: rows[0].lat, lon: rows[0].lon, outlierCount: 0 };
   // Score each candidate by how many points lie within ~2 km (approx deg).
   const radiusDeg = 2 / 111; // ~2 km
+  const r2 = radiusDeg * radiusDeg;
+  // Grid with cell = radius: every point within the radius lies in the 3x3 block of cells,
+  // so the neighbour count is exact but the all-pairs scan (n^2) becomes ~n.
+  const cellOf = (v: number) => Math.floor(v / radiusDeg);
+  const grid = new Map<string, number[]>();
+  for (let i = 0; i < rows.length; i++) {
+    const key = `${cellOf(rows[i].lat)},${cellOf(rows[i].lon)}`;
+    const bucket = grid.get(key);
+    if (bucket) bucket.push(i);
+    else grid.set(key, [i]);
+  }
   let bestIdx = 0;
   let bestCount = 0;
   for (let i = 0; i < rows.length; i++) {
+    const ci = cellOf(rows[i].lat);
+    const cj = cellOf(rows[i].lon);
     let c = 0;
-    for (let j = 0; j < rows.length; j++) {
-      const dlat = rows[i].lat - rows[j].lat;
-      const dlon = rows[i].lon - rows[j].lon;
-      if (dlat * dlat + dlon * dlon <= radiusDeg * radiusDeg) c += 1;
+    for (let a = -1; a <= 1; a++) {
+      for (let b = -1; b <= 1; b++) {
+        const bucket = grid.get(`${ci + a},${cj + b}`);
+        if (!bucket) continue;
+        for (const j of bucket) {
+          const dlat = rows[i].lat - rows[j].lat;
+          const dlon = rows[i].lon - rows[j].lon;
+          if (dlat * dlat + dlon * dlon <= r2) c += 1;
+        }
+      }
     }
     if (c > bestCount) {
       bestCount = c;
@@ -474,32 +493,48 @@ function robustGpsAnchor(
 }
 
 /** Row-order sanity: source polyline vs nearest-neighbour tour (large ratio ⇒ jumbled order). */
-function rowOrderSanityWarning(points: { north_m: number; east_m: number }[]): string | null {
-  if (points.length < 6) return null;
+/** The check is a ratio, so a large file is judged on an evenly spaced sample (keeps it O(1)-ish). */
+const ROW_ORDER_SANITY_MAX_POINTS = 600;
+
+function rowOrderSanityWarning(allPoints: { north_m: number; east_m: number }[]): string | null {
+  if (allPoints.length < 6) return null;
+  const points =
+    allPoints.length > ROW_ORDER_SANITY_MAX_POINTS
+      ? sampleEvenly(allPoints, ROW_ORDER_SANITY_MAX_POINTS)
+      : allPoints;
+  const n = points.length;
+  const north = new Float64Array(n);
+  const east = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    north[i] = points[i].north_m;
+    east[i] = points[i].east_m;
+  }
   let pathLen = 0;
-  for (let i = 1; i < points.length; i++) {
-    pathLen += Math.hypot(
-      points[i].north_m - points[i - 1].north_m,
-      points[i].east_m - points[i - 1].east_m
-    );
+  for (let i = 1; i < n; i++) {
+    pathLen += Math.hypot(north[i] - north[i - 1], east[i] - east[i - 1]);
   }
   // Greedy NN tour length from first point (cheap upper-bound proxy for "drive order").
-  const remaining = new Set(Array.from({ length: points.length }, (_, i) => i));
+  // Index-order scan with squared distances: same tie-breaking as the old Set walk.
+  const used = new Uint8Array(n);
+  used[0] = 1;
   let cur = 0;
-  remaining.delete(0);
   let nnLen = 0;
-  while (remaining.size > 0) {
+  for (let step = 1; step < n; step++) {
     let best = -1;
-    let bestD = Infinity;
-    for (const j of remaining) {
-      const d = Math.hypot(points[j].north_m - points[cur].north_m, points[j].east_m - points[cur].east_m);
-      if (d < bestD) {
-        bestD = d;
+    let bestD2 = Infinity;
+    for (let j = 0; j < n; j++) {
+      if (used[j] === 1) continue;
+      const dn = north[j] - north[cur];
+      const de = east[j] - east[cur];
+      const d2 = dn * dn + de * de;
+      if (d2 < bestD2) {
+        bestD2 = d2;
         best = j;
       }
     }
-    nnLen += bestD;
-    remaining.delete(best);
+    if (best < 0) break;
+    nnLen += Math.sqrt(bestD2);
+    used[best] = 1;
     cur = best;
   }
   if (nnLen > 1e-6 && pathLen > 2.5 * nnLen) {
