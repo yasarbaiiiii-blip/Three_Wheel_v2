@@ -1678,6 +1678,7 @@ export default function ModernHomeUI(props) {
           onClose={() => setShowTelemetry(false)}
         />
 
+        {/* Quick status strip temporarily disabled.
         <View style={styles.telemetryQuickStrip}>
           <QuickChip icon={Radio} label="Gateway" value={telemetrySnapshot?.gateway_connected ? "ONLINE" : "DISCONNECTED"} tone={telemetrySnapshot?.gateway_connected ? COLORS.success : COLORS.danger} />
           <QuickChip icon={Radio} label="Operator" value={telemetrySnapshot?.operator_alive ? "ALIVE" : "UNAVAILABLE"} tone={telemetrySnapshot?.operator_alive ? COLORS.success : COLORS.danger} />
@@ -1686,6 +1687,7 @@ export default function ModernHomeUI(props) {
           <QuickChip icon={Radio} label="FCU" value={fcuConn} tone={fcuTone} />
           <QuickChip icon={Battery} label="Batt" value={hasBattery ? `${batteryPct}%` : "N/A"} tone={batteryTone} />
         </View>
+        */}
 
         <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.telemetryScroll} showsVerticalScrollIndicator={false}>
           <TelemetryBlock title="Position" icon={MapPin}>
