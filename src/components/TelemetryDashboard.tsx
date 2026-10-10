@@ -16,6 +16,9 @@ const areTelemetrySnapshotsEqual = (
   if (!prev || !next) return false;
   return (
     prev.lat === next.lat &&
+    prev.gateway_connected === next.gateway_connected &&
+    prev.operator_alive === next.operator_alive &&
+    prev.vehicle_telemetry_health === next.vehicle_telemetry_health &&
     prev.lon === next.lon &&
     prev.pos_n === next.pos_n &&
     prev.pos_e === next.pos_e &&
@@ -139,7 +142,7 @@ export const TelemetryDashboard = memo(
     const hasBattery = snapshot.battery_pct != null;
     const batteryPct = snapshot.battery_pct ?? 0;
     const batteryText = hasBattery ? `${batteryPct}%` : "N/A";
-    const missionStateStr = snapshot.mission_state ?? "idle";
+    const missionStateStr = snapshot.mission_state ?? "unavailable";
 
     const gpsFixSev = gpsFixSeverity(gpsFix);
     const gpsFixTone =
@@ -167,6 +170,9 @@ export const TelemetryDashboard = memo(
       <View style={{ padding: 8, gap: 6 }}>
         {/* Quick status row */}
         <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+          <TelemetryChip label="Gateway" value={snapshot.gateway_connected ? "ONLINE" : "DISCONNECTED"} tone={snapshot.gateway_connected ? "#10b981" : "#ef4444"} />
+          <TelemetryChip label="Operator" value={snapshot.operator_alive ? "ALIVE" : "UNAVAILABLE"} tone={snapshot.operator_alive ? "#10b981" : "#ef4444"} />
+          <TelemetryChip label="Vehicle" value={snapshot.vehicle_telemetry_health ?? "UNAVAILABLE"} tone={snapshot.vehicle_telemetry_health === "LIVE" ? "#10b981" : "#ef4444"} />
           <TelemetryChip label="Fix" value={gpsFix} tone={gpsFixTone} />
           <TelemetryChip label="Batt" value={batteryText} tone={batteryTone} />
           <TelemetryChip label="Sats" value={String(sats)} tone="#94a3b8" />

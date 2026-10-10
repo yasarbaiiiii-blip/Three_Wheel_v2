@@ -89,4 +89,11 @@ describe("production telemetry failure contract", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("schema"), "1");
     expect((store as any).evaluateMissionStartTelemetry().ok).toBe(false);
   });
+  it("preserves GPS-origin fix >=3 policy without requiring RTK fixed", () => {
+    const s = snapshot(); ingest(s);
+    expect(store.evaluateMissionStartTelemetry([12,77]).ok).toBe(true);
+    s.gnss_report!.data.fix_type=2; ingest(s);
+    expect(store.evaluateMissionStartTelemetry([12,77]).reasons.join(" ")).toContain("GPS fix ≥ 3");
+    expect(store.evaluateMissionStartTelemetry(null).ok).toBe(true);
+  });
 });

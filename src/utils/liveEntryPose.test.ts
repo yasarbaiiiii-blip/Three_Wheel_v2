@@ -99,6 +99,11 @@ describe("pickRoverPoseForEntry", () => {
     if (!r.ok) expect(r.error).toMatch(/stale/i);
   });
 
+  it("rejects an old source even when its cache receive timestamp is recent", () => {
+    const r = pickRoverPoseForEntry({restPose:null, cachePose:{...cache, pose_age_ms:1001}, cacheReceivedAtMs:100, nowMs:100});
+    expect(r.ok).toBe(false);
+  });
+
   it("rejects cache without receive timestamp", () => {
     const r = pickRoverPoseForEntry({
       restPose: null,

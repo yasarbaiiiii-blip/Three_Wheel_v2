@@ -23,7 +23,6 @@ import { resolveRoverNedInMissionFrame, type RoverPoseForEntry } from "../../uti
 import { radToDeg, wrap360, wrapPi } from "../../contract/prod/units";
 import {
   batteryPercentOrNull,
-  entryAgeMs,
   finiteOrNull,
   positiveOrNull,
   rppBlockedReason,
@@ -99,7 +98,7 @@ export function ingestTelemetryPacket(packet: TelemetryPacket, options: {source:
   const snapshot = packet?.snapshot ?? null;
   const schema = snapshot?.gateway?.schema;
   const schemaCompatible = schema === 1;
-  if (!schemaCompatible) console.warn("[Telemetry] gateway schema mismatch: expected numeric schema 1; Start disabled", schema);
+  if (snapshot && !schemaCompatible) console.warn("[Telemetry] gateway schema mismatch: expected numeric schema 1; Start disabled", schema);
   const age = finiteOrNull(packet?.age_s);
   const estop = snapshot?.emergency_stop?.data;
   state = { ...state, snapshot, lastReceivedAt: now, envelopeAgeMs: age !== null && age >= 0 ? age * 1000 : Infinity,
@@ -129,18 +128,22 @@ export function evaluateMissionStartTelemetry(originGps?: [number, number] | nul
   if (state.awaitingPacket) reasons.push("Waiting for fresh telemetry after reconnect or resume.");
   if (getOverallStaleness(now).isDisconnected) reasons.push("Telemetry disconnected or silent.");
   const pose = getAdaptedTelemetrySnapshot(now);
-  const hasPose = pose && (originGps ? Number.isFinite(pose.lat) && Number.isFinite(pose.lon) :
-    (Number.isFinite(pose.pos_n) && Number.isFinite(pose.pos_e)) || (Number.isFinite(pose.lat) && Number.isFinite(pose.lon)));
+  const localPose = pose && Number.isFinite(pose.pos_n) && Number.isFinite(pose.pos_e);
+  const gpsPose = pose && Number.isFinite(pose.lat) && Number.isFinite(pose.lon);
+  const hasPose = originGps ? gpsPose : originGps === null ? localPose : localPose || gpsPose;
   if (!hasPose) reasons.push("No valid, fresh rover pose available.");
   else if (originGps) {
-    const resolved = resolveRoverNedInMissionFrame(pose, originGps);
+    const resolved = resolveRoverNedInMissionFrame(pose!, originGps);
     if (!resolved.ok) reasons.push(resolved.reason);
   }
   return { ok: reasons.length === 0, reasons };
 }
 
 export function getMissionStartTelemetryPose(originGps?: [number, number] | null): RoverPoseForEntry | null {
-  return evaluateMissionStartTelemetry(originGps).ok ? getAdaptedTelemetrySnapshot() : null;
+  if (!evaluateMissionStartTelemetry(originGps).ok) return null;
+  const pose = getAdaptedTelemetrySnapshot();
+  if (!pose) return null;
+  return { ...pose, pose_age_ms: getTelemetrySourceAgeMs(originGps ? state.snapshot?.gnss_report : state.snapshot?.vehicle_state) };
 }
 
 const listeners = new Set<Listener>();
@@ -220,7 +223,7 @@ export function useProdTelemetry() {
 
 /** Evaluates overall telemetry freshness */
 export function getOverallStaleness(now = telemetryNow()): StalenessInfo {
-  return evaluateAgeStaleness(state.awaitingPacket ? Infinity : packetAgeMs(now));
+  return evaluateAgeStaleness(state.awaitingPacket || !state.snapshot ? Infinity : packetAgeMs(now));
 }
 
 /** Extracted and unit-converted live vehicle state */
@@ -259,7 +262,7 @@ export function getDerivedVehiclePose(now = telemetryNow()): DerivedVehiclePose 
   const speed = adapted?.speed_m_s ?? null;
   const headingDeg = adapted?.heading_ned_deg ?? null;
   const rate = d?.attitude_valid === true ? finiteOrNull(d.yaw_rate_radps) : null;
-  const yawRateDegps = rate === null ? null : radToDeg(rate);
+  const yawRateDegps = rate === null ? null : finiteOrNull(radToDeg(rate));
 
   // Use subsystem receive stamp if available, or fall back to snapshot stamp
   const staleness = evaluateAgeStaleness(getTelemetrySourceAgeMs(vs, now) ?? Infinity);
@@ -312,9 +315,10 @@ export function getAdaptedTelemetrySnapshot(now = telemetryNow()): TelemetrySnap
 
   const vn = velOk ? finiteOrNull(vs!.velocity_north_mps) : null;
   const ve = velOk ? finiteOrNull(vs!.velocity_east_mps) : null;
-  const speed = vn !== null && ve !== null ? Math.sqrt(vn * vn + ve * ve) : null;
+  const speed = vn !== null && ve !== null ? finiteOrNull(Math.hypot(vn, ve)) : null;
   const headingRad = attOk ? finiteOrNull(vs!.heading_rad) : null;
-  const heading = headingRad !== null ? wrap360(radToDeg(headingRad)) : null;
+  const headingDegrees = headingRad !== null ? finiteOrNull(radToDeg(headingRad)) : null;
+  const heading = headingDegrees !== null ? wrap360(headingDegrees) : null;
 
   const fixType = finiteOrNull(rtk?.fix_type) ?? finiteOrNull(gnss?.fix_type);
   const fixName = fixType !== null ? FIX_TYPE_NAMES[fixType] ?? `Fix ${fixType}` : "NO DATA";

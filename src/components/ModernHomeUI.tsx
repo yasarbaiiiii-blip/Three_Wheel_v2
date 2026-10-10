@@ -831,7 +831,7 @@ export default function ModernHomeUI(props) {
   // hrms/vrms displayed in centimetres (m * 100), 2 decimal places
   const hrms = telemetrySnapshot?.hrms != null ? (telemetrySnapshot.hrms * 100).toFixed(2) : "—";
   const vrms = telemetrySnapshot?.vrms != null ? (telemetrySnapshot.vrms * 100).toFixed(2) : "—";
-  const missionStateStr = telemetrySnapshot?.mission_state ?? (missionRunning ? "running" : "idle");
+  const missionStateStr = telemetrySnapshot?.mission_state ?? "unavailable";
   const xtrack = telemetrySnapshot?.xtrack_m != null ? telemetrySnapshot.xtrack_m.toFixed(2) : "—";
   const headingErr = telemetrySnapshot?.heading_err_deg != null ? telemetrySnapshot.heading_err_deg.toFixed(2) : "—";
   const headingDeg = telemetrySnapshot?.heading_ned_deg != null ? telemetrySnapshot.heading_ned_deg.toFixed(2) : "—";
@@ -1679,6 +1679,9 @@ export default function ModernHomeUI(props) {
         />
 
         <View style={styles.telemetryQuickStrip}>
+          <QuickChip icon={Radio} label="Gateway" value={telemetrySnapshot?.gateway_connected ? "ONLINE" : "DISCONNECTED"} tone={telemetrySnapshot?.gateway_connected ? COLORS.success : COLORS.danger} />
+          <QuickChip icon={Radio} label="Operator" value={telemetrySnapshot?.operator_alive ? "ALIVE" : "UNAVAILABLE"} tone={telemetrySnapshot?.operator_alive ? COLORS.success : COLORS.danger} />
+          <QuickChip icon={Activity} label="Vehicle" value={telemetrySnapshot?.vehicle_telemetry_health ?? "UNAVAILABLE"} tone={telemetrySnapshot?.vehicle_telemetry_health === "LIVE" ? COLORS.success : COLORS.danger} />
           <QuickChip icon={Satellite} label="Fix" value={gpsFix} tone={gpsFixTone} />
           <QuickChip icon={Radio} label="FCU" value={fcuConn} tone={fcuTone} />
           <QuickChip icon={Battery} label="Batt" value={hasBattery ? `${batteryPct}%` : "N/A"} tone={batteryTone} />

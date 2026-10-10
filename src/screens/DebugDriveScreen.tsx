@@ -567,6 +567,12 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
                 GATEWAY: {telemetry.gatewayConnected ? "ONLINE" : "DISCONNECTED"}
               </Text>
             </View>
+            <View style={[styles.pill, telemetry.operatorAlive && overallStaleness.isLive && !telemetry.awaitingPacket ? styles.pillGreen : styles.pillRed]}>
+              <Text style={styles.pillText}>OPERATOR: {telemetry.operatorAlive && overallStaleness.isLive && !telemetry.awaitingPacket ? "ALIVE" : "UNAVAILABLE"}</Text>
+            </View>
+            <View style={[styles.pill, vehiclePose.staleness.isLive && vehiclePose.northM !== null ? styles.pillGreen : styles.pillRed]}>
+              <Text style={styles.pillText}>VEHICLE: {vehiclePose.northM === null ? "UNAVAILABLE" : vehiclePose.staleness.grade}</Text>
+            </View>
           </View>
         </View>
 

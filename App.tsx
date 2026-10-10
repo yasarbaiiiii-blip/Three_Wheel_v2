@@ -189,7 +189,6 @@ import { ConnectionView } from "./src/features/connection/ConnectionView";
 import {
   applyTelemetryPacket,
   clearTelemetryRuntime,
-  getTelemetrySnapshot,
   patchTelemetryMissionState,
   setSystemHealth,
   setTelemetrySnapshot,
@@ -197,13 +196,12 @@ import {
   useTelemetrySnapshot,
 } from "./src/features/telemetry/telemetryStore";
 import { getAppTransport } from "./src/services/appTransport";
+import { recoverProductionTelemetry } from "./src/features/telemetry/telemetryRecovery";
 import { roverBeaconListener, type BeaconRover } from "./src/services/roverBeacon";
 import { loadLastRoverId } from "./src/api/prodStorage";
 import { getProdApiClient, ProdApiError } from "./src/api/prodClient";
 import {
   clearProdTelemetry,
-  applyProdTelemetrySnapshot,
-  setProdGatewayConnected,
   getAdaptedTelemetrySnapshot,
   subscribeProdTelemetry,
   getProdTelemetryState,
@@ -224,7 +222,6 @@ import {
   SOCKET_CONNECT_TIMEOUT_MS,
   waitForSocketConnect,
 } from "./src/utils/socketConnect";
-import { normalizeTelemetryPacket } from "./src/utils/telemetryDeadband";
 import { EMPTY_RTK_STATUS, fetchRtkStatus, normalizeRtkStatus } from "./src/api/rtkStatus";
 const SwoziPage = lazyDefault(
   () => import("./src/screens/SecondaryPages").then((m) => ({ default: m.SwoziPage })),
@@ -1027,29 +1024,6 @@ function AppRoot() {
   // already skips noise; do not use boolean-only selectors that miss pose updates.
   const telemetrySnapshot = useTelemetrySnapshot();
   const systemHealth = useSystemHealth();
-  /**
-   * Always-current pose for Start live entry. Updated on every telemetry packet
-   * (including when React deadband skips setState) and on REST refresh.
-   */
-  const telemetrySnapshotRef = useRef<TelemetrySnapshot | null>(null);
-  const telemetryReceivedAtMsRef = useRef<number>(0);
-
-  const noteTelemetryForLiveEntry = useCallback(
-    (partial: {
-      pos_n?: number | null;
-      pos_e?: number | null;
-      lat?: number | null;
-      lon?: number | null;
-      gps_fix?: number | null;
-      pose_age_ms?: number | null;
-    }) => {
-      // Never merge null fields into a last-known pose, or stamp ticker notifications as packets.
-      telemetrySnapshotRef.current = { ...partial } as TelemetrySnapshot;
-      telemetryReceivedAtMsRef.current = getProdTelemetryState().lastReceivedAt ?? 0;
-    },
-    []
-  );
-
   // Latch first finite GPS after telemetry exists — must not run above this declaration.
   useEffect(() => {
     if (latchedPreviewGps) return;
@@ -1940,26 +1914,9 @@ function AppRoot() {
 
   // Listen to live telemetry from unified production store
   useEffect(() => {
-    let lastPacketRevision = -1;
     const unsub = subscribeProdTelemetry(() => {
       const snap = getAdaptedTelemetrySnapshot();
-      if (getProdTelemetryState().awaitingPacket) {
-        telemetrySnapshotRef.current = null;
-        telemetryReceivedAtMsRef.current = 0;
-      }
       if (snap) {
-        if (!getProdTelemetryState().awaitingPacket && lastPacketRevision !== getProdTelemetryState().packetRevision) {
-          lastPacketRevision = getProdTelemetryState().packetRevision;
-          noteTelemetryForLiveEntry({
-          pos_n: snap.pos_n,
-          pos_e: snap.pos_e,
-          lat: snap.lat,
-          lon: snap.lon,
-          gps_fix: snap.gps_fix,
-          pose_age_ms: snap.pose_age_ms,
-        });
-        }
-
         if (snap.mission_state) {
           setMissionRunning(snap.mission_state === "running");
           setIsPaused(snap.mission_state === "paused");
@@ -2707,178 +2664,65 @@ function AppRoot() {
   async function refreshTelemetryPanel(opts?: { quiet?: boolean }) {
     if (!apiBaseUrl) return;
     const quiet = opts?.quiet === true;
-    if (!quiet) {
-      setTelemetryLoading(true);
-      setTelemetryError("");
-    }
+    if (!quiet) { setTelemetryLoading(true); setTelemetryError(""); }
     try {
-      const [statusRes, healthRes, telemetryRes, loadedRes] = await Promise.all([
-        fetchMissionStatus(apiBaseUrl),
-        fetchJson<{
-          ros_node: boolean;
-          fcu_connected: boolean;
-          armed: boolean;
-          mode: string;
-          rpp_state: number;
-          pose_age_ms: number;
-          mission_state: string;
-        }>(`${apiBaseUrl}/api/healthz`).catch((err) => {
-          console.log("healthz failed:", err);
-          return null;
-        }),
-        fetchJson<{
-          pos_n: number;
-          pos_e: number;
-          heading_ned_deg: number;
-          xtrack_m: number;
-          heading_err_deg: number;
-          lookahead_m: number;
-          speed_m_s: number;
-          measured_speed_m_s?: number | null;
-          kappa: number;
-          dist_to_goal_m: number;
-          pose_age_ms: number;
-          rpp_state: number;
-          rpp_state_name: string;
-          rpp_debug_age_ms?: number | null;
-          rpp_debug_fresh?: boolean | null;
-          armed: boolean;
-          mode: string;
-          connected: boolean;
-          battery_v: number;
-          battery_pct: number;
-          gps_fix: number;
-          gps_fix_name?: string | null;
-          gps_sat: number;
-          hrms?: number | null;
-          vrms?: number | null;
-          lat: number;
-          lon: number;
-          alt: number;
-          spraying?: boolean | null;
-          along_track_speed_mps?: number | null;
-          cross_track_speed_mps?: number | null;
-          projection_segment_index?: number | null;
-          projection_s?: number | null;
-          projection_xtrack_error_m?: number | null;
-          vehicle_state_stale?: boolean | null;
-          gps_safety_ok?: boolean | null;
-          manual_resume_required?: boolean | null;
-        }>(`${apiBaseUrl}/api/telemetry/latest`).catch((err) => {
-          console.log("telemetry/latest failed:", err);
-          return null;
-        }),
-        fetchJson<missionApi.LoadedPathResponse>(`${apiBaseUrl}/api/mission/loaded-path`).catch((err) => {
-          console.log("loaded-path failed:", err);
-          return null;
-        }),
-      ]);
-
-      if (loadedRes) reconcileLoadedMission(loadedRes, statusRes);
-      setMissionRunning(statusRes.state === "running");
-
-      const normalizedTelemetry = telemetryRes ? normalizeTelemetryPacket(telemetryRes) : null;
-      const fromStatus = normalizeTelemetryPacket({
-        rpp_state: statusRes.rpp_state,
-        rpp_state_name: statusRes.rpp_state_name,
-        dist_to_goal: statusRes.dist_to_goal,
-        speed: statusRes.speed,
-        measured_speed_m_s: statusRes.measured_speed_m_s,
-        xtrack: statusRes.xtrack,
-        mission_state: statusRes.state,
-      });
-      const mergedPacket = {
-        ...(fromStatus ?? {}),
-        ...(normalizedTelemetry ?? {}),
-        mission_state: statusRes.state,
-      };
-      applyTelemetryPacket(mergedPacket);
-      const live = getTelemetrySnapshot();
-      if (live) {
-        noteTelemetryForLiveEntry({
-          pos_n: live.pos_n,
-          pos_e: live.pos_e,
-          lat: live.lat,
-          lon: live.lon,
-          gps_fix: live.gps_fix,
-          pose_age_ms: live.pose_age_ms,
-        });
+      const result = await recoverProductionTelemetry(getProdApiClient());
+      if (!result.accepted) return;
+      const status = missionApi.missionStatusFromTelemetry();
+      if (status) {
+        setMissionRunning(status.state === "running");
+        setIsPaused(status.state === "paused");
       }
-
-      if (statusRes.state === "paused") {
-        setIsPaused(true);
-      } else if (statusRes.state === "running") {
-        setIsPaused(false);
-      }
-
-      setSystemHealth((prev) => ({
-        ros_node: healthRes?.ros_node ?? prev?.ros_node ?? Boolean(telemetryRes),
-        fcu_connected:
-          healthRes?.fcu_connected ??
-          (typeof telemetryRes?.connected === "boolean" ? telemetryRes.connected : prev?.fcu_connected ?? false),
-        armed: live?.armed ?? healthRes?.armed ?? prev?.armed ?? false,
-        mode: live?.mode ?? healthRes?.mode ?? prev?.mode ?? statusRes.state.toUpperCase(),
-        rpp_state: live?.rpp_state ?? statusRes.rpp_state ?? prev?.rpp_state ?? null,
-        mission_state: statusRes.state,
-      }));
     } catch (error) {
-      if (!quiet) {
-        setTelemetryError(error instanceof Error ? error.message : "Unable to load status");
-      }
+      if (!quiet) setTelemetryError(error instanceof Error ? error.message : "Unable to load telemetry");
     } finally {
       if (!quiet) setTelemetryLoading(false);
     }
   }
 
   async function refreshMissionIdentity() {
-    if (!apiBaseUrl) return;
-    if (missionIdentityInFlightRef.current) {
-      missionIdentityRepeatRef.current = true;
-      return;
-    }
+    if (!apiBaseUrl || missionIdentityInFlightRef.current) return;
     missionIdentityInFlightRef.current = true;
-    const requestGeneration = missionIdentityGenerationRef.current;
+    const generation = missionIdentityGenerationRef.current;
     try {
-      const [status, loaded] = await Promise.all([
-        fetchMissionStatus(apiBaseUrl),
-        fetchJson<missionApi.LoadedPathResponse>(`${apiBaseUrl}/api/mission/loaded-path`),
-      ]);
-      // A load/stage/clear action started and finished while this request was
-      // in flight — its snapshot predates that action, discard it rather than
-      // stomp the newer state.
-      if (missionIdentityGenerationRef.current !== requestGeneration) return;
-      reconcileLoadedMission(loaded, status);
-      setMissionRunning(status.state === "running");
+      await refreshTelemetryPanel({ quiet: true });
+      if (generation !== missionIdentityGenerationRef.current) return;
+      const status = missionApi.missionStatusFromTelemetry();
+      if (!status) return;
+      const loaded = await missionApi.getLoadedPath(apiBaseUrl);
+      if (generation !== missionIdentityGenerationRef.current) return;
+      const inspection = await loaded.json() as missionApi.LoadedPathResponse;
+      reconcileLoadedMission(inspection, missionApi.missionStatusFromTelemetry() ?? undefined);
     } catch {
-      // Telemetry errors are presented by the existing status refresh path.
+      // Keep the existing inspection until current mission telemetry and geometry can be verified.
     } finally {
       missionIdentityInFlightRef.current = false;
-      if (missionIdentityRepeatRef.current) {
-        missionIdentityRepeatRef.current = false;
-        void refreshMissionIdentity();
-      }
     }
   }
 
   useEffect(() => {
-    if (!apiBaseUrl || wsStatus !== "connected") return;
-    void refreshMissionIdentity();
-    const timer = setInterval(() => void refreshMissionIdentity(), 3000);
-    return () => clearInterval(timer);
-  }, [apiBaseUrl, reconcileLoadedMission, wsStatus]);
+    if (apiBaseUrl && wsStatus === "connected" && telemetrySnapshot?.mission_state) void refreshMissionIdentity();
+  }, [apiBaseUrl, wsStatus, telemetrySnapshot?.mission_state]);
 
   useEffect(() => {
-    if (!apiBaseUrl || wsStatus !== "connected") return;
-    void refreshTelemetryPanel();
+    if (!apiBaseUrl || wsStatus === "unauthorized" || wsStatus === "idle") return;
+    let stopped = false;
+    let inFlight = false;
+    const recover = async () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      try { await refreshTelemetryPanel({ quiet: true }); }
+      finally { inFlight = false; }
+    };
+    // Reconnect bootstrap; disconnect and silence both have a recovery path.
+    void recover();
     const timer = setInterval(() => {
-      const last = telemetryReceivedAtMsRef.current;
-      if (!last || Date.now() - last > 2500) {
-        void refreshTelemetryPanel({ quiet: true });
-      }
+      const state = getProdTelemetryState();
+      const silent = state.lastReceivedAt === null || telemetryNow() - state.lastReceivedAt > 2500;
+      if (wsStatus !== "connected" || state.awaitingPacket || silent) void recover();
     }, 2500);
-    return () => clearInterval(timer);
+    return () => { stopped = true; clearInterval(timer); };
   }, [apiBaseUrl, wsStatus]);
-
   async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
@@ -4213,7 +4057,7 @@ function AppRoot() {
       if (isAppPlannedStart && appPlannedStartSnapshot) {
         const nowMs = telemetryNow();
         const cachePose = getMissionStartTelemetryPose(appPlannedStartSnapshot.originGps);
-        const cacheReceivedAtMs = telemetryReceivedAtMsRef.current || null;
+        const cacheReceivedAtMs = getProdTelemetryState().lastReceivedAt;
         const cacheAgeMs =
           cacheReceivedAtMs != null ? nowMs - cacheReceivedAtMs : Number.POSITIVE_INFINITY;
         let restPoseRaw: Awaited<ReturnType<typeof missionApi.fetchLatestTelemetryPose>> = null;
@@ -4223,6 +4067,7 @@ function AppRoot() {
         const eligibility = evaluateMissionStartTelemetry(appPlannedStartSnapshot.originGps);
         if (!eligibility.ok) throw new Error(eligibility.reasons.join(" "));
         const picked = pickRoverPoseForEntry({
+          eligibility,
           restPose: telemetryToRoverPoseForEntry(restPoseRaw),
           cachePose: getMissionStartTelemetryPose(appPlannedStartSnapshot.originGps),
           cacheReceivedAtMs: getProdTelemetryState().lastReceivedAt,
@@ -4344,6 +4189,7 @@ function AppRoot() {
 
           const usedNed = resolveRoverNedInMissionFrame(livePose, startSnapshot.originGps);
           const picked2 = pickRoverPoseForEntry({
+            eligibility: evaluateMissionStartTelemetry(startSnapshot.originGps),
             restPose: null,
             cachePose: getMissionStartTelemetryPose(startSnapshot.originGps),
             cacheReceivedAtMs: getProdTelemetryState().lastReceivedAt,

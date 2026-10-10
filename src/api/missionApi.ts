@@ -1,6 +1,6 @@
-import { normalizeTelemetryPacket } from "../utils/telemetryDeadband";
 import { getProdApiClient } from "./prodClient";
-import { beginTelemetryRequest, ingestTelemetryPacket, getMissionStartTelemetryPose } from "../features/telemetry/prodTelemetryStore";
+import { beginTelemetryRequest, ingestTelemetryPacket, getMissionStartTelemetryPose, getAdaptedTelemetrySnapshot, getProdTelemetryState, getTelemetrySourceAgeMs } from "../features/telemetry/prodTelemetryStore";
+import { STALE_THRESHOLD_MS } from "../features/telemetry/staleness";
 
 export type LoadMissionPayload = {
   path_name?: string;
@@ -104,11 +104,22 @@ export async function loadMissionToController(
   return postJson(apiBaseUrl, "/api/path/load-to-controller", payload);
 }
 
-export function getLoadedPath(apiBaseUrl: string): Promise<Response> {
-  return fetch(apiUrl(apiBaseUrl, "/api/mission/loaded-path"), {
-    method: "GET",
-    headers: { Accept: "application/json" },
-  });
+export async function getLoadedPath(apiBaseUrl: string): Promise<Response> {
+  const status = await getMissionStatus(apiBaseUrl);
+  const id = status.loaded_mission_id;
+  const path = id ? await getProdApiClient().getMissionPath(id) : null;
+  // Never attach geometry from an old mission to a newer telemetry identity.
+  const latest = missionStatusFromTelemetry();
+  if (!latest || latest.loaded_mission_id !== id) throw new Error("Mission changed during recovery; retry.");
+  const points = path?.points ?? [];
+  const marks = points.filter(p => (p[2] & 1) !== 0).length;
+  const inspection: LoadedPathResponse = {
+    loaded: Boolean(id), mission_id: id, running_mission_id: latest.running_mission_id,
+    state: latest.state, is_staged: Boolean(id),
+    num_waypoints: points.length, num_mark: marks, num_transit: points.length - marks,
+    has_spray_flags: points.length > 0, sample_coords: points.map(p => [p[0],p[1]]), sample_truncated: false,
+  };
+  return new Response(JSON.stringify(inspection), {status:200, headers:{"Content-Type":"application/json"}});
 }
 
 export async function startMission(apiBaseUrl: string, payload?: StartMissionPayload): Promise<Response> {
@@ -166,12 +177,25 @@ export function exportLog(apiBaseUrl: string): Promise<Response> {
   return postJson(apiBaseUrl, "/api/mission/export");
 }
 
-export async function getMissionStatus(apiBaseUrl: string, init?: RequestInit): Promise<MissionStatus> {
-  const res = await fetch(apiUrl(apiBaseUrl, "/api/mission/status"), init);
-  if (!res.ok) {
-    throw new Error(`${res.status} ${res.statusText}`);
-  }
-  return (await res.json()) as MissionStatus;
+export function missionStatusFromTelemetry(): MissionStatus | null {
+  const entry = getProdTelemetryState().snapshot?.mission;
+  const age = getTelemetrySourceAgeMs(entry);
+  const adapted = getAdaptedTelemetrySnapshot();
+  if (entry?.fresh !== true || age === null || age > STALE_THRESHOLD_MS || !adapted?.mission_state) return null;
+  const id = entry.data.path_artifact_sha256 || null;
+  return {state: adapted.mission_state, rpp_state: adapted.rpp_state ?? null,
+    rpp_state_name: adapted.rpp_state_name ?? "UNKNOWN", dist_to_goal: adapted.dist_to_goal_m ?? null,
+    speed: adapted.speed_m_s ?? null, xtrack: adapted.xtrack_m ?? null, loaded_mission_id: id,
+    running_mission_id: ["running", "paused"].includes(adapted.mission_state) ? id : null};
+}
+
+export async function getMissionStatus(_apiBaseUrl: string, _init?: RequestInit): Promise<MissionStatus> {
+  const request = beginTelemetryRequest();
+  const packet = await getProdApiClient().getTelemetry();
+  ingestTelemetryPacket(packet, {source:"rest", request});
+  const status = missionStatusFromTelemetry();
+  if (!status) throw new Error("Mission telemetry unavailable or stale.");
+  return status;
 }
 
 /**
