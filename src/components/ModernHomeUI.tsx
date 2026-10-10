@@ -685,8 +685,8 @@ export default function ModernHomeUI(props) {
 
   // Local UI State
   const [mapStyleIndex, setMapStyleIndex] = useState(0);
-  const [showTelemetry, setShowTelemetry] = useState(false);
-  const [showMissionControl, setShowMissionControl] = useState(false);
+  const [showTelemetry, setShowTelemetry] = useState(true);
+  const [showMissionControl, setShowMissionControl] = useState(true);
   const [showJoystick, setShowJoystick] = useState(false);
   const [pendingJoystickOpen, setPendingJoystickOpen] = useState(false);
   const [quickAccessExpanded, setQuickAccessExpanded] = useState(false);
