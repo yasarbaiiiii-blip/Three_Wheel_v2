@@ -172,7 +172,8 @@ export function evaluateMissionStartTelemetry(originGps?: [number, number] | nul
   const reasons: string[] = [];
   if (!state.socketConnected) reasons.push("Socket disconnected.");
   if (!gatewayUp()) reasons.push("Gateway disconnected.");
-  if (!operatorUp() || !getOverallStaleness(now).isLive) reasons.push("Operator heartbeat unavailable.");
+  // The operator heartbeat is not a start condition (owner decision 2026-10-10, prototype behaviour).
+  if (!getOverallStaleness(now).isLive) reasons.push("Rover telemetry is not live.");
   if (!state.schemaCompatible) reasons.push("Telemetry schema incompatible.");
   if (state.awaitingPacket) reasons.push("Waiting for fresh telemetry after reconnect or resume.");
   if (getOverallStaleness(now).isDisconnected) reasons.push("Telemetry disconnected or silent.");
@@ -355,7 +356,6 @@ export function getAdaptedTelemetrySnapshot(now = telemetryNow()): TelemetrySnap
   const rtk = usableData(snap.rtk_status, now);
   const gnssFresh = usableData(snap.gnss_report, now);
   const gnss = gnssFresh?.valid === true ? gnssFresh : null;
-  const battery = usableData(snap.battery, now);
 
   const posOk = vs?.position_valid === true;
   const velOk = vs?.velocity_valid === true;
@@ -365,6 +365,13 @@ export function getAdaptedTelemetrySnapshot(now = telemetryNow()): TelemetrySnap
   const ve = velOk ? finiteOrNull(vs!.velocity_east_mps) : null;
   const speed = vn !== null && ve !== null ? finiteOrNull(Math.hypot(vn, ve)) : null;
   const headingRad = attOk ? finiteOrNull(vs!.heading_rad) : null;
+  // Body-frame speeds: forward along the nose, lateral to the right.
+  const forwardSpeed =
+    vn !== null && ve !== null && headingRad !== null ? vn * Math.cos(headingRad) + ve * Math.sin(headingRad) : null;
+  const lateralSpeed =
+    vn !== null && ve !== null && headingRad !== null ? -vn * Math.sin(headingRad) + ve * Math.cos(headingRad) : null;
+  const batteryOk = vs?.battery_valid === true;
+  const batteryRemaining = batteryOk ? finiteOrNull(vs!.battery_remaining) : null;
   const headingDegrees = headingRad !== null ? finiteOrNull(radToDeg(headingRad)) : null;
   const heading = headingDegrees !== null ? wrap360(headingDegrees) : null;
 
@@ -410,8 +417,10 @@ export function getAdaptedTelemetrySnapshot(now = telemetryNow()): TelemetrySnap
     connected: gatewayUp() && !state.awaitingPacket && !staleness.isDisconnected,
     // The fcu_link event, not the snapshot: unknown (null) while the gateway is down or the source is silent.
     fcu_connected: fcuConnected(),
-    battery_v: finiteOrNull(battery?.voltage_v),
-    battery_pct: batteryPercentOrNull(battery?.remaining_pct),
-    battery_a: finiteOrNull(battery?.current_a),
+    battery_v: batteryOk ? finiteOrNull(vs!.battery_voltage_v) : null,
+    battery_pct: batteryRemaining !== null ? batteryPercentOrNull(batteryRemaining * 100) : null,
+    battery_a: batteryOk ? finiteOrNull(vs!.battery_current_a) : null,
+    along_track_speed_mps: forwardSpeed !== null ? finiteOrNull(forwardSpeed) : null,
+    cross_track_speed_mps: lateralSpeed !== null ? finiteOrNull(lateralSpeed) : null,
   };
 }

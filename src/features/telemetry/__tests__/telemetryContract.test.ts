@@ -71,7 +71,8 @@ describe("production telemetry failure contract", () => {
     ingest();
     expect(store.getProdTelemetryState().gatewayConnected).toBe(true);
     expect(store.getProdTelemetryState().operatorAlive).toBe(false);
-    expect((store as any).evaluateMissionStartTelemetry().reasons).toContain("Operator heartbeat unavailable.");
+    // The operator heartbeat is not a start condition (prototype behaviour).
+    expect((store as any).evaluateMissionStartTelemetry().reasons).not.toContain("Operator heartbeat unavailable.");
     pushRoverEvent("operator_link", operatorLinkData(true));
     ingest(); now += 2501;
     expect((store as any).evaluateMissionStartTelemetry().reasons).toContain("Telemetry disconnected or silent.");

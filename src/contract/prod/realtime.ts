@@ -29,6 +29,17 @@ export interface VehicleStateData {
   arming_state: number;
   nav_state: number;
   failsafe: boolean;
+  /** Gateway-derived (rover interfaces 0.16.0): ground speed and its component along the heading. */
+  velocity_down_mps?: number | null;
+  ground_speed_mps?: number | null;
+  forward_speed_mps?: number | null;
+  global_reference_valid?: boolean;
+  xy_reset_counter?: number;
+  /** PX4 battery_status; values are null unless battery_valid. remaining is 0..1. */
+  battery_valid?: boolean;
+  battery_voltage_v?: number | null;
+  battery_current_a?: number | null;
+  battery_remaining?: number | null;
 }
 
 export interface EstimatorHealthData {
@@ -194,13 +205,6 @@ export interface RecorderData {
   free_bytes: number;
 }
 
-/** Not sent by the gateway yet (docs/BACKEND_TELEMETRY_REQUESTS.md R4). `remaining_pct` is 0-100. */
-export interface BatteryData {
-  voltage_v?: number | null;
-  current_a?: number | null;
-  remaining_pct?: number | null;
-}
-
 export interface GatewayInfoData {
   operator_alive: boolean;
   clients: number;
@@ -223,7 +227,6 @@ export interface RoverTelemetrySnapshot {
   spray: SnapshotEntry<SprayData> | null;
   recorder: SnapshotEntry<RecorderData> | null;
   /** Absent until the backend adds it (docs/BACKEND_TELEMETRY_REQUESTS.md R4). */
-  battery?: SnapshotEntry<BatteryData> | null;
   gateway?: GatewayInfoData;
 }
 

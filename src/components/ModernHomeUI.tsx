@@ -7,7 +7,8 @@ import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText, Path, Poly
 import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check, Pencil, Undo2, Layers, ChevronRight, Ruler, Spline, LayoutList } from "lucide-react-native";
 import { Compass } from "./Compass";
 import { Navbar } from "./Navbar";
-import { useRoverEvents } from "../features/telemetry/roverEventStore";
+import { selectEstop, useRoverEvents } from "../features/telemetry/roverEventStore";
+import { useTelemetrySelector } from "../features/telemetry/telemetryStore";
 import { describeRoverLinks, linkUnknownNote } from "../features/telemetry/roverLinkStatus";
 import { describeMission, missionControls, selectMission } from "../features/mission/missionLifecycle";
 import { MapView } from "./MapView";
@@ -225,6 +226,42 @@ const StatTile = ({ icon: Icon, label, value, tone = COLORS.textMain, accent = C
   </View>
 );
 
+// ---- live (10 Hz) tiles -------------------------------------------------------------------------
+// The panel around these tiles re-renders at most ~4 Hz. Each live tile subscribes to ONE formatted
+// string from the raw telemetry store, so a 10 Hz packet re-renders only the tiles whose displayed
+// text changed — never the panel, the map or the screen.
+type LiveFormat = (s: TelemetrySnapshot | null) => string;
+const fmt = (v: number | null | undefined, digits: number, unit: string) =>
+  v == null || !Number.isFinite(v) ? "—" : `${v.toFixed(digits)}${unit}`;
+const LIVE = {
+  lat: (s) => fmt(s?.lat, 8, ""),
+  lon: (s) => fmt(s?.lon, 8, ""),
+  hrms: (s) => fmt(s?.hrms != null ? s.hrms * 100 : null, 2, " cm"),
+  poseAge: (s) => fmt(s?.pose_age_ms, 0, " ms"),
+  xtrack: (s) => fmt(s?.xtrack_m, 2, " m"),
+  headingErr: (s) => fmt(s?.heading_err_deg, 2, "°"),
+  distGoal: (s) => fmt(s?.dist_to_goal_m, 2, " m"),
+  speed: (s) => fmt(s?.measured_speed_m_s ?? s?.speed_m_s, 2, " m/s"),
+  along: (s) => fmt(s?.along_track_speed_mps, 2, " m/s"),
+  cross: (s) => fmt(s?.cross_track_speed_mps, 2, " m/s"),
+} satisfies Record<string, LiveFormat>;
+const useLiveText = (format: LiveFormat) => useTelemetrySelector(format);
+
+const LiveStatTile = React.memo(function LiveStatTile({
+  icon, label, format, accent, accentFor,
+}: { icon: any; label: string; format: LiveFormat; accent?: string; accentFor?: (text: string) => string }) {
+  const value = useLiveText(format);
+  return <StatTile icon={icon} label={label} value={value} accent={accentFor ? accentFor(value) : accent} />;
+});
+
+const LiveCoordRow = React.memo(function LiveCoordRow({ label, format }: { label: string; format: LiveFormat }) {
+  const value = useLiveText(format);
+  return <CoordRow label={label} value={value} />;
+});
+
+const xtrackAccent = (t: string) => (Math.abs(parseFloat(t) || 0) > 0.05 ? COLORS.danger : COLORS.accentBrand);
+const headingErrAccent = (t: string) => (Math.abs(parseFloat(t) || 0) > 10 ? COLORS.danger : COLORS.warning);
+
 const StatusPill = ({ label, tone = COLORS.accentBrand, pulse = false }) => (
   <View style={[styles.statusPill, { backgroundColor: pillBgFor(tone), borderColor: pillBorderFor(tone) }]}>
     {pulse && <View style={[styles.statusPillDot, { backgroundColor: tone }]} />}
@@ -404,7 +441,7 @@ const MissionActionBtn = ({
   );
 };
 
-const FloatingEStop = ({ visible, onTrigger }) => {
+const FloatingEStop = ({ visible, onTrigger, asserted = false }) => {
   const posX = useSharedValue(ESTOP_INIT_X);
   const posY = useSharedValue(ESTOP_INIT_Y);
   const dragOriginX = useSharedValue(ESTOP_INIT_X);
@@ -476,8 +513,8 @@ const FloatingEStop = ({ visible, onTrigger }) => {
         <AnimatedReanimated.View style={[styles.estopDraggable, containerStyle]}>
           <View style={styles.estopButton}>
             <ShieldAlert size={32} color="#fff" strokeWidth={2.5} />
-            <Text style={styles.estopText}>E-STOP</Text>
-            <Text style={styles.estopSubText}>2 TAP</Text>
+            <Text style={styles.estopText}>{asserted ? "E-STOP ON" : "E-STOP"}</Text>
+            <Text style={styles.estopSubText}>{asserted ? "2 TAP · CLEAR" : "2 TAP"}</Text>
           </View>
         </AnimatedReanimated.View>
       </GestureDetector>
@@ -731,6 +768,7 @@ export default function ModernHomeUI(props) {
   // Mission status comes from `rover_event`s only. The rover arms and switches to OFFBOARD itself:
   // nothing on this screen arms or changes the mode.
   const roverEvents = useRoverEvents();
+  const estopView = selectEstop(roverEvents);
   const missionView = useMemo(() => selectMission(roverEvents), [roverEvents]);
   const lifecycle = useMemo(() => describeMission(missionView), [missionView]);
   const controls = useMemo(
@@ -1439,15 +1477,15 @@ export default function ModernHomeUI(props) {
         <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.telemetryScroll} showsVerticalScrollIndicator={false}>
           <TelemetryBlock title="Position" icon={MapPin}>
             <View style={styles.coordCard}>
-              <CoordRow label="LAT" value={lat} />
+              <LiveCoordRow label="LAT" format={LIVE.lat} />
               <View style={styles.coordDivider} />
-              <CoordRow label="LON" value={lon} />
+              <LiveCoordRow label="LON" format={LIVE.lon} />
             </View>
             <View style={styles.statGrid}>
               <StatTile icon={Satellite} label="Satellites" value={sats} accent={COLORS.accentBrand} />
-              <StatTile icon={Target} label="HRMS" value={hrms !== "—" ? `${hrms} cm` : "—"} accent={COLORS.textMuted} />
+              <LiveStatTile icon={Target} label="HRMS" format={LIVE.hrms} accent={COLORS.textMuted} />
               <StatTile icon={Target} label="VRMS" value={vrms !== "—" ? `${vrms} cm` : "—"} accent={COLORS.textMuted} />
-              <StatTile icon={Activity} label="Pose Age" value={poseAge !== "—" ? `${poseAge} ms` : "—"} accent={COLORS.textMuted} />
+              <LiveStatTile icon={Activity} label="Pose Age" format={LIVE.poseAge} accent={COLORS.textMuted} />
             </View>
           </TelemetryBlock>
 
@@ -1461,38 +1499,18 @@ export default function ModernHomeUI(props) {
             </View>
             <View style={styles.statGrid}>
               {/* X-Track from xtrack_m */}
-              <StatTile
-                icon={Route}
-                label="X-Track"
-                value={xtrack !== "—" ? `${xtrack} m` : "—"}
-                accent={Math.abs(parseFloat(xtrack) || 0) > 0.05 ? COLORS.danger : COLORS.accentBrand}
-              />
+              <LiveStatTile icon={Route} label="X-Track" format={LIVE.xtrack} accentFor={xtrackAccent} />
               {/* Heading error from heading_err_deg */}
-              <StatTile
-                icon={Navigation}
-                label="Hdg Err"
-                value={headingErr !== "—" ? `${headingErr}°` : "—"}
-                accent={Math.abs(parseFloat(headingErr) || 0) > 10 ? COLORS.danger : COLORS.warning}
-              />
+              <LiveStatTile icon={Navigation} label="Hdg Err" format={LIVE.headingErr} accentFor={headingErrAccent} />
               {/* Distance to goal from dist_to_goal_m */}
-              <StatTile
-                icon={Target}
-                label="Dist Goal"
-                value={distGoal !== "—" ? `${distGoal} m` : "—"}
-                accent={COLORS.success}
-              />
+              <LiveStatTile icon={Target} label="Dist Goal" format={LIVE.distGoal} accent={COLORS.success} />
               {/* Speed — prefers measured_speed_m_s from MAVROS */}
-              <StatTile
-                icon={Gauge}
-                label="Speed"
-                value={displaySpeed !== "—" ? `${displaySpeed} m/s` : "—"}
-                accent={COLORS.accentBrand}
-              />
+              <LiveStatTile icon={Gauge} label="Speed" format={LIVE.speed} accent={COLORS.accentBrand} />
             </View>
             {/* Along/cross track speeds row */}
             <View style={[styles.statGrid, { marginTop: 6 }]}>
-              <StatTile icon={Route} label="Along-Trk" value={alongTrackSpeed !== "—" ? `${alongTrackSpeed} m/s` : "—"} accent={COLORS.textMuted} />
-              <StatTile icon={Route} label="Cross-Trk" value={crossTrackSpeed !== "—" ? `${crossTrackSpeed} m/s` : "—"} accent={COLORS.textMuted} />
+              <LiveStatTile icon={Route} label="Along-Trk" format={LIVE.along} accent={COLORS.textMuted} />
+              <LiveStatTile icon={Route} label="Cross-Trk" format={LIVE.cross} accent={COLORS.textMuted} />
             </View>
           </TelemetryBlock>
 
@@ -1829,7 +1847,9 @@ export default function ModernHomeUI(props) {
               {renderMissionControl()}
             </View>
           ) : null}
-          {isHomePage ? <FloatingEStop visible onTrigger={handleEStop} /> : null}
+          {isHomePage ? (
+            <FloatingEStop visible onTrigger={handleEStop} asserted={estopView.known && estopView.asserted} />
+          ) : null}
 
           {/* Drawing floating toolbar */}
           {drawingMode !== "none" && (

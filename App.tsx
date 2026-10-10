@@ -186,8 +186,10 @@ import {
   applyTelemetryPacket,
   clearTelemetryRuntime,
   setSystemHealth,
+  getTelemetrySnapshot,
   setTelemetrySnapshot,
   useSystemHealth,
+  useTelemetrySelector,
   useTelemetrySnapshot,
   useThrottledTelemetrySnapshot,
 } from "./src/features/telemetry/telemetryStore";
@@ -196,7 +198,7 @@ import { roverBeaconListener, type BeaconRover } from "./src/services/roverBeaco
 import { loadLastRoverId } from "./src/api/prodStorage";
 import { getProdApiClient, ProdApiError } from "./src/api/prodClient";
 import { MissionStateEnum } from "./src/contract/prod/realtime";
-import { useRoverEvents } from "./src/features/telemetry/roverEventStore";
+import { getRoverEventsState, selectEstop, useRoverEvents } from "./src/features/telemetry/roverEventStore";
 import { missionControls, missionIsActive, selectMission } from "./src/features/mission/missionLifecycle";
 import { beginStartTap } from "./src/features/mission/startTap";
 import {
@@ -228,7 +230,7 @@ import {
   SOCKET_CONNECT_TIMEOUT_MS,
   waitForSocketConnect,
 } from "./src/utils/socketConnect";
-import { EMPTY_RTK_STATUS, fetchRtkStatus, normalizeRtkStatus } from "./src/api/rtkStatus";
+import { EMPTY_RTK_STATUS, normalizeRtkStatus } from "./src/api/rtkStatus";
 const SwoziPage = lazyDefault(
   () => import("./src/screens/SecondaryPages").then((m) => ({ default: m.SwoziPage })),
   "SwoziPage"
@@ -393,6 +395,17 @@ const MENU_ITEMS: Array<{ key: Page; label: string; icon: React.ReactNode }> = [
   { key: "howto", label: "How To", icon: <CircleHelp size={22} color="#fff" /> },
   { key: "about", label: "About", icon: <Info size={22} color="#fff" /> },
 ];
+
+function rootTelemetryKey(s: TelemetrySnapshot | null): string {
+  if (!s) return "none";
+  const fix = Number.isFinite(s.lat) && Number.isFinite(s.lon);
+  const n = s.pos_n == null ? "x" : String(Math.round((s.pos_n as number) * 2));
+  const e = s.pos_e == null ? "x" : String(Math.round((s.pos_e as number) * 2));
+  return `${s.mission_state ?? ""}|${fix}|${n}|${e}`;
+}
+const selectRootTelemetry = (s: TelemetrySnapshot | null) => s;
+const rootTelemetryEqual = (a: TelemetrySnapshot | null, b: TelemetrySnapshot | null) =>
+  rootTelemetryKey(a) === rootTelemetryKey(b);
 
 export default function App() {
   // Outer boundary: a render crash in any screen must not force-kill the APK.
@@ -990,7 +1003,11 @@ function AppRoot() {
   // is thousands of lines of render + hundreds of child props, so re-rendering it at packet
   // rate starved the JS thread and made nav taps lag. The map marker reads the raw store
   // itself (MapViewNative), and start/safety gating reads store getters, not this value.
-  const telemetrySnapshot = useThrottledTelemetrySnapshot();
+  // The root re-renders only when what IT uses changes: mission state, "has a GPS fix", and the
+  // rover position at 0.5 m. Home / Fields / the map subscribe to live telemetry themselves; a
+  // root subscription at packet rate re-rendered the whole tree 8-10x/s and starved the JS
+  // thread (socket ping timeouts, stale pose). Exact values are read with getTelemetrySnapshot().
+  const telemetrySnapshot = useTelemetrySelector(selectRootTelemetry, rootTelemetryEqual);
   const systemHealth = useSystemHealth();
   // Latch first finite GPS after telemetry exists — must not run above this declaration.
   useEffect(() => {
@@ -1172,7 +1189,7 @@ function AppRoot() {
 
   useEffect(() => {
     if (!autoOriginEligible || autoOriginReference) return;
-    const captured = buildAutoOriginReference(sanitizePlanLines(lines), telemetrySnapshot);
+    const captured = buildAutoOriginReference(sanitizePlanLines(lines), getTelemetrySnapshot());
     if (captured) {
       setAutoOriginReference(captured);
     }
@@ -1325,40 +1342,6 @@ function AppRoot() {
       }),
     [alignedRefPoints, stagedWorkflow.staged, autoOriginReference, autoOriginEligible, geoOriginDxf]
   );
-
-  // [CANVAS] frame-alignment debug. Logs the auto-origin transform whenever the
-  // captured origin, run-state, or rover pose changes, so a wrong rover-icon
-  // placement can be diagnosed against the drawn path's first point.
-  useEffect(() => {
-    if (!autoOriginEligible) return;
-    const first = getPlanStartPoint(sanitizePlanLines(lines));
-    const rover =
-      telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
-        ? { n: telemetrySnapshot.pos_n, e: telemetrySnapshot.pos_e }
-        : null;
-    if (!__DEV__) return;
-    console.log("[CANVAS] frame", JSON.stringify({
-      missionRunning,
-      missionState: telemetrySnapshot?.mission_state ?? null,
-      autoOriginReference,
-      planFirstPoint: first,
-      roverTelemetry: rover,
-      delta: autoOriginReference && first
-        ? {
-            dN: autoOriginReference.roverNorth - autoOriginReference.planStartNorth,
-            dE: autoOriginReference.roverEast - autoOriginReference.planStartEast,
-          }
-        : null,
-    }));
-  }, [
-    autoOriginEligible,
-    missionRunning,
-    autoOriginReference,
-    telemetrySnapshot?.mission_state,
-    telemetrySnapshot?.pos_n,
-    telemetrySnapshot?.pos_e,
-    lines,
-  ]);
 
   const previewRoverPoint = useMemo(() => {
     const telemetryPoint =
@@ -2981,8 +2964,8 @@ function AppRoot() {
     let startSha: string | null = null;
     // Single try/finally so every early return still clears busy + in-flight flags.
     try {
-      // Operator link / pose gate FIRST: the rover also refuses a Start without a live operator
-      // heartbeat, so tell the operator now instead of after a re-upload.
+      // Link / pose gate FIRST (socket, gateway, live telemetry, fresh pose), so the operator is told
+      // now instead of after a re-upload. The operator heartbeat is not a start condition.
       {
         const earlyOrigin = appPlannedStartSnapshot?.originGps;
         if (earlyOrigin) {
@@ -3276,41 +3259,39 @@ function AppRoot() {
     }
   }
 
+  // RTK status comes from the pushed telemetry (ntrip_status + rtk_status), never from a poll.
   useEffect(() => {
     if (!apiBaseUrl) {
       setRtkStatus(EMPTY_RTK_STATUS);
       return;
     }
-    let active = true;
-    let inFlight = false;
-    const pollRtkStatus = async () => {
-      if (rtkConnecting || inFlight) return;
-      inFlight = true;
-      try {
-        const next = await fetchRtkStatus(apiBaseUrl);
-        if (active) setRtkStatus(next);
-      } catch {
-        // Never leave an old green "streaming" indication on screen when the
-        // tablet can no longer verify the rover's correction process.
-        if (active) {
-          setRtkStatus((current) => ({
-            ...current,
-            healthy: false,
-            source_state: "unavailable",
-            last_error: "Rover RTK status is unavailable. Check the backend connection.",
-          }));
-        }
-      } finally {
-        inFlight = false;
-      }
+    let lastKey = "";
+    const update = () => {
+      const snap = getProdTelemetryState().snapshot;
+      const ntrip = snap?.ntrip_status?.fresh ? (snap.ntrip_status.data as Record<string, any>) : null;
+      const rtk = snap?.rtk_status?.fresh ? snap.rtk_status.data : null;
+      const next: RTKStatus = ntrip
+        ? {
+            ...EMPTY_RTK_STATUS,
+            mode: ntrip.connected || ntrip.state > 0 ? "ntrip" : "idle",
+            desired_mode: ntrip.connected || ntrip.state > 0 ? "ntrip" : "idle",
+            running: Boolean(ntrip.connected),
+            healthy: Boolean(ntrip.streaming) && rtk?.corrections_fresh === true,
+            source_state: ntrip.streaming ? "streaming" : ntrip.connected ? "connected" : ntrip.state > 0 ? "reconnecting" : "idle",
+            frames: Number.isFinite(ntrip.valid_rtcm_frames) ? ntrip.valid_rtcm_frames : 0,
+            bytes: Number.isFinite(ntrip.source_bytes_received) ? ntrip.source_bytes_received : 0,
+            last_frame_age_s: Number.isFinite(ntrip.correction_age_s) ? ntrip.correction_age_s : null,
+            last_error: typeof ntrip.last_error === "string" && ntrip.last_error ? ntrip.last_error : null,
+          }
+        : { ...EMPTY_RTK_STATUS, source_state: snap ? "unavailable" : "idle" };
+      const key = `${next.mode}|${next.running}|${next.healthy}|${next.source_state}|${next.last_error}|${Math.round((next.last_frame_age_s ?? -1) * 2)}`;
+      if (key === lastKey) return; // re-render only when what the chip shows changes
+      lastKey = key;
+      setRtkStatus((current) => ({ ...next, active_profile_id: current.active_profile_id, active_profile_revision: current.active_profile_revision }));
     };
-    void pollRtkStatus();
-    const interval = setInterval(pollRtkStatus, 3000);
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
-  }, [apiBaseUrl, rtkConnecting]);
+    update();
+    return subscribeProdTelemetry(update);
+  }, [apiBaseUrl]);
 
 
   /**
@@ -3420,7 +3401,10 @@ function AppRoot() {
     }
   }
 
-  async function estopVehicle(asserted: boolean = true) {
+  /** No argument: the button toggles by the rover's E-stop state (asserted -> offer Clear). */
+  async function estopVehicle(requested?: boolean) {
+    const current = selectEstop(getRoverEventsState());
+    const asserted = requested ?? !(current.known && current.asserted);
     if (asserted) {
       virtualJoystick.handleEStop();
       logAction("ESTOP_REQUEST", { asserted: true });

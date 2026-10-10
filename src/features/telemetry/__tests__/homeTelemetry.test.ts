@@ -206,10 +206,25 @@ describe("Home telemetry derivation", () => {
     expect(none.battery_a).toBeNull();
 
     clearProdTelemetry();
-    const some = adapted(
-      baseSnapshot({ battery: entry({ voltage_v: 25.1, current_a: 3.4, remaining_pct: 82 }) })
+    const base = baseSnapshot();
+    const invalid = adapted(
+      baseSnapshot({ vehicle_state: entry({ ...base.vehicle_state!.data, battery_valid: false, battery_voltage_v: 25.1 }) })
     );
-    expect(some.battery_pct).toBe(82);
+    expect(invalid.battery_v).toBeNull(); // not valid -> never shown
+
+    clearProdTelemetry();
+    const some = adapted(
+      baseSnapshot({
+        vehicle_state: entry({
+          ...base.vehicle_state!.data,
+          battery_valid: true,
+          battery_voltage_v: 25.1,
+          battery_current_a: 3.4,
+          battery_remaining: 0.82,
+        }),
+      })
+    );
+    expect(some.battery_pct).toBeCloseTo(82, 6);
     expect(some.battery_v).toBe(25.1);
     expect(some.battery_a).toBe(3.4);
   });

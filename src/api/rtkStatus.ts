@@ -113,26 +113,3 @@ export function rtkStatusLabel(status: RTKStatus): string {
   }
 }
 
-export async function fetchRtkStatus(
-  baseUrl: string,
-  timeoutMs = RTK_STATUS_TIMEOUT_MS
-): Promise<RTKStatus> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${baseUrl.trim().replace(/\/$/, "")}/api/rtk/status`, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`RTK status request failed (${response.status}).`);
-    return normalizeRtkStatus(await response.json());
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error("RTK status request timed out.");
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
