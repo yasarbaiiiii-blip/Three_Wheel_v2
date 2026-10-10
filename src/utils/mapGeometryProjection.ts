@@ -9,7 +9,7 @@ import {
   MAP_CIRCLE_STEPS,
   sampleCurveEntityPoints,
 } from "./curveGeometry";
-import { projectLocalMetersToGps } from "./visualAlignment";
+import { projectLocalMetersToGps } from "./geoProjection";
 
 export type MapProjectionOrigin = {
   frame: MapGeometryFrame;

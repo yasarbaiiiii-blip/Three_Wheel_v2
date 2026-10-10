@@ -8,6 +8,7 @@ import {
   isValidAutoOriginReference,
   planStartMatchesReference,
 } from "./autoOrigin";
+import { projectGpsToLocalMeters } from "./geoProjection";
 import { getPlanStartPoint } from "./planGeometry";
 import { getCurveGeometry } from "./curveGeometry";
 import {
@@ -201,14 +202,9 @@ describe("Auto Origin MapView projection", () => {
     const origin = resolveMapProjectionOrigin(frame, frameInput)!;
     const startGps = projectPlanNorthEastToGps(10, 5, origin);
     const offsetGps = projectPlanNorthEastToGps(13, 7, origin);
-    const dLatM = (offsetGps.lat - startGps.lat) * (Math.PI / 180) * 6378137;
-    const dLonM =
-      (offsetGps.lon - startGps.lon) *
-      (Math.PI / 180) *
-      6378137 *
-      Math.cos((startGps.lat * Math.PI) / 180);
-    expect(dLatM).toBeCloseTo(3, 1);
-    expect(dLonM).toBeCloseTo(2, 1);
+    const d = projectGpsToLocalMeters(offsetGps.lat, offsetGps.lon, startGps.lat, startGps.lon);
+    expect(d.north).toBeCloseTo(3, 1);
+    expect(d.east).toBeCloseTo(2, 1);
   });
 
   it("non-zero plan start coordinates are handled correctly", () => {

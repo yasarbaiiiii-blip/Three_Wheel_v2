@@ -98,3 +98,12 @@ SVG X = east,         SVG Y = −north
 
 All consistent: **east goes to X-like axes, north goes to Y-like axes**.
 The confusion is only in naming (`PlanPoint.x` is actually the Y-like axis).
+
+## Geodesy: lat/lon and metres
+
+Every lat/lon to metre conversion goes through `src/utils/geoProjection.ts`: a WGS84 local
+tangent plane (east-north-up through ECEF about the origin; inverse = plane point at u = 0 back through ECEF to geodetic, the rover's placement). North and
+east are TRUE ground metres from the origin, which is what the rover assumes when it places
+an anchored mission (`anchor` in `POST /api/missions/plan`). Against the Vincenty geodesic
+the error is below 0.1 mm over 1 km. Do not add a sphere, a fixed metres-per-degree or an
+`R * cos(lat)` shortcut anywhere else.

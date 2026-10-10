@@ -302,9 +302,9 @@ import {
 import {
   buildVisualAlignmentRefPoints,
   computeLineBoundingBox,
-  projectGpsToLocalMeters,
   transformVisualDxfPoint,
 } from "./src/utils/visualAlignment";
+import { projectGpsToLocalMeters } from "./src/utils/geoProjection";
 import {
   transformPlanLinesGeometry,
 } from "./src/utils/planLineTransform";

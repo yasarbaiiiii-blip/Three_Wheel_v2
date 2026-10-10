@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   buildVisualAlignmentRefPoints,
-  projectGpsToLocalMeters,
   transformVisualDxfPoint,
 } from "./visualAlignment";
+import { projectGpsToLocalMeters } from "./geoProjection";
 
 describe("visualAlignment", () => {
   it("preview matches MapView formula", () => {
@@ -92,4 +92,4 @@ describe("visualAlignment", () => {
     expect(local.north).toBeCloseTo(expectedLocalNorth, 6);
     expect(local.east).toBeCloseTo(expectedLocalEast, 6);
   });
-});
+});

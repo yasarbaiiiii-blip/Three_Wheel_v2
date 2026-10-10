@@ -15,11 +15,10 @@ import { migratePlacedItemsToDesignDocument } from './designMigration';
 import { flattenDesignDocument } from './designTransform';
 import {
   transformVisualDxfPoint,
-  projectLocalMetersToGps,
-  projectGpsToLocalMeters,
   buildVisualAlignmentRefPoints,
   computeLineBoundingBox,
 } from './visualAlignment';
+import { projectLocalMetersToGps, projectGpsToLocalMeters } from './geoProjection';
 import type { PlanLine } from '../types/plan';
 
 // ────────────────────────────────────────────────

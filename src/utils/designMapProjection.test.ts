@@ -41,10 +41,11 @@ describe('Design Map Projection Tests (Phase 4)', () => {
 
     // North = increase latitude
     expect(northGps.lat).toBeGreaterThan(originGps.lat);
-    expect(northGps.lon).toBe(originGps.lon);
+    expect(northGps.lon).toBeCloseTo(originGps.lon, 10);
 
     // East = increase longitude
     expect(eastGps.lon).toBeGreaterThan(originGps.lon);
-    expect(eastGps.lat).toBe(originGps.lat);
+    // East is along the local tangent: latitude falls by ~1e-9 deg over 10 m (curvature).
+    expect(eastGps.lat).toBeCloseTo(originGps.lat, 6);
   });
 });

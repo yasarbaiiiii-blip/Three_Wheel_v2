@@ -7,19 +7,12 @@
  * GPS header rules match guide/ref CSV (`parseGuidePointsCsv`) so the same file
  * lands at the same map position in both Upload plan and Import guide CSV.
  *
- * Local metres for GPS rows use the shared PX4-sphere projection
- * (`geoProjection.projectGpsToLocalMeters` / rover `georef.metres_per_degree`).
- *
- * On the earth model: these metres are sent to `POST /api/path/plan-trajectory`, which uses
- * them VERBATIM as PX4 local NED anchored at `origin_gps` — the rover never re-projects them.
- * PX4 defines that frame on a sphere of R = 6 371 000 m (geo.cpp CONSTANTS_RADIUS_OF_EARTH),
- * so that is the only scale under which the rover lands on the surveyed lat/lon. See
- * `path_engine/parsers/georef.py::metres_per_degree`, which records the 2026-07-25 field
- * measurement: the WGS84 meridional radius is true-to-ground but 0.52 % short *in the frame
- * the EKF navigates*, seen as a −0.51 cm-per-metre-north placement walk at 13 °N.
+ * Local metres for GPS rows are true ground metres from the WGS84 local tangent plane
+ * (`geoProjection.projectGpsToLocalMeters`), the same maths the rover uses to place an
+ * anchored trajectory.
  */
 
-import { metresPerDegreePx4, projectGpsToLocalMeters, projectLocalMetersToGps } from "./geoProjection";
+import { metresPerDegree, projectGpsToLocalMeters, projectLocalMetersToGps } from "./geoProjection";
 import { MARK_CONTIGUOUS_GAP_M } from "./missionTrajectory";
 import { splitCsvCells } from "./refPointsCsv";
 import {
@@ -34,25 +27,6 @@ export const PROJECTED_COORD_BLOCK_M = 10_000;
 
 /** Soft cap for map pin markers (polyline still uses full point set). */
 export const LOCAL_CSV_MAX_MAP_PINS = 1000;
-
-/** Re-export of shared PX4-sphere metres-per-degree (rover georef parity). */
-export function metresPerDegree(lat0Deg: number): { mPerDegNorth: number; mPerDegEast: number } {
-  return metresPerDegreePx4(lat0Deg);
-}
-
-/**
- * @deprecated Misleading name — this has never been ellipsoidal since the move to the shared
- * PX4-sphere projection. Import `projectGpsToLocalMeters` from `./geoProjection` instead.
- * Kept only so existing callers/tests keep compiling.
- */
-export function projectGpsToLocalMetersEllipsoid(
-  lat: number,
-  lon: number,
-  originLat: number,
-  originLon: number
-): { north: number; east: number } {
-  return projectGpsToLocalMeters(lat, lon, originLat, originLon);
-}
 
 const LAT_ALIASES = new Set(["lat", "latitude"]);
 const LON_ALIASES = new Set(["lon", "lng", "long", "longitude"]);
@@ -629,7 +603,8 @@ export function parseLocalPointCsv(text: string, fileName = "points.csv"): Local
       const spanLon = Math.max(...rawGps.map((r) => r.lon)) - Math.min(...rawGps.map((r) => r.lon));
       if (maxAbs < 1 && (spanLat > 0.01 || spanLon > 0.01)) {
         // ~1 km+ span near 0,0 from values that look like metres misread as degrees.
-        const approxM = Math.hypot(spanLat * 111_000, spanLon * 111_000);
+        const perDeg = metresPerDegree(0);
+        const approxM = Math.hypot(spanLat * perDeg.mPerDegNorth, spanLon * perDeg.mPerDegEast);
         warnings.push(
           `Headerless file read as lat/lon near 0°N 0°E (~${approxM.toFixed(0)} m across). ` +
             `If these are local metres, add a north,east header — do not paint until confirmed.`
@@ -1165,7 +1140,7 @@ export {
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
   type CsvExtensionPreview,
-} from "./csvExtensions";
+} from "./missionExtensions";
 
 export function buildCsvTransitLines(planLines: PlanLine[]): PlanLine[] {
   const transitLines: PlanLine[] = [];

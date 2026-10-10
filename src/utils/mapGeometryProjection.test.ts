@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PlanLine } from "../types/plan";
 import type { AutoOriginReference } from "../types/autoOrigin";
-import { projectLocalMetersToGps } from "./visualAlignment";
+import { projectLocalMetersToGps } from "./geoProjection";
 import {
   buildPlanManipulationAnchor,
   projectPlanLineToGpsSegments,

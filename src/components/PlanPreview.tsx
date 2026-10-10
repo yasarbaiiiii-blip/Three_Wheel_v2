@@ -36,7 +36,7 @@ import {
   isPrimaryEditableLine,
   sanitizePlanLines,
 } from "../utils/pathWorkflow";
-import { projectGpsToLocalMeters } from "../utils/visualAlignment";
+import { projectGpsToLocalMeters } from "../utils/geoProjection";
 import { getPlanStartPoint } from "../utils/planStartPoint";
 import {
   PREVIEW_ARROWHEAD_HALF_WIDTH_PX,

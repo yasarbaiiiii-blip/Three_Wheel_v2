@@ -11,6 +11,7 @@
 
 import type { PlanLine } from "../types/plan";
 import { computePlanBoundingBoxLegacy } from "./curveGeometry";
+import { projectLocalMetersToGps } from "./geoProjection";
 
 export type VisualAlignmentTransform = {
   x: number;
@@ -22,22 +23,6 @@ export type VisualAlignmentTransform = {
   /** Independent east-axis scale (falls back to `scale`). */
   scaleEast?: number;
 };
-
-// PX4 sphere metres-per-degree — shared with geoProjection / rover georef (G2).
-// Do not reintroduce WGS84 ellipsoid here; the EKF navigates the PX4 sphere.
-import {
-  projectLocalMetersToGps,
-  metresPerDegreeShared as _metresPerDegreeShared,
-  metresPerDegreePx4 as _metresPerDegreePx4,
-  projectGpsToLocalMeters as _projectGpsToLocalMeters,
-  PX4_EARTH_RADIUS_M as _PX4_EARTH_RADIUS_M,
-} from "./geoProjection";
-
-export const metresPerDegreeShared = _metresPerDegreeShared;
-export const metresPerDegreePx4 = _metresPerDegreePx4;
-export const projectGpsToLocalMeters = _projectGpsToLocalMeters;
-export const PX4_EARTH_RADIUS_M = _PX4_EARTH_RADIUS_M;
-export { projectLocalMetersToGps };
 
 /** Rotate + translate a DXF point into local north/east metres (latchedOrigin frame). */
 export function transformVisualDxfPoint(

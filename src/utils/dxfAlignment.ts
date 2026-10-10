@@ -1,5 +1,5 @@
 /**
- * Local DXF alignment → origin_gps for plan-trajectory (Phase 4).
+ * Local DXF alignment → origin_gps (the mission anchor).
  *
  * Three offline sources:
  *  - geographic DXF: geoOrigin from parseLocalDxf
@@ -9,6 +9,7 @@
 
 import type { PlanLine } from "../types/plan";
 import { enforceAlignmentScale } from "./designAlignmentPolicy";
+import { projectGpsToLocalMeters, projectLocalMetersToGps } from "./geoProjection";
 import {
   similarityTransform,
   transformPlanLinesGeometry,
@@ -21,6 +22,16 @@ export type DxfAlignment = {
   scale: number;
   rmseM: number | null;
   residualsM: number[];
+  /**
+   * Operator-visible caveats that do not block the alignment (for example a
+   * single reference point fixes translation only).
+   */
+  warnings: string[];
+  /**
+   * Distance (m) from the reference centroid to `originGps`. Guards against an
+   * origin that was extrapolated far away from the site.
+   */
+  originOffsetM: number;
 };
 
 export type AlignmentRefPoint = {
@@ -46,6 +57,8 @@ export function alignmentFromGeographic(geoOrigin: {
     scale: 1,
     rmseM: 0,
     residualsM: [],
+    warnings: [],
+    originOffsetM: 0,
   };
 }
 
@@ -60,6 +73,8 @@ export function alignmentFromAutoOrigin(lat: number, lon: number): DxfAlignment 
     scale: 1,
     rmseM: null,
     residualsM: [],
+    warnings: [],
+    originOffsetM: 0,
   };
 }
 
@@ -71,33 +86,40 @@ export function alignmentFromAutoOrigin(lat: number, lon: number): DxfAlignment 
  * refs must have ≥ 2 points. For a single visual corner pair use
  * alignmentFromVisualOrigin.
  */
-export function solveMultiPointAlignment(
-  refs: AlignmentRefPoint[],
-  metresPerDegree: (lat0: number) => { mPerDegNorth: number; mPerDegEast: number }
-): DxfAlignment {
+export function solveMultiPointAlignment(refs: AlignmentRefPoint[]): DxfAlignment {
   if (refs.length < 1) {
     throw new Error("solveMultiPointAlignment requires at least one ref point");
   }
 
   const lat0 = refs.reduce((s, r) => s + r.lat, 0) / refs.length;
   const lon0 = refs.reduce((s, r) => s + r.lon, 0) / refs.length;
-  const { mPerDegNorth, mPerDegEast } = metresPerDegree(lat0);
 
-  const world = refs.map((r) => ({
-    n: (r.lat - lat0) * mPerDegNorth,
-    e: (r.lon - lon0) * mPerDegEast,
-  }));
+  const world = refs.map((r) => {
+    const p = projectGpsToLocalMeters(r.lat, r.lon, lat0, lon0);
+    return { n: p.north, e: p.east };
+  });
   const design = refs.map((r) => ({ n: r.designNorth, e: r.designEast }));
 
   if (refs.length === 1) {
+    // Translation only: design point D lands on GPS G, so the GPS of design
+    // (0, 0) is G shifted by -D. Rotation cannot be observed from one point.
+    const origin = projectLocalMetersToGps(
+      -design[0].n,
+      -design[0].e,
+      refs[0].lat,
+      refs[0].lon
+    );
     return {
       method: "visual",
-      originGps: [refs[0].lat, refs[0].lon],
-      // Translation-only: design point maps to this GPS via origin shift later
+      originGps: [origin.lat, origin.lon],
       rotationDeg: 0,
       scale: 1,
       rmseM: 0,
       residualsM: [0],
+      warnings: [
+        "Single reference point: translation only. Rotation is unverified (north is assumed). Add a second reference point to fit rotation and scale.",
+      ],
+      originOffsetM: Math.hypot(design[0].n, design[0].e),
     };
   }
 
@@ -135,6 +157,8 @@ export function solveMultiPointAlignment(
   const cos = Math.cos(rotationRad);
   const sin = Math.sin(rotationRad);
 
+  // Fitted scale, reported as fitted: the trust gate (designAlignmentPolicy)
+  // decides whether it is acceptable. Coincident design points leave scale at 1.
   let scale = 1;
   if (varD > 1e-12) {
     let num = 0;
@@ -147,7 +171,7 @@ export function solveMultiPointAlignment(
       const we = world[i].e - wMean.e;
       num += rn * wn + re * we;
     }
-    scale = enforceAlignmentScale(num / varD);
+    scale = num / varD;
   }
 
   // Residuals in world frame after similarity about design centroid, then
@@ -160,34 +184,22 @@ export function solveMultiPointAlignment(
     const pe = (dn * sin + de * cos) * scale + wMean.e;
     residuals.push(Math.hypot(pn - world[i].n, pe - world[i].e));
   }
-  const rmse =
-    residuals.length > 0
-      ? Math.sqrt(residuals.reduce((s, r) => s + r * r, 0) / residuals.length)
-      : 0;
+  const rmse = Math.sqrt(residuals.reduce((s, r) => s + r * r, 0) / residuals.length);
 
-  // origin_gps is the GPS of design (0,0) after transform:
-  // world = R*scale*(design - dMean) + wMean
-  // design (0,0) → R*scale*(-dMean) + wMean
-  const originN = (-dMean.n * cos + dMean.e * sin) * scale + wMean.n;
-  const originE = (-dMean.n * sin - dMean.e * cos) * scale + wMean.e;
-  // Wait: R * (-dMean):
-  // n' = (-dMean.n)*cos - (-dMean.e)*sin = -dMean.n*cos + dMean.e*sin
-  // e' = (-dMean.n)*sin + (-dMean.e)*cos = -dMean.n*sin - dMean.e*cos
-  const oN = (-dMean.n * cos - -dMean.e * sin) * scale + wMean.n;
-  const oE = (-dMean.n * sin + -dMean.e * cos) * scale + wMean.e;
-  void originN;
-  void originE;
-
-  const originLat = lat0 + oN / mPerDegNorth;
-  const originLon = lon0 + oE / mPerDegEast;
+  // GPS of design (0, 0) after the transform: world = R*scale*(design - dMean) + wMean.
+  const oN = (-dMean.n * cos + dMean.e * sin) * scale + wMean.n;
+  const oE = (-dMean.n * sin - dMean.e * cos) * scale + wMean.e;
+  const origin = projectLocalMetersToGps(oN, oE, lat0, lon0);
 
   return {
     method: "multi_point",
-    originGps: [originLat, originLon],
+    originGps: [origin.lat, origin.lon],
     rotationDeg,
     scale,
     rmseM: rmse,
     residualsM: residuals,
+    warnings: [],
+    originOffsetM: Math.hypot(oN, oE),
   };
 }
 
@@ -205,17 +217,8 @@ export function alignmentFromVisualOrigin(opts: {
   scale?: number;
 }): DxfAlignment {
   const scale = enforceAlignmentScale(opts.scale ?? 1);
-  // Design (0,0) maps to offset in local metres about originLat/Lon
-  const { mPerDegNorth, mPerDegEast } = {
-    // inline using equirectangular about origin — caller should pass already
-    // consistent frame; for GPS of design origin after sticker:
-    mPerDegNorth: 1,
-    mPerDegEast: 1,
-  };
-  void mPerDegNorth;
-  void mPerDegEast;
 
-  // origin of plan-trajectory is GPS of NED (0,0). Visual sticker places
+  // The mission anchor is the GPS of NED (0,0). Visual sticker places
   // design (0,0) at (offsetNorth, offsetEast) relative to latched GPS origin.
   // So plan origin_gps = latched origin (design is already in that frame after bake).
   // When baking, we apply rotation/scale/offset so NED matches rover frame about origin_gps.
@@ -226,6 +229,8 @@ export function alignmentFromVisualOrigin(opts: {
     scale,
     rmseM: null,
     residualsM: [],
+    warnings: [],
+    originOffsetM: 0,
   };
 }
 

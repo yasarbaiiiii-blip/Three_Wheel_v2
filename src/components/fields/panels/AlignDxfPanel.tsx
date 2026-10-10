@@ -4,13 +4,11 @@ import { Check, MapPin, Maximize2, Move, Plus, Upload, X } from "lucide-react-na
 import * as DocumentPicker from "expo-document-picker";
 
 import * as pathApi from "../../../api/pathApi";
-import { DXF_PLANNER } from "../../../config/featureFlags";
-import { enforceAlignmentScale } from "../../../utils/designAlignmentPolicy";
+import { assessAlignmentTrust, enforceAlignmentScale } from "../../../utils/designAlignmentPolicy";
 import {
   applyAlignmentToLines,
   solveMultiPointAlignment,
 } from "../../../utils/dxfAlignment";
-import { metresPerDegreePx4 } from "../../../utils/geoProjection";
 import {
   coerceFiniteNumber,
   formatFinite,
@@ -399,7 +397,7 @@ export function AlignDxfPanel({
       return;
     }
 
-    const localAppDxf = DXF_PLANNER === "app" && !selectedPathName;
+    const localAppDxf = !selectedPathName;
 
     setIsFixing(true);
     try {
@@ -409,7 +407,7 @@ export function AlignDxfPanel({
 
       // Local DXF: solve similarity on device — no POST /align.
       // Bake R·scale into the real DXF path vertices; origin_gps is GPS of design (0,0).
-      // plan-trajectory then receives those NED runs about origin_gps (no further affine).
+      // the mission then receives those NED runs about origin_gps (no further affine).
       if (localAppDxf) {
         const refs = validPoints.map((p) => ({
           designNorth: p.dxf_y,
@@ -417,10 +415,22 @@ export function AlignDxfPanel({
           lat: p.lat,
           lon: p.lon,
         }));
-        const solved = solveMultiPointAlignment(refs, metresPerDegreePx4);
+        const solved = solveMultiPointAlignment(refs);
+        const trust = assessAlignmentTrust(solved);
+        if (!trust.ok) {
+          // Never apply an alignment that does not reproduce the reference points.
+          setAlignmentResult(null);
+          setVerifiedAlignmentRequest(null);
+          onWorkflowStep?.("alignment", "failed");
+          Alert.alert(
+            "Alignment not applied",
+            `${trust.blockers.join("\n")}\n\nFix the reference points and try again.`
+          );
+          return;
+        }
         const originLat = solved.originGps[0];
         const originLon = solved.originGps[1];
-        const scale = enforceAlignmentScale(solved.scale);
+        const scale = solved.scale;
         const alignedLines = sanitizePlanLines(
           applyAlignmentToLines(lines, solved, 0, 0)
         );
@@ -435,7 +445,7 @@ export function AlignDxfPanel({
           rmse_m: solved.rmseM,
           sample_coords: null,
           residuals: solved.residualsM,
-          warnings: null,
+          warnings: trust.warnings.length > 0 ? trust.warnings : null,
         });
         if (onLocalFixApplied) {
           // Multi-file batch: parent rebases onto sharedOriginGps and merges into mission lines.
@@ -468,7 +478,10 @@ export function AlignDxfPanel({
         setVisualAlignmentAnchor?.(null);
         Alert.alert(
           "Alignment applied",
-          `Local fix (RMSE ${solved.rmseM != null ? solved.rmseM.toFixed(3) : "—"} m). DXF path ready for Send.`
+          [
+            `Local fix (RMSE ${solved.rmseM != null ? solved.rmseM.toFixed(3) : "—"} m, scale ${scale.toFixed(4)}). DXF path ready for Send.`,
+            ...trust.warnings,
+          ].join("\n\n")
         );
         return;
       }
@@ -907,14 +920,14 @@ export function AlignDxfPanel({
               ))}
               <Pressable
                 onPress={handleFixAlignment}
-                disabled={isFixing || (!selectedPathName && DXF_PLANNER !== "app")}
+                disabled={isFixing}
                 style={{
                   height: 44,
                   borderRadius: 10,
                   alignItems: "center",
                   justifyContent: "center",
                   backgroundColor:
-                    isFixing || (!selectedPathName && DXF_PLANNER !== "app")
+                    isFixing
                       ? FIELDS_COLORS.surfaceSolid
                       : FIELDS_COLORS.accentBrand,
                 }}
@@ -922,7 +935,7 @@ export function AlignDxfPanel({
                 <Text
                   style={{
                     color:
-                      isFixing || (!selectedPathName && DXF_PLANNER !== "app")
+                      isFixing
                         ? FIELDS_COLORS.textDim
                         : FIELDS_COLORS.accentText,
                     fontSize: 14,
@@ -1024,14 +1037,14 @@ export function AlignDxfPanel({
           ))}
           <Pressable
             onPress={handleFixAlignment}
-            disabled={isFixing || (!selectedPathName && DXF_PLANNER !== "app")}
+            disabled={isFixing}
             style={{
               height: 44,
               borderRadius: 10,
               alignItems: "center",
               justifyContent: "center",
               backgroundColor:
-                isFixing || (!selectedPathName && DXF_PLANNER !== "app")
+                isFixing
                   ? FIELDS_COLORS.surfaceSolid
                   : FIELDS_COLORS.accentBrand,
             }}
@@ -1039,7 +1052,7 @@ export function AlignDxfPanel({
             <Text
               style={{
                 color:
-                  isFixing || (!selectedPathName && DXF_PLANNER !== "app")
+                  isFixing
                     ? FIELDS_COLORS.textDim
                     : FIELDS_COLORS.accentText,
                 fontSize: 14,
@@ -1086,6 +1099,13 @@ export function AlignDxfPanel({
               <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
                 RMSE: {formatFinite(alignmentResult.rmse_m, 3)}
               </Text>
+              {Array.isArray(alignmentResult.warnings)
+                ? (alignmentResult.warnings as unknown[]).map((w, wi) => (
+                    <Text key={`align-warn-${wi}`} style={{ color: FIELDS_COLORS.warning, fontSize: 12 }}>
+                      {String(w)}
+                    </Text>
+                  ))
+                : null}
             </View>
           ) : null}
         </View>
@@ -1198,8 +1218,7 @@ export function AlignDxfPanel({
                 onPress={handleFixAlignment}
                 disabled={
                   isFixing ||
-                  (!selectedPathName && DXF_PLANNER !== "app") ||
-                  !canFixFromTypedRefs ||
+                                    !canFixFromTypedRefs ||
                   missionRunning
                 }
                 style={{
@@ -1209,8 +1228,7 @@ export function AlignDxfPanel({
                   justifyContent: "center",
                   backgroundColor:
                     isFixing ||
-                    (!selectedPathName && DXF_PLANNER !== "app") ||
-                    !canFixFromTypedRefs ||
+                                        !canFixFromTypedRefs ||
                     missionRunning
                       ? FIELDS_COLORS.surfaceSolid
                       : FIELDS_COLORS.accentBrand,
@@ -1220,8 +1238,7 @@ export function AlignDxfPanel({
                   style={{
                     color:
                       isFixing ||
-                      (!selectedPathName && DXF_PLANNER !== "app") ||
-                      !canFixFromTypedRefs ||
+                                            !canFixFromTypedRefs ||
                       missionRunning
                         ? FIELDS_COLORS.textDim
                         : FIELDS_COLORS.accentText,
@@ -1260,6 +1277,13 @@ export function AlignDxfPanel({
               <Text style={{ color: FIELDS_COLORS.success, fontSize: 12 }}>
                 RMSE: {formatFinite(alignmentResult.rmse_m, 3)}
               </Text>
+              {Array.isArray(alignmentResult.warnings)
+                ? (alignmentResult.warnings as unknown[]).map((w, wi) => (
+                    <Text key={`align-warn-${wi}`} style={{ color: FIELDS_COLORS.warning, fontSize: 12 }}>
+                      {String(w)}
+                    </Text>
+                  ))
+                : null}
             </View>
           ) : null}
         </View>

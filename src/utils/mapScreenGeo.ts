@@ -20,7 +20,7 @@
 import type { MapView } from "@rnmapbox/maps";
 
 import { fromMapboxCoord, toMapboxCoord } from "./mapboxCoords";
-import { projectGpsToLocalMeters } from "./visualAlignment";
+import { projectGpsToLocalMeters } from "./geoProjection";
 
 // ─────────────────────────────────────────────────────────────────
 // Types

@@ -72,11 +72,13 @@ import {
   isCircleLikeLine,
   isCurveEntity,
 } from "../utils/curveGeometry";
+import { transformVisualDxfPoint } from "../utils/visualAlignment";
 import {
-  transformVisualDxfPoint,
+  groundBearingDeg,
+  groundDistanceMeters,
   projectGpsToLocalMeters,
   projectLocalMetersToGps,
-} from "../utils/visualAlignment";
+} from "../utils/geoProjection";
 import { type LocalMeters } from "../utils/refPointSnap";
 import { computeShapeSnapPoints } from "../utils/planShapeSnapPoints";
 import {
@@ -927,9 +929,7 @@ export function MapViewNative(props: MapViewProps) {
         startCoord = coords[0];
         const [lon1, lat1] = coords[0];
         const [lon2, lat2] = coords[1];
-        const dLat = lat2 - lat1;
-        const dLon = (lon2 - lon1) * Math.cos((lat1 * Math.PI) / 180);
-        bearing = (Math.atan2(dLon, dLat) * 180) / Math.PI;
+        bearing = groundBearingDeg(lat1, lon1, lat2, lon2);
         // World metres under current sticker pose (committed or last bake mid-drag).
         const w0 = transformVisualDxfPoint(n0, e0, sticker);
         planNorth = w0.north;
@@ -942,10 +942,7 @@ export function MapViewNative(props: MapViewProps) {
         const startGps = projectPlanNorthEastToGps(w0.north, w0.east, projectionOrigin);
         const tipGps = projectPlanNorthEastToGps(w1.north, w1.east, projectionOrigin);
         startCoord = toMapboxCoord(startGps.lat, startGps.lon);
-        const dLat = tipGps.lat - startGps.lat;
-        const dLon =
-          (tipGps.lon - startGps.lon) * Math.cos((startGps.lat * Math.PI) / 180);
-        bearing = (Math.atan2(dLon, dLat) * 180) / Math.PI;
+        bearing = groundBearingDeg(startGps.lat, startGps.lon, tipGps.lat, tipGps.lon);
       }
 
       return featureCollection([
@@ -971,9 +968,7 @@ export function MapViewNative(props: MapViewProps) {
     const [lat2, lon2] = segs[1];
     const startCoord = toMapboxCoord(lat1, lon1);
 
-    const dLat = lat2 - lat1;
-    const dLon = (lon2 - lon1) * Math.cos((lat1 * Math.PI) / 180);
-    const bearing = (Math.atan2(dLon, dLat) * 180) / Math.PI;
+    const bearing = groundBearingDeg(lat1, lon1, lat2, lon2);
 
     const renderPts = getPlanLineRenderPoints(startLine, true);
     const planNorth = renderPts[0]?.north ?? startLine.from?.x ?? 0;
@@ -1399,9 +1394,7 @@ export function MapViewNative(props: MapViewProps) {
           : { x: targetSeg.from.x, y: targetSeg.from.y };
         const gps = projectPlanNorthEastToGps(target.x, target.y, projectionOrigin);
         // Calculate real physical distance on Earth (meters) between rover GPS and target GPS
-        const dLatMeters = (gps.lat - lat) * 111320;
-        const dLonMeters = (gps.lon - lon) * (111320 * Math.cos((lat * Math.PI) / 180));
-        const dist = Math.hypot(dLatMeters, dLonMeters);
+        const dist = groundDistanceMeters(lat, lon, gps.lat, gps.lon);
         if (dist < 10000) {
           targetDist = dist;
           targetPoint = toMapboxCoord(gps.lat, gps.lon);

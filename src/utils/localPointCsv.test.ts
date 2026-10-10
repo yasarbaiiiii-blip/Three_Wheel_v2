@@ -5,60 +5,10 @@ import {
   localCsvPointsToPlanLines,
   localCsvToMapPins,
   mergeLocalPointCsvResults,
-  metresPerDegree,
   parseLocalPointCsv,
-  projectGpsToLocalMetersEllipsoid,
   sampleEvenly,
 } from "./localPointCsv";
-/**
- * Earth model. These metres go to POST /api/path/plan-trajectory and are used VERBATIM as
- * PX4 local NED anchored at origin_gps — the rover never re-projects them. PX4 defines that
- * frame on a sphere of R = 6 371 000 m, so that is the scale we must produce.
- *
- * History, all three at 13.07 °N:
- *   WGS84 semi-major used as a sphere  111 319.5 m/deg  — 0.6 % long (original app bug)
- *   WGS84 meridional radius            110 627   m/deg  — true ground, 0.52 % short in PX4's frame
- *   PX4 sphere (6 371 000)             111 194.9 m/deg  — what the EKF actually navigates  ✓
- *
- * The middle row was an intermediate fix that overshot; see the field measurement recorded in
- * path_engine/parsers/georef.py::metres_per_degree (2026-07-25 bags).
- */
-describe("metresPerDegree / PX4-sphere projection", () => {
-  const PX4_R = 6_371_000;
-  const WGS84_A = 6_378_137;
-
-  it("matches the PX4 sphere, not WGS84 semi-major or meridional", () => {
-    const { mPerDegNorth, mPerDegEast } = metresPerDegree(13.07);
-
-    expect(mPerDegNorth).toBeCloseTo(PX4_R * (Math.PI / 180), 3);
-
-    // Strictly between the two superseded models.
-    const semiMajorNorth = WGS84_A * (Math.PI / 180);
-    const meridionalNorth = semiMajorNorth / 1.00622;
-    expect(mPerDegNorth).toBeLessThan(semiMajorNorth);
-    expect(mPerDegNorth).toBeGreaterThan(meridionalNorth);
-
-    // East shrinks by cos(lat) off the same sphere.
-    expect(mPerDegEast).toBeCloseTo(
-      PX4_R * (Math.PI / 180) * Math.cos((13.07 * Math.PI) / 180),
-      3
-    );
-    expect(mPerDegEast).toBeLessThan(mPerDegNorth);
-  });
-
-  it("GPS→NED uses the same sphere as metresPerDegree", () => {
-    const originLat = 13.07;
-    const originLon = 80.26;
-    const projected = projectGpsToLocalMetersEllipsoid(
-      originLat + 0.001,
-      originLon,
-      originLat,
-      originLon
-    );
-    expect(projected.north).toBeCloseTo(0.001 * metresPerDegree(originLat).mPerDegNorth, 6);
-    expect(projected.east).toBeCloseTo(0, 9);
-  });
-});
+import { projectGpsToLocalMeters, projectLocalMetersToGps } from "./geoProjection";
 
 describe("parseLocalPointCsv", () => {
   it("parses lat,lon GPS header and anchors at first row", () => {
@@ -71,8 +21,8 @@ describe("parseLocalPointCsv", () => {
     expect(r.points[0].east_m).toBeCloseTo(0, 6);
     expect(r.points[1].north_m).toBeGreaterThan(100);
     expect(Math.abs(r.points[1].east_m)).toBeLessThan(1);
-    // Ellipsoid scale at anchor, not sphere
-    const expected = projectGpsToLocalMetersEllipsoid(13.001, 80.0, 13.0, 80.0);
+    // WGS84 local tangent plane about the anchor
+    const expected = projectGpsToLocalMeters(13.001, 80.0, 13.0, 80.0);
     expect(r.points[1].north_m).toBeCloseTo(expected.north, 6);
   });
 
@@ -146,18 +96,13 @@ describe("parseLocalPointCsv", () => {
     expect(r.num_points).toBe(1);
   });
 
-  it("round-trips GPS lat/lon through ellipsoidal NED (rover scale)", () => {
-    // Preview NED uses ellipsoid metres-per-degree. Inverse with the same scale
-    // must recover lat/lon; the shared spherical map helper does not (and pins
-    // still draw from source lat/lon, so map markers are unaffected).
+  it("round-trips GPS lat/lon through the WGS84 tangent-plane NED", () => {
     const text = ["lat,lon", "13.07208106,80.26195346", "13.08,80.27"].join("\n");
     const r = parseLocalPointCsv(text);
-    const { mPerDegNorth, mPerDegEast } = metresPerDegree(r.anchor!.lat);
     for (const p of r.points) {
-      const lat = r.anchor!.lat + p.north_m / mPerDegNorth;
-      const lon = r.anchor!.lon + p.east_m / mPerDegEast;
-      expect(lat).toBeCloseTo(p.lat!, 8);
-      expect(lon).toBeCloseTo(p.lon!, 8);
+      const g = projectLocalMetersToGps(p.north_m, p.east_m, r.anchor!.lat, r.anchor!.lon);
+      expect(g.lat).toBeCloseTo(p.lat!, 8);
+      expect(g.lon).toBeCloseTo(p.lon!, 8);
     }
   });
 

@@ -2,7 +2,7 @@
  * Rebase PlanLine geometry from one GPS-anchored local NED frame into another.
  *
  * Pure translation in the local frames (no rotation/scale). Uses the shared
- * PX4-sphere projection so CSV, geo-DXF, and Fix-Alignment origins all agree.
+ * WGS84 tangent-plane projection (geoProjection) so CSV, geo-DXF, and Fix-Alignment origins all agree.
  */
 
 import type { PlanLine } from "../types/plan";
@@ -16,7 +16,7 @@ function originsEqual(a: GpsOrigin, b: GpsOrigin): boolean {
 }
 
 /**
- * Identity when origins match; otherwise GPS round-trip via PX4 sphere.
+ * Identity when origins match; otherwise GPS round-trip via the WGS84 tangent plane.
  */
 export function rebasePlanLineToOrigin(
   line: PlanLine,

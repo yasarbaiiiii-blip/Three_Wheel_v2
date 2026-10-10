@@ -24,6 +24,7 @@ import type {
 import { isDesignInstance, isDesignEntity } from '../types/designDocument';
 import type { TemplateRegistry } from './designTemplateRegistry';
 import { validateDesignDocument } from './designValidation';
+import { projectGpsToLocalMeters, projectLocalMetersToGps } from './geoProjection';
 
 // ──────────────────────────────────────────
 // Flatten: DesignDocument → PlanLine[]
@@ -315,8 +316,6 @@ export function simplifyPath(
 // GPS ↔ Design coordinate transforms
 // ──────────────────────────────────────────
 
-const EARTH_RADIUS = 6378137.0;
-
 /**
  * Project a design vertex (northM, eastM) directly to GPS (lat, lon)
  * relative to the anchor's survey location.
@@ -325,12 +324,7 @@ export function projectDesignToGps(
   vertex: DesignVertex,
   anchor: DesignPreviewAnchor,
 ): { lat: number; lon: number } {
-  const originLatRad = (anchor.lat * Math.PI) / 180;
-  const lat = anchor.lat + (vertex.northM / EARTH_RADIUS) * (180 / Math.PI);
-  const lon =
-    anchor.lon +
-    (vertex.eastM / (EARTH_RADIUS * Math.cos(originLatRad))) * (180 / Math.PI);
-  return { lat, lon };
+  return projectLocalMetersToGps(vertex.northM, vertex.eastM, anchor.lat, anchor.lon);
 }
 
 /**
@@ -342,11 +336,6 @@ export function projectGpsToDesignMeters(
   lon: number,
   anchor: DesignPreviewAnchor,
 ): DesignVertex {
-  const originLatRad = (anchor.lat * Math.PI) / 180;
-  const northM = (lat - anchor.lat) * (EARTH_RADIUS * Math.PI) / 180;
-  const eastM =
-    (lon - anchor.lon) *
-    (EARTH_RADIUS * Math.cos(originLatRad) * Math.PI) /
-    180;
-  return { northM, eastM };
+  const { north, east } = projectGpsToLocalMeters(lat, lon, anchor.lat, anchor.lon);
+  return { northM: north, eastM: east };
 }
