@@ -51,49 +51,46 @@ export class AppTransportService {
   private activeToken: string | null = null;
   private connectionListeners = new Set<SocketStatusListener>();
   private appStateSubscription: NativeEventSubscription | null = null;
+  /** True from the first accepted socket connection until disconnect()/unauthorized. */
+  private sessionActive = false;
+  private appActive = true;
 
   constructor() {
     this.socketMgr = getProdSocketManager();
     this.client = getProdApiClient();
 
-    // Fixed-rate heartbeat sender (independent of request latency)
-    // Total budget capped strictly at 350 ms (< 500 ms)
+    // Fixed-rate heartbeat sender (independent of request latency). ONE path per tick:
+    // the socket while it is connected, REST only while the socket is down. Never both: a late
+    // socket ack must not add a second request, and a down socket must not silence the heartbeat.
     this.heartbeatScheduler = new HeartbeatScheduler(async () => {
       const socket = this.socketMgr.getSocket();
       if (socket && socket.connected) {
         try {
-          // Socket heartbeat allocated 200 ms
-          const res = await this.socketMgr.emitHeartbeat(200);
+          const res = await this.socketMgr.emitHeartbeat(HEARTBEAT_REQUEST_TIMEOUT_MS);
           return { ok: Boolean(res.ok), transport: "socket" };
         } catch {
-          // Socket heartbeat failed or timed out: REST fallback allocated remaining 150 ms
-        }
-        try {
-          const res = await this.client.heartbeat({ timeoutMs: 150 });
-          return { ok: Boolean(res.ok), transport: "rest" };
-        } catch {
-          return { ok: false };
+          return { ok: false, transport: "socket" };
         }
       }
-
-      // Socket disconnected: REST given full 350 ms budget
       try {
         const res = await this.client.heartbeat({ timeoutMs: HEARTBEAT_REQUEST_TIMEOUT_MS });
         return { ok: Boolean(res.ok), transport: "rest" };
       } catch {
-        return { ok: false };
+        return { ok: false, transport: "rest" };
       }
     }, 500);
 
-    // Listen to socket status transitions
+    // The heartbeat follows the operator SESSION, not the socket status: a reconnect window
+    // ("disconnected"/"error" while socket.io retries) must not stop it (no stop/start churn);
+    // the sender switches to REST for that window. It stops only when the session ends.
     this.socketMgr.subscribeStatus((status, detail) => {
       if (status === "connected") {
-        this.heartbeatScheduler.start();
-      } else if (status === "disconnected" || status === "unauthorized" || status === "error") {
+        this.sessionActive = true;
+        if (this.appActive) this.heartbeatScheduler.start();
+      } else if (status === "unauthorized") {
+        this.sessionActive = false;
         this.heartbeatScheduler.stop();
-        if (status === "unauthorized") {
-          clearProdTelemetry();
-        }
+        clearProdTelemetry();
       }
       this.notifyListeners(status, detail);
     });
@@ -105,16 +102,17 @@ export class AppTransportService {
     try {
       if (AppState && typeof AppState.addEventListener === "function") {
         this.appStateSubscription = AppState.addEventListener("change", (nextState) => {
-          if (nextState === "background" || nextState === "inactive") {
-            // Tablet sleep / background: pause heartbeat scheduler cleanly
+          if (nextState === "background") {
+            // Tablet sleep / background: JS timers are not reliable there; pause cleanly.
+            this.appActive = false;
             this.heartbeatScheduler.stop();
           } else if (nextState === "active") {
-            // Tablet wake-up / foregrounded: check socket and immediately trigger heartbeat
-            if (this.socketMgr.getStatus() === "connected") {
+            // Foregrounded: resume at once while the session is alive (socket state is irrelevant:
+            // the sender uses REST until the socket is back).
+            this.appActive = true;
+            if (this.sessionActive) {
               this.heartbeatScheduler.start();
               this.heartbeatScheduler.triggerNow();
-            } else if (this.activeToken) {
-              void this.socketMgr.connect(this.activeHost, this.activeToken);
             }
           }
         });
@@ -215,6 +213,9 @@ export class AppTransportService {
     const normalizedHost = normalizeProdBaseUrl(rawHost);
     this.activeHost = normalizedHost;
     this.activeToken = token?.trim() || null;
+    // A new session: no heartbeat to the old rover/token while this one is being accepted.
+    this.sessionActive = false;
+    this.heartbeatScheduler.stop();
 
     await saveProdHost(normalizedHost);
 
@@ -294,6 +295,7 @@ export class AppTransportService {
    * Disconnects the rover session completely.
    */
   disconnect() {
+    this.sessionActive = false;
     this.heartbeatScheduler.stop();
     this.socketMgr.disconnect();
     clearProdTelemetry();

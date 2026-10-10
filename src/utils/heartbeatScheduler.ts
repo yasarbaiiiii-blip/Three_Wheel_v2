@@ -4,7 +4,7 @@
  * Rules:
  * 1. Fixed rate: fires every 500 ms on a fixed clock, independent of request latency.
  *    Never waits for the previous request before scheduling the next tick.
- * 2. In-flight timeout: capped at 350 ms (< 500 ms), so it can never stretch cadence.
+ * 2. Every tick sends (never skipped for an in-flight request). In-flight timeout: capped at 350 ms (< 500 ms), so it can never stretch cadence.
  * 3. Primary path: Socket.IO "heartbeat" event. Fallback: REST POST /api/heartbeat.
  * 4. Measures and reports actual interval, jitter, and JS thread blocking lag.
  */
@@ -35,7 +35,7 @@ export class HeartbeatScheduler {
   private sender: HeartbeatSender;
   private timerId: ReturnType<typeof setTimeout> | null = null;
   private isRunning = false;
-  private inFlight = false;
+  private inFlight = 0;
   private nextScheduledTime = 0;
   private lastTriggerTime = 0;
   private listeners = new Set<MetricsListener>();
@@ -164,14 +164,8 @@ export class HeartbeatScheduler {
     // This guarantees request latency (even 1.2s) CANNOT stretch the cadence.
     this.scheduleNextTick();
 
-    // Guard against overlapping requests: if a previous heartbeat is still in flight,
-    // do not spawn a concurrent request; record consecutive error.
-    if (this.inFlight) {
-      this.metrics.consecutiveErrors += 1;
-      this.emit();
-      return;
-    }
-
+    // No in-flight skip: a tick whose predecessor is still pending (late timeout on a busy JS thread)
+    // must still send. Every request has its own <= 350 ms timeout, so at most a couple overlap.
     // Fire asynchronous heartbeat sender in background with strict 350ms timeout
     void this.dispatchHeartbeat();
 
@@ -179,7 +173,7 @@ export class HeartbeatScheduler {
   }
 
   private async dispatchHeartbeat(): Promise<void> {
-    this.inFlight = true;
+    this.inFlight += 1;
     let timer: ReturnType<typeof setTimeout> | null = null;
     try {
       // Enforce timeout strictly < 500 ms (350 ms)
@@ -212,7 +206,7 @@ export class HeartbeatScheduler {
       if (timer !== null) {
         clearTimeout(timer);
       }
-      this.inFlight = false;
+      this.inFlight -= 1;
       this.emit();
     }
   }
