@@ -9,6 +9,8 @@ import {
   type PathExclusiveKind,
 } from "./src/utils/pathPipelineGuard";
 import { AppErrorBoundary } from "./src/components/AppErrorBoundary";
+import { LoopProbe } from "./src/components/LoopProbe";
+import { loadMapPrefs, useSharedMapEnabled } from "./src/components/sharedMap/mapPrefs";
 
 // Mapbox token is applied on first map mount (MapViewNative / MapboxHelloMap),
 // not at app entry — keeps the connection screen off the Mapbox native JS path.
@@ -21,21 +23,37 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 // Lazy-loaded: none of these are needed for the initial "connection" screen
 // (see the `page` state default below), so deferring them shrinks the JS
 // that must be parsed before first paint.
+// Read the saved shared-map preference before the first map can mount (no remount flicker).
+void loadMapPrefs();
+
 /** Metro HMR can resolve a chunk with a missing default; fail loudly instead of undefined. */
 function lazyDefault<T extends React.ComponentType<any>>(
   loader: () => Promise<{ default?: T } & Record<string, unknown>>,
   name: string
 ) {
-  return lazy(async () => {
-    const mod = await loader();
-    const Comp = (mod.default ?? mod[name]) as T | undefined;
-    if (typeof Comp !== "function") {
-      throw new Error(
-        `[lazy] ${name} failed to load (got ${typeof Comp}). Restart Metro with --reset-cache.`
-      );
+  // One shared load per screen so preload() and the first render never fetch twice.
+  let pending: Promise<{ default: T }> | null = null;
+  const load = (): Promise<{ default: T }> => {
+    if (!pending) {
+      pending = (async () => {
+        const mod = await loader();
+        const Comp = (mod.default ?? mod[name]) as T | undefined;
+        if (typeof Comp !== "function") {
+          throw new Error(
+            `[lazy] ${name} failed to load (got ${typeof Comp}). Restart Metro with --reset-cache.`
+          );
+        }
+        return { default: Comp };
+      })();
+      pending.catch(() => {
+        pending = null; // let a later render retry instead of caching the failure
+      });
     }
-    return { default: Comp };
-  });
+    return pending;
+  };
+  const Component = lazy(load) as ReturnType<typeof lazy<T>> & { preload: () => Promise<unknown> };
+  Component.preload = () => load().catch(() => undefined);
+  return Component;
 }
 
 const MapboxHelloMap = lazyDefault(() => import("./src/components/MapboxHelloMap"), "MapboxHelloMap");
@@ -171,6 +189,7 @@ import {
   setTelemetrySnapshot,
   useSystemHealth,
   useTelemetrySnapshot,
+  useThrottledTelemetrySnapshot,
 } from "./src/features/telemetry/telemetryStore";
 import { getAppTransport } from "./src/services/appTransport";
 import { roverBeaconListener, type BeaconRover } from "./src/services/roverBeacon";
@@ -967,9 +986,11 @@ function AppRoot() {
       setActiveRefPointLabelIndex(null);
     }
   }, [showRefPointLabels]);
-  // Full live telemetry subscription (baseline-correct). Deadband in the store
-  // already skips noise; do not use boolean-only selectors that miss pose updates.
-  const telemetrySnapshot = useTelemetrySnapshot();
+  // Throttled (~4 Hz, instant on armed/mode/mission/link/staleness changes): this component
+  // is thousands of lines of render + hundreds of child props, so re-rendering it at packet
+  // rate starved the JS thread and made nav taps lag. The map marker reads the raw store
+  // itself (MapViewNative), and start/safety gating reads store getters, not this value.
+  const telemetrySnapshot = useThrottledTelemetrySnapshot();
   const systemHealth = useSystemHealth();
   // Latch first finite GPS after telemetry exists — must not run above this declaration.
   useEffect(() => {
@@ -1667,6 +1688,23 @@ function AppRoot() {
       }
     });
     return unsub;
+  }, []);
+
+  // Warm every lazy screen shortly after launch so a nav tap never waits on a pending
+  // Suspense boundary (in a dev build that wait is a Metro fetch — seconds).
+  useEffect(() => {
+    const t = setTimeout(() => {
+      void ModernHomeUI.preload();
+      void FieldsPage.preload();
+      void TemplatesPage.preload();
+      void SwoziPage.preload(); // SecondaryPages module — shared by the other secondary pages
+      // Settings is a second-level lazy chunk inside SecondaryPages; warm it too, otherwise
+      // the first visit shows a spinner while it loads.
+      void import("./src/screens/SecondaryPages")
+        .then((m) => m.preloadSettingsPage())
+        .catch(() => undefined);
+    }, 1500);
+    return () => clearTimeout(t);
   }, []);
 
   // Show whether the rover on the connect screen already has a saved token.
@@ -3723,6 +3761,7 @@ function AppRoot() {
                 </Suspense>
               ) : (
                 <AppErrorBoundary name="Home">
+                <LoopProbe id="HomeView">
                 <HomeView
                   page={page}
                   autoOrigin={autoOrigin}
@@ -3967,6 +4006,7 @@ function AppRoot() {
                       : undefined
                   }
                 />
+                </LoopProbe>
                 </AppErrorBoundary>
               )}
 
@@ -4211,7 +4251,8 @@ type HomeViewProps = {
 
 function HomeView(props: HomeViewProps) {
   // Prefer App-provided live snapshot (single source of truth). Store is fallback only.
-  const liveTelemetry = useTelemetrySnapshot();
+  const liveTelemetry = useThrottledTelemetrySnapshot();
+  const liveHealth = useSystemHealth();
   const {
     page = "home",
     renderSectionContent,
@@ -5266,8 +5307,9 @@ function SectionPages(props: {
   offsetPreviewLines?: PlanLine[] | null;
 }) {
   const { page, mapViewEnabled, setMapViewEnabled } = props;
+  const sharedMapEnabled = useSharedMapEnabled();
   // Prefer App props; store fallback if a screen mounts without a parent snapshot.
-  const liveTelemetry = useTelemetrySnapshot();
+  const liveTelemetry = useThrottledTelemetrySnapshot();
   const telemetrySnapshot = liveTelemetry ?? props.telemetrySnapshot;
   const previewRoverPoint =
     props.previewRoverPoint ??
@@ -5277,8 +5319,12 @@ function SectionPages(props: {
 
   return (
     <Suspense fallback={<ActivityIndicator />}>
-    <View style={{ flex: 1, backgroundColor: "#09090b" }}>
+    <View
+      style={{ flex: 1, backgroundColor: page === "fields" && sharedMapEnabled && mapViewEnabled ? "transparent" : "#09090b" }}
+      pointerEvents={page === "fields" ? "box-none" : "auto"}
+    >
       {page === "fields" ? (
+        <LoopProbe id="FieldsPage">
         <FieldsPage
           {...props}
           previewRoverPoint={previewRoverPoint}
@@ -5310,8 +5356,10 @@ function SectionPages(props: {
             />
           )}
         />
+        </LoopProbe>
       ) : null}
       {page === "templates" ? (
+        <LoopProbe id="TemplatesPage">
         <TemplatesPage
           {...props}
           previewRoverPoint={previewRoverPoint}
@@ -5341,6 +5389,7 @@ function SectionPages(props: {
             />
           )}
         />
+        </LoopProbe>
       ) : null}
       {page === "swozi" ? (
         <SwoziPage

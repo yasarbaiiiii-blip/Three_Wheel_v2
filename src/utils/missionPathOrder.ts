@@ -515,6 +515,18 @@ function connectorCrossings(model: OrderModel, a: RouteCode, b: RouteCode): numb
   return hits;
 }
 
+/** Sum of the transit gaps between consecutive entries — the quantity a chain minimizes. */
+export function totalGapM(chain: PlanLine[]): number {
+  let total = 0;
+  for (let i = 0; i < chain.length - 1; i++) {
+    const a = lineEndpoints(chain[i]);
+    const b = lineEndpoints(chain[i + 1]);
+    if (!a || !b) continue;
+    total += Math.hypot(b.start[0] - a.end[0], b.start[1] - a.end[1]);
+  }
+  return total;
+}
+
 /** Transit distance of a route: start position (if any) -> first mark, then end -> next start. */
 function deadheadM(model: OrderModel, route: RouteCode[]): number {
   let total = 0;

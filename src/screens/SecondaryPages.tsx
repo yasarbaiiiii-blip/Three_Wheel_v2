@@ -705,6 +705,11 @@ export function PositioningPage({
   );
 }
 
+/** Pull the Settings chunk in ahead of the first visit (see App's idle preload). */
+export function preloadSettingsPage(): Promise<unknown> {
+  return import("../components/ModernSettingsPage");
+}
+
 export function SettingsPage(props: {
   toggleA: boolean;
   toggleB: boolean;

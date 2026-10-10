@@ -17,6 +17,7 @@ import type { MultiPointPlacementPhase } from "../types/fieldsWorkflow";
 import type { PlacedItem } from "./BoundaryEditor";
 import type { AnchorCandidatePoint } from "./mapViewTypes";
 import { MapView } from "./MapView";
+import { useSharedMapEnabled } from "./sharedMap/mapPrefs";
 import { Map as MapIcon } from "lucide-react-native";
 import {
   getCurveGeometry,
@@ -203,6 +204,8 @@ export function PlanPreview({
   anchorCandidates?: AnchorCandidatePoint[];
   onAnchorCandidateSelect?: (candidate: AnchorCandidatePoint) => void;
 }) {
+  // True when the native map is the app-wide shared one sitting UNDER this view.
+  const sharedMapBehind = useSharedMapEnabled() && mapViewEnabled && mapMode !== "templates";
   const [visualSelected, setVisualSelected] = useState(true);
   const [boundarySelected, setBoundarySelected] = useState(true);
   const isEditablePlacedItemMode = Boolean(
@@ -972,14 +975,24 @@ export function PlanPreview({
     <View
       onLayout={handleLayout}
       style={{ flex: 1 }}
+      pointerEvents={sharedMapBehind ? "box-none" : "auto"}
     >
       <View
         {...(mapViewEnabled ? {} : panResponder.panHandlers)}
         collapsable={false}
-        style={{ flex: 1, position: "relative", backgroundColor: "#f0f4f8", overflow: "hidden" }}
+        style={{
+          flex: 1,
+          position: "relative",
+          // Shared map: the native surface is under the page, so this wrapper must not paint
+          // over it. (Templates keeps a private map and its own light background.)
+          backgroundColor: sharedMapBehind ? "transparent" : "#f0f4f8",
+          overflow: sharedMapBehind ? "visible" : "hidden",
+        }}
+        pointerEvents={sharedMapBehind ? "box-none" : "auto"}
       >
         {mapViewEnabled ? (
           <MapView
+            standalone={mapMode === "templates"}
             mode={isPlacedItemActive || boundaryMode || !!templateEditItem ? "templates" : "fields"}
             boundaryWidth={boundaryWidth}
             boundaryHeight={boundaryHeight}

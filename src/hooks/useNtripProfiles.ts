@@ -22,9 +22,18 @@ const EMPTY_REGISTRY: NtripProfileRegistry = {
   profiles: [],
 };
 
+/**
+ * Last registry seen per rover. Settings is opened and closed constantly; without this every
+ * open started from an empty list + spinner and waited on the radio. Show the last known
+ * list immediately and revalidate in the background (the server revision still guards edits).
+ */
+const registryCache = new Map<string, NtripProfileRegistry>();
+
 export function useNtripProfiles(baseUrl: string | null | undefined) {
   const baseIdentity = baseUrl?.trim().replace(/\/$/, "") || null;
-  const [registry, setRegistry] = useState<NtripProfileRegistry>(EMPTY_REGISTRY);
+  const [registry, setRegistry] = useState<NtripProfileRegistry>(
+    () => (baseIdentity ? registryCache.get(baseIdentity) : undefined) ?? EMPTY_REGISTRY
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mutationKey, setMutationKey] = useState<string | null>(null);
@@ -47,6 +56,7 @@ export function useNtripProfiles(baseUrl: string | null | undefined) {
     setError(null);
     try {
       const next = await listNtripProfiles(requestedBase);
+      registryCache.set(requestedBase, next);
       if (
         currentBaseRef.current === requestedBase &&
         requestGenerationRef.current === generation
@@ -70,7 +80,7 @@ export function useNtripProfiles(baseUrl: string | null | undefined) {
     mutationGenerationRef.current += 1;
     mutationKeyRef.current = null;
     setMutationKey(null);
-    setRegistry(EMPTY_REGISTRY);
+    setRegistry((baseIdentity ? registryCache.get(baseIdentity) : undefined) ?? EMPTY_REGISTRY);
     setError(null);
     void reload();
     return () => {

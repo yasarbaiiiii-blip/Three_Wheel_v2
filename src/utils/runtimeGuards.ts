@@ -74,9 +74,19 @@ export function installRuntimeGuards(): void {
 /** Yield to the UI thread so busy spinners / toasts paint before heavy work. */
 export function yieldToUi(): Promise<void> {
   return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
     // Double rAF: one for layout, one for paint — more reliable than a single frame.
     requestAnimationFrame(() => {
-      requestAnimationFrame(() => resolve());
+      requestAnimationFrame(finish);
     });
+    // Frames can be withheld (backgrounded app, picker/system UI on top, a stalled
+    // compositor). Callers set a busy flag BEFORE awaiting this, so a promise that never
+    // settles leaves the screen busy forever and every control that checks it looks dead.
+    setTimeout(finish, 120);
   });
 }

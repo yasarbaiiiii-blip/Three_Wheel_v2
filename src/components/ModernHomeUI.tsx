@@ -11,6 +11,8 @@ import { useRoverEvents } from "../features/telemetry/roverEventStore";
 import { describeRoverLinks, linkUnknownNote } from "../features/telemetry/roverLinkStatus";
 import { describeMission, missionControls, selectMission } from "../features/mission/missionLifecycle";
 import { MapView } from "./MapView";
+import { SharedMapHost } from "./sharedMap/SharedMapHost";
+import { useSharedMapEnabled } from "./sharedMap/mapPrefs";
 import { getPlanLineSegmentKind, isSegmentKindVisible } from "../utils/curveGeometry";
 import { parseLocalPointCsv } from "../utils/localPointCsv";
 import { MissionLayerPills } from "./fields/MissionLayerPills";
@@ -604,6 +606,7 @@ export default function ModernHomeUI(props) {
   const rtkLifecycleLabel = rtkStatusLabel(rtkStatus);
   const canStartLora = !rtkStatus.running && rtkStatus.desired_mode === "idle";
   const isFieldsPage = currentPage === "fields";
+  const sharedMapOn = useSharedMapEnabled();
   const PAGE_TO_NAV = {
     home: "main",
     fields: "fields",
@@ -1712,10 +1715,11 @@ export default function ModernHomeUI(props) {
 
   return (
     <View style={styles.container}>
-      {/* Home map only. Fields hosts its own PlanPreview MapView — a transparent
-          full-screen Fields overlay hides native Mapbox on Android. */}
-      {isHomePage ? (
-      <View style={{ ...StyleSheet.absoluteFillObject, zIndex: mapFullscreen ? 200 : 1, backgroundColor: COLORS.bgBase }}>
+      <View style={{ ...StyleSheet.absoluteFillObject, zIndex: isHomePage && mapFullscreen ? 200 : 1, backgroundColor: COLORS.bgBase }}>
+        {/* The one native map lives here for the whole session (Home + Fields share it). It is
+            only parked, never unmounted, on non-map pages — see SharedMapHost. */}
+        {sharedMapOn && mapViewEnabled ? <SharedMapHost parked={!(isHomePage || isFieldsPage)} /> : null}
+        {isHomePage ? (<>
         {mapViewEnabled ? (
           <>
             <MapView
@@ -1788,20 +1792,29 @@ export default function ModernHomeUI(props) {
         )}
 
 
+        </>) : null}
       </View>
-      ) : (
-        <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1, backgroundColor: COLORS.bgBase }} />
-      )}
 
       {!isHomePage && renderSectionContent ? (
+        isFieldsPage ? (
+          // Fields is full-bleed with constant insets: a plain, un-clipped, touch-through View.
+          // No Reanimated layout animation and no overflow clipping between the page UI and the
+          // shared native map underneath it.
+          <View style={styles.sectionContentFields} pointerEvents="box-none">
+            <AppErrorBoundary name={currentPage || "page"}>
+              {renderSectionContent()}
+            </AppErrorBoundary>
+          </View>
+        ) : (
         <AnimatedReanimated.View
-          style={[styles.sectionContent, sectionContentAnimatedStyle, isFieldsPage && StyleSheet.absoluteFillObject]}
+          style={[styles.sectionContent, sectionContentAnimatedStyle]}
           pointerEvents="box-none"
         >
           <AppErrorBoundary name={currentPage || "page"}>
             {renderSectionContent()}
           </AppErrorBoundary>
         </AnimatedReanimated.View>
+        )
       ) : null}
       
       {/* HUD Layer */}
@@ -1942,6 +1955,10 @@ const styles = StyleSheet.create({
     position: "absolute",
     zIndex: 5,
     overflow: "hidden",
+  },
+  sectionContentFields: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 5,
   },
   canvasContainer: {
     flex: 1,

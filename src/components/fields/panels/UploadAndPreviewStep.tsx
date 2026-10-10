@@ -588,13 +588,21 @@ export function UploadAndPreviewStep({
   const pickAndImport = async (opts?: { append?: boolean }) => {
     if (blockPlanEdit(opts?.append ? "Adding files to the plan" : "Uploading a new path"))
       return;
-    if (isUploading) return;
+    if (isUploading) {
+      // Silent returns read as "the button is dead" — say why.
+      Alert.alert("Import in progress", "Wait for the current import to finish, then try again.");
+      return;
+    }
     try {
       setAppendOnImport(!!opts?.append);
       const result = await DocumentPicker.getDocumentAsync({
         type: ["*/*"],
         copyToCacheDirectory: true,
         multiple: true,
+        // expo-document-picker 14 base64-encodes every picked file by default. We read the
+        // cached copy ourselves, so that was pure overhead (and a bridge-sized string for a
+        // big DXF).
+        base64: false,
       });
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const valid = result.assets.filter((asset) => {
@@ -620,6 +628,13 @@ export function UploadAndPreviewStep({
     } catch (err) {
       setAppendOnImport(false);
       console.log("Error picking file:", err);
+      const message = err instanceof Error ? err.message : String(err);
+      Alert.alert(
+        "Could not open the file picker",
+        /in progress/i.test(message)
+          ? "A previous file picker is still open or was interrupted. Close it (or restart the app) and try again."
+          : message || "The system file picker failed to open."
+      );
     }
   };
 
@@ -641,6 +656,7 @@ export function UploadAndPreviewStep({
         type: ["*/*"],
         copyToCacheDirectory: true,
         multiple: false,
+        base64: false,
       });
       if (result.canceled || !result.assets || result.assets.length === 0) return;
       const asset = result.assets[0];

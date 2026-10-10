@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSharedMapEnabled } from "../components/sharedMap/mapPrefs";
 import { Alert, Keyboard, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 
 import { type PlacedItem } from "../components/BoundaryEditor";
@@ -1207,6 +1208,8 @@ export function FieldsPage(props: FieldsPageProps) {
     openOnlySection,
   ]);
 
+  // Shared native map sits under this page: stay transparent / touch-through (see render).
+  const sharedMapActive = useSharedMapEnabled() && mapViewEnabled;
   const alignRequired = !isLocalCsvFlow || hasPendingAlignment;
   const pathOrderReady = uploadDone && (!alignRequired || alignDone);
   /** The mission is stored on the rover and verified (Send). */
@@ -1259,10 +1262,21 @@ export function FieldsPage(props: FieldsPageProps) {
   ]);
 
   return (
-    <View style={{ flex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
-      {/* Fields owns this MapView. Sharing Home's map under a full-screen overlay
-          made native Mapbox invisible on Android. */}
-      <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 1, backgroundColor: FIELDS_COLORS.bgBase }}>
+    <View
+      style={{ flex: 1, backgroundColor: sharedMapActive ? "transparent" : FIELDS_COLORS.bgBase }}
+      pointerEvents={sharedMapActive ? "box-none" : "auto"}
+    >
+      {/* With the shared map the native surface lives UNDER this page (SharedMapHost), so this
+          layer must be transparent and let touches fall through to it. Otherwise (map off, or
+          the operator turned the shared map off) Fields paints its own background. */}
+      <View
+        style={{
+          ...StyleSheet.absoluteFillObject,
+          zIndex: 1,
+          backgroundColor: sharedMapActive ? "transparent" : FIELDS_COLORS.bgBase,
+        }}
+        pointerEvents={sharedMapActive ? "box-none" : "auto"}
+      >
         {renderPlanPreview({
           lines: anchorSelectMode && anchorTarget
             ? anchorIsolatedLines

@@ -26,6 +26,7 @@ import {
   Trash2,
 } from "lucide-react-native";
 import SchemaParamEditor from "./settings/SchemaParamEditor";
+import { MapSettingsPanel } from "./settings/MapSettingsPanel";
 import { NtripProfileConflictError } from "../api/rtkProfiles";
 import { EMPTY_RTK_STATUS, hasLiveCorrections, rtkStatusLabel } from "../api/rtkStatus";
 import { useNtripProfiles } from "../hooks/useNtripProfiles";
@@ -1077,6 +1078,7 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
   );
 
   const generalSection = (
+    <>
     <SettingsPanel icon={Settings} title="General" subtitle="Field operation preferences">
       <View style={styles.block}>
         <SettingsToggle
@@ -1096,6 +1098,8 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
         />
       </View>
     </SettingsPanel>
+    <MapSettingsPanel />
+    </>
   );
 
   return (
