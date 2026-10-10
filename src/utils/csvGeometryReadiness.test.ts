@@ -8,7 +8,7 @@ import {
   isGeometryNonPaintable,
   partitionParseWarnings,
 } from "./csvGeometryReadiness";
-import { buildTrajectory } from "./csvTrajectory";
+import { buildTrajectory } from "./missionTrajectory";
 
 function markLine(
   id: string,

@@ -9,9 +9,9 @@ import {
   isCompleteExtensionDraft,
   normalizeCsvExtensionConfig,
   terminalUnitVector,
-} from "./csvExtensions";
-import { buildTrajectory, findAdjacentMarkViolation, type TrajectoryRun } from "./csvTrajectory";
-import { applyCsvOrderToPlanLines, defaultPathOrder } from "./csvPathOrder";
+} from "./missionExtensions";
+import { buildTrajectory, findAdjacentMarkViolation, type TrajectoryRun } from "./missionTrajectory";
+import { applyCsvOrderToPlanLines, defaultPathOrder } from "./missionPathOrder";
 import { relabelHydratedLinesWithExtensions } from "./stagedMissionHydration";
 
 function mark(
@@ -139,16 +139,6 @@ describe("buildTrajectory with extensions", () => {
       // mark interior should not include pre tip
       expect(run.points[0][0]).toBeGreaterThanOrEqual(-1e-9);
     }
-    // Ground-truth indices still mark-only when attached (match a real mark vertex)
-    const gtResult = buildTrajectory([a, b], {
-      ...speeds,
-      extensions: { enabled: true, preM: 0.5, aftM: 0.5 },
-      groundTruthSource: [{ north: 10, east: 0, lat: 1, lon: 2 }],
-    });
-    expect(gtResult.groundTruth.length).toBe(1);
-    expect(gtResult.runs[gtResult.groundTruth[0].run_index].kind).toBe("mark");
-    // Leading travel shifted mark run index from 0 → 1
-    expect(gtResult.groundTruth[0].run_index).toBe(1);
   });
 
   it("aftM=0.02 is corrected to 0.10 before payload", () => {

@@ -32,7 +32,6 @@ import {
   shouldRenderAlignCard,
   type FieldsStepSlice,
 } from "../utils/fieldsStepSlicing";
-import { DXF_PLANNER } from "../config/featureFlags";
 import {
   applyCsvOrderToPlanLines,
   defaultPathOrder,
@@ -124,6 +123,7 @@ export type FieldsPageProps = {
   onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
   /** Frozen painted geometry from successful Send — Start restages with live entry. */
   onAppPlannedStartSnapshot?: (snapshot: import("../utils/appPlannedStartSnapshot").AppPlannedStartSnapshot) => void;
+  dashPattern?: import("../utils/appPlannedMissionBuilder").DashPattern | null;
   alignedRefPoints?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
   setAlignedRefPoints?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>>;
   mapViewEnabled?: boolean;
@@ -211,7 +211,7 @@ export type FieldsPageProps = {
   localCsvPreview?: LocalPointCsvResult | null;
   /**
    * Local DXF parse meta (app planner). Geometry is in `lines`; this carries
-   * name / georef / warnings for Path Order → plan-trajectory Send.
+   * name / georef / warnings for Path Order → mission Send.
    */
   localDxfMeta?: {
     fileName: string;
@@ -376,6 +376,7 @@ export function FieldsPage(props: FieldsPageProps) {
     loadedPathInspection,
     onInvalidateWorkflow,
     onAppPlannedStartSnapshot,
+    dashPattern,
     alignedRefPoints = [],
     setAlignedRefPoints,
     mapViewEnabled = true,
@@ -899,8 +900,7 @@ export function FieldsPage(props: FieldsPageProps) {
   /** Local DXF-only (or mixed batch treated as DXF-style steps with Align). */
   const isLocalDxfFlow =
     (hasLocalBatch && batchHasDxf) ||
-    (DXF_PLANNER === "app" &&
-      isDxfPath &&
+    (isDxfPath &&
       !selectedPathName &&
       importedPlan?.fileType === "dxf" &&
       !hasLocalBatch);
@@ -1669,7 +1669,7 @@ export function FieldsPage(props: FieldsPageProps) {
                 setCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG);
                 // A georeferenced DXF is already placed, so Align has nothing to do and the
                 // operator goes straight to ordering. A metric one cannot be sent until it is
-                // aligned (plan-trajectory requires origin_gps), so lead with Align open.
+                // aligned (the mission anchor is origin_gps), so lead with Align open.
                 const placed = data.isGeographic && data.geoOrigin != null;
                 setActiveStep(placed ? "upload" : "align");
                 openOnlySection(placed ? "upload" : "align");
@@ -1854,6 +1854,7 @@ export function FieldsPage(props: FieldsPageProps) {
                             : null
                         }
                         onAppPlannedStartSnapshot={onAppPlannedStartSnapshot}
+                        dashPattern={dashPattern ?? null}
                         missionName={
                           hasLocalBatch || isLocalDxfFlow
                             ? localDxfMeta?.fileName ??

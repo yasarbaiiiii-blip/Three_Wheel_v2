@@ -10,7 +10,7 @@ import {
   trajectoryRunLengthM,
   trajectoryTotals,
   type TrajectoryRun,
-} from "./csvTrajectory";
+} from "./missionTrajectory";
 
 const SPEEDS = { markSpeedMs: 0.35, travelSpeedMs: 0.5 };
 
@@ -284,46 +284,6 @@ describe("buildTrajectory", () => {
     ]);
   });
 
-  it("ground-truth indices resolve to real points on mark runs", () => {
-    const a = markLine(
-      "a",
-      [
-        { north: 0, east: 0 },
-        { north: 10, east: 0 },
-      ],
-      "A"
-    );
-    const b = markLine(
-      "b",
-      [
-        { north: 10, east: 30 },
-        { north: 20, east: 30 },
-      ],
-      "B"
-    );
-
-    const { runs, groundTruth } = buildTrajectory([a, b], {
-      ...SPEEDS,
-      groundTruthSource: [
-        { north: 0, east: 0, lat: 13.0, lon: 80.0 },
-        { north: 10, east: 0, lat: 13.0001, lon: 80.0 },
-        { north: 10, east: 30, lat: 13.0001, lon: 80.0003 },
-        // Far from any fitted point — ignored
-        { north: 999, east: 999, lat: 14.0, lon: 81.0 },
-      ],
-    });
-
-    expect(groundTruth.length).toBe(3);
-    for (const gt of groundTruth) {
-      expect(gt.run_index).toBeGreaterThanOrEqual(0);
-      expect(gt.run_index).toBeLessThan(runs.length);
-      expect(runs[gt.run_index].kind).toBe("mark");
-      expect(gt.point_index).toBeGreaterThanOrEqual(0);
-      expect(gt.point_index).toBeLessThan(runs[gt.run_index].points.length);
-      expect(Number.isFinite(gt.lat) && Number.isFinite(gt.lon)).toBe(true);
-    }
-  });
-
   it("ignores transit layer lines in the input list", () => {
     const a = horizontalMark("a", 0, 10, 0);
     const transit: PlanLine = {
@@ -386,29 +346,5 @@ describe("buildTrajectory", () => {
     const { runs, warnings } = buildTrajectory([weird], SPEEDS);
     expect(runs).toHaveLength(0);
     expect(warnings.some((w) => /allowlist|Skipped/i.test(w))).toBe(true);
-  });
-
-  it("ground-truth attachment scales with spatial index (many survey × many fitted)", () => {
-    // 200 fitted points on a mark, 200 survey samples — must stay correct and finish quickly.
-    const fitted = Array.from({ length: 200 }, (_, i) => ({
-      north: i * 0.05,
-      east: 0,
-    }));
-    const line = markLine("road", fitted, "Road");
-    const source = fitted.map((p, i) => ({
-      north: p.north,
-      east: p.east,
-      lat: 13 + i * 1e-6,
-      lon: 80,
-    }));
-    const t0 = performance.now();
-    const { groundTruth } = buildTrajectory([line], {
-      ...SPEEDS,
-      groundTruthSource: source,
-    });
-    const ms = performance.now() - t0;
-    expect(groundTruth.length).toBeGreaterThan(50);
-    // Spatial hash should be well under a second even on weak hosts.
-    expect(ms).toBeLessThan(500);
   });
 });

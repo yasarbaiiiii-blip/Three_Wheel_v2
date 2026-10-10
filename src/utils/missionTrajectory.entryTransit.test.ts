@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { PlanLine } from "../types/plan";
-import { projectGpsToLocalMeters } from "./geoProjection";
-import { trajectoryRunsToPayload as toPayload } from "../api/planTrajectory";
+import { projectGpsToLocalMeters, projectLocalMetersToGps } from "./geoProjection";
+import { buildAppPlannedMissionPayload } from "./appPlannedMissionBuilder";
 import {
   ENTRY_TRANSIT_LABEL,
   ENTRY_TRANSIT_MAX_M,
@@ -208,7 +208,7 @@ describe("buildTrajectory + entry transit", () => {
 
   it("includes leading entry-transit when rover is offset in mission frame", () => {
     // ~5.5 m north of origin
-    const lat = origin[0] + 5.5 / 6_371_000 / (Math.PI / 180);
+    const lat = projectLocalMetersToGps(5.5, 0, origin[0], origin[1]).lat;
     const a = markLine("a", [
       { north: 0, east: 0 },
       { north: 10, east: 0 },
@@ -230,7 +230,7 @@ describe("buildTrajectory + entry transit", () => {
   });
 
   it("folds entry into pre-ext when extensions are enabled", () => {
-    const lat = origin[0] + 3 / 6_371_000 / (Math.PI / 180);
+    const lat = projectLocalMetersToGps(3, 0, origin[0], origin[1]).lat;
     const a = markLine("a", [
       { north: 0, east: 0 },
       { north: 10, east: 0 },
@@ -250,8 +250,8 @@ describe("buildTrajectory + entry transit", () => {
     expect(runs[1].kind).toBe("mark");
   });
 
-  it("travel payload keeps must_hit_indices empty", () => {
-    const lat = origin[0] + 2 / 6_371_000 / (Math.PI / 180);
+  it("entry travel is a spray-off run in the mission payload with only its endpoints must-hit", () => {
+    const lat = projectLocalMetersToGps(2, 0, origin[0], origin[1]).lat;
     const a = markLine("a", [
       { north: 0, east: 0 },
       { north: 5, east: 0 },
@@ -262,10 +262,11 @@ describe("buildTrajectory + entry transit", () => {
       roverPose: { lat, lon: origin[1], gps_fix: 5, pose_age_ms: 50 },
       includeEntryTransit: true,
     });
-    const payload = toPayload(runs);
-    const entry = payload.find((r) => r.label === ENTRY_TRANSIT_LABEL);
-    expect(entry).toBeTruthy();
-    expect(entry!.must_hit_indices).toEqual([]);
+    const payload = buildAppPlannedMissionPayload({ runs, anchor: origin });
+    const entry = payload.runs[0];
+    expect(entry.type).toBe("travel");
+    expect(entry.points.every((p) => (p[2] & 1) === 0)).toBe(true);
+    expect(entry.points.map((p) => (p[2] & 2) !== 0)).toEqual([true, true]);
   });
 
   it("does not change runs when roverPose is omitted", () => {

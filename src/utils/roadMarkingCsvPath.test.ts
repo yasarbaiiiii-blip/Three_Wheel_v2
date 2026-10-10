@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  anchorSharpJoints,
+  buildRoadMarkingFittedPath,
   buildRoadMarkingPreviewPoints,
+  buildWaypointFilletPath,
+  pinFittedPathTermini,
+  strongCornerIndices,
   ensureOpenPath,
-  filletSharpCorners,
   fitCircleHyper,
   fitCircleKasa,
   geometricFilletFromTangents,
@@ -17,7 +21,6 @@ import {
   tryWholeLoopFit,
   mergeAdjacentPrimitives,
   dropNegligibleArcs,
-  absorbSandwichedCornerArcs,
   splitIntoOpenPathGroups,
   splitFittedPathAtAnchor,
   splitRoadMarkingPathAtAnchor,
@@ -178,26 +181,6 @@ describe("geometricFilletFromTangents", () => {
   });
 });
 
-describe("filletSharpCorners", () => {
-  it("reduces max turning angle on a sharp right-angle path", () => {
-    const sharp = [
-      { north: 0, east: 0 },
-      { north: 0, east: 10 },
-      { north: 10, east: 10 },
-    ];
-    expect(Math.abs(turningAngleDeg(sharp[0], sharp[1], sharp[2]))).toBeCloseTo(90, 0);
-
-    const soft = filletSharpCorners(sharp, {
-      sharpCornerDeg: 12,
-      filletRadiusFraction: 0.4,
-      maxFilletRadiusM: 8,
-      sampleSpacingM: 0.35,
-    });
-    expect(soft.length).toBeGreaterThan(3);
-    expect(maxTurningAngleDeg(soft)).toBeLessThan(45);
-  });
-});
-
 describe("rejectPathSpikes", () => {
   it("drops an extreme GPS spike without removing a 90° corner", () => {
     const withSpike = [
@@ -298,7 +281,7 @@ describe("buildRoadMarkingPreviewPoints", () => {
     expect(maxTurningAngleDeg(out)).toBeLessThan(25);
   });
 
-  it("softens L-shaped intersection without polygon close", () => {
+  it("keeps an L-shaped corner sharp (no fillet) without polygon close", () => {
     const pts: { north: number; east: number }[] = [];
     for (let i = 0; i <= 20; i++) pts.push({ north: 0, east: i * 0.5 });
     pts.push({ north: 0.05, east: 10.05 });
@@ -314,7 +297,14 @@ describe("buildRoadMarkingPreviewPoints", () => {
       maxFilletRadiusM: 4,
     });
     expect(out.length).toBeGreaterThan(5);
-    expect(maxTurningAngleDeg(out)).toBeLessThan(55);
+    // The corner is not rounded: the path turns ~90 degrees at a single vertex.
+    expect(maxTurningAngleDeg(out)).toBeGreaterThan(80);
+    // And that vertex is a surveyed one (the apex of the corner cluster), not an invented one.
+    const turnIdx = out.findIndex(
+      (p, i) => i > 0 && i < out.length - 1 && Math.abs(turningAngleDeg(out[i - 1], p, out[i + 1])) > 80
+    );
+    expect(turnIdx).toBeGreaterThan(0);
+    expect(pts.some((q) => q.north === out[turnIdx].north && q.east === out[turnIdx].east)).toBe(true);
     const gap = Math.hypot(
       out[0].north - out[out.length - 1].north,
       out[0].east - out[out.length - 1].east
@@ -322,7 +312,7 @@ describe("buildRoadMarkingPreviewPoints", () => {
     expect(gap).toBeGreaterThan(1);
   });
 
-  it("does not re-introduce a 90° kink after full pipeline", () => {
+  it("keeps the 90° corner of a dense polyline as the exact surveyed vertex", () => {
     const sharp = [
       { north: 0, east: 0 },
       { north: 0, east: 2 },
@@ -341,48 +331,36 @@ describe("buildRoadMarkingPreviewPoints", () => {
       filletRadiusFraction: 0.4,
       maxFilletRadiusM: 5,
     });
-    expect(maxTurningAngleDeg(out)).toBeLessThan(50);
+    expect(out.some((p) => p.north === 0 && p.east === 12)).toBe(true);
+    expect(maxTurningAngleDeg(out)).toBeCloseTo(90, 5);
   });
 
-  it("does not leave an S-shaped jog (opposite consecutive turns)", () => {
-    // Screenshot-class defect: two moderate opposite kinks near a corner cluster.
-    // maxTurningAngle alone can stay low while the path still snakes.
+  it("does not silently collapse a surveyed S-jog: its vertices stay and the fold is flagged", () => {
+    // A ~1 m jog on the approach to a corner is surveyed geometry, not RTK weave. The old weave
+    // collapse quietly deleted its vertices and painted a different path; now the jog apexes
+    // reach the rover exactly and the fold (reversal-class vertices) blocks the path with a
+    // clear warning instead.
     const pts: { north: number; east: number }[] = [];
     for (let i = 0; i <= 16; i++) pts.push({ north: 0, east: i * 0.6 });
-    // Deliberate S-jog before the main turn.
-    pts.push({ north: 0.6, east: 9.7 });
-    pts.push({ north: -0.5, east: 10.0 });
-    pts.push({ north: 0.4, east: 10.3 });
+    const jog = [
+      { north: 0.6, east: 9.7 },
+      { north: -0.5, east: 10.0 },
+    ];
+    pts.push(...jog, { north: 0.4, east: 10.3 });
     for (let i = 1; i <= 16; i++) pts.push({ north: i * 0.6, east: 10.4 });
 
-    // Raw path has a strong opposite-turn pair.
-    expect(maxOppositeTurnPairDeg(pts, 3)).toBeGreaterThan(20);
-
-    const out = buildRoadMarkingPreviewPoints(pts, {
+    const fit = buildRoadMarkingFittedPath(pts, {
       fitToleranceM: 0.12,
       sampleSpacingM: 0.3,
       sharpCornerDeg: 12,
       filletRadiusFraction: 0.35,
       maxFilletRadiusM: 4,
     });
-    expect(out.length).toBeGreaterThan(5);
-    // Refined path should not keep a large opposite-sign turn pair (S-jog).
-    expect(maxOppositeTurnPairDeg(out, 4)).toBeLessThan(35);
-    expect(maxTurningAngleDeg(out)).toBeLessThan(55);
-  });
-});
-
-describe("maxOppositeTurnPairDeg", () => {
-  it("returns 0 for a monotonic single-corner L", () => {
-    const L = [
-      { north: 0, east: 0 },
-      { north: 0, east: 5 },
-      { north: 0, east: 10 },
-      { north: 5, east: 10 },
-      { north: 10, east: 10 },
-    ];
-    // Only one significant turn direction → no opposite pair.
-    expect(maxOppositeTurnPairDeg(L, 3)).toBe(0);
+    for (const j of jog) {
+      expect(fit.samples.some((p) => p.north === j.north && p.east === j.east)).toBe(true);
+    }
+    expect(fit.paintable).toBe(false);
+    expect(fit.warnings.some((w) => /reversal corner/i.test(w))).toBe(true);
   });
 
   it("detects an S-jog polyline", () => {
@@ -398,22 +376,45 @@ describe("maxOppositeTurnPairDeg", () => {
 });
 
 describe("dampenOppositeJogs", () => {
-  it("collapses a short S-weave without removing a long L-corner", () => {
+  it("collapses a small S-weave without removing a long L-corner", () => {
+    // Two opposite ~10 degree kinks 1 m apart (a ~9 cm lateral shift): weave, not geometry.
+    const dn = Math.sin((10 * Math.PI) / 180);
+    const de = Math.cos((10 * Math.PI) / 180);
     const s = [
       { north: 0, east: 0 },
       { north: 0, east: 4 },
-      { north: 1.2, east: 5 },
-      { north: -1.0, east: 6 },
-      { north: 0, east: 7 },
-      { north: 0, east: 14 },
+      { north: 0, east: 5 },
+      { north: dn, east: 5 + de },
+      { north: dn, east: 6 + de },
+      { north: dn, east: 14 },
       { north: 8, east: 14 },
     ];
     const rawPair = maxOppositeTurnPairDeg(s, 3);
-    expect(rawPair).toBeGreaterThan(30);
-    const out = dampenOppositeJogs(s, 8, 3.5);
+    expect(rawPair).toBeGreaterThan(15);
+    const out = dampenOppositeJogs(s, 8, 3.5, 12);
     expect(maxOppositeTurnPairDeg(out, 3)).toBeLessThan(rawPair * 0.85);
     // L corner near east=14 still present.
-    expect(out.some((p) => Math.abs(p.east - 14) < 0.01)).toBe(true);
+    expect(out.some((p) => Math.abs(p.east - 14) < 0.01 && Math.abs(p.north - dn) < 0.01)).toBe(true);
+  });
+
+  it("never drops a true corner: a noisy fix after a 90 degree corner is dropped instead", () => {
+    const s = [
+      { north: 0, east: 0 },
+      { north: 0, east: 4 },
+      { north: 0, east: 8 },
+      { north: 1, east: 8 },
+      { north: 2, east: 8.15 },
+      { north: 6, east: 8.15 },
+    ];
+    // Without protection the 90 degree vertex at (0, 8) is the "kinkier" one and would go.
+    const out = dampenOppositeJogs(s, 8, 3.5, 12);
+    expect(out.some((p) => p.north === 0 && p.east === 8)).toBe(true);
+    expect(out.length).toBe(s.length - 1);
+  });
+
+  it("keeps every apex of a short-legged zig-zag (large alternating turns are geometry)", () => {
+    const zz = Array.from({ length: 12 }, (_, i) => ({ north: i, east: (i % 2) * 1.5 }));
+    expect(dampenOppositeJogs(zz, 8, 3.5, 12)).toEqual(zz);
   });
 });
 
@@ -544,113 +545,6 @@ describe("dropNegligibleArcs", () => {
     const prims = [{ kind: "arc" as const, i0: 0, i1: 9, circle: fit }];
     const result = dropNegligibleArcs(pts, prims, 0.1);
     expect(result[0].kind).toBe("arc");
-  });
-});
-
-describe("absorbSandwichedCornerArcs", () => {
-  it("reclassifies a short arc flanked by two sharp turns (regression: S-jog remnant)", () => {
-    // Exact point sequence that reproduces the original bug: after dampenOppositeJogs
-    // collapses an S-weave down to one transition point, segmentIntoPrimitives correctly
-    // fits a genuine small-radius (r≈1.81) arc across indices 16-21 — but that arc is
-    // sandwiched between two real corners and only 2.5m long, so its two joint fillets
-    // (each independently budgeted against its full length) conflicted and produced a
-    // backtracking tessellated sample.
-    const pts: RoadMarkingNedPoint[] = [
-      { north: 0, east: 0 }, { north: 0, east: 0.6 }, { north: 0, east: 1.2 }, { north: 0, east: 1.8 },
-      { north: 0, east: 2.4 }, { north: 0, east: 3 }, { north: 0, east: 3.6 }, { north: 0, east: 4.2 },
-      { north: 0, east: 4.8 }, { north: 0, east: 5.4 }, { north: 0, east: 6 }, { north: 0, east: 6.6 },
-      { north: 0, east: 7.2 }, { north: 0, east: 7.8 }, { north: 0, east: 8.4 }, { north: 0, east: 9 },
-      { north: 0, east: 9.6 },
-      { north: 0.4, east: 10.3 },
-      { north: 0.6, east: 10.4 }, { north: 1.2, east: 10.4 }, { north: 1.8, east: 10.4 },
-      { north: 2.4, east: 10.4 }, { north: 3, east: 10.4 }, { north: 3.6, east: 10.4 },
-      { north: 4.2, east: 10.4 }, { north: 4.8, east: 10.4 }, { north: 5.4, east: 10.4 },
-      { north: 6, east: 10.4 }, { north: 6.6, east: 10.4 }, { north: 7.2, east: 10.4 },
-      { north: 7.8, east: 10.4 }, { north: 8.4, east: 10.4 }, { north: 9, east: 10.4 },
-      { north: 9.6, east: 10.4 },
-    ];
-    const smallArcFit = fitCircleHyper(pts.slice(16, 22))!;
-    const prims = [
-      { kind: "line" as const, i0: 0, i1: 16 },
-      { kind: "arc" as const, i0: 16, i1: 21, circle: smallArcFit },
-      { kind: "line" as const, i0: 21, i1: 33 },
-    ];
-    // With the real joint-fillet options supplied, the function now verifies the overshoot
-    // (rather than assuming it from neighbor-turn angle alone) before flattening — confirm
-    // it still reaches the same conclusion for the case it was originally built to fix.
-    const result = absorbSandwichedCornerArcs(pts, prims, 12, {
-      sampleSpacingM: 0.35,
-      filletRadiusFraction: 0.4,
-      maxFilletRadiusM: 40,
-    });
-    expect(result[1].kind).toBe("line");
-  });
-
-  it("preserves a real sandwiched curve when tessellation does not overshoot (regression: field_test_02.csv, 2026-07-31)", () => {
-    // Real RTK survey geometry (dedupe/spike-reject/jog-dampen cleaned, indices 0-45 of a
-    // 77-point dense path). A genuine r=2.55m, ~90deg turn (indices 17-25) sits between a
-    // long straight run (0-17) and a long, gentle arc (25-45) — both neighbors turn sharply
-    // relative to it (same neighbor-turn signature as the S-jog case above), but tessellating
-    // it with its real joint fillets is clean: no overshoot. The old neighbor-turn-only
-    // heuristic flattened this into a straight line that missed a surveyed point by 0.79m
-    // (9x the fit tolerance), which tripped validateFittedPath and dropped the whole dense
-    // fit to the per-point waypoint-fillet fallback — the reported "wobbly, corners and
-    // edges instead of straight and curve" bug.
-    const pts: RoadMarkingNedPoint[] = [
-      { north: 0, east: 0 }, { north: 1.8636, east: 0.0758 }, { north: 4.0608, east: 0.1386 },
-      { north: 6.228, east: 0.197 }, { north: 8.6643, east: 0.3313 }, { north: 10.9849, east: 0.38 },
-      { north: 12.9965, east: 0.4038 }, { north: 15.1848, east: 0.459 }, { north: 17.2519, east: 0.511 },
-      { north: 19.4925, east: 0.5056 }, { north: 21.4362, east: 0.4633 }, { north: 24.0081, east: 0.4103 },
-      { north: 25.467, east: 0.4136 }, { north: 26.729, east: 0.4114 }, { north: 27.3317, east: 0.3724 },
-      { north: 27.9333, east: 0.3356 }, { north: 28.4581, east: 0.3648 }, { north: 28.8707, east: 0.3995 },
-      { north: 29.4366, east: 0.4742 }, { north: 29.8692, east: 0.5142 }, { north: 30.3507, east: 0.5619 },
-      { north: 30.8132, east: 0.7892 }, { north: 31.1846, east: 1.0967 }, { north: 31.6016, east: 1.4788 },
-      { north: 31.8651, east: 2.0223 }, { north: 31.8907, east: 2.5008 }, { north: 31.8974, east: 3.0821 },
-      { north: 31.8996, east: 3.7837 }, { north: 31.8295, east: 4.7764 }, { north: 31.7395, east: 5.7334 },
-      { north: 31.6783, east: 6.6774 }, { north: 31.6272, east: 7.3681 }, { north: 31.596, east: 8.4182 },
-      { north: 31.5427, east: 9.4315 }, { north: 31.5883, east: 10.394 }, { north: 31.5871, east: 11.2817 },
-      { north: 31.6261, east: 12.0644 }, { north: 31.6294, east: 12.9478 }, { north: 31.6361, east: 13.8951 },
-      { north: 31.6772, east: 14.9116 }, { north: 31.7617, east: 15.9401 }, { north: 31.7973, east: 16.9393 },
-      { north: 31.8796, east: 18.1107 }, { north: 31.9007, east: 18.6065 }, { north: 31.9763, east: 18.9367 },
-      { north: 32.0542, east: 19.3513 },
-    ];
-    const curveFit = fitCircleHyper(pts.slice(17, 26))!;
-    const nextArcFit = fitCircleHyper(pts.slice(25, 46))!;
-    const prims = [
-      { kind: "line" as const, i0: 0, i1: 17 },
-      { kind: "arc" as const, i0: 17, i1: 25, circle: curveFit },
-      { kind: "arc" as const, i0: 25, i1: 45, circle: nextArcFit },
-    ];
-    const result = absorbSandwichedCornerArcs(pts, prims, 12, {
-      sampleSpacingM: 0.35,
-      filletRadiusFraction: 0.4,
-      maxFilletRadiusM: 40,
-    });
-    expect(result[1].kind).toBe("arc");
-  });
-
-  it("does not touch a genuine road curve with smooth tangent continuity at its boundaries", () => {
-    const r = 20;
-    const before: RoadMarkingNedPoint[] = Array.from({ length: 6 }, (_, i) => ({ north: -6 + i, east: 0 }));
-    const arcPts: RoadMarkingNedPoint[] = Array.from({ length: 12 }, (_, i) => {
-      const a = (i / 11) * (Math.PI / 4);
-      return { north: r * Math.sin(a), east: r - r * Math.cos(a) };
-    });
-    const afterStart = arcPts[arcPts.length - 1];
-    const afterHeading = Math.atan2(afterStart.east - arcPts[arcPts.length - 2].east, afterStart.north - arcPts[arcPts.length - 2].north);
-    const after: RoadMarkingNedPoint[] = Array.from({ length: 6 }, (_, i) => ({
-      north: afterStart.north + (i + 1) * Math.cos(afterHeading),
-      east: afterStart.east + (i + 1) * Math.sin(afterHeading),
-    }));
-    const pts = [...before, ...arcPts, ...after];
-    const fit = fitCircleHyper(arcPts)!;
-    const prims = [
-      { kind: "line" as const, i0: 0, i1: 5 },
-      { kind: "arc" as const, i0: 5, i1: 16, circle: fit },
-      { kind: "line" as const, i0: 16, i1: 21 },
-    ];
-    const result = absorbSandwichedCornerArcs(pts, prims, 12);
-    expect(result[1].kind).toBe("arc");
   });
 });
 
@@ -838,6 +732,263 @@ describe("tessellatePrimitivesWithJointFillets — arc/line joint continuity (re
     // point (the raw joint), not two ~3cm-apart reconstructions.
     const jointIdx = out.findIndex((p) => distApprox(p, points[2]) < 0.001);
     expect(jointIdx).toBeGreaterThanOrEqual(0);
+  });
+});
+
+/** Open square (side `side`, last point distinct from the first) sampled every `step`, plus optional noise. */
+function sampledSquare(side: number, step: number, noise = 0): RoadMarkingNedPoint[] {
+  const corners = [
+    [0, 0],
+    [0, side],
+    [side, side],
+    [side, 0],
+  ];
+  const pts: RoadMarkingNedPoint[] = [];
+  let k = 0;
+  const n = Math.round(side / step);
+  for (let c = 0; c < 3; c++) {
+    const [a0, b0] = corners[c];
+    const [a1, b1] = corners[c + 1];
+    for (let i = 0; i < n; i++) {
+      pts.push({
+        north: a0 + ((a1 - a0) * i) / n + detNoise(k, noise),
+        east: b0 + ((b1 - b0) * i) / n + detNoise(k + 5000, noise),
+      });
+      k++;
+    }
+  }
+  pts.push({ north: side, east: 0 });
+  return pts;
+}
+
+function hasVertex(samples: RoadMarkingNedPoint[], v: RoadMarkingNedPoint): boolean {
+  return samples.some((p) => p.north === v.north && p.east === v.east);
+}
+
+describe("sharp corners are exact vertices (rover controller owns corner policy)", () => {
+  it("keeps all four corners of a sparse square (waypoint path) as exact vertices, no cut", () => {
+    const sq = [
+      { north: 0, east: 0 },
+      { north: 0, east: 8 },
+      { north: 8, east: 8 },
+      { north: 8, east: 0 },
+    ];
+    const fit = buildRoadMarkingFittedPath(sq);
+    expect(fit.mode).toBe("waypoint-fillet");
+    expect(hasVertex(fit.samples, sq[1])).toBe(true);
+    expect(hasVertex(fit.samples, sq[2])).toBe(true);
+    expect(fit.quality.maxSourceDeviationM).toBe(0);
+    expect(maxTurningAngleDeg(fit.samples)).toBeCloseTo(90, 5);
+  });
+
+  it("keeps both corners of a dense square exact at every sampling density and noise level", () => {
+    for (const step of [0.05, 0.1, 0.25, 0.5, 1]) {
+      for (const noise of [0, 0.01, 0.02]) {
+        const src = sampledSquare(10, step, noise);
+        const fit = buildRoadMarkingFittedPath(src);
+        expect(fit.mode).toBe("dense-fit");
+        // The output vertex is a surveyed fix (bit-identical), within one noise radius of the
+        // true corner - never a fillet tangent point 15 cm away.
+        for (const trueCorner of [
+          { north: 0, east: 10 },
+          { north: 10, east: 10 },
+        ]) {
+          const nearSrc = src.reduce((best, p) =>
+            distApprox(p, trueCorner) < distApprox(best, trueCorner) ? p : best
+          );
+          expect(hasVertex(fit.samples, nearSrc)).toBe(true);
+        }
+        expect(maxTurningAngleDeg(fit.samples)).toBeGreaterThan(80);
+      }
+    }
+  });
+
+  it("keeps every apex of a dense zig-zag exact, with short and long legs", () => {
+    const cases: Array<[number, number, number, number]> = [
+      [30, 1, 1.2, 1.5], // one fix per leg
+      [30, 2, 0.5, 2],
+      [12, 3, 0.5, 3],
+      [25, 1, 0.5, 0.6], // two fixes per leg, tolerance estimate inflated by the zig-zag itself
+    ];
+    for (const [nLegs, leg, step, ampl] of cases) {
+      const apex: RoadMarkingNedPoint[] = [];
+      for (let k = 0; k <= nLegs; k++) apex.push({ north: k * leg, east: (k % 2) * ampl });
+      const pts: RoadMarkingNedPoint[] = [];
+      const m = Math.max(1, Math.round(Math.hypot(leg, ampl) / step));
+      for (let k = 0; k < nLegs; k++) {
+        for (let i = 0; i < m; i++) {
+          pts.push({
+            north: apex[k].north + ((apex[k + 1].north - apex[k].north) * i) / m,
+            east: apex[k].east + ((apex[k + 1].east - apex[k].east) * i) / m,
+          });
+        }
+      }
+      pts.push(apex[nLegs]);
+      const fit = buildRoadMarkingFittedPath(pts);
+      expect(fit.mode).toBe("dense-fit");
+      for (const a of apex.slice(1, -1)) {
+        expect(hasVertex(fit.samples, a)).toBe(true);
+      }
+    }
+  });
+
+  it("keeps the apexes of a sparse zig-zag exact", () => {
+    const zz = Array.from({ length: 9 }, (_, i) => ({ north: i * 3, east: (i % 2) * 3 }));
+    const fit = buildRoadMarkingFittedPath(zz);
+    for (const a of zz.slice(1, -1)) expect(hasVertex(fit.samples, a)).toBe(true);
+    expect(fit.quality.maxSourceDeviationM).toBe(0);
+  });
+
+  it("does not fillet a sparse vertex turning more than sharpCornerDeg, but smooths one turning less", () => {
+    const turn = (deg: number) => {
+      const r = (deg * Math.PI) / 180;
+      return [
+        { north: 0, east: 0 },
+        { north: 0, east: 20 },
+        { north: 20 * Math.sin(r), east: 20 + 20 * Math.cos(r) },
+      ];
+    };
+    const sharp = buildWaypointFilletPath(turn(12.5), { sharpCornerDeg: 12 });
+    expect(hasVertex(sharp.samples, { north: 0, east: 20 })).toBe(true);
+    const gentle = buildWaypointFilletPath(turn(11.5), { sharpCornerDeg: 12 });
+    expect(hasVertex(gentle.samples, { north: 0, east: 20 })).toBe(false);
+  });
+
+  it("still smooths gentle joints below sharpCornerDeg (waypoint and dense tessellation)", () => {
+    // Sparse: an 8 degree vertex is a bend of a curve and gets a small fillet.
+    const r = (8 * Math.PI) / 180;
+    const bend = [
+      { north: 0, east: 0 },
+      { north: 0, east: 20 },
+      { north: 20 * Math.sin(r), east: 20 + 20 * Math.cos(r) },
+    ];
+    const wp = buildWaypointFilletPath(bend);
+    expect(hasVertex(wp.samples, bend[1])).toBe(false);
+    expect(maxTurningAngleDeg(wp.samples)).toBeLessThan(5);
+    // The pre-existing 8 degree dense-tessellation case lives in "joint fillet floor" below.
+  });
+
+  it("strongCornerIndices reports one apex per corner, not every fix around it", () => {
+    const dense = sampledSquare(5, 0.05);
+    const idx = strongCornerIndices(dense);
+    expect(idx).toHaveLength(2);
+    for (const i of idx) {
+      const p = dense[i];
+      const atCorner =
+        (p.north === 0 && p.east === 5) || (p.north === 5 && p.east === 5);
+      expect(atCorner).toBe(true);
+    }
+  });
+
+  it("anchorSharpJoints moves a joint that landed past the corner back onto the corner fix", () => {
+    // 5 cm fixes: the first straight run absorbs one fix past the corner (still inside the
+    // 8 cm band), so the joint sits at index 101 instead of the corner at index 100.
+    const pts: RoadMarkingNedPoint[] = [];
+    for (let i = 0; i <= 100; i++) pts.push({ north: 0, east: i * 0.05 });
+    for (let i = 1; i <= 100; i++) pts.push({ north: i * 0.05, east: 5 });
+    const prims: PathPrimitive[] = [
+      { kind: "line", i0: 0, i1: 101 },
+      { kind: "line", i0: 101, i1: 200 },
+    ];
+    const anchored = anchorSharpJoints(pts, prims, 12, 0.08);
+    expect(anchored[0].i1).toBe(100);
+    expect(anchored[1].i0).toBe(100);
+    // A joint that is not a corner is left alone.
+    const gentlePts: RoadMarkingNedPoint[] = [
+      ...Array.from({ length: 11 }, (_, i) => ({ north: 0, east: i })),
+      ...Array.from({ length: 10 }, (_, i) => ({ north: (i + 1) * Math.sin(0.1), east: 10 + (i + 1) * Math.cos(0.1) })),
+    ];
+    const gp: PathPrimitive[] = [
+      { kind: "line", i0: 0, i1: 10 },
+      { kind: "line", i0: 10, i1: 20 },
+    ];
+    expect(anchorSharpJoints(gentlePts, gp, 12, 0.08)).toEqual(gp);
+  });
+
+  it("mergeAdjacentPrimitives never merges across a hard break", () => {
+    const arc = Array.from({ length: 12 }, (_, i) => {
+      const a = (i / 11) * (Math.PI / 3);
+      return { north: 10 * Math.sin(a), east: 10 * Math.cos(a) };
+    });
+    const c1 = fitCircleHyper(arc.slice(0, 7))!;
+    const c2 = fitCircleHyper(arc.slice(6))!;
+    const prims: PathPrimitive[] = [
+      { kind: "arc", i0: 0, i1: 6, circle: c1 },
+      { kind: "arc", i0: 6, i1: 11, circle: c2 },
+    ];
+    expect(mergeAdjacentPrimitives(arc, prims, 0.1, 4, 5000)).toHaveLength(1);
+    expect(mergeAdjacentPrimitives(arc, prims, 0.1, 4, 5000, new Set([6]))).toHaveLength(2);
+  });
+
+  it("still reconstructs a dense surveyed curve as a smooth curve next to exact corners", () => {
+    // Straight, 90 degree corner, then a r=12 m quarter circle: the corner stays sharp, the
+    // curve stays smooth (turn per sample well under the bare-turn bar).
+    const pts: RoadMarkingNedPoint[] = [];
+    for (let i = 0; i < 20; i++) pts.push({ north: 0, east: i * 0.5 });
+    // corner at (0, 10), then a quarter circle starting due north
+    const r = 12;
+    for (let i = 0; i <= 30; i++) {
+      const a = (i / 30) * (Math.PI / 2);
+      pts.push({ north: r * Math.sin(a), east: 10 + r * (1 - Math.cos(a)) });
+    }
+    const fit = buildRoadMarkingFittedPath(pts);
+    expect(fit.mode).toBe("dense-fit");
+    expect(hasVertex(fit.samples, { north: 0, east: 10 })).toBe(true);
+    // Everything except the corner turns gently.
+    const turns = fit.samples
+      .slice(1, -1)
+      .map((p, i) => ({ p, t: Math.abs(turningAngleDeg(fit.samples[i], p, fit.samples[i + 2])) }));
+    const big = turns.filter((x) => x.t > 8);
+    expect(big).toHaveLength(1);
+    expect(big[0].p).toEqual({ north: 0, east: 10 });
+  });
+});
+
+describe("open paths are never closed into a ring", () => {
+  it("keeps the last vertex of a square survey that returns to its start distinct from the first", () => {
+    const loop = [
+      { north: 0, east: 0 },
+      { north: 0, east: 6 },
+      { north: 6, east: 6 },
+      { north: 6, east: 0 },
+      { north: 0, east: 0 },
+    ];
+    const fit = buildRoadMarkingFittedPath(loop);
+    const first = fit.samples[0];
+    const last = fit.samples[fit.samples.length - 1];
+    expect(Math.hypot(first.north - last.north, first.east - last.east)).toBeGreaterThan(4);
+    expect(last).toEqual({ north: 6, east: 0 });
+  });
+
+  it("pins termini to the open source, never to the closing duplicate", () => {
+    const samples = [
+      { north: 0.01, east: 0 },
+      { north: 3, east: 0 },
+      { north: 6, east: 0.02 },
+    ];
+    const open = [
+      { north: 0, east: 0 },
+      { north: 6, east: 0 },
+    ];
+    const pinned = pinFittedPathTermini(samples, open);
+    expect(pinned[0]).toEqual({ north: 0, east: 0 });
+    expect(pinned[pinned.length - 1]).toEqual({ north: 6, east: 0 });
+  });
+
+  it("does not close a nearly-closed survey whose end is within a few cm of the start, either direction", () => {
+    const base = [
+      { north: 0, east: 0 },
+      { north: 0, east: 6 },
+      { north: 6, east: 6 },
+      { north: 6, east: 0 },
+      { north: 0.03, east: 0.01 },
+    ];
+    for (const pts of [base, [...base].reverse()]) {
+      const fit = buildRoadMarkingFittedPath(pts);
+      const first = fit.samples[0];
+      const last = fit.samples[fit.samples.length - 1];
+      expect(Math.hypot(first.north - last.north, first.east - last.east)).toBeGreaterThan(4);
+    }
   });
 });
 

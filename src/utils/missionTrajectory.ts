@@ -1,18 +1,22 @@
 /**
  * App-planned mission trajectory builder (source-agnostic: CSV + DXF).
  *
- * Builds ordered mark/travel runs from fitted PlanLine[] for POST /api/path/plan-trajectory.
- * Does not touch the network.
+ * Builds ordered mark/travel runs from fitted PlanLine[] for the v2 mission contract
+ * (`POST /api/missions/plan`). Does not touch the network.
  *
- * Critical invariant (backend validation rule 1): never emit two adjacent `mark` runs.
- * Preview helper `buildCsvTransitLines` and trajectory merge share MARK_CONTIGUOUS_GAP_M
- * (0.05 m): gaps under that threshold are treated as contiguous paint (no travel leg on
- * the map and no separate travel run for the rover), matching backend rules 2/3
- * endpoint-touch tolerance and avoiding a 422 from adjacent mark runs.
+ * Run-list contract: runs alternate mark / travel, and every run boundary must close to
+ * within 10 mm (each travel leg starts where the previous mark ends and ends where the next
+ * mark starts). Two adjacent `mark` runs are therefore never emitted: paths whose end->start
+ * gap is under MARK_CONTIGUOUS_GAP_M (0.05 m) are merged into one contiguous mark run, both
+ * here and in the preview helper `buildCsvTransitLines`, so the map shows no travel leg where
+ * the rover gets none.
+ *
+ * Corners are not shaped here. A sharp corner is an ordinary vertex of its mark run (the
+ * mission builder flags it must-hit); the rover controller owns the corner policy.
  *
  * Axis convention: run points are always [north_m, east_m]. Points are taken from
  * `entity.preview_points` (explicit north/east). Fallback from/to uses CSV convention
- * (PlanPoint.x = north, PlanPoint.y = east) — same as `buildPlanLineForGroup`.
+ * (PlanPoint.x = north, PlanPoint.y = east) - same as `buildPlanLineForGroup`.
  * Templates still use the opposite placement convention in TemplatePanel; convert them
  * to this NED shape *before* calling buildTrajectory.
  *
@@ -20,7 +24,6 @@
  */
 
 import type { PlanLine } from "../types/plan";
-import { SHARP_CORNER_MODE, type SharpCornerMode } from "../config/featureFlags";
 import { projectGpsToLocalMeters } from "./geoProjection";
 import {
   buildExtendedMarkChain,
@@ -32,13 +35,8 @@ import {
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
 } from "./missionExtensions";
-import {
-  buildTeardropTravelPoints,
-  R_MIN_ROVER_M,
-  type SourceCorner,
-} from "./roadMarkingCsvPath";
 
-/** [north_m, east_m] — explicit NED pair for the plan-trajectory payload. */
+/** [north_m, east_m] - explicit NED pair for the mission payload. */
 export type NedPair = [number, number];
 
 export type TrajectoryRunKind = "mark" | "travel";
@@ -51,26 +49,10 @@ export type TrajectoryRun = {
   label?: string;
 };
 
-/** Survey ground truth index into densified-or-sent run points (backend §3.1). */
-export type SurveyGroundTruthPoint = {
-  run_index: number;
-  point_index: number;
-  lat: number;
-  lon: number;
-};
-
-/** Optional surveyed source vertex for ground-truth attachment. */
-export type GroundTruthSourcePoint = {
-  north: number;
-  east: number;
-  lat: number;
-  lon: number;
-};
-
 /**
  * Live rover pose used to build the runtime-entry travel leg at Send.
- * Prefer lat/lon when origin_gps is known (mission frame). Never treat EKF
- * pos_n/pos_e as mission NED when origin_gps is set.
+ * Prefer lat/lon when the mission anchor is known (mission frame). Never treat EKF
+ * pos_n/pos_e as mission NED when the anchor is set.
  */
 export type RoverPoseForEntry = {
   pos_n?: number | null;
@@ -96,11 +78,6 @@ export type BuildTrajectoryOpts = {
   markSpeedMs: number;
   travelSpeedMs: number;
   /**
-   * Optional GPS survey rows. Each is matched to the nearest fitted mark point
-   * within {@link GROUND_TRUTH_MATCH_M}; fitted fill points contribute nothing.
-   */
-  groundTruthSource?: GroundTruthSourcePoint[];
-  /**
    * When enabled, PRE/AFT travel runs are inserted at mark-group boundaries
    * (see docs/CSV_EXTENSIONS_EXECUTION_PLAN.md). Spray-off by construction.
    */
@@ -110,7 +87,7 @@ export type BuildTrajectoryOpts = {
    * Requires {@link originGps} for GPS_SURVEYED-correct projection.
    */
   roverPose?: RoverPoseForEntry | null;
-  /** Mission origin [lat, lon] — same as plan-trajectory origin_gps. */
+  /** Mission anchor [lat, lon] - the local-frame origin the plan NED coordinates are relative to. */
   originGps?: [number, number] | null;
   /**
    * When true (default if roverPose is provided), apply entry transit.
@@ -122,16 +99,10 @@ export type BuildTrajectoryOpts = {
    * errors so the operator never drives without a fresh approach fix.
    */
   requireEntryTransit?: boolean;
-  /**
-   * Override {@link SHARP_CORNER_MODE} for tests / mission config.
-   * Default teardrop; pivot is opt-in after rover bench.
-   */
-  sharpCornerMode?: SharpCornerMode;
 };
 
 export type BuildTrajectoryResult = {
   runs: TrajectoryRun[];
-  groundTruth: SurveyGroundTruthPoint[];
   warnings: string[];
   entryTransit?: EntryTransitInfo;
 };
@@ -139,12 +110,10 @@ export type BuildTrajectoryResult = {
 /**
  * Gaps shorter than this are treated as contiguous paint geometry: merge into one
  * mark run rather than emit a travel leg the rover would densify to a single stop.
- * Matches backend plan-trajectory rules 2/3 (0.05 m neighbour-touch tolerance).
+ * The v2 contract itself requires run boundaries within 10 mm; this is the looser threshold
+ * at which two nearby paths are considered one stroke and merged, not a boundary tolerance.
  */
 export const MARK_CONTIGUOUS_GAP_M = 0.05;
-
-/** Match survey lat/lon rows onto fitted NED points within this distance (m). */
-export const GROUND_TRUTH_MATCH_M = 0.05;
 
 /** Skip entry when already this close to the first tip (same as join tol). */
 export const ENTRY_TRANSIT_SKIP_M = MARK_CONTIGUOUS_GAP_M;
@@ -158,7 +127,7 @@ export const ENTRY_TRANSIT_MAX_M = 250;
 /** Soft-skip when pose age is older than this (ms). */
 export const ENTRY_TRANSIT_POSE_AGE_MAX_MS = 5000;
 
-/** Minimum GPS fix type for lat/lon → origin_gps projection (3D fix). */
+/** Minimum GPS fix type for lat/lon projection about the mission anchor (3D fix). */
 export const ENTRY_TRANSIT_MIN_GPS_FIX = 3;
 
 export const ENTRY_TRANSIT_LABEL = "entry-transit";
@@ -172,148 +141,12 @@ export const PAINTABLE_PLAN_LAYERS = new Set(["marking", "center"]);
 /** Near-coincident junction: drop the duplicate vertex when concatenating. */
 const JUNCTION_DEDUP_M = 1e-6;
 
-/** Spatial hash cell size for ground-truth attachment (m). */
-const GT_CELL_M = GROUND_TRUTH_MATCH_M;
-
 function isFinitePair(n: number, e: number): boolean {
   return Number.isFinite(n) && Number.isFinite(e);
 }
 
 function distM(a: NedPair, b: NedPair): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
-}
-
-/** Match densified samples to a classified corner vertex (m). */
-const SHARP_CORNER_MATCH_M = 0.75;
-
-type GeometryCorner = Pick<
-  SourceCorner,
-  "class" | "undrivable" | "north" | "east" | "turnDeg"
->;
-
-function sharpCornersFromLine(line: PlanLine): GeometryCorner[] {
-  const raw = line.entity?.geometry?.corners;
-  if (!Array.isArray(raw)) return [];
-  const out: GeometryCorner[] = [];
-  for (const c of raw) {
-    if (!c || typeof c !== "object") continue;
-    const cls = (c as { class?: string }).class;
-    const undrivable = (c as { undrivable?: boolean }).undrivable === true;
-    if (cls !== "sharp" && !undrivable) continue;
-    const north = Number((c as { north?: number }).north);
-    const east = Number((c as { east?: number }).east);
-    if (!Number.isFinite(north) || !Number.isFinite(east)) continue;
-    out.push({
-      class: "sharp",
-      undrivable: true,
-      north,
-      east,
-      turnDeg: Number((c as { turnDeg?: number }).turnDeg) || 90,
-    });
-  }
-  return out;
-}
-
-/**
- * Split a continuous mark polyline at sharp corners, inserting TRAVEL
- * teardrop (or near-zero pivot) so paint lifts while the rover reorients.
- * Clean/tight corners stay continuous MARK (fillet already in samples).
- */
-export function expandMarkRunsForSharpCorners(
-  points: NedPair[],
-  corners: GeometryCorner[],
-  markSpeed: number,
-  travelSpeed: number,
-  label: string | undefined,
-  mode: SharpCornerMode
-): TrajectoryRun[] {
-  if (points.length < 2 || corners.length === 0) {
-    const run: TrajectoryRun = { kind: "mark", points, speed_m_s: markSpeed };
-    if (label) run.label = label;
-    return [run];
-  }
-
-  const splitIdxs: number[] = [];
-  for (const c of corners) {
-    let bestI = -1;
-    let bestD = Infinity;
-    for (let i = 1; i < points.length - 1; i++) {
-      const d = distM(points[i], [c.north, c.east]);
-      if (d < bestD) {
-        bestD = d;
-        bestI = i;
-      }
-    }
-    if (bestI > 0 && bestI < points.length - 1 && bestD <= SHARP_CORNER_MATCH_M) {
-      splitIdxs.push(bestI);
-    }
-  }
-  const unique = [...new Set(splitIdxs)].sort((a, b) => a - b);
-  if (unique.length === 0) {
-    const run: TrajectoryRun = { kind: "mark", points, speed_m_s: markSpeed };
-    if (label) run.label = label;
-    return [run];
-  }
-
-  const runs: TrajectoryRun[] = [];
-  let start = 0;
-  for (const si of unique) {
-    const markPts = points.slice(start, si + 1);
-    if (markPts.length >= 2) {
-      const markRun: TrajectoryRun = {
-        kind: "mark",
-        points: markPts,
-        speed_m_s: markSpeed,
-      };
-      if (label) markRun.label = label;
-      runs.push(markRun);
-    }
-
-    const prev = points[Math.max(0, si - 1)];
-    const vertex = points[si];
-    const next = points[Math.min(points.length - 1, si + 1)];
-    let travelPts: NedPair[];
-    if (mode === "pivot") {
-      // Near-zero TRAVEL: stay at the vertex (rover must honor as in-place rotate).
-      const dn = next[0] - vertex[0];
-      const de = next[1] - vertex[1];
-      const len = Math.hypot(dn, de) || 1;
-      const eps = 0.02;
-      travelPts = [
-        vertex,
-        [vertex[0] + (dn / len) * eps, vertex[1] + (de / len) * eps],
-        vertex,
-      ];
-    } else {
-      const td = buildTeardropTravelPoints(
-        { north: vertex[0], east: vertex[1] },
-        { north: prev[0], east: prev[1] },
-        { north: next[0], east: next[1] },
-        R_MIN_ROVER_M
-      );
-      travelPts = td.map((p) => [p.north, p.east] as NedPair);
-    }
-    if (travelPts.length >= 2) {
-      runs.push({
-        kind: "travel",
-        points: travelPts,
-        speed_m_s: travelSpeed,
-        label: mode === "pivot" ? "sharp-corner-pivot" : "sharp-corner-teardrop",
-      });
-    }
-    start = si;
-  }
-  const tail = points.slice(start);
-  if (tail.length >= 2) {
-    const markRun: TrajectoryRun = {
-      kind: "mark",
-      points: tail,
-      speed_m_s: markSpeed,
-    };
-    if (label) markRun.label = label;
-    runs.push(markRun);
-  }
-  return runs;
 }
 
 export type ResolvedRoverNed =
@@ -323,9 +156,9 @@ export type ResolvedRoverNed =
 /**
  * Resolve live rover pose into mission NED.
  *
- * - With origin_gps: project lat/lon about that origin (mission frame). Never use
- *   EKF pos_n/pos_e here — different origin in the field.
- * - Without origin_gps: LOCAL_NED only — use pos_n/pos_e when finite.
+ * - With a mission anchor: project lat/lon about that anchor (mission frame). Never use
+ *   EKF pos_n/pos_e here - different origin in the field.
+ * - Without an anchor: LOCAL_NED only - use pos_n/pos_e when finite.
  */
 export function resolveRoverNedInMissionFrame(
   pose: RoverPoseForEntry | null | undefined,
@@ -383,7 +216,7 @@ export function resolveRoverNedInMissionFrame(
 
   return {
     ok: false,
-    reason: "No origin_gps and no finite local NED (pos_n/pos_e) for runtime entry.",
+    reason: "No mission anchor and no finite local NED (pos_n/pos_e) for runtime entry.",
   };
 }
 
@@ -556,60 +389,8 @@ export function isPaintableMarkLine(line: PlanLine): boolean {
   return false;
 }
 
-type GtIndexEntry = { runIndex: number; pointIndex: number; n: number; e: number };
-
-function gtCellKey(n: number, e: number): string {
-  return `${Math.floor(n / GT_CELL_M)}:${Math.floor(e / GT_CELL_M)}`;
-}
-
-/** Build a spatial bucket index over mark-run points for O(1)-neighbour GT matching. */
-function buildMarkPointIndex(runs: TrajectoryRun[]): Map<string, GtIndexEntry[]> {
-  const index = new Map<string, GtIndexEntry[]>();
-  for (let ri = 0; ri < runs.length; ri++) {
-    if (runs[ri].kind !== "mark") continue;
-    const pts = runs[ri].points;
-    for (let pi = 0; pi < pts.length; pi++) {
-      const [n, e] = pts[pi];
-      const key = gtCellKey(n, e);
-      let bucket = index.get(key);
-      if (!bucket) {
-        bucket = [];
-        index.set(key, bucket);
-      }
-      bucket.push({ runIndex: ri, pointIndex: pi, n, e });
-    }
-  }
-  return index;
-}
-
-function nearestInIndex(
-  index: Map<string, GtIndexEntry[]>,
-  north: number,
-  east: number,
-  maxDistM: number
-): GtIndexEntry | null {
-  const ci = Math.floor(north / GT_CELL_M);
-  const cj = Math.floor(east / GT_CELL_M);
-  let best: GtIndexEntry | null = null;
-  let bestD = maxDistM;
-  for (let di = -1; di <= 1; di++) {
-    for (let dj = -1; dj <= 1; dj++) {
-      const bucket = index.get(`${ci + di}:${cj + dj}`);
-      if (!bucket) continue;
-      for (const entry of bucket) {
-        const d = Math.hypot(entry.n - north, entry.e - east);
-        if (d <= bestD) {
-          bestD = d;
-          best = entry;
-        }
-      }
-    }
-  }
-  return best;
-}
-
 /**
- * Extract an explicit NED polyline from a mark PlanLine for plan-trajectory.
+ * Extract an explicit NED polyline from a mark PlanLine for the mission payload.
  *
  * Prefer `preview_points` (authoritative):
  * - CSV: frontend-fitted road-marking samples
@@ -677,7 +458,7 @@ export function trajectoryTotals(runs: TrajectoryRun[]): {
 }
 
 /**
- * Backend rule 1: no two mark runs may be adjacent.
+ * Contract: runs alternate, so no two mark runs may be adjacent.
  * Returns null when ok, otherwise a human-readable failure.
  */
 export function findAdjacentMarkViolation(runs: TrajectoryRun[]): string | null {
@@ -690,8 +471,9 @@ export function findAdjacentMarkViolation(runs: TrajectoryRun[]): string | null 
 }
 
 /**
- * Backend rules 2/3: each travel leg must start where the previous mark ends and
- * end where the next mark starts (within MARK_CONTIGUOUS_GAP_M).
+ * Contract: each travel leg must start where the previous mark ends and end where the
+ * next mark starts. The default tolerance here is MARK_CONTIGUOUS_GAP_M; the server
+ * enforces 10 mm, so callers that need the strict bound pass `tolM = 0.01`.
  */
 export function findTravelTouchViolations(
   runs: TrajectoryRun[],
@@ -840,48 +622,11 @@ function buildInterGroupTravel(
 }
 
 /**
- * Attach survey lat/lon onto fitted mark points.
- * Uses a spatial hash so large road surveys (thousands × thousands) stay O(n)
- * on the UI thread rather than O(n·m) (finding 1).
- */
-function attachGroundTruth(
-  runs: TrajectoryRun[],
-  source: GroundTruthSourcePoint[] | undefined
-): SurveyGroundTruthPoint[] {
-  if (!source || source.length === 0) return [];
-
-  const index = buildMarkPointIndex(runs);
-  if (index.size === 0) return [];
-
-  const out: SurveyGroundTruthPoint[] = [];
-  const used = new Set<string>(); // runIndex:pointIndex
-
-  for (const src of source) {
-    if (!Number.isFinite(src.lat) || !Number.isFinite(src.lon)) continue;
-    if (!isFinitePair(src.north, src.east)) continue;
-
-    const best = nearestInIndex(index, src.north, src.east, GROUND_TRUTH_MATCH_M);
-    if (!best) continue;
-    const key = `${best.runIndex}:${best.pointIndex}`;
-    if (used.has(key)) continue;
-    used.add(key);
-    out.push({
-      run_index: best.runIndex,
-      point_index: best.pointIndex,
-      lat: src.lat,
-      lon: src.lon,
-    });
-  }
-
-  return out;
-}
-
-/**
- * Build ordered mark/travel runs for plan-trajectory.
+ * Build ordered mark/travel runs for the v2 mission plan request.
  *
  * @param orderedMarkLines Mark paths already in operator order (skips removed).
  *   Transit/extension layers are ignored if present.
- * @param opts Speeds and optional ground-truth survey rows.
+ * @param opts Speeds, extensions and optional runtime entry.
  */
 export function buildTrajectory(
   orderedMarkLines: PlanLine[],
@@ -944,7 +689,6 @@ export function buildTrajectory(
   if (marks.length === 0) {
     return {
       runs: [],
-      groundTruth: [],
       warnings: warnings.length > 0 ? warnings : ["No mark lines with ≥2 NED points."],
     };
   }
@@ -1056,46 +800,6 @@ export function buildTrajectory(
     }
   }
 
-  // Sharp corners: expand continuous MARK polylines into MARK→TRAVEL→MARK
-  // (teardrop default, or near-zero pivot when opted in). Clean/tight stay continuous.
-  const sharpMode = opts.sharpCornerMode ?? SHARP_CORNER_MODE;
-  const allSharp = acceptedLines.flatMap(sharpCornersFromLine);
-  if (allSharp.length > 0) {
-    const expanded: TrajectoryRun[] = [];
-    for (const run of runs) {
-      if (run.kind !== "mark") {
-        expanded.push(run);
-        continue;
-      }
-      const onRun = allSharp.filter((c) =>
-        run.points.some(
-          (p) => distM(p, [c.north, c.east]) <= SHARP_CORNER_MATCH_M
-        )
-      );
-      if (onRun.length === 0) {
-        expanded.push(run);
-        continue;
-      }
-      const parts = expandMarkRunsForSharpCorners(
-        run.points,
-        onRun,
-        markSpeed,
-        travelSpeed,
-        run.label,
-        sharpMode
-      );
-      if (parts.length > 1) {
-        warnings.push(
-          `Sharp corner(s) on "${run.label ?? "mark"}": inserted ${
-            parts.filter((p) => p.kind === "travel").length
-          } ${sharpMode} TRAVEL leg(s).`
-        );
-      }
-      expanded.push(...parts);
-    }
-    runs = expanded;
-  }
-
   // Runtime entry (rover → first tip) — after PRE/AFT/connectors so we can fold
   // into the leading pre-ext travel as one continuous deadhead run.
   // Prefer building this at Start (requireEntryTransit) with live pose; Send usually omits it.
@@ -1125,7 +829,5 @@ export function buildTrajectory(
     warnings.push(issue);
   }
 
-  const groundTruth = attachGroundTruth(runs, opts.groundTruthSource);
-
-  return { runs, groundTruth, warnings, entryTransit };
+  return { runs, warnings, entryTransit };
 }

@@ -226,7 +226,7 @@ export function buildMissionStartPayload(args: {
   autoOrigin: boolean;
   /**
    * When true, start is only allowed with a verified staged mission_id.
-   * Use for CSV / plan-trajectory missions (no meaningful path_name reload).
+   * Use for CSV / app-planned missions (no meaningful path_name reload).
    */
   requireStagedMission?: boolean;
 }): StartMissionPayload {

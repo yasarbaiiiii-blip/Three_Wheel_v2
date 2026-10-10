@@ -18,7 +18,7 @@ import {
   resolveOrderedPaintedLines,
   reversePathOrder,
   setPathPaint,
-} from "./csvPathOrder";
+} from "./missionPathOrder";
 import { buildExtensionTransitLines } from "./missionExtensions";
 import { MARK_CONTIGUOUS_GAP_M } from "./missionTrajectory";
 

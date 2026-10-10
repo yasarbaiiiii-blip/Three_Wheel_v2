@@ -72,6 +72,8 @@ export interface MissionDetailResponse {
 export interface MissionPathResponse {
   sha256: string;
   frame: "local_ned" | string;
+  /** Geodetic anchor the points are relative to; null for an EKF-local artifact. */
+  anchor?: { lat: number; lon: number; alt: number | null } | null;
   points: [number, number, number][]; // [north_m, east_m, flags]
 }
 

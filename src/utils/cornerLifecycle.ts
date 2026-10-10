@@ -5,13 +5,17 @@
  * snapshot, then match hydrated polylines by nearest position.
  */
 
-import { SHARP_CORNER_MODE, type SharpCornerMode } from "../config/featureFlags";
 import type { PlanLine } from "../types/plan";
 import type { CornerClass, SourceCorner } from "./roadMarkingCsvPath";
 import { formatCornerWarnings } from "./roadMarkingCsvPath";
 
-/** How a corner is executed on the rover (post-trajectory-build). */
-export type CornerExecutionMode = "paint-through" | "teardrop" | "pivot" | "blocked";
+/**
+ * Who executes a corner. The tablet sends every vertex as-is (sharp corners are plain
+ * vertices flagged must-hit); the rover controller owns the corner policy, so every
+ * drivable corner is "controller". A reversal corner is the exception: it is a fold the
+ * survey itself must fix, so it is "blocked" and keeps the path out of Send.
+ */
+export type CornerExecutionMode = "controller" | "blocked";
 
 export type CornerCatalogEntry = {
   north: number;
@@ -68,24 +72,8 @@ export function formatCornerCountsSummary(counts: CornerClassCounts): string | n
   return parts.length > 0 ? parts.join(" · ") : `${counts.total} corner(s)`;
 }
 
-function executionModeFor(
-  cls: CornerClass,
-  undrivable: boolean,
-  overBudget: boolean,
-  sharpMode: SharpCornerMode
-): CornerExecutionMode {
-  if (cls === "reversal") return "blocked";
-  // Gate on the actual constraint violation (undrivable / over the paint
-  // budget), not just the coarse angle bucket — a 90° turn classifies as
-  // "tight" (60-99°), not "sharp" (100-149°), but with short-enough legs it
-  // still can't hold a fillet inside the paint budget without clamping to the
-  // rover's floor (overBudget). That corner needs the same teardrop/pivot
-  // treatment as a "sharp" one; using the class alone left every "tight"
-  // corner painted straight through the budget overrun, unconditionally.
-  if (cls === "sharp" || undrivable || overBudget) {
-    return sharpMode === "pivot" ? "pivot" : "teardrop";
-  }
-  return "paint-through";
+function executionModeFor(cls: CornerClass): CornerExecutionMode {
+  return cls === "reversal" ? "blocked" : "controller";
 }
 
 function readSourceCorners(line: PlanLine): SourceCorner[] {
@@ -123,10 +111,7 @@ function readSourceCorners(line: PlanLine): SourceCorner[] {
  * Catalog of classified corners from pre-Send source lines (still carry
  * entity.geometry.corners from the fitter).
  */
-export function buildCornerCatalog(
-  paintedLines: PlanLine[],
-  sharpMode: SharpCornerMode = SHARP_CORNER_MODE
-): CornerCatalogEntry[] {
+export function buildCornerCatalog(paintedLines: PlanLine[]): CornerCatalogEntry[] {
   const out: CornerCatalogEntry[] = [];
   for (const line of paintedLines) {
     if (line.layer === "extension" || line.layer === "transit") continue;
@@ -140,7 +125,7 @@ export function buildCornerCatalog(
         cutM: c.cutM,
         overBudget: c.overBudget,
         undrivable: c.undrivable,
-        executionMode: executionModeFor(c.class, c.undrivable, c.overBudget, sharpMode),
+        executionMode: executionModeFor(c.class),
         sourceLineId: line.id,
         sourceLabel: line.label || line.id,
       });
@@ -212,7 +197,7 @@ function minDistToPolylineM(
 
 /**
  * Attach matched catalog corners onto hydrated lines so Path Order / map still
- * know class + teardrop/pivot after stage/hydrate strip source ids.
+ * know the corner class after stage/hydrate strip source ids.
  */
 export function tagLinesWithCorners(
   lines: PlanLine[],
@@ -336,9 +321,8 @@ export function tagLinesWithCorners(
  */
 export function recoverCornersAfterHydration(
   hydratedLines: PlanLine[],
-  sourcePaintedLines: PlanLine[],
-  sharpMode: SharpCornerMode = SHARP_CORNER_MODE
+  sourcePaintedLines: PlanLine[]
 ): PlanLine[] {
-  const catalog = buildCornerCatalog(sourcePaintedLines, sharpMode);
+  const catalog = buildCornerCatalog(sourcePaintedLines);
   return tagLinesWithCorners(hydratedLines, catalog);
 }

@@ -99,9 +99,9 @@ export type AccordionStatus = StagedWorkflowStatus | "idle";
 /** Local CSV PRE/AFT extension config (app state — never saved via /extensions). */
 export type {
   CsvExtensionConfig,
-} from "../utils/csvExtensions";
+} from "../utils/missionExtensions";
 
 export {
   DEFAULT_CSV_EXTENSION_CONFIG,
   normalizeCsvExtensionConfig,
-} from "../utils/csvExtensions";
+} from "../utils/missionExtensions";

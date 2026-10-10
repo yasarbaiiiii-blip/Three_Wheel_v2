@@ -30,6 +30,8 @@ import { NtripProfileConflictError } from "../api/rtkProfiles";
 import { EMPTY_RTK_STATUS, hasLiveCorrections, rtkStatusLabel } from "../api/rtkStatus";
 import { useNtripProfiles } from "../hooks/useNtripProfiles";
 import type { NtripProfile, RTKStatus } from "../types/appRuntime";
+import { validateDashPattern, type DashPattern } from "../utils/appPlannedMissionBuilder";
+import { describeMissionPlanFailure } from "../utils/appPlannedMissionErrors";
 
 const COLORS = {
   bgBase: "#09090b",
@@ -58,7 +60,7 @@ const COLORS = {
   infoBorder: "#1f5a7a",
 };
 
-type SprayMode = "continuous" | "dashed" | "point";
+type SprayMode = "continuous" | "dashed";
 type SettingsSection = "connection" | "drive" | "spray" | "general";
 
 type ModernSettingsPageProps = {
@@ -71,7 +73,9 @@ type ModernSettingsPageProps = {
   setToggleB?: (v: boolean) => void;
   setToggleC?: (v: boolean) => void;
   apiBaseUrl?: string;
-  selectedPathName?: string | null;
+  /** Dashed spray pattern applied to every mark run at Send (null = continuous). */
+  dashPattern?: DashPattern | null;
+  onDashPatternChange?: (pattern: DashPattern | null) => void;
 };
 
 type ProfileEditorMode = { kind: "create" } | { kind: "edit"; profile: NtripProfile };
@@ -359,7 +363,8 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
     setToggleB,
     setToggleC,
     apiBaseUrl,
-    selectedPathName,
+    dashPattern = null,
+    onDashPatternChange,
   } = props;
 
   const { width } = useWindowDimensions();
@@ -375,11 +380,9 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
   const [isSprayMasterChanging, setIsSprayMasterChanging] = useState(false);
   const [isSprayOn, setIsSprayOn] = useState(false);
   const [isSprayOnChanging, setIsSprayOnChanging] = useState(false);
-  const [sprayMode, setSprayMode] = useState<SprayMode>("continuous");
-  const [dashDistanceOn, setDashDistanceOn] = useState("0.3");
-  const [dashDistanceOff, setDashDistanceOff] = useState("0.3");
-  const [pointExecutionMode, setPointExecutionMode] = useState<"auto" | "manual">("auto");
-  const [isSettingSprayMode, setIsSettingSprayMode] = useState(false);
+  const [sprayMode, setSprayMode] = useState<SprayMode>(dashPattern ? "dashed" : "continuous");
+  const [dashDistanceOn, setDashDistanceOn] = useState(String(dashPattern?.onM ?? 0.3));
+  const [dashDistanceOff, setDashDistanceOff] = useState(String(dashPattern?.offM ?? 0.3));
   const [manualHoldActive, setManualHoldActive] = useState(false);
   const [sprayLive, setSprayLive] = useState(false);
 
@@ -480,50 +483,23 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
     }
   };
 
-  const handleSetSprayMode = async () => {
-    if (!apiBaseUrl || !selectedPathName) {
-      Alert.alert("No path", "Select a path on the Fields page before setting spray mode.");
+  /** Dashes are expressed as alternating mark/travel runs when the mission is built. */
+  const handleSetSprayMode = () => {
+    if (sprayMode === "continuous") {
+      onDashPatternChange?.(null);
+      Alert.alert("Pattern applied", "Continuous lines. Applies to the next Send.");
       return;
     }
-    setIsSettingSprayMode(true);
+    const onM = parseFloat(dashDistanceOn);
+    const offM = parseFloat(dashDistanceOff);
     try {
-      let res: Response;
-      const base = sprayApiUrl(`/api/path/${encodeURIComponent(selectedPathName)}/spray-mode`);
-
-      if (sprayMode === "continuous") {
-        res = await fetch(`${base}/continuous`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify({}),
-        });
-      } else if (sprayMode === "dashed") {
-        res = await fetch(`${base}/dash`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify({
-            dash_on_distance_m: parseFloat(dashDistanceOn) || 0.3,
-            dash_off_distance_m: parseFloat(dashDistanceOff) || 0.3,
-            dash_phase_reset: "per_mark_region",
-          }),
-        });
-      } else {
-        res = await fetch(`${base}/point`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify({ point_execution_mode: pointExecutionMode }),
-        });
-      }
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(errText || `Server error: ${res.status}`);
-      }
-      Alert.alert("Success", `Spray mode set to ${sprayMode}.`);
-    } catch (err: any) {
-      Alert.alert("Error", err?.message || "Failed to set spray mode.");
-    } finally {
-      setIsSettingSprayMode(false);
+      validateDashPattern({ onM, offM });
+    } catch (err) {
+      Alert.alert("Dash pattern not valid", err instanceof Error ? describeMissionPlanFailure(err) : "Check the dash lengths.");
+      return;
     }
+    onDashPatternChange?.({ onM, offM });
+    Alert.alert("Pattern applied", `Dashed: ${onM} m ON, ${offM} m OFF. Applies to the next Send.`);
   };
 
   const startManualHold = async () => {
@@ -1029,16 +1005,15 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
 
           <View style={styles.block}>
             <Text style={styles.blockLabel}>Pattern mode</Text>
-            {selectedPathName ? (
-              <Text style={styles.pathHint} numberOfLines={1}>Current path: {selectedPathName}</Text>
-            ) : (
-              <Text style={styles.pathHintWarn}>Select a path on Fields first</Text>
-            )}
+            <Text style={styles.pathHint} numberOfLines={1}>
+              {dashPattern
+                ? `Active: dashed ${dashPattern.onM} m ON / ${dashPattern.offM} m OFF`
+                : "Active: continuous"}
+            </Text>
             <SegmentControl
               options={[
                 { id: "continuous", label: "Continuous" },
                 { id: "dashed", label: "Dashed" },
-                { id: "point", label: "Point" },
               ]}
               value={sprayMode}
               onChange={(id) => setSprayMode(id as SprayMode)}
@@ -1065,26 +1040,10 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
               </View>
             ) : null}
 
-            {sprayMode === "point" ? (
-              <>
-                <Text style={styles.blockLabel}>Point execution</Text>
-                <SegmentControl
-                  options={[
-                    { id: "auto", label: "Auto" },
-                    { id: "manual", label: "Manual" },
-                  ]}
-                  value={pointExecutionMode}
-                  onChange={(id) => setPointExecutionMode(id as "auto" | "manual")}
-                />
-              </>
-            ) : null}
-
             <ActionButton
               label="Apply pattern"
               icon={Check}
               onPress={handleSetSprayMode}
-              loading={isSettingSprayMode}
-              disabled={!apiBaseUrl || !selectedPathName}
             />
           </View>
 

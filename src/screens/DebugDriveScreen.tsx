@@ -89,6 +89,7 @@ import type {
 } from "../contract/prod/rest";
 import type { PlanLine } from "../types/plan";
 import { buildAppPlannedMissionFromLines } from "../utils/appPlannedMissionBuilder";
+import { describeMissionPlanFailure } from "../utils/appPlannedMissionErrors";
 import {
   discoverRovers,
   type DiscoveredRoverTarget,
@@ -97,9 +98,11 @@ import {
 interface DebugDriveScreenProps {
   onBack?: () => void;
   currentPlanLines?: PlanLine[];
+  /** GPS anchor of the loaded plan (its local origin). Without it upload is refused. */
+  originGps?: [number, number] | null;
 }
 
-export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenProps) {
+export function DebugDriveScreen({ onBack, currentPlanLines, originGps }: DebugDriveScreenProps) {
   // ---- Connection state ----
   const [hostUrl, setHostUrl] = useState("");
   const [token, setToken] = useState("");
@@ -449,6 +452,7 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
     try {
       const payload = buildAppPlannedMissionFromLines({
         lines: currentPlanLines,
+        anchor: originGps,
         missionName: "operator_debug_plan",
       });
 
@@ -459,13 +463,13 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
         code: "CREATED",
         reason: "Mission artifact created",
         delivered: true,
-        data: res.mission as Record<string, unknown>,
+        data: res.mission as unknown as Record<string, unknown>,
       });
       void refreshMissionsList();
     } catch (err: unknown) {
       if (err instanceof ProdApiError) {
         if (err.status === 404) {
-          const notFoundMsg = "Backend returned 404: GAP-04 app_planned_mission endpoint not yet implemented on rover backend.";
+          const notFoundMsg = "Backend returned 404: the rover does not serve POST /api/missions/plan (update the rover backend).";
           setUploadStatus(notFoundMsg);
           recordResult("POST /api/missions/plan", 404, {
             ok: false,
@@ -483,13 +487,12 @@ export function DebugDriveScreen({ onBack, currentPlanLines }: DebugDriveScreenP
           });
         }
       } else {
-        const msg = err instanceof Error ? err.message : String(err);
-        setUploadStatus(`Upload error: ${msg}`);
+        setUploadStatus(`Upload not sent: ${describeMissionPlanFailure(err)}`);
       }
     } finally {
       setCommandBusy(false);
     }
-  }, [currentPlanLines, recordResult, refreshMissionsList]);
+  }, [currentPlanLines, originGps, recordResult, refreshMissionsList]);
 
   // ---- Derived State Fields ----
   const snap = telemetry.snapshot;

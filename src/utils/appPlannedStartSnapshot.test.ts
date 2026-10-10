@@ -1,15 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PlanLine } from "../types/plan";
+import { initProdApiClient } from "../api/prodClient";
+import type { AppPlannedMissionRequest } from "../contract/prod/missionPlan";
+import { computeExpectedAdmission } from "./appPlannedMissionBuilder";
 import {
   buildAppPlannedStartSnapshot,
   clonePlanLinesForSnapshot,
+  restageAppTrajectoryWithLiveEntry,
 } from "./appPlannedStartSnapshot";
 import {
   ENTRY_TRANSIT_LABEL,
   buildTrajectory,
   type TrajectoryRun,
 } from "./missionTrajectory";
+import { projectLocalMetersToGps } from "./geoProjection";
 
 function markLine(
   id: string,
@@ -58,7 +63,7 @@ describe("appPlannedStartSnapshot", () => {
   it("Start-style build with requireEntryTransit uses live GPS about origin", () => {
     const origin: [number, number] = [12.97, 77.59];
     // ~4 m north of origin
-    const lat = origin[0] + 4 / 6_371_000 / (Math.PI / 180);
+    const lat = projectLocalMetersToGps(4, 0, origin[0], origin[1]).lat;
     const painted = [
       markLine("a", [
         { north: 0, east: 0 },
@@ -85,7 +90,7 @@ describe("appPlannedStartSnapshot", () => {
     expect(first.runs[0].points[0][0]).toBeGreaterThan(3);
 
     // Pose at second Start (Y) — different position
-    const latY = origin[0] + 8 / 6_371_000 / (Math.PI / 180);
+    const latY = projectLocalMetersToGps(8, 0, origin[0], origin[1]).lat;
     const second = buildTrajectory(snap.paintedLines, {
       markSpeedMs: 0.35,
       travelSpeedMs: 0.5,
@@ -118,5 +123,67 @@ describe("appPlannedStartSnapshot", () => {
     });
     expect(entryTransit?.error).toBeTruthy();
     expect(entryTransit?.included).toBe(false);
+  });
+});
+
+describe("restageAppTrajectoryWithLiveEntry", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("uploads the snapshot plus the live entry leg through the v2 endpoint with the anchor", async () => {
+    const origin: [number, number] = [12.97, 77.59];
+    const lat = projectLocalMetersToGps(4, 0, origin[0], origin[1]).lat;
+    let sent: AppPlannedMissionRequest | null = null;
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith("/api/missions/plan")) {
+        sent = JSON.parse(String(init?.body)) as AppPlannedMissionRequest;
+        const e = computeExpectedAdmission(sent);
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            mission: {
+              sha256: "cd".repeat(32),
+              engine_id: "app_v1",
+              num_points: e.numPoints,
+              num_spray_points: e.numSprayPoints,
+              mark_length_m: e.markLengthM,
+              transit_length_m: e.transitLengthM,
+              bbox_ne_m: e.bboxNeM,
+              source: { num_runs: e.numRuns },
+            },
+            normalisation: { densified_steps: 0, max_boundary_snap_m: 0 },
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`unexpected request ${String(url)}`);
+    });
+    initProdApiClient("http://10.0.0.9:8000", "operator-token");
+    const snapshot = buildAppPlannedStartSnapshot({
+      paintedLines: [markLine("a", [{ north: 0, east: 0 }, { north: 10, east: 0 }])],
+      originGps: origin,
+      missionName: "m1",
+    });
+    const res = await restageAppTrajectoryWithLiveEntry({
+      snapshot,
+      roverPose: { lat, lon: origin[1], gps_fix: 4, pose_age_ms: 50 },
+    });
+    expect(res.success).toBe(true);
+    if (!res.success) return;
+    expect(res.entryIncluded).toBe(true);
+    expect(res.missionId).toBe("cd".repeat(32));
+    expect(sent!.anchor).toEqual({ lat: origin[0], lon: origin[1] });
+    expect(sent!.runs.map((r) => r.type)).toEqual(["travel", "mark"]);
+    expect(sent!.runs[0].points[0][0]).toBeCloseTo(4, 3);
+    expect(res.admitted.transitLengthM).toBeCloseTo(4, 3);
+    expect(res.admitted.markLengthM).toBeCloseTo(10, 6);
+  });
+
+  it("fails clearly when the snapshot has no paths", async () => {
+    const snapshot = buildAppPlannedStartSnapshot({ paintedLines: [], originGps: [1, 1], missionName: "m" });
+    const res = await restageAppTrajectoryWithLiveEntry({ snapshot, roverPose: null });
+    expect(res.success).toBe(false);
   });
 });

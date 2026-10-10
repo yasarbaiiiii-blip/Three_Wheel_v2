@@ -6,14 +6,10 @@
  * never be re-planned. Start always rebuilds from this snapshot + live telemetry.
  */
 
-import { SHARP_CORNER_MODE, type SharpCornerMode } from "../config/featureFlags";
 import type { PlanLine } from "../types/plan";
-import { planAndStageAppTrajectory, type CsvStageResult } from "./missionStaging";
-import {
-  buildTrajectory,
-  type GroundTruthSourcePoint,
-  type RoverPoseForEntry,
-} from "./missionTrajectory";
+import type { DashPattern } from "./appPlannedMissionBuilder";
+import { stageAppPlannedMission, type AdmittedMission } from "./missionStaging";
+import { buildTrajectory, type RoverPoseForEntry } from "./missionTrajectory";
 import {
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
@@ -23,11 +19,11 @@ export type AppPlannedStartSnapshot = {
   /** Ordered painted mark lines only (source geometry, not densified). */
   paintedLines: PlanLine[];
   extensionConfig: CsvExtensionConfig | null;
+  /** GPS anchor of the mission: the trajectory's local origin. */
   originGps: [number, number];
   missionName: string;
-  groundTruthSource?: GroundTruthSourcePoint[];
-  /** Sharp-corner TRAVEL mode frozen at Send (teardrop default / pivot opt-in). */
-  sharpCornerMode?: SharpCornerMode;
+  /** Dash pattern frozen at Send (null = continuous). */
+  dash: DashPattern | null;
   capturedAtMs: number;
 };
 
@@ -41,8 +37,7 @@ export function buildAppPlannedStartSnapshot(args: {
   extensionConfig?: CsvExtensionConfig | null;
   originGps: [number, number];
   missionName: string;
-  groundTruthSource?: GroundTruthSourcePoint[];
-  sharpCornerMode?: SharpCornerMode;
+  dash?: DashPattern | null;
 }): AppPlannedStartSnapshot {
   return {
     paintedLines: clonePlanLinesForSnapshot(args.paintedLines),
@@ -51,10 +46,7 @@ export function buildAppPlannedStartSnapshot(args: {
       : null,
     originGps: [args.originGps[0], args.originGps[1]],
     missionName: args.missionName,
-    groundTruthSource: args.groundTruthSource
-      ? args.groundTruthSource.map((g) => ({ ...g }))
-      : undefined,
-    sharpCornerMode: args.sharpCornerMode ?? SHARP_CORNER_MODE,
+    dash: args.dash ? { onM: args.dash.onM, offM: args.dash.offM } : null,
     capturedAtMs: Date.now(),
   };
 }
@@ -63,8 +55,7 @@ export type RestageWithLiveEntryResult =
   | {
       success: true;
       missionId: string;
-      plan: NonNullable<CsvStageResult["plan"]>;
-      stagedInspection?: CsvStageResult["stagedInspection"];
+      admitted: AdmittedMission;
       entryLengthM?: number;
       entryIncluded: boolean;
     }
@@ -75,21 +66,13 @@ export type RestageWithLiveEntryResult =
 
 /**
  * Rebuild trajectory from the Send snapshot, prepend live entry from roverPose,
- * plan-trajectory + stage. Caller loads to controller and starts.
+ * then upload through the same builder and authenticated client as Send.
+ * Caller loads to controller and starts.
  */
-export async function restageAppTrajectoryWithLiveEntry(
-  apiBaseUrl: string,
-  args: {
-    snapshot: AppPlannedStartSnapshot;
-    roverPose: RoverPoseForEntry | null | undefined;
-    markSpeedMs?: number;
-    travelSpeedMs?: number;
-    /** Start does not need the staged artifact for the map. */
-    skipStagedInspect?: boolean;
-  }
-): Promise<RestageWithLiveEntryResult> {
-  const markSpeedMs = args.markSpeedMs ?? 0.35;
-  const travelSpeedMs = args.travelSpeedMs ?? 0.5;
+export async function restageAppTrajectoryWithLiveEntry(args: {
+  snapshot: AppPlannedStartSnapshot;
+  roverPose: RoverPoseForEntry | null | undefined;
+}): Promise<RestageWithLiveEntryResult> {
   const snap = args.snapshot;
 
   if (!snap.paintedLines.length) {
@@ -99,19 +82,17 @@ export async function restageAppTrajectoryWithLiveEntry(
     !Number.isFinite(snap.originGps[0]) ||
     !Number.isFinite(snap.originGps[1])
   ) {
-    return { success: false, error: "Start snapshot is missing origin_gps. Re-Send the mission." };
+    return { success: false, error: "Start snapshot is missing the GPS origin. Re-Send the mission." };
   }
 
   const built = buildTrajectory(snap.paintedLines, {
-    markSpeedMs,
-    travelSpeedMs,
-    groundTruthSource: snap.groundTruthSource,
+    markSpeedMs: 0.35,
+    travelSpeedMs: 0.5,
     extensions: snap.extensionConfig,
     roverPose: args.roverPose ?? null,
     originGps: snap.originGps,
     includeEntryTransit: true,
     requireEntryTransit: true,
-    sharpCornerMode: snap.sharpCornerMode ?? SHARP_CORNER_MODE,
   });
 
   if (built.entryTransit?.error) {
@@ -124,17 +105,15 @@ export async function restageAppTrajectoryWithLiveEntry(
     };
   }
 
-  const staged = await planAndStageAppTrajectory(apiBaseUrl, {
+  const staged = await stageAppPlannedMission({
     missionName: snap.missionName,
-    originGps: snap.originGps,
+    anchor: snap.originGps,
     runs: built.runs,
-    groundTruth: built.groundTruth,
-    markSpeedMs,
-    travelSpeedMs,
-    skipStagedInspect: args.skipStagedInspect === true,
+    dash: snap.dash,
+    verifyStoredGeometry: false,
   });
 
-  if (!staged.success || !staged.missionId || !staged.plan) {
+  if (!staged.success || !staged.missionId || !staged.admitted) {
     return {
       success: false,
       error: staged.error || "Could not re-stage trajectory with live entry.",
@@ -144,8 +123,7 @@ export async function restageAppTrajectoryWithLiveEntry(
   return {
     success: true,
     missionId: staged.missionId,
-    plan: staged.plan,
-    stagedInspection: staged.stagedInspection,
+    admitted: staged.admitted,
     entryIncluded: built.entryTransit?.included === true,
     entryLengthM: built.entryTransit?.lengthM,
   };

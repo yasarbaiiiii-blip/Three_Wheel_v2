@@ -29,6 +29,10 @@ import type {
 export const DEFAULT_PROD_PORT = 8000;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 5000;
 export const HEARTBEAT_REQUEST_TIMEOUT_MS = 1200;
+/** A 50,000-point mission is a multi-megabyte JSON body and is compiled on the rover. */
+export const MISSION_UPLOAD_TIMEOUT_MS = 60_000;
+/** Reading a stored 200,000-point geometry back. */
+export const MISSION_PATH_TIMEOUT_MS = 30_000;
 
 export interface ProdClientConfig {
   baseUrl: string;
@@ -289,7 +293,9 @@ export class ProdApiClient {
 
   /** GET /api/missions/{sha}/path */
   async getMissionPath(sha: string): Promise<MissionPathResponse> {
-    return this.request<MissionPathResponse>(`/api/missions/${encodeURIComponent(sha)}/path`);
+    return this.request<MissionPathResponse>(`/api/missions/${encodeURIComponent(sha)}/path`, {
+      timeoutMs: MISSION_PATH_TIMEOUT_MS,
+    });
   }
 
   /** POST /api/missions/{sha}/start */
@@ -299,11 +305,12 @@ export class ProdApiClient {
     });
   }
 
-  /** POST /api/missions/plan (GAP-04 App-Planned Mission) */
+  /** POST /api/missions/plan (app-planned mission, contract v2). Operator bearer token. */
   async uploadAppPlannedMission(plan: AppPlannedMissionRequest): Promise<AppPlannedMissionResponse> {
     return this.request<AppPlannedMissionResponse>("/api/missions/plan", {
       method: "POST",
       body: plan,
+      timeoutMs: MISSION_UPLOAD_TIMEOUT_MS,
     });
   }
 

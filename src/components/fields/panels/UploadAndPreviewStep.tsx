@@ -5,7 +5,6 @@ import * as FileSystem from "expo-file-system/legacy";
 import { Plus, RefreshCw, Trash2, Upload, X } from "lucide-react-native";
 
 import * as pathApi from "../../../api/pathApi";
-import { DXF_PLANNER } from "../../../config/featureFlags";
 import type { MissionLayer } from "../../../types/missionLayers";
 import type { ImportedPlan } from "../../../types/plan";
 import { layerForFile, nonEmptyMissionLayers, sortedMissionLayers } from "../../../utils/missionLayerAssignment";
@@ -51,7 +50,7 @@ type UploadAndPreviewStepProps = {
    */
   onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
   /**
-   * Local-only DXF parse when DXF_PLANNER === "app". Parent sets lines + alignment.
+   * Local-only DXF parse. Parent sets lines + alignment.
    * No parse-dxf / entities / upload.
    */
   onLocalDxfParsed?: (data: LocalDxfResult) => void;
@@ -424,7 +423,7 @@ export function UploadAndPreviewStep({
     localCsvPreview != null ||
     localCsvSummary != null;
   /** DXF parsed on device — never hit /parse-dxf, /entities, or /extensions. */
-  const isLocalDxfPlanner = DXF_PLANNER === "app" && isDxfPath;
+  const isLocalDxfPlanner = isDxfPath;
   /** Extension UI must not depend on local-only summary — that state dies on remount. */
   const showCsvExtension =
     isCsvPath &&
@@ -718,8 +717,8 @@ export function UploadAndPreviewStep({
   };
 
   /**
-   * CSV + app-planned DXF: multi-file parse on-device (mixed types allowed).
-   * Waypoints / rover DXF (DXF_PLANNER=rover): single-file upload + backend preview.
+   * CSV + DXF: multi-file parse on-device (mixed types allowed).
+   * Waypoints: single-file upload + backend preview.
    * `append` adds into the local batch already shown as LOADED (Add more files).
    */
   const importAndPreviewFiles = async (
@@ -736,7 +735,7 @@ export function UploadAndPreviewStep({
       (f) => (f.name.split(".").pop()?.toLowerCase() ?? "") === "waypoints"
     );
 
-    // Waypoints (and rover-side DXF when planner is not app) stay single-file.
+    // Waypoints stay single-file.
     if (waypointFiles.length > 0) {
       if (csvFiles.length > 0 || dxfFiles.length > 0 || waypointFiles.length > 1) {
         Alert.alert(
@@ -748,7 +747,7 @@ export function UploadAndPreviewStep({
       if (append) {
         Alert.alert(
           "Cannot Add Files",
-          "Adding more files is only available for local CSV and app-planned DXF plans."
+          "Adding more files is only available for local CSV and DXF plans."
         );
         return;
       }
@@ -756,48 +755,31 @@ export function UploadAndPreviewStep({
       return;
     }
 
-    const localDxfOk = DXF_PLANNER === "app";
     const hasLocalBatch = uploadedFiles.length > 0 || localCsvPreview != null || isLocalDxfPlanner;
 
     if (append) {
       if (!hasLocalBatch) {
         Alert.alert(
           "Cannot Add Files",
-          "Adding more files is only available for local CSV and app-planned DXF plans."
+          "Adding more files is only available for local CSV and DXF plans."
         );
-        return;
-      }
-      if (dxfFiles.length > 0 && !localDxfOk) {
-        Alert.alert("Wrong Type", "App-planned DXF is required to add .dxf files to a local batch.");
         return;
       }
       // Append each type into the existing multi-file batch (no type exclusivity).
       if (csvFiles.length > 0) {
         await importLocalCsvFiles(csvFiles, { append: true });
       }
-      if (dxfFiles.length > 0 && localDxfOk) {
+      if (dxfFiles.length > 0) {
         await importLocalDxfFiles(dxfFiles, { append: true });
       }
       return;
     }
 
-    // Fresh pick: mixed CSV + app DXF in one gesture is allowed.
-    if (dxfFiles.length > 0 && !localDxfOk) {
-      if (csvFiles.length > 0 || dxfFiles.length > 1) {
-        Alert.alert(
-          "One File at a Time",
-          "Rover-side DXF uploads support a single file. Select one file, or switch to app-planned DXF for multi-file merge."
-        );
-        return;
-      }
-      await importRoverFile(dxfFiles[0]);
-      return;
-    }
-
+    // Fresh pick: mixed CSV + DXF in one gesture is allowed.
     // Mixed CSV + app-planned DXF in one pick: reuse the per-type importers so summary
     // bookkeeping (localCsvSummary / lastLocalDxf) stays correct for both kinds — only the
     // first call resets the batch, the second appends into what it just started.
-    const mixedLocal = csvFiles.length > 0 && dxfFiles.length > 0 && localDxfOk;
+    const mixedLocal = csvFiles.length > 0 && dxfFiles.length > 0;
     if (mixedLocal) {
       await importLocalCsvFiles(csvFiles, { append: false });
       await importLocalDxfFiles(dxfFiles, { append: true });
@@ -821,7 +803,7 @@ export function UploadAndPreviewStep({
       return;
     }
 
-    if (dxfFiles.length > 0 && localDxfOk) {
+    if (dxfFiles.length > 0) {
       await importLocalDxfFiles(dxfFiles, { append: false });
       return;
     }

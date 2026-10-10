@@ -14,7 +14,7 @@ import {
   csvExtensionLengthM,
   type CsvExtensionConfig,
   type CsvExtensionPreview,
-} from "../../../utils/csvExtensions";
+} from "../../../utils/missionExtensions";
 import {
   buildCsvTransitPreviews,
   buildOrderedTrajectory,
@@ -28,7 +28,7 @@ import {
   setPathPaint,
   type CsvPathOrderEntry,
   type CsvTransitPreview,
-} from "../../../utils/csvPathOrder";
+} from "../../../utils/missionPathOrder";
 import { getLineLengthM, type SelectLineFn } from "../../../utils/pathWorkflow";
 import { CsvWarningsPanel } from "../CsvWarningsPanel";
 import { FIELDS_COLORS } from "../fieldsTheme";

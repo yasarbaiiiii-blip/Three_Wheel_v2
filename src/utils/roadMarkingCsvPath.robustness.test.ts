@@ -39,7 +39,7 @@ describe("CSV geometry robustness", () => {
     expect(classifyPointSequence(ring).class).toBe("dense-survey");
   });
 
-  it("keeps sharp sparse 90° corners as raw vertices (rover pivots in place)", () => {
+  it("keeps sharp sparse 90° corners as raw vertices (the rover controller takes them)", () => {
     // mission.csv class: 3-point L
     const mission = [
       { north: 0, east: 0 },
@@ -67,7 +67,7 @@ describe("CSV geometry robustness", () => {
       { north: 2, east: 0 },
     ];
     const out = buildRoadMarkingPreviewPoints(square);
-    // 90° waypoint corners stay sharp — the rover pivots in place instead of driving an arc.
+    // 90° waypoint corners stay sharp - the tablet never cuts a corner; the controller owns it.
     expect(maxTurningAngleDeg(out)).toBeCloseTo(90, 0);
     const srcLen = polylineLengthM(square);
     const outLen = polylineLengthM(out);
@@ -139,16 +139,15 @@ describe("CSV geometry robustness", () => {
     expect(v.reasons.some((r) => /explod/i.test(r))).toBe(true);
   });
 
-  it("waypoint corner cut stays near paint budget for 90° with long legs", () => {
+  it("does not cut a 90° waypoint corner, even with long legs", () => {
     const pts = [
       { north: 0, east: 0 },
       { north: 0, east: 10 },
       { north: 10, east: 10 },
     ];
     const fitted = buildRoadMarkingFittedPath(pts);
-    // Pin 2 is cut inside; deviation should be order of corner tolerance / r_min miss.
-    const dev = maxSourceDeviationM(pts, fitted.samples);
-    expect(dev).toBeLessThan(Math.max(CORNER_TOLERANCE_M * 4, R_MIN_ROVER_M));
+    // Pin 2 is the exact surveyed vertex of the output: zero deviation from the source.
+    expect(maxSourceDeviationM(pts, fitted.samples)).toBe(0);
   });
 
   it("exports production policy constants", () => {
@@ -159,7 +158,7 @@ describe("CSV geometry robustness", () => {
   it("dense-fits a real serpentine field survey instead of degrading to waypoint fillets (regression: field_test_02.csv, 2026-07-31)", () => {
     // Full raw 78-point RTK survey (field_test_02.csv), reported HRMS 0.02 m. A genuine
     // r=2.55m ~90deg turn partway through was previously flattened by
-    // absorbSandwichedCornerArcs (neighbor-turn-angle heuristic, no overshoot check), missing
+    // a neighbor-turn-angle heuristic that flattened the arc (no overshoot check), missing
     // a surveyed point by 0.79m — 9x the fit tolerance — which tripped validateFittedPath and
     // dropped the WHOLE dense fit to the per-point waypoint-fillet fallback: every one of the
     // 78 raw fixes became its own straight leg with only light corner rounding, i.e. the

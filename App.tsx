@@ -1,7 +1,7 @@
 import "react-native-gesture-handler";
 import "./global.css";
 
-import { DXF_PLANNER, SMOKE_TEST_MAPBOX, SMOKE_TEST_CENTER } from "./src/config/featureFlags";
+import { SMOKE_TEST_MAPBOX, SMOKE_TEST_CENTER } from "./src/config/featureFlags";
 import { installRuntimeGuards, yieldToUi } from "./src/utils/runtimeGuards";
 import {
   createPathPipelineGuard,
@@ -134,6 +134,8 @@ import {
   restageAppTrajectoryWithLiveEntry,
   type AppPlannedStartSnapshot,
 } from "./src/utils/appPlannedStartSnapshot";
+import { stagedPlanResultFromAdmitted } from "./src/utils/missionStaging";
+import type { DashPattern } from "./src/utils/appPlannedMissionBuilder";
 import {
   LIVE_ENTRY_CACHE_MAX_AGE_MS,
   canSkipLiveEntryRestage,
@@ -176,7 +178,6 @@ import {
 import { splitRoadMarkingPathAtAnchor } from "./src/utils/roadMarkingCsvPath";
 import type { AnchorCandidatePoint } from "./src/components/mapViewTypes";
 import { recoverCornersAfterHydration } from "./src/utils/cornerLifecycle";
-import { SHARP_CORNER_MODE } from "./src/config/featureFlags";
 import * as pathApi from "./src/api/pathApi";
 // Template generators live only in lazy TemplatesPage (not on the connection entry graph).
 import { canAcquireJoystick as canAcquireJoystickForState } from "./src/utils/joystickFrontendSafety";
@@ -347,10 +348,9 @@ import {
   chainMarkLinesFromSeed,
   defaultPathOrder,
   selectMarkPlanLines,
-} from "./src/utils/csvPathOrder";
+} from "./src/utils/missionPathOrder";
 import { normalizeBearingDeg } from "./src/utils/planOffset";
 import { computeOffsetResultLines } from "./src/utils/planOffsetApply";
-import { sanitizeUploadFileName } from "./src/utils/surveyCsvExport";
 import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
 import { rehydrateAlignedPlanLines } from "./src/utils/rehydrateAlignedPlan";
 import type { AutoOriginReference, MapGeometryFrame } from "./src/types/autoOrigin";
@@ -909,12 +909,11 @@ function AppRoot() {
       return;
     }
 
-    // Local app-planned DXF: plan-trajectory sends NED vertices as-is about origin_gps.
+    // Local app-planned DXF: the mission sends NED vertices as-is about the GPS anchor.
     // The sticker is only a map preview — bake the real DXF path (placed geometry) into
     // `lines` before enabling Send. Never set origin_gps while leaving design-frame
     // geometry (that used to ship an untransformed DXF trajectory).
     const isLocalAppDxf =
-      DXF_PLANNER === "app" &&
       selectedPathName == null &&
       (importedPlan?.fileType === "dxf" || !!importedPlan?.fileName?.toLowerCase().endsWith(".dxf"));
 
@@ -929,7 +928,7 @@ function AppRoot() {
       const item = visualAlignmentItem;
       const transformPt = (north: number, east: number) => {
         const t = transformVisualDxfPoint(north, east, item);
-        // NED about the latched map origin (= origin_gps for plan-trajectory).
+        // NED about the latched map origin (= the mission anchor origin_gps).
         return {
           north: t.north - originDxfNorth,
           east: t.east - originDxfEast,
@@ -968,7 +967,7 @@ function AppRoot() {
       setIsPlanEditingMode(false);
       setMultiPointPlacementPhase("idle");
       console.log(
-        `[Align DXF] Local DXF placement baked into lines; origin_gps=[${baseLat}, ${baseLon}] ready for plan-trajectory`
+        `[Align DXF] Local DXF placement baked into lines; origin_gps=[${baseLat}, ${baseLon}] ready for the mission upload`
       );
       return;
     }
@@ -1083,6 +1082,8 @@ function AppRoot() {
    */
   const [appPlannedStartSnapshot, setAppPlannedStartSnapshot] =
     useState<AppPlannedStartSnapshot | null>(null);
+  /** Dashed spray pattern for the next Send (null = continuous lines). */
+  const [dashPattern, setDashPattern] = useState<DashPattern | null>(null);
   /** Local-only CSV preview (Select File .csv never hits backend path APIs). */
   const [localCsvPreview, setLocalCsvPreview] = useState<LocalPointCsvResult | null>(null);
   /** Per-file parses; preview/export is `mergeLocalPointCsvResults` of this list (not last-wins). */
@@ -2829,7 +2830,7 @@ function AppRoot() {
       if (isStagedLoad) {
         const missionId = requestedMissionId;
         let loadRes = await missionApi.loadMissionToController(apiBaseUrl, { mission_id: missionId });
-        // Controller can be briefly busy after plan-trajectory (Send then Start).
+        // Controller can be briefly busy after the mission upload (Send then Start).
         if (!loadRes.ok && (loadRes.status === 503 || loadRes.status === 504)) {
           await new Promise((r) => setTimeout(r, 600));
           loadRes = await missionApi.loadMissionToController(apiBaseUrl, { mission_id: missionId });
@@ -2898,12 +2899,11 @@ function AppRoot() {
             appPlannedStartSnapshot?.extensionConfig
           );
           const missionLayerTaggedLines = tagLinesWithMissionLayer(hydrated.lines, layerCatalog);
-          // Recover corner class / teardrop-vs-pivot so Path Order + map still show
-          // corners after densified hydrate (same catalog pattern as mission layers).
+          // Recover corner class so Path Order + map still show corners after
+          // densified hydrate (same catalog pattern as mission layers).
           const cornerTaggedLines = recoverCornersAfterHydration(
             missionLayerTaggedLines,
-            appPlannedStartSnapshot?.paintedLines ?? [],
-            appPlannedStartSnapshot?.sharpCornerMode ?? SHARP_CORNER_MODE
+            appPlannedStartSnapshot?.paintedLines ?? []
           );
 
           const expectedMarks = selectMarkPlanLines(
@@ -3345,7 +3345,7 @@ function AppRoot() {
   }
 
   /**
-   * Local DXF parse (DXF_PLANNER === "app"). Geo-DXF appends (auto-verified);
+   * Local DXF parse. Geo-DXF appends (auto-verified);
    * metric DXF is held in pendingDxfAlignment until Fix Alignment.
    */
   function handleLocalDxfParsed(data: LocalDxfResult) {
@@ -3517,14 +3517,6 @@ function AppRoot() {
   }
 
   function handleClearLocalCsv() {
-    // Best-effort: drop a CSV previously written into the rover missions dir by
-    // "Send to Rover". 404 is fine if it was never uploaded or already deleted.
-    const uploadedName = localCsvPreview
-      ? sanitizeUploadFileName(localCsvPreview.fileName)
-      : null;
-    if (apiBaseUrl && uploadedName) {
-      void pathApi.deletePath(apiBaseUrl, uploadedName).catch(() => {});
-    }
     setLocalCsvPreview(null);
     localCsvParsesRef.current = [];
     setLocalDxfMeta(null);
@@ -4105,13 +4097,11 @@ function AppRoot() {
         const previewed = buildTrajectory(startSnapshot.paintedLines, {
           markSpeedMs: 0.35,
           travelSpeedMs: 0.5,
-          groundTruthSource: startSnapshot.groundTruthSource,
           extensions: startSnapshot.extensionConfig,
           roverPose: livePose,
           originGps: startSnapshot.originGps,
           includeEntryTransit: true,
           requireEntryTransit: true,
-          sharpCornerMode: startSnapshot.sharpCornerMode ?? SHARP_CORNER_MODE,
         });
         if (previewed.entryTransit?.error) {
           throw new Error(previewed.entryTransit.error);
@@ -4133,26 +4123,9 @@ function AppRoot() {
           >
         ) => {
           setStagedMissionId(restaged.missionId);
-          if (restaged.stagedInspection) {
-            setStagedMissionInspection(restaged.stagedInspection);
-          }
+          setStagedMissionInspection(null);
           setWorkflowStep("staged", "verified");
-          const n = (v: unknown): number | null =>
-            typeof v === "number" && Number.isFinite(v) ? v : null;
-          setStagedPlanResult({
-            missionId: restaged.missionId,
-            numWaypoints: n(restaged.plan.num_waypoints),
-            numSegments: n(restaged.plan.num_segments),
-            totalLengthM: n(restaged.plan.total_length_m),
-            markLengthM: n(restaged.plan.mark_length_m),
-            transitLengthM: n(restaged.plan.transit_length_m),
-            estimatedPaintL: n(restaged.plan.mission_summary?.estimated_paint_l),
-            estimatedRuntimeS: n(restaged.plan.mission_summary?.estimated_runtime_s),
-            rmseM: n(restaged.plan.mission_summary?.rmse_m),
-            warnings: Array.isArray(restaged.plan.warnings)
-              ? restaged.plan.warnings.filter((w): w is string => typeof w === "string")
-              : [],
-          });
+          setStagedPlanResult(stagedPlanResultFromAdmitted(restaged.admitted));
         };
 
         let driftRetry = false;
@@ -4165,10 +4138,9 @@ function AppRoot() {
           });
         } else {
           showToast("Approach", "Building runtime entry from current rover position…", "info");
-          let restaged = await restageAppTrajectoryWithLiveEntry(apiBaseUrl, {
+          let restaged = await restageAppTrajectoryWithLiveEntry({
             snapshot: startSnapshot,
             roverPose: livePose,
-            skipStagedInspect: true,
           });
           if (!restaged.success) {
             throw new Error(restaged.error);
@@ -4182,7 +4154,6 @@ function AppRoot() {
               startSnapshot.extensionConfig
             ),
             manageBusy: false,
-            stagedInspection: restaged.stagedInspection ?? null,
             skipNavigate: true,
             skipMapHydration: true,
             expectedPaintedLines: startSnapshot.paintedLines,
@@ -4215,10 +4186,9 @@ function AppRoot() {
               showToast("Approach", "Rover moved — rebuilding entry from new position…", "info");
               livePose = picked2.pose;
               poseSource = picked2.source;
-              restaged = await restageAppTrajectoryWithLiveEntry(apiBaseUrl, {
+              restaged = await restageAppTrajectoryWithLiveEntry({
                 snapshot: startSnapshot,
                 roverPose: livePose,
-                skipStagedInspect: true,
               });
               if (!restaged.success) {
                 throw new Error(restaged.error);
@@ -4231,7 +4201,6 @@ function AppRoot() {
                   startSnapshot.extensionConfig
                 ),
                 manageBusy: false,
-                stagedInspection: restaged.stagedInspection ?? null,
                 skipNavigate: true,
                 skipMapHydration: true,
                 expectedPaintedLines: startSnapshot.paintedLines,
@@ -4577,22 +4546,6 @@ function AppRoot() {
         const error = new Error(errMsg) as Error & { status?: number };
         error.status = res.status;
         throw error;
-      }
-
-      // Also remove the uploaded survey CSV from the rover missions dir so files
-      // do not accumulate across Send-to-Rover cycles. Best-effort: ignore 404.
-      const uploadedCsv =
-        localCsvPreview != null
-          ? sanitizeUploadFileName(localCsvPreview.fileName)
-          : selectedPathName && /\.csv$/i.test(selectedPathName)
-            ? selectedPathName
-            : null;
-      if (uploadedCsv) {
-        try {
-          await pathApi.deletePath(apiBaseUrl, uploadedCsv);
-        } catch {
-          // Network blip after mission clear succeeded — not fatal.
-        }
       }
 
       setImportedPlan(null);
@@ -5202,6 +5155,11 @@ function AppRoot() {
                   <DebugDriveScreen
                     onBack={() => setPage("home")}
                     currentPlanLines={lines}
+                    originGps={
+                      alignedRefPoints[0]
+                        ? [alignedRefPoints[0].lat, alignedRefPoints[0].lon]
+                        : appPlannedStartSnapshot?.originGps ?? null
+                    }
                   />
                 </Suspense>
               ) : (
@@ -5431,6 +5389,8 @@ function AppRoot() {
                             loadedPathInspection={loadedPathInspection}
                             onInvalidateWorkflow={invalidateStagedWorkflowFrom}
                             onAppPlannedStartSnapshot={setAppPlannedStartSnapshot}
+                            dashPattern={dashPattern}
+                            onDashPatternChange={setDashPattern}
                             alignedRefPoints={alignedRefPoints}
                             setAlignedRefPoints={setAlignedRefPoints}
                             mapViewEnabled={mapViewEnabled}
@@ -5843,57 +5803,8 @@ function HomeView(props: HomeViewProps) {
       ? { north: telemetrySnapshot.pos_n as number, east: telemetrySnapshot.pos_e as number }
       : null);
 
-  const [sprayModalOpen, setSprayModalOpen] = useState(false);
-  const [sprayTab, setSprayTab] = useState<"continuous" | "dashed" | "point">("continuous");
-  const [dashDistanceOn, setDashDistanceOn] = useState("0.3");
-  const [dashDistanceOff, setDashDistanceOff] = useState("0.3");
-  const [pointExecutionMode, setPointExecutionMode] = useState<"auto" | "manual">("auto");
-  const [activeSprayMode, setActiveSprayMode] = useState<string>("continuous");
-  const [activePointExecutionMode, setActivePointExecutionMode] = useState<string>("auto");
   const [isSprayMasterEnabled, setIsSprayMasterEnabled] = useState(false);
   const [isSprayMasterChanging, setIsSprayMasterChanging] = useState(false);
-
-  const handleSetSprayMode = async () => {
-    if (!apiBaseUrl || !selectedPathName) return;
-    try {
-      let res;
-      if (sprayTab === "continuous") {
-        res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/continuous`, { 
-          method: "PUT",
-          headers: { "Content-Type": "application/json", "Accept": "application/json" },
-          body: JSON.stringify({})
-        });
-        if (!res.ok) throw new Error(`Server error: ${res.status} ${await res.text()}`);
-        setActiveSprayMode("continuous");
-      } else if (sprayTab === "dashed") {
-        res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/dash`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", "Accept": "application/json" },
-          body: JSON.stringify({
-            dash_on_distance_m: parseFloat(dashDistanceOn) || 0.3,
-            dash_off_distance_m: parseFloat(dashDistanceOff) || 0.3,
-            dash_phase_reset: "per_mark_region"
-          })
-        });
-        if (!res.ok) throw new Error(`Server error: ${res.status} ${await res.text()}`);
-        setActiveSprayMode("dashed");
-      } else if (sprayTab === "point") {
-        res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/path/${encodeURIComponent(selectedPathName)}/spray-mode/point`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", "Accept": "application/json" },
-          body: JSON.stringify({
-            point_execution_mode: pointExecutionMode
-          })
-        });
-        if (!res.ok) throw new Error(`Server error: ${res.status} ${await res.text()}`);
-        setActiveSprayMode("point");
-        setActivePointExecutionMode(pointExecutionMode);
-      }
-      setSprayModalOpen(false);
-    } catch (err: any) {
-      Alert.alert("Error", err.message || "Failed to set spray mode.");
-    }
-  };
 
   const handleSprayMasterToggle = async () => {
     if (!apiBaseUrl) return;
@@ -6990,6 +6901,8 @@ function SectionPages(props: {
   loadedPathInspection: missionApi.LoadedPathResponse | null;
   onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
   onAppPlannedStartSnapshot?: (snapshot: AppPlannedStartSnapshot) => void;
+  dashPattern?: DashPattern | null;
+  onDashPatternChange?: (pattern: DashPattern | null) => void;
   onNav: (page: Page) => void;
   extensionsEnabled?: boolean;
   setExtensionsEnabled?: React.Dispatch<React.SetStateAction<boolean>>;
@@ -7233,7 +7146,8 @@ function SectionPages(props: {
           rtkStatus={props.rtkStatus}
           stopRtk={props.stopRtk}
           apiBaseUrl={props.apiBaseUrl}
-          selectedPathName={props.selectedPathName}
+          dashPattern={props.dashPattern}
+          onDashPatternChange={props.onDashPatternChange}
         />
       ) : null}
       {page === "howto" ? <HowToPage /> : null}

@@ -1,365 +1,196 @@
 /**
- * Verify plan-trajectory response against what we sent.
+ * Verify what the rover stored against what the app sent.
  *
- * Always compare against `run_echo`, never `staged.segment_runs` (adjacent MARKs
- * collapse in segment_runs derived from spray_flags).
- *
- * Also spot-checks `must_hit` on staged waypoints for our sent vertices.
- *
- * Renamed from csvTrajectoryVerification.ts (DXF_APP_PLANNED_TRAJECTORY_PLAN Phase 0).
+ * Admission is lossless, and the app densifies and snaps boundaries itself, so
+ * the stored mission must equal the payload: same point count, same spray
+ * count, same lengths and bounding box, and a normalisation report of zero.
+ * The expected values come from the payload itself
+ * ({@link computeExpectedAdmission}), never from a fabricated echo. A mismatch
+ * blocks Load.
  */
 
-import type { PlanTrajectoryResponse, RunEchoEntry } from "../api/planTrajectory";
-import {
-  trajectoryRunLengthM,
-  trajectoryTotals,
-  type TrajectoryRun,
-} from "./missionTrajectory";
+import type { MissionPathResponse } from "../contract/prod/rest";
+import type {
+  AppPlannedMissionRequest,
+  AppPlannedMissionResponse,
+} from "../contract/prod/missionPlan";
+import { computeExpectedAdmission, type ExpectedAdmission } from "./appPlannedMissionBuilder";
 
-/** Per-run and total length relative tolerance (plan: 1 %). */
-export const LENGTH_TOL_FRAC = 0.01;
+/** Lengths agree within this absolute floor (m) plus {@link LENGTH_REL_TOL}. */
+export const LENGTH_ABS_TOL_M = 1e-6;
+export const LENGTH_REL_TOL = 1e-9;
+/** Stored coordinates are written as exact floats; this only absorbs formatting. */
+export const COORD_TOL_M = 1e-9;
+/** Any boundary snap above this means the app left a gap between runs. */
+export const NORMALISATION_SNAP_TOL_M = 1e-9;
 
-/** Max distance (m) from a sent vertex to a densified waypoint for must_hit match. */
-export const MUST_HIT_MATCH_M = 0.08;
+export type AdmissionIssueCode =
+  | "missing_mission"
+  | "sha_invalid"
+  | "normalised"
+  | "run_count"
+  | "num_points"
+  | "num_spray_points"
+  | "mark_length"
+  | "transit_length"
+  | "bbox"
+  | "stored_missing"
+  | "stored_frame"
+  | "stored_anchor"
+  | "stored_point_count"
+  | "stored_point_mismatch";
 
-/**
- * Two waypoints closer than this are the SAME junction vertex emitted once per
- * run. Mirrors the engine's own junction de-duplication threshold
- * (path_engine/engine.py: `if d < 0.01 and spray_flags[-1] == is_mark`), which
- * deliberately does NOT collapse the pair when the spray state differs — so a
- * mark↔travel junction always yields a coincident pair, only one of which
- * carries must_hit.
- */
-export const JUNCTION_COINCIDENT_M = 0.01;
-
-export type TrajectoryVerifyIssue = {
-  code:
-    | "missing_run_echo"
-    | "run_count"
-    | "run_kind"
-    | "run_length"
-    | "mark_total"
-    | "travel_total"
-    | "must_hit_missing"
-    | "must_hit_false"
-    | "must_hit_unmatched"
-    | "backend_warning";
+export type AdmissionIssue = {
+  code: AdmissionIssueCode;
   message: string;
 };
 
-export type TrajectoryVerifyResult = {
-  ok: boolean;
+export type AdmissionVerifyResult = {
   /** Load must stay blocked when false. */
-  issues: TrajectoryVerifyIssue[];
-  /** Backend warnings surfaced even when structure matches. */
-  backendWarnings: string[];
-  /** run_echo after dropping generated:true (terminal run-out). */
-  comparableEcho: RunEchoEntry[];
+  ok: boolean;
+  issues: AdmissionIssue[];
+  expected: ExpectedAdmission;
 };
 
-function isRunEchoEntry(v: unknown): v is RunEchoEntry {
-  if (v == null || typeof v !== "object") return false;
-  const o = v as Record<string, unknown>;
-  return (
-    typeof o.kind === "string" &&
-    typeof o.num_points === "number" &&
-    typeof o.length_m === "number"
-  );
+const SHA256_HEX = /^[0-9a-f]{64}$/i;
+
+function near(a: number, b: number): boolean {
+  return Math.abs(a - b) <= LENGTH_ABS_TOL_M + LENGTH_REL_TOL * Math.max(Math.abs(a), Math.abs(b));
 }
 
-export function filterComparableRunEcho(echo: RunEchoEntry[] | undefined | null): RunEchoEntry[] {
-  if (!Array.isArray(echo)) return [];
-  return echo.filter((e) => isRunEchoEntry(e) && e.generated !== true);
-}
+/** Check the 201 response of `POST /api/missions/plan` against the payload we sent. */
+export function verifyAdmissionResponse(
+  payload: AppPlannedMissionRequest,
+  response: AppPlannedMissionResponse | null | undefined
+): AdmissionVerifyResult {
+  const expected = computeExpectedAdmission(payload);
+  const issues: AdmissionIssue[] = [];
+  const mission = response?.mission;
 
-/**
- * Total length of backend-generated runs we did NOT send (terminal run-out).
- *
- * `transit_length_m` in the response counts these; `trajectoryTotals(sentRuns)`
- * cannot, because the client never sent them. Subtract before comparing totals,
- * or the two sides are measuring different paths.
- *
- * The engine appends a ~0.10 m TRANSIT run-out past the final MARK point on any
- * open mission that ends on MARK, so the nozzle has a clean shutoff region. On a
- * PAINT-ONLY mission the client's travel total is 0, and relDiff's
- * max(|a|,|b|,eps) denominator makes 0.1 vs 0 a 100 % error — always above the
- * 1 % tolerance. With real transit present it is ~0.5 % and slips through, which
- * is why this only ever blocked paint-only loads.
- */
-export function generatedRunLengthM(echo: RunEchoEntry[] | undefined | null): number {
-  if (!Array.isArray(echo)) return 0;
-  return echo.reduce(
-    (sum, e) => (isRunEchoEntry(e) && e.generated === true ? sum + e.length_m : sum),
-    0,
-  );
-}
-
-function relDiff(a: number, b: number): number {
-  const denom = Math.max(Math.abs(a), Math.abs(b), 1e-9);
-  return Math.abs(a - b) / denom;
-}
-
-/**
- * Collect representative vertices we authored: first/last of every MARK run.
- *
- * MARK runs only, deliberately. This check asserts that a vertex we declared
- * must-hit survived densification as must-hit — so it may only sample vertices
- * we actually declared. TRAVEL runs are sent with `must_hit_indices: []` (they
- * are deadhead; declaring them forces a must-hit every ~0.125 m on extension
- * legs, which truncates the rover's approach lookahead to ~0.10 m — see
- * trajectoryRunsToPayload). Sampling a travel endpoint would therefore assert
- * must_hit=true on a point we explicitly asked NOT to be must-hit, and would
- * block the load on every extensions mission.
- *
- * A pre/aft extension shares its inner junction with the mark run, and that
- * point IS still declared (it is a mark-run endpoint), so the join between
- * deadhead and paint stays covered. Only the extension's outer tip is dropped
- * from the check, which is what we intend.
- */
-export function sentVertexSpotSamples(sentRuns: TrajectoryRun[]): Array<[number, number]> {
-  const out: Array<[number, number]> = [];
-  const seen = new Set<string>();
-  const push = (p: [number, number]) => {
-    const key = `${p[0].toFixed(4)},${p[1].toFixed(4)}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    out.push(p);
-  };
-  for (const run of sentRuns) {
-    if (run.kind !== "mark" || run.points.length < 1) continue;
-    push(run.points[0]);
-    push(run.points[run.points.length - 1]);
-  }
-  return out;
-}
-
-/**
- * Spot-check staged `must_hit` flags against vertices we sent.
- *
- * - If `must_hit` is absent: non-blocking issue (older backends) — recorded, does not fail alone.
- * - If present: each sample must land on a densified waypoint with must_hit=true (blocking).
- */
-export function verifyMustHitSpotCheck(args: {
-  sentRuns: TrajectoryRun[];
-  waypoints: unknown;
-  mustHit: unknown;
-  tolM?: number;
-}): { issues: TrajectoryVerifyIssue[]; blocking: TrajectoryVerifyIssue[] } {
-  const tol = args.tolM ?? MUST_HIT_MATCH_M;
-  const issues: TrajectoryVerifyIssue[] = [];
-  const samples = sentVertexSpotSamples(args.sentRuns);
-  if (samples.length === 0) return { issues, blocking: [] };
-
-  const wps = Array.isArray(args.waypoints) ? args.waypoints : null;
-  if (!wps || wps.length === 0) {
+  if (!mission || typeof mission !== "object") {
     issues.push({
-      code: "must_hit_unmatched",
-      message: "Staged mission has no waypoints — cannot spot-check must_hit.",
+      code: "missing_mission",
+      message: "The rover's answer has no mission summary, so the stored mission cannot be checked.",
     });
-    return { issues, blocking: issues };
+    return { ok: false, issues, expected };
   }
 
-  const flags = Array.isArray(args.mustHit) ? args.mustHit : null;
-  if (!flags) {
-    // Non-blocking: backend may not have shipped must_hit yet.
+  if (typeof mission.sha256 !== "string" || !SHA256_HEX.test(mission.sha256)) {
+    issues.push({ code: "sha_invalid", message: "The rover returned no valid mission id (sha256)." });
+  }
+
+  const norm = response?.normalisation;
+  if (!norm || typeof norm.densified_steps !== "number" || typeof norm.max_boundary_snap_m !== "number") {
     issues.push({
-      code: "must_hit_missing",
-      message:
-        "Staged mission has no must_hit array — skipped spot-check (backend should provide it).",
+      code: "normalised",
+      message: "The rover did not report what admission changed (normalisation), so exactness cannot be confirmed.",
     });
-    return { issues, blocking: [] };
-  }
-
-  const ned: Array<{ n: number; e: number; i: number }> = [];
-  for (let i = 0; i < wps.length; i++) {
-    const p = wps[i];
-    if (!Array.isArray(p) || p.length < 2) continue;
-    const n = Number(p[0]);
-    const e = Number(p[1]);
-    if (!Number.isFinite(n) || !Number.isFinite(e)) continue;
-    ned.push({ n, e, i });
-  }
-
-  const blocking: TrajectoryVerifyIssue[] = [];
-  let unmatched = 0;
-  let falseHit = 0;
-
-  for (const [sn, se] of samples) {
-    // Nearest match, resolved deterministically (strict <, so the FIRST of any
-    // equal-distance set wins rather than the last).
-    let bestI = -1;
-    let bestD = Infinity;
-    for (const wp of ned) {
-      const d = Math.hypot(wp.n - sn, wp.e - se);
-      if (d < bestD) {
-        bestD = d;
-        bestI = wp.i;
-      }
+  } else {
+    if (norm.densified_steps !== 0) {
+      issues.push({
+        code: "normalised",
+        message: `The rover split ${norm.densified_steps} step(s) longer than 5 m: the stored mission is not what the app sent.`,
+      });
     }
-    if (bestI < 0 || bestD > tol) {
-      unmatched += 1;
-      continue;
-    }
-    // A mark↔travel junction emits TWO coincident waypoints: the engine's
-    // de-duplication only collapses coincident points that agree on spray
-    // state, so the shared vertex appears once per run, and only the MARK
-    // one carries must_hit. Picking either single "nearest" is therefore a
-    // coin flip decided by tie-break order — with the old `d <= bestD` the
-    // LAST won, which at a mark END is the travel copy with must_hit=false,
-    // blocking the load on every extensions mission (field 2026-07-30, once
-    // travel runs began declaring `[]`). The declared vertex DID survive, so
-    // accept the sample when ANY coincident waypoint carries the flag.
-    const hit = ned.some(
-      (wp) =>
-        Math.hypot(wp.n - sn, wp.e - se) <= bestD + JUNCTION_COINCIDENT_M &&
-        flags[wp.i] === true
-    );
-    if (!hit) {
-      falseHit += 1;
+    if (!(norm.max_boundary_snap_m <= NORMALISATION_SNAP_TOL_M)) {
+      issues.push({
+        code: "normalised",
+        message: `The rover moved a run boundary by ${(norm.max_boundary_snap_m * 1000).toFixed(2)} mm: the stored mission is not what the app sent.`,
+      });
     }
   }
 
-  if (unmatched > 0) {
-    const issue: TrajectoryVerifyIssue = {
-      code: "must_hit_unmatched",
-      message: `${unmatched} sent vertex sample(s) have no densified waypoint within ${tol} m.`,
-    };
-    issues.push(issue);
-    blocking.push(issue);
-  }
-  if (falseHit > 0) {
-    const issue: TrajectoryVerifyIssue = {
-      code: "must_hit_false",
-      message: `${falseHit} sent vertex sample(s) map to densified waypoints with must_hit=false.`,
-    };
-    issues.push(issue);
-    blocking.push(issue);
-  }
-
-  return { issues, blocking };
-}
-
-/**
- * Verify densified mission matches the operator's run list.
- * Does NOT prove our geometry is right — only that the backend densified what we sent.
- */
-export function verifyTrajectoryResponse(
-  sentRuns: TrajectoryRun[],
-  response: PlanTrajectoryResponse
-): TrajectoryVerifyResult {
-  const issues: TrajectoryVerifyIssue[] = [];
-  const backendWarnings = Array.isArray(response.warnings)
-    ? response.warnings.filter((w): w is string => typeof w === "string" && w.trim() !== "")
-    : [];
-
-  for (const w of backendWarnings) {
-    issues.push({ code: "backend_warning", message: w });
-  }
-
-  const rawEcho = response.run_echo;
-  if (!Array.isArray(rawEcho)) {
-    issues.push({
-      code: "missing_run_echo",
-      message: "Response has no run_echo — cannot verify densified runs against what we sent.",
-    });
-    return { ok: false, issues, backendWarnings, comparableEcho: [] };
-  }
-
-  const echo = filterComparableRunEcho(rawEcho);
-  if (echo.length !== sentRuns.length) {
+  const numRuns = mission.source?.num_runs;
+  if (typeof numRuns === "number" && numRuns !== expected.numRuns) {
     issues.push({
       code: "run_count",
-      message: `run_echo has ${echo.length} operator runs, we sent ${sentRuns.length}.`,
+      message: `The rover stored ${numRuns} run(s); the app sent ${expected.numRuns}.`,
     });
   }
-
-  const n = Math.min(echo.length, sentRuns.length);
-  for (let i = 0; i < n; i++) {
-    const sent = sentRuns[i];
-    const got = echo[i];
-    if (String(got.kind).toLowerCase() !== sent.kind) {
-      issues.push({
-        code: "run_kind",
-        message: `runs[${i}] kind mismatch: sent ${sent.kind}, echo ${got.kind}.`,
-      });
-    }
-    const sentLen = trajectoryRunLengthM(sent);
-    if (relDiff(sentLen, got.length_m) > LENGTH_TOL_FRAC) {
-      issues.push({
-        code: "run_length",
-        message: `runs[${i}] length ${got.length_m.toFixed(3)} m vs sent ${sentLen.toFixed(3)} m (>${(LENGTH_TOL_FRAC * 100).toFixed(0)}%).`,
-      });
-    }
-  }
-
-  const our = trajectoryTotals(sentRuns);
-  const markResp = typeof response.mark_length_m === "number" ? response.mark_length_m : null;
-  const travelResp = typeof response.transit_length_m === "number" ? response.transit_length_m : null;
-
-  if (markResp != null && relDiff(our.markLengthM, markResp) > LENGTH_TOL_FRAC) {
+  if (mission.num_points !== expected.numPoints) {
     issues.push({
-      code: "mark_total",
-      message: `mark_length_m ${markResp.toFixed(3)} vs our ${our.markLengthM.toFixed(3)} m.`,
+      code: "num_points",
+      message: `The rover stored ${String(mission.num_points)} point(s); the app expects ${expected.numPoints}.`,
     });
   }
-  // Compare like with like: strip backend-generated runs (terminal run-out) from
-  // the response total, exactly as filterComparableRunEcho strips them from the
-  // per-run check above. Leaving them in made a paint-only mission fail at
-  // 0.100 vs 0.000 m — a 100 % relative error against a 1 % tolerance.
-  const generatedLen = generatedRunLengthM(rawEcho);
-  const travelRespComparable = travelResp != null ? travelResp - generatedLen : null;
-
+  if (mission.num_spray_points !== expected.numSprayPoints) {
+    issues.push({
+      code: "num_spray_points",
+      message: `The rover stored ${String(mission.num_spray_points)} spray point(s); the app expects ${expected.numSprayPoints}.`,
+    });
+  }
+  if (typeof mission.mark_length_m !== "number" || !near(mission.mark_length_m, expected.markLengthM)) {
+    issues.push({
+      code: "mark_length",
+      message: `Painted length ${String(mission.mark_length_m)} m on the rover vs ${expected.markLengthM.toFixed(3)} m sent.`,
+    });
+  }
   if (
-    travelRespComparable != null &&
-    relDiff(our.travelLengthM, travelRespComparable) > LENGTH_TOL_FRAC
+    typeof mission.transit_length_m !== "number" ||
+    !near(mission.transit_length_m, expected.transitLengthM)
   ) {
     issues.push({
-      code: "travel_total",
-      message:
-        `transit_length_m ${travelRespComparable.toFixed(3)} vs our ` +
-        `${our.travelLengthM.toFixed(3)} m` +
-        (generatedLen > 0
-          ? ` (response ${travelResp!.toFixed(3)} less ${generatedLen.toFixed(3)} m generated run-out).`
-          : "."),
+      code: "transit_length",
+      message: `Travel length ${String(mission.transit_length_m)} m on the rover vs ${expected.transitLengthM.toFixed(3)} m sent.`,
+    });
+  }
+  const bbox = mission.bbox_ne_m;
+  if (
+    !Array.isArray(bbox) ||
+    bbox.length !== 4 ||
+    bbox.some((v, i) => typeof v !== "number" || Math.abs(v - expected.bboxNeM[i]) > COORD_TOL_M)
+  ) {
+    issues.push({
+      code: "bbox",
+      message: "The stored mission's bounding box differs from the geometry that was sent.",
     });
   }
 
-  // Optional must_hit on the plan body itself (some backends echo it here).
-  if (response.must_hit != null || response.merged_waypoints != null) {
-    const mh = verifyMustHitSpotCheck({
-      sentRuns,
-      waypoints: response.merged_waypoints,
-      mustHit: response.must_hit,
-    });
-    issues.push(...mh.issues);
-  }
-
-  const nonBlocking = new Set(["backend_warning", "must_hit_missing"]);
-  const blocking = issues.filter((i) => !nonBlocking.has(i.code));
-  return {
-    ok: blocking.length === 0,
-    issues,
-    backendWarnings,
-    comparableEcho: echo,
-  };
+  return { ok: issues.length === 0, issues, expected };
 }
 
 /**
- * Merge staged-artifact must_hit spot-check into a prior echo verification result.
- * Call after GET staged/{mission_id}.
+ * Bit-exact check of the stored geometry (`GET /api/missions/{sha}/path`)
+ * against the payload: frame, anchor, every point and flag.
  */
-export function mergeStagedMustHitCheck(
-  prior: TrajectoryVerifyResult,
-  args: { sentRuns: TrajectoryRun[]; waypoints: unknown; mustHit: unknown }
-): TrajectoryVerifyResult {
-  const mh = verifyMustHitSpotCheck(args);
-  const issues = [...prior.issues, ...mh.issues];
-  const nonBlocking = new Set(["backend_warning", "must_hit_missing"]);
-  const blocking = issues.filter((i) => !nonBlocking.has(i.code));
-  return {
-    ok: blocking.length === 0,
-    issues,
-    backendWarnings: prior.backendWarnings,
-    comparableEcho: prior.comparableEcho,
-  };
+export function verifyStoredPath(
+  payload: AppPlannedMissionRequest,
+  stored: MissionPathResponse | null | undefined
+): AdmissionIssue[] {
+  const issues: AdmissionIssue[] = [];
+  if (!stored || !Array.isArray(stored.points)) {
+    return [{ code: "stored_missing", message: "The rover returned no stored geometry for this mission." }];
+  }
+  if (stored.frame !== "local_ned") {
+    issues.push({ code: "stored_frame", message: `Stored frame is '${String(stored.frame)}', expected local_ned.` });
+  }
+  const a = stored.anchor;
+  if (!a || Math.abs(a.lat - payload.anchor.lat) > 1e-12 || Math.abs(a.lon - payload.anchor.lon) > 1e-12) {
+    issues.push({ code: "stored_anchor", message: "The stored GPS origin differs from the one the app sent." });
+  }
+  const expected = computeExpectedAdmission(payload).storedPoints;
+  if (stored.points.length !== expected.length) {
+    issues.push({
+      code: "stored_point_count",
+      message: `Stored geometry has ${stored.points.length} point(s); the app sent ${expected.length}.`,
+    });
+    return issues;
+  }
+  for (let i = 0; i < expected.length; i++) {
+    const s = stored.points[i];
+    const e = expected[i];
+    if (
+      !Array.isArray(s) ||
+      Math.abs(s[0] - e[0]) > COORD_TOL_M ||
+      Math.abs(s[1] - e[1]) > COORD_TOL_M ||
+      s[2] !== e[2]
+    ) {
+      issues.push({
+        code: "stored_point_mismatch",
+        message: `Stored point ${i} differs from the geometry that was sent.`,
+      });
+      break;
+    }
+  }
+  return issues;
 }

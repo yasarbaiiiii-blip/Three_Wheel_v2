@@ -8,7 +8,6 @@ import {
   splitIntoOpenPathGroups,
   type RoadMarkingNedPoint,
 } from "./roadMarkingCsvPath";
-import { assignPathCodes } from "./surveyCsvExport";
 
 /** 132.51 m 2-pt straight then a quarter-circle (Madhavaram mixed-density). */
 function madhavaramMixedDensity(): RoadMarkingNedPoint[] {
@@ -75,12 +74,6 @@ describe("mixed-density grouping (Madhavaram 132.51 m + curve)", () => {
     expect(fitLen).toBeGreaterThan(srcLen * 0.75);
     const warnings = (mark[0].entity?.geometry?.fit_warnings as string[] | undefined) ?? [];
     expect(warnings.some((w) => /sparse straight/i.test(w))).toBe(true);
-  });
-
-  it("assigns a single export path code (Send will not drop P1 as its own path)", () => {
-    const pts = madhavaramMixedDensity();
-    const codes = assignPathCodes(asCsvPoints(pts));
-    expect(new Set(codes).size).toBe(1);
   });
 
   it("still splits two dense unrelated circles ~30 m apart", () => {

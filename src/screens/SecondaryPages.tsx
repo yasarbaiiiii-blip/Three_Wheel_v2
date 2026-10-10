@@ -715,7 +715,8 @@ export function SettingsPage(props: {
   rtkStatus?: RTKStatus;
   stopRtk?: () => Promise<void>;
   apiBaseUrl?: string;
-  selectedPathName?: string | null;
+  dashPattern?: import("../utils/appPlannedMissionBuilder").DashPattern | null;
+  onDashPatternChange?: (pattern: import("../utils/appPlannedMissionBuilder").DashPattern | null) => void;
 }) {
   return (
     <Suspense fallback={<ActivityIndicator />}>
@@ -729,7 +730,8 @@ export function SettingsPage(props: {
         setToggleB={props.setToggleB}
         setToggleC={props.setToggleC}
         apiBaseUrl={props.apiBaseUrl}
-        selectedPathName={props.selectedPathName}
+        dashPattern={props.dashPattern}
+        onDashPatternChange={props.onDashPatternChange}
       />
     </Suspense>
   );

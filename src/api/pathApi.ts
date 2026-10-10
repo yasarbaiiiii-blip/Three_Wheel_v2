@@ -79,25 +79,7 @@ export type AlignPathRequest = {
   [key: string]: unknown;
 };
 
-export type PointMissionPoint = {
-  north_m: number;
-  east_m: number;
-  dwell_s: number;
-  source_index: number;
-  mark: boolean;
-};
-
-export type ParsePointGpsCsvResponse = {
-  num_points: number;
-  anchor: { lat: number; lon: number };
-  point_source_frame: "GPS_SURVEYED";
-  point_mission_points: PointMissionPoint[];
-};
-
-export type PlanAndStageRequest = PathPlanRequest & {
-  point_source_frame?: string;
-  point_mission_points?: PointMissionPoint[];
-};
+export type PlanAndStageRequest = PathPlanRequest;
 
 function apiUrl(apiBaseUrl: string, path: string) {
   return `${apiBaseUrl.replace(/\/$/, "")}${path}`;
@@ -131,7 +113,7 @@ export function getPaths(apiBaseUrl: string): Promise<PathListItem[]> {
 
 /**
  * Rover-side DXF entity list.
- * @deprecated When `DXF_PLANNER === "app"`, use `parseLocalDxf` (Phase 8). Kept for rollback.
+ * @deprecated Use `parseLocalDxf` on device.
  */
 export function getPathEntities(apiBaseUrl: string, pathName: string): Promise<Response> {
   return fetch(apiUrl(apiBaseUrl, `/api/path/${encodeURIComponent(pathName)}/entities`), {
@@ -149,32 +131,10 @@ export function getPathPreview(apiBaseUrl: string, pathName: string): Promise<Re
 
 /**
  * Rover-side DXF parse (uploads file to MISSION_DIR).
- * @deprecated When `DXF_PLANNER === "app"`, use `parseLocalDxf` on device. Kept for rollback.
+ * @deprecated Use `parseLocalDxf` on device.
  */
 export function parseDxf(apiBaseUrl: string, formData: FormData): Promise<Response> {
   return fetch(apiUrl(apiBaseUrl, "/api/path/parse-dxf"), {
-    method: "POST",
-    body: formData,
-  });
-}
-
-/**
- * @deprecated Fields Select File CSV is local-only (`parseLocalPointCsv`).
- * Kept for optional tooling / non-UI callers — do not wire mission upload UI to these.
- */
-export function parsePointCsv(apiBaseUrl: string, formData: FormData): Promise<Response> {
-  return fetch(apiUrl(apiBaseUrl, "/api/path/parse-point-csv"), {
-    method: "POST",
-    body: formData,
-  });
-}
-
-/**
- * @deprecated Fields Select File CSV is local-only (`parseLocalPointCsv`).
- * Kept for optional tooling / non-UI callers — do not wire mission upload UI to these.
- */
-export function parsePointGpsCsv(apiBaseUrl: string, formData: FormData): Promise<Response> {
-  return fetch(apiUrl(apiBaseUrl, "/api/path/parse-point-gps-csv"), {
     method: "POST",
     body: formData,
   });
@@ -254,9 +214,6 @@ export type StagedMissionResponse = {
   segment_runs: Record<string, unknown>[];
   alignment_metadata?: Record<string, unknown> | null;
   metadata?: Record<string, unknown> | null;
-  point_mission_points?: PointMissionPoint[];
-  point_source_frame?: string;
-  spray_mode?: string;
   [key: string]: unknown;
 };
 
@@ -300,26 +257,6 @@ export async function getStagedMission(apiBaseUrl: string, missionId: string): P
 export function deletePath(apiBaseUrl: string, pathName: string): Promise<Response> {
   return fetch(apiUrl(apiBaseUrl, `/api/path/${encodeURIComponent(pathName)}`), {
     method: "DELETE",
-  });
-}
-
-export type SurveyLineConfig = {
-  fillet_corners_m?: number;
-  fit_arcs_max_dev_m?: number | null;
-};
-
-export function saveLineConfig(
-  apiBaseUrl: string,
-  pathName: string,
-  config: SurveyLineConfig
-): Promise<Response> {
-  return postJson(apiBaseUrl, `/api/path/${encodeURIComponent(pathName)}/line-config`, config);
-}
-
-export function getLineConfig(apiBaseUrl: string, pathName: string): Promise<Response> {
-  return fetch(apiUrl(apiBaseUrl, `/api/path/${encodeURIComponent(pathName)}/line-config`), {
-    method: "GET",
-    headers: { Accept: "application/json" },
   });
 }
 

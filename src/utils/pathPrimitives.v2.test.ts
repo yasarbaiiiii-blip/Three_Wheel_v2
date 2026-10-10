@@ -1,5 +1,5 @@
 /**
- * Track 0 + A + B harness for PATH_PRIMITIVES_V2.
+ * Track 0 + A + B harness for the path-primitive pipeline.
  * Synthetic fixtures — real CSV goldens can be added under src/test/fixtures/.
  */
 import { describe, expect, it } from "vitest";
@@ -7,11 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   collinearAwareMustHitIndices,
   MUST_HIT_PATH_ERROR_M,
-} from "../api/planTrajectory";
-import {
-  PATH_PRIMITIVES_V2,
-  pathPrimitivesV2TopDownSegment,
-} from "../config/featureFlags";
+} from "./appPlannedMissionBuilder";
 import {
   buildRoadMarkingFittedPath,
   classifyCornerDrivability,
@@ -83,11 +79,9 @@ const SEG_OPTS = {
   maxArcRadiusM: 5000,
 } as const;
 
-describe("PATH_PRIMITIVES_V2 policy", () => {
-  it("exports paint budget and enables top-down in production default", () => {
+describe("path-primitive policy", () => {
+  it("exports the paint error budget", () => {
     expect(PAINT_ERROR_BUDGET_M).toBe(0.15);
-    expect(PATH_PRIMITIVES_V2).toBe("full");
-    expect(pathPrimitivesV2TopDownSegment()).toBe(true);
   });
 });
 
@@ -229,13 +223,9 @@ describe("Track C — corner classification", () => {
     expect(tiny.class === "sharp" || tiny.undrivable).toBe(true);
   });
 
-  it("dense and sparse joint sizing agree for the same 90° corner geometry", () => {
-    const turn = 90;
+  it("keeps a 90° joint of the dense pipeline as the exact surveyed vertex (no fillet)", () => {
     const leg = 5;
-    const sparse = waypointCornerRadiusM(turn, leg, leg);
-    expect(sparse).not.toBeNull();
-    // Dense path uses the same helper now (not filletRadiusFraction×leg).
-    const densePrims: PathPrimitive[] = [
+    const prims: PathPrimitive[] = [
       { kind: "line", i0: 0, i1: 1 },
       { kind: "line", i0: 1, i1: 2 },
     ];
@@ -244,106 +234,102 @@ describe("Track C — corner classification", () => {
       { north: 0, east: leg },
       { north: leg, east: leg },
     ];
-    const samples = tessellatePrimitivesWithJointFillets(pts, densePrims, {
+    const samples = tessellatePrimitivesWithJointFillets(pts, prims, {
       sharpCornerDeg: 12,
       filletRadiusFraction: 0.4,
       maxFilletRadiusM: 40,
       sampleSpacingM: 0.35,
     });
-    // Filleted path should not pass through the raw corner vertex (cut away).
     const corner = pts[1];
-    const minDist = Math.min(
-      ...samples.map((p) => Math.hypot(p.north - corner.north, p.east - corner.east))
-    );
-    // Miss distance for sparse r should be close to minDist order of magnitude.
-    expect(sparse!.missM).toBeGreaterThan(0.01);
-    expect(minDist).toBeLessThan(sparse!.missM + 0.05);
-    // And radius policy floor holds.
-    expect(sparse!.r).toBeGreaterThanOrEqual(Math.min(R_MIN_ROVER_M, sparse!.r));
+    expect(samples.some((p) => p.north === corner.north && p.east === corner.east)).toBe(true);
+    // Nothing is cut: the path leaves the corner along the two source legs only.
+    for (const p of samples) {
+      const onLeg1 = Math.abs(p.north) < 1e-9;
+      const onLeg2 = Math.abs(p.east - leg) < 1e-9;
+      expect(onLeg1 || onLeg2).toBe(true);
+    }
+    // The advisory classification still reports what a controller turning at R_min implies.
+    expect(waypointCornerRadiusM(90, leg, leg)).not.toBeNull();
   });
 });
 
-describe("Track C2 — sharp teardrop in buildTrajectory", () => {
-  it("inserts MARK→TRAVEL→MARK for a sharp corner with geometry.corners metadata", async () => {
-    const { buildTrajectory, findAdjacentMarkViolation } = await import("./missionTrajectory");
-    // Short legs → sharp/undrivable class under drivability policy.
-    const pts = [
-      { north: 0, east: 0 },
-      { north: 0, east: 0.25 },
-      { north: 0.25, east: 0.25 },
-    ];
+describe("Track C2 - sharp corners are plain vertices in buildTrajectory", () => {
+  function markLineOf(id: string, pts: RoadMarkingNedPoint[]) {
     const corners = classifySourceCorners(pts);
-    expect(corners.some((c) => c.class === "sharp" || c.undrivable)).toBe(true);
-    const line = {
-      id: "sharp-1",
-      label: "sharp-1",
+    return {
+      id,
+      label: id,
       layer: "marking" as const,
-      from: { id: 1, x: 0, y: 0 },
-      to: { id: 2, x: 0.25, y: 0.25 },
+      from: { id: 1, x: pts[0].north, y: pts[0].east },
+      to: { id: 2, x: pts[pts.length - 1].north, y: pts[pts.length - 1].east },
       width: 0.1,
       is_mark: true,
       entity: {
-        entity_id: "sharp-1",
+        entity_id: id,
         entity_type: "LWPOLYLINE",
         layer: "MARK",
         color: 7,
         is_mark: true,
-        length_m: 0.5,
-        geometry: {
-          closed: false,
-          road_marking: true,
-          paintable: true,
-          corners,
-        },
-        preview_points: pts,
-      },
-    };
-    const { runs, warnings } = buildTrajectory([line], {
-      markSpeedMs: 0.35,
-      travelSpeedMs: 0.5,
-      sharpCornerMode: "teardrop",
-    });
-    expect(findAdjacentMarkViolation(runs)).toBeNull();
-    expect(runs.some((r) => r.kind === "travel" && r.label === "sharp-corner-teardrop")).toBe(
-      true
-    );
-    expect(runs.filter((r) => r.kind === "mark").length).toBeGreaterThanOrEqual(2);
-    expect(warnings.some((w) => /sharp corner/i.test(w))).toBe(true);
-  });
-
-  it("pivot mode emits a near-zero TRAVEL middle", async () => {
-    const { buildTrajectory } = await import("./missionTrajectory");
-    const pts = [
-      { north: 0, east: 0 },
-      { north: 0, east: 0.25 },
-      { north: 0.25, east: 0.25 },
-    ];
-    const corners = classifySourceCorners(pts);
-    const line = {
-      id: "sharp-p",
-      label: "sharp-p",
-      layer: "marking" as const,
-      from: { id: 1, x: 0, y: 0 },
-      to: { id: 2, x: 0.25, y: 0.25 },
-      width: 0.1,
-      is_mark: true,
-      entity: {
-        entity_id: "sharp-p",
-        entity_type: "LWPOLYLINE",
-        layer: "MARK",
-        color: 7,
-        is_mark: true,
-        length_m: 0.5,
+        length_m: 1,
         geometry: { closed: false, road_marking: true, paintable: true, corners },
         preview_points: pts,
       },
     };
-    const { runs } = buildTrajectory([line], {
-      markSpeedMs: 0.35,
-      travelSpeedMs: 0.5,
-      sharpCornerMode: "pivot",
-    });
-    const pivot = runs.find((r) => r.label === "sharp-corner-pivot");
-    expect(pivot?.kind).toBe("travel");
+  }
+
+  it("leaves a sharp corner as an ordinary vertex: one mark run, no TRAVEL leg, no pivot leg, no teardrop", async () => {
+    const { buildTrajectory, findAdjacentMarkViolation } = await import("./missionTrajectory");
+    // Short legs: classified sharp / undrivable, the case that used to get a pivot or teardrop.
+    const pts = [
+      { north: 0, east: 0 },
+      { north: 0, east: 0.25 },
+      { north: 0.25, east: 0.25 },
+    ];
+    const line = markLineOf("sharp-1", pts);
+    expect(
+      (line.entity.geometry.corners as Array<{ class: string; undrivable: boolean }>).some(
+        (c) => c.class === "sharp" || c.undrivable
+      )
+    ).toBe(true);
+    const { runs, warnings } = buildTrajectory([line], { markSpeedMs: 0.35, travelSpeedMs: 0.5 });
+    expect(findAdjacentMarkViolation(runs)).toBeNull();
+    expect(runs).toHaveLength(1);
+    expect(runs[0].kind).toBe("mark");
+    expect(runs[0].points).toEqual([
+      [0, 0],
+      [0, 0.25],
+      [0.25, 0.25],
+    ]);
+    expect(runs.some((r) => r.kind === "travel")).toBe(false);
+    expect(warnings.some((w) => /sharp corner/i.test(w))).toBe(false);
+  });
+
+  it("does not split a neighbouring line whose interior vertex lies within 0.75 m of another line's corner", async () => {
+    const { buildTrajectory } = await import("./missionTrajectory");
+    // Line A has a short-legged (sharp / undrivable) corner at (0, 0.25). Line B is a
+    // straight line 0.45 m away whose interior vertex (0.1, 0.7) is 0.46 m from that
+    // corner - inside the old 0.75 m cross-run matching radius - but B has no corner.
+    const aPts = [
+      { north: 0, east: 0 },
+      { north: 0, east: 0.25 },
+      { north: 0.25, east: 0.25 },
+    ];
+    const a = markLineOf("line-a", aPts);
+    expect(
+      (a.entity.geometry.corners as Array<{ class: string; undrivable: boolean }>).some(
+        (c) => c.class === "sharp" || c.undrivable
+      )
+    ).toBe(true);
+    const bPts = [
+      { north: -0.5, east: 0.7 },
+      { north: 0.1, east: 0.7 },
+      { north: 0.7, east: 0.7 },
+    ];
+    const b = markLineOf("line-b", bPts);
+    expect(b.entity.geometry.corners).toEqual([]);
+    const { runs } = buildTrajectory([a, b], { markSpeedMs: 0.35, travelSpeedMs: 0.5 });
+    expect(runs.map((r) => r.kind)).toEqual(["mark", "travel", "mark"]);
+    expect(runs[0].points).toEqual(aPts.map((p) => [p.north, p.east]));
+    expect(runs[2].points).toEqual(bPts.map((p) => [p.north, p.east]));
   });
 });

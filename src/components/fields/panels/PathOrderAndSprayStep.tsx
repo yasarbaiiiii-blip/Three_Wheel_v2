@@ -15,11 +15,11 @@ import {
   defaultPathOrder,
   selectMarkPlanLines,
   type CsvPathOrderEntry,
-} from "../../../utils/csvPathOrder";
+} from "../../../utils/missionPathOrder";
 import {
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
-} from "../../../utils/csvExtensions";
+} from "../../../utils/missionExtensions";
 import { CsvPathOrderStep } from "./CsvPathOrderStep";
 import { FIELDS_COLORS } from "../fieldsTheme";
 

@@ -4,14 +4,20 @@
  * Survey CSV points become an OPEN path of:
  *   - straight runs (line / infinite-radius generalized fit), and
  *   - circular-arc runs (Hyper algebraic circle fit),
- * with geometric fillets only at joints between fitted primitives.
+ * so that surveyed CURVES are reconstructed as smooth curves.
  *
- * Pipeline (order matters — do not re-flatten fillets through another fit pass):
+ * Corner policy: the tablet does not shape corners. A vertex or primitive joint that turns
+ * by `sharpCornerDeg` (12 deg) or more is a true corner and is emitted as the exact surveyed
+ * vertex - never filleted, rounded or cut; the rover controller decides how to take it.
+ * Only joints turning LESS than `sharpCornerDeg` are smoothed with a small geometric
+ * fillet, because those are bends of a curve, not corners.
+ *
+ * Pipeline (order matters - do not re-flatten fillets through another fit pass):
  *   1. dedupe + open-path guard
- *   2. collinear simplify + deterministic spike reject
+ *   2. deterministic spike reject + short opposite-sign S-jog collapse (dense surveys)
  *   3. greedy segment into line/arc primitives (Hyper for arcs)
- *   4. geometric joint fillets from adjacent tangent directions
- *   5. tessellate once → open polyline samples
+ *   4. small geometric fillets at gentle joints (< sharpCornerDeg) only
+ *   5. tessellate once -> open polyline samples
  *
  * Strictly no closed polygon / ring. DXF / other plan sources are not handled here.
  */
@@ -26,9 +32,12 @@ export type RoadMarkingNedPoint = {
 export type RoadMarkingPathOptions = {
   /** Max orthogonal deviation from a line/arc (metres). */
   fitToleranceM?: number;
-  /** Turning angle above this (deg) is treated as a sharp corner to fillet. */
+  /**
+   * Turning angle (deg) at or above which a vertex / primitive joint is a true corner: it is
+   * kept as the exact surveyed vertex and never filleted. Gentler joints are smoothed.
+   */
   sharpCornerDeg?: number;
-  /** Fillet radius as a fraction of the shorter adjacent segment. */
+  /** Fillet radius (gentle joints only) as a fraction of the shorter adjacent segment. */
   filletRadiusFraction?: number;
   /** Absolute cap on fillet radius (metres). */
   maxFilletRadiusM?: number;
@@ -72,8 +81,8 @@ const DEFAULTS: Required<RoadMarkingPathOptions> = {
    *
    * Raised to a value above any fillet the paint budget would actually allow, so policy comes
    * from the paint and leg budgets again. Verified over turn 3–179° × legs {0.5,1,2,5,20}: the
-   * worst in-budget corner cut is 0.1500 m against the 0.15 m budget, never above, and every
-   * turn ≥ 20° is bit-identical to the old value — squares and zig-zags do not move.
+   * worst in-budget cut is 0.1500 m against the 0.15 m budget, never above. Fillets now only
+   * apply to joints below `sharpCornerDeg`, so this cap is only ever exercised on gentle bends.
    */
   maxFilletRadiusM: 40,
   sampleSpacingM: 0.35,
@@ -87,9 +96,10 @@ const DEFAULTS: Required<RoadMarkingPathOptions> = {
 /**
  * Production geometry policy (CSV road-marking).
  *
- * R_MIN_ROVER_M: kinematic floor for fillet arcs. Conservative default for a
- * three-wheel paint platform; override via RoadMarkingPathOptions later if needed.
- * CORNER_TOLERANCE_M: max acceptable corner cut (paint budget) — matches MAX_FIT_DEVIATION_M.
+ * R_MIN_ROVER_M: kinematic floor for a fitted arc radius (sparse-arc gate) and for the
+ * advisory corner classification. Conservative default for a three-wheel paint platform.
+ * CORNER_TOLERANCE_M: max acceptable fillet cut on a gentle joint (paint budget) and the
+ * advisory budget used to classify a corner - matches MAX_FIT_DEVIATION_M.
  */
 export const R_MIN_ROVER_M = 0.5;
 export const CORNER_TOLERANCE_M = 0.15;
@@ -110,11 +120,26 @@ export const MAX_BARE_TURN_DEG = 8;
 export const MAX_INTERIOR_TURN_DEG = 120;
 
 /**
- * Sparse arc-run gates — when a sparse point list may be read as ONE surveyed curve rather
+ * Sparse arc-run gates - when a sparse point list may be read as ONE surveyed curve rather
  * than a chain of design vertices.
  *
- * Filleting bends AT a vertex, so its error is a corner cut of r·(sec(θ/2) − 1) and the paint
- * budget caps how smooth it can ever be. Fitting an arc THROUGH the points has no corner to
+ * How the three corner thresholds relate (decided, not accidental):
+ *  - `sharpCornerDeg` (12 deg) is the GEOMETRY threshold: a vertex / joint turning this much
+ *    is emitted as the exact surveyed vertex and is never filleted.
+ *  - {@link SPARSE_ARC_CORNER_TURN_DEG} (30 deg) is the ARC-FIT gate below: a vertex turning
+ *    this much is a corner and rules out reading the list as one arc. Between 12 and 30 deg
+ *    an arc may still be fitted THROUGH the vertices, but only when the points demonstrably
+ *    lie on one circle (residual gate); the fitted curve passes through every surveyed
+ *    vertex, so no vertex is cut. Anything that fails the gate stays sharp (no fillet).
+ *  - CORNER_CLASSIFY_MIN_TURN_DEG (the same 30 deg) is the REPORTING threshold: which raw
+ *    vertices are listed in `quality.corners` for operator warnings and the reversal block.
+ *    It is deliberately higher than `sharpCornerDeg` so that RTK noise on a dense survey does
+ *    not flood the operator with corner entries. The dense segmenter also never fits a
+ *    primitive across such a vertex (hard break), so those corners are exact vertices by
+ *    construction; corners between 12 and 30 deg are preserved at primitive joints.
+ *
+ * A fillet bends AT a vertex, so its error is a corner cut of r*(sec(theta/2) - 1) bounded by
+ * the paint budget; fitting an arc THROUGH the points has no corner to
  * cut: on the reported 10-point curve the fitted arc sits 0.007 m from the operator's points
  * where the fillet path sits 0.031 m. The smooth answer is the more accurate one — but only
  * when the points really are samples of an arc, which is what these gates establish.
@@ -205,9 +230,10 @@ export type PointSequenceClass = "dense-survey" | "sparse-waypoints";
 export type CornerClass = "clean" | "tight" | "sharp" | "reversal";
 
 /**
- * Classified interior corner on a source polyline (Track C).
- * `radiusM` / `cutM` come from {@link waypointCornerRadiusM} when a geometric
- * fillet is possible; null when the turn is a hard reversal or unfittable.
+ * Classified interior corner on a source polyline (Track C), for operator readiness only.
+ * The path itself keeps the exact vertex; `radiusM` / `cutM` are the advisory fillet radius
+ * and corner cut a controller turning at R_min would imply (from
+ * {@link waypointCornerRadiusM}), null when the turn is a hard reversal or unfittable.
  */
 export type SourceCorner = {
   atIndex: number;
@@ -306,7 +332,8 @@ export function closestPointOnSegment(
  * Force the painted polyline to start and end on the surveyed termini.
  * Fillet/arc sampling + consecutive-point dedupe can leave the first/last sample
  * a few centimetres off the CSV pins; at high zoom that reads as "path sits left
- * of the point". Intermediate corners stay filleted (not re-inserted).
+ * of the point". Intermediate vertices are not touched. `source` must be the OPEN
+ * source path (no closing duplicate of the first point) so the path is never closed.
  */
 export function pinFittedPathTermini(
   samples: RoadMarkingNedPoint[],
@@ -690,11 +717,17 @@ export function simplifyCollinear(
 /**
  * Collapse short opposite-sign turn pairs (S-jogs / GPS weave) by dropping the
  * kinkier interior vertex. Leaves long single corners (L-turns) intact.
+ *
+ * A vertex where the survey turns `sharpCornerDeg` or more over the corner baseline (see
+ * {@link surveyedTurnDegAt}) is a true corner and is never dropped; if only one vertex of the
+ * pair is protected the other one (the noisy fix) is dropped instead. Weave amplitude is
+ * measurement noise, a corner or zig-zag apex is a surveyed feature.
  */
 export function dampenOppositeJogs(
   points: RoadMarkingNedPoint[],
   minTurnDeg = 8,
-  maxSegM = 3.5
+  maxSegM = 3.5,
+  sharpCornerDeg: number = DEFAULTS.sharpCornerDeg
 ): RoadMarkingNedPoint[] {
   if (points.length < 4) return points.slice();
   let pts = points.slice();
@@ -714,8 +747,13 @@ export function dampenOppositeJogs(
       // (Do not require all three short — approach legs to a jog can be longer.)
       if (d1 > maxSegM) continue;
       if (Math.min(d0, d2) > maxSegM * 1.25) continue;
-      // Drop the vertex with the larger |turn| so the weave collapses.
-      const removeIdx = Math.abs(t1) >= Math.abs(t2) ? i : i + 1;
+      // Drop the vertex with the larger |turn| so the weave collapses, but never a true
+      // corner; if the kinkier vertex is one, drop the other (the noisy fix) instead.
+      const order = Math.abs(t1) >= Math.abs(t2) ? [i, i + 1] : [i + 1, i];
+      const removeIdx = order.find(
+        (idx) => surveyedTurnDegAt(pts, idx, 0, pts.length - 1) < sharpCornerDeg
+      );
+      if (removeIdx === undefined) continue;
       pts.splice(removeIdx, 1);
       changed = true;
       break;
@@ -1167,17 +1205,14 @@ export type SparseArcFit = {
 /**
  * Decide whether a sparse point list is ONE surveyed arc, and fit it if so.
  *
- * Returns null — meaning "fall back to waypoint fillets, unchanged" — for anything it cannot
+ * Returns null — meaning "fall back to the waypoint path, unchanged" — for anything it cannot
  * establish. See {@link SPARSE_ARC_CORNER_TURN_DEG} for why each gate exists and which shape
  * each one is there to protect.
  *
- * Deliberately whole-path only. A path containing a hard corner is left entirely to the fillet
- * pipeline rather than being split into arc runs joined at the corner, because a corner fillet
- * sizes itself from the legs either side of it (`legCeil = 0.45·min(legIn,legOut)/tan(θ/2)`)
- * and arc samples land 0.35 m apart — feeding a densified run into a corner starves that fillet
- * of leg budget and drives it under the rover's 0.5 m floor, turning a drivable corner into a
- * non-paintable one. Splitting properly means trimming each run back to the fillet's tangent
- * points, which is a bigger change than this one is worth until real files ask for it.
+ * Deliberately whole-path only. A path containing a hard corner is left entirely to the
+ * waypoint path (every vertex kept, corners exact) rather than being split into arc runs
+ * joined at the corner; splitting at the corner would be a bigger change than this one is
+ * worth until real files ask for it.
  */
 export function trySparseArcFit(
   points: RoadMarkingNedPoint[],
@@ -1496,8 +1531,9 @@ export function buildSparseArcSamples(
 }
 
 /**
- * Fillet radius at a waypoint corner from paint budget + leg budget + rover floor.
- * Returns null when no geometric fillet is possible.
+ * Fillet radius at a waypoint bend from paint budget + leg budget + rover floor.
+ * Returns null when no geometric fillet is possible. Used to size the small fillets on
+ * gentle joints (below `sharpCornerDeg`) and, advisory only, to classify corners.
  *
  * Single sizing policy for sparse (`buildWaypointFilletPath`) and dense
  * (`tessellatePrimitivesWithJointFillets`) pipelines — do not re-derive radius
@@ -1611,17 +1647,15 @@ export function classifyCornerDrivability(
 }
 
 /**
- * Sparse-waypoint pipeline: preserve every vertex, straight legs + geometric fillets only
- * below the corner line — never above it.
+ * Sparse-waypoint pipeline: preserve every vertex, straight legs + small geometric fillets
+ * only below the corner line - never at or above it.
  *
- * A turn at or above {@link SPARSE_ARC_CORNER_TURN_DEG} is a genuine design corner (the same
- * line {@link trySparseArcFit}'s gate 1 uses: "a vertex that turns this hard is a corner, full
- * stop") and renders sharp — the rover stops and pivots in place at a waypoint turn rather
- * than needing a matching physical turning radius, so a sharp corner is correct, not a
- * fallback. A turn below that line is not a corner at all; it is one vertex of a coarse
- * curve/ring approximation (e.g. a 40-point survey of a roundabout that missed
- * {@link trySparseArcFit}'s stricter residual gate) and still gets a small fillet so the
- * curve reads as smooth instead of faceted.
+ * A turn at or above `sharpCornerDeg` is a genuine design corner and is emitted as the exact
+ * surveyed vertex: the tablet never cuts it, the rover controller owns how it is taken. A
+ * turn below that line is not a corner at all; it is one vertex of a coarse curve/ring
+ * approximation (e.g. a 40-point survey of a roundabout that missed {@link trySparseArcFit}'s
+ * stricter residual gate) and still gets a small fillet so the curve reads as smooth instead
+ * of faceted.
  *
  * Never estimates noise, never deletes points, never invents arcs from data.
  */
@@ -1651,13 +1685,13 @@ export function buildWaypointFilletPath(
     const next = pts[i + 1];
     const turn = Math.abs(turningAngleDeg(prev, cur, next));
 
-    // Genuine corner: sharp, no fillet attempted.
-    if (turn >= SPARSE_ARC_CORNER_TURN_DEG || turn < MIN_VISIBLE_TURN_DEG) {
+    // Genuine corner (exact vertex, no fillet) or imperceptible bend (nothing to smooth).
+    if (turn >= opts.sharpCornerDeg || turn < MIN_VISIBLE_TURN_DEG) {
       out.push(cur);
       continue;
     }
 
-    // Below the corner line: still a curve vertex, not a corner — soften it as before.
+    // Below the corner line: a curve vertex, not a corner - soften it.
     const dPrev = dist(prev, cur);
     const dNext = dist(cur, next);
     const radiusInfo = waypointCornerRadiusM(turn, dPrev, dNext, {
@@ -1874,6 +1908,127 @@ const MAX_ARC_SAMPLE_ANGLE_RAD = (3 * Math.PI) / 180;
  */
 const MIN_VISIBLE_TURN_DEG = 3;
 
+/**
+ * Baseline (m) over which the surveyed polyline's own turn at a primitive joint is measured.
+ * On a dense survey adjacent fixes are centimetres apart and RTK noise alone can swing a
+ * single-step angle past `sharpCornerDeg`; stepping out to this distance keeps that noise
+ * below the corner threshold while a real corner (which turns by tens of degrees over any
+ * baseline) is unaffected. Sparse surveys with wider spacing simply use the neighbouring fix.
+ */
+const CORNER_TURN_BASELINE_M = 0.3;
+
+/**
+ * Turn (deg) of the SURVEYED polyline at `points[idx]`, from raw fixes on either side, the
+ * nearest being at least {@link CORNER_TURN_BASELINE_M} away (or the adjacent fix, when the
+ * survey is sparser than that), searched within [lo, hi]. This - not the tangent mismatch
+ * between two fitted primitives - decides whether a vertex / joint is a true corner: the
+ * tangent of a short fitted arc at its end is only as good as its fit (a straight run into a
+ * tight surveyed curve routinely reads 15 deg apart although the survey itself turns only a
+ * few degrees there), whereas a real corner turns sharply in the raw data.
+ */
+function surveyedTurnDegAt(
+  points: RoadMarkingNedPoint[],
+  idx: number,
+  lo: number,
+  hi: number
+): number {
+  if (idx <= lo || idx >= hi) return 0;
+  const at = points[idx];
+  let iIn = idx - 1;
+  while (iIn > lo && dist(points[iIn], at) < CORNER_TURN_BASELINE_M) iIn--;
+  let iOut = idx + 1;
+  while (iOut < hi && dist(points[iOut], at) < CORNER_TURN_BASELINE_M) iOut++;
+  return Math.abs(turningAngleDeg(points[iIn], at, points[iOut]));
+}
+
+function surveyedJointTurnDeg(
+  points: RoadMarkingNedPoint[],
+  prev: PathPrimitive,
+  next: PathPrimitive,
+  jointIdx: number
+): number {
+  return surveyedTurnDegAt(points, jointIdx, prev.i0, next.i1);
+}
+
+/**
+ * Interior fixes that are strong corners (surveyed turn at or above
+ * {@link CORNER_CLASSIFY_MIN_TURN_DEG}), one per corner: a fix that is the sharpest within
+ * {@link CORNER_TURN_BASELINE_M} of itself. Dense fixes around one corner all see it inside
+ * their baseline window; only the apex survives. Zig-zag apexes further apart than the
+ * baseline each survive.
+ */
+export function strongCornerIndices(points: RoadMarkingNedPoint[]): number[] {
+  const n = points.length;
+  if (n < 3) return [];
+  const turns = new Array<number>(n).fill(0);
+  for (let i = 1; i < n - 1; i++) turns[i] = surveyedTurnDegAt(points, i, 0, n - 1);
+  const out: number[] = [];
+  for (let i = 1; i < n - 1; i++) {
+    if (turns[i] < CORNER_CLASSIFY_MIN_TURN_DEG) continue;
+    let isApex = true;
+    for (let j = i - 1; j >= 1 && dist(points[j], points[i]) <= CORNER_TURN_BASELINE_M; j--) {
+      if (turns[j] >= turns[i]) {
+        isApex = false;
+        break;
+      }
+    }
+    for (let j = i + 1; isApex && j <= n - 2 && dist(points[j], points[i]) <= CORNER_TURN_BASELINE_M; j++) {
+      if (turns[j] > turns[i]) isApex = false;
+    }
+    if (isApex) out.push(i);
+  }
+  return out;
+}
+
+/**
+ * Greedy segmentation closes a straight run as soon as the NEXT fix leaves the tolerance
+ * band, which on a densely sampled survey can land a few centimetres past the real corner
+ * (the corner fix itself is still inside the band of the first run). Left alone, the joint
+ * sits on a neighbouring fix and the surveyed corner vertex is cut by up to the fit
+ * tolerance. For every line-to-line joint that is a true corner (see
+ * {@link surveyedJointTurnDeg}), move the joint onto the apex: the fix, within a small
+ * window around the joint, farthest from the chord of that window. Never changes which
+ * fixes exist, only which primitive owns the shared one.
+ */
+export function anchorSharpJoints(
+  points: RoadMarkingNedPoint[],
+  prims: PathPrimitive[],
+  sharpCornerDeg: number,
+  fitToleranceM: number,
+  hardBreaks?: ReadonlySet<number>
+): PathPrimitive[] {
+  if (prims.length < 2) return prims;
+  const out = prims.map((p) => ({ ...p }));
+  const reach = Math.min(0.5, Math.max(0.2, 3 * fitToleranceM));
+  for (let k = 0; k < out.length - 1; k++) {
+    const prev = out[k];
+    const next = out[k + 1];
+    if (prev.kind !== "line" || next.kind !== "line") continue;
+    const j = prev.i1;
+    if (next.i0 !== j || hardBreaks?.has(j)) continue;
+    if (surveyedJointTurnDeg(points, prev, next, j) < sharpCornerDeg) continue;
+    const joint = points[j];
+    let lo = j;
+    while (lo > prev.i0 && dist(points[lo - 1], joint) <= reach) lo--;
+    let hi = j;
+    while (hi < next.i1 && dist(points[hi + 1], joint) <= reach) hi++;
+    if (hi - lo < 2) continue;
+    let best = j;
+    let bestH = -1;
+    for (let i = lo + 1; i < hi; i++) {
+      const h = pointLineResidual(points[i], points[lo], points[hi]);
+      if (h > bestH + 1e-12) {
+        bestH = h;
+        best = i;
+      }
+    }
+    if (best === j || best <= prev.i0 || best >= next.i1) continue;
+    prev.i1 = best;
+    next.i0 = best;
+  }
+  return out;
+}
+
 /** Minimum tangent offset for a joint fillet — see the flooring logic in
  * `tessellatePrimitivesWithJointFillets`: a visible turn is floored up to this instead of
  * being skipped when the geometrically-derived offset lands marginally below it. */
@@ -1964,75 +2119,16 @@ export function geometricFilletFromTangents(
   return { t1, t2, samples };
 }
 
-/**
- * Replace sharp corners on a polyline with geometric fillets.
- * Used for raw polylines and as a helper; production path fillets primitive joints.
- */
-export function filletSharpCorners(
-  points: RoadMarkingNedPoint[],
-  options: Required<
-    Pick<
-      typeof DEFAULTS,
-      "sharpCornerDeg" | "filletRadiusFraction" | "maxFilletRadiusM" | "sampleSpacingM"
-    >
-  >
-): RoadMarkingNedPoint[] {
-  if (points.length < 3) return points.slice();
-
-  const out: RoadMarkingNedPoint[] = [points[0]];
-
-  for (let i = 1; i < points.length - 1; i++) {
-    const prev = points[i - 1];
-    const cur = points[i];
-    const next = points[i + 1];
-    const turn = Math.abs(turningAngleDeg(prev, cur, next));
-    if (turn < options.sharpCornerDeg) {
-      out.push(cur);
-      continue;
-    }
-
-    const dPrev = dist(prev, cur);
-    const dNext = dist(cur, next);
-    const r = Math.min(
-      options.maxFilletRadiusM,
-      options.filletRadiusFraction * Math.min(dPrev, dNext)
-    );
-    const turnRad = (turn * Math.PI) / 180;
-    const need = r * Math.tan(turnRad / 2);
-    if (r < 0.05 || dPrev < need * 1.05 || dNext < need * 1.05) {
-      out.push(cur);
-      continue;
-    }
-
-    const uIn = unit(sub(cur, prev));
-    const uOut = unit(sub(next, cur));
-    if (!uIn || !uOut) {
-      out.push(cur);
-      continue;
-    }
-
-    const fillet = geometricFilletFromTangents(cur, uIn, uOut, r, options.sampleSpacingM);
-    if (!fillet) {
-      out.push(cur);
-      continue;
-    }
-    for (let k = 0; k < fillet.samples.length; k++) {
-      const p = fillet.samples[k];
-      if (k === 0 && dist(out[out.length - 1], p) < 0.02) continue;
-      out.push(p);
-    }
-  }
-
-  out.push(points[points.length - 1]);
-  return dedupeNearPoints(out, 0.015);
-}
-
 export type PathPrimitive =
   | { kind: "line"; i0: number; i1: number }
   | { kind: "arc"; i0: number; i1: number; circle: Circle };
 
-/** Min |turn| (deg) to treat an interior vertex as a corner candidate. */
-const CORNER_CLASSIFY_MIN_TURN_DEG = 30;
+/**
+ * Min |turn| (deg) to report an interior vertex as a corner. One definition of "a vertex
+ * that turns this hard is a corner, full stop" for the arc-fit gate, the dense segmenter's
+ * hard breaks and the operator-facing corner list.
+ */
+const CORNER_CLASSIFY_MIN_TURN_DEG = SPARSE_ARC_CORNER_TURN_DEG;
 
 /**
  * Classify interior vertices by drivability (Track C1).
@@ -2082,86 +2178,10 @@ export function formatCornerWarnings(corners: SourceCorner[]): string[] {
   const detail: string[] = [summary];
   for (const c of corners) {
     if (c.class === "clean") continue;
-    const cut =
-      c.cutM != null ? `, cut ${(c.cutM * 100).toFixed(0)} cm` : "";
-    const r = c.radiusM != null ? `, r=${c.radiusM.toFixed(2)} m` : "";
-    detail.push(
-      `  · vertex ${c.atIndex + 1}: ${c.class} (${c.turnDeg.toFixed(0)}°${r}${cut})`
-    );
+    // No radius / cut here: the path keeps the exact vertex, nothing is cut on the tablet.
+    detail.push(`  · vertex ${c.atIndex + 1}: ${c.class} (${c.turnDeg.toFixed(0)}°)`);
   }
   return detail;
-}
-
-/**
- * Short TRAVEL loop at R_min that reorients from arrival to departure heading
- * and returns to the vertex (MARK→TRAVEL→MARK teardrop for sharp corners).
- * Start and end are the vertex so travel-touch rules hold.
- */
-export function buildTeardropTravelPoints(
-  vertex: RoadMarkingNedPoint,
-  prev: RoadMarkingNedPoint,
-  next: RoadMarkingNedPoint,
-  rMin: number = R_MIN_ROVER_M,
-  sampleSpacingM: number = 0.15
-): RoadMarkingNedPoint[] {
-  const dIn = dist(prev, vertex);
-  const dOut = dist(vertex, next);
-  if (dIn < 1e-9 || dOut < 1e-9) {
-    return [vertex, vertex];
-  }
-  const uIn = unit(sub(vertex, prev));
-  const uOut = unit(sub(next, vertex));
-  if (!uIn || !uOut) return [vertex, vertex];
-
-  const cross = uIn.north * uOut.east - uIn.east * uOut.north;
-  const dot = uIn.north * uOut.north + uIn.east * uOut.east;
-  let turn = Math.atan2(cross, dot);
-  if (Math.abs(turn) < 1e-3) {
-    // Nearly straight — tiny lateral nudge so the run still has ≥2 distinct points.
-    return [
-      vertex,
-      { north: vertex.north + uOut.north * 0.05, east: vertex.east + uOut.east * 0.05 },
-      vertex,
-    ];
-  }
-
-  // Prefer the shorter exterior reorient when the interior fold is very sharp.
-  if (Math.abs(turn) > Math.PI) {
-    turn = turn > 0 ? turn - 2 * Math.PI : turn + 2 * Math.PI;
-  }
-
-  // Circle center to the left of arrival for CCW (positive) turn.
-  const left = { north: -uIn.east, east: uIn.north };
-  const sign = turn >= 0 ? 1 : -1;
-  const center = {
-    north: vertex.north + sign * left.north * rMin,
-    east: vertex.east + sign * left.east * rMin,
-  };
-
-  // Match angleOf / sampleArc convention: atan2(north − c, east − c).
-  const ang0 = Math.atan2(vertex.north - center.north, vertex.east - center.east);
-  const sweep = turn;
-  const arcLen = Math.abs(sweep) * rMin;
-  const steps = Math.max(4, Math.ceil(arcLen / Math.max(0.05, sampleSpacingM)));
-  const pts: RoadMarkingNedPoint[] = [{ ...vertex }];
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps;
-    const a = ang0 + sweep * t;
-    // Inverse of atan2(n, e): n = r·sin(a)? Wait — atan2(n, e) means
-    // cos(a) aligns with east, sin(a) with north.
-    pts.push({
-      north: center.north + rMin * Math.sin(a),
-      east: center.east + rMin * Math.cos(a),
-    });
-  }
-  // Close back to vertex for mark-touch rules.
-  if (dist(pts[pts.length - 1], vertex) > 0.02) {
-    pts.push({ ...vertex });
-  } else {
-    pts[pts.length - 1] = { ...vertex };
-  }
-  if (pts.length < 2) pts.push({ ...vertex });
-  return pts;
 }
 
 /**
@@ -2270,7 +2290,9 @@ export function mergeAdjacentPrimitives(
   prims: PathPrimitive[],
   tol: number,
   minArcPoints: number,
-  maxArcRadiusM: number
+  maxArcRadiusM: number,
+  /** Point indices that are corners: two primitives meeting there are never merged. */
+  hardBreaks?: ReadonlySet<number>
 ): PathPrimitive[] {
   let cur = prims.slice();
   let changed = true;
@@ -2280,7 +2302,11 @@ export function mergeAdjacentPrimitives(
     const next: PathPrimitive[] = [];
     let i = 0;
     while (i < cur.length) {
-      if (i < cur.length - 1 && cur[i].kind === cur[i + 1].kind) {
+      if (
+        i < cur.length - 1 &&
+        cur[i].kind === cur[i + 1].kind &&
+        !hardBreaks?.has(cur[i].i1)
+      ) {
         const union = points.slice(cur[i].i0, cur[i + 1].i1 + 1);
         let merged: PathPrimitive | null = null;
         if (cur[i].kind === "line") {
@@ -2337,95 +2363,6 @@ export function dropNegligibleArcs(
     const sagitta = (chord * chord) / (8 * p.circle.r);
     if (sagitta <= tol) return { kind: "line", i0: p.i0, i1: p.i1 };
     return p;
-  });
-}
-
-function primitiveNeighborTurnDeg(
-  points: RoadMarkingNedPoint[],
-  a: PathPrimitive,
-  b: PathPrimitive
-): number | null {
-  const uIn = tangentInAtEnd(points, a);
-  const uOut = tangentOutAtStart(points, b);
-  if (!uIn || !uOut) return null;
-  const cross = uIn.north * uOut.east - uIn.east * uOut.north;
-  const dot = uIn.north * uOut.north + uIn.east * uOut.east;
-  return Math.abs((Math.atan2(cross, dot) * 180) / Math.PI);
-}
-
-/**
- * A local direction swing sharper than `MAX_BARE_TURN_DEG` (the same "target quality" bar
- * `buildRoadMarkingFittedPath` already warns against for a whole path), measured immediately
- * after trimming a candidate sandwiched arc with its real joint fillets, marks the
- * tessellation as having actually overshot/backtracked — as opposed to merely tracing a
- * tight-but-well-behaved curve. Reusing that existing bar (rather than a fresh ad-hoc
- * multiple of `sharpCornerDeg`) keeps this check and the path-level warning agreeing on what
- * "clean" means, and it is what correctly separates a real sagitta-significant survey curve
- * (kept) from an S-jog remnant (flattened) once the joint taper itself is smooth (see
- * `blendArcBoundary`) — both can look similar by sagitta and neighbor-turn angle alone.
- */
-const SANDWICHED_ARC_OVERSHOOT_DEG_THRESHOLD = MAX_BARE_TURN_DEG;
-
-/** True when consecutive tessellated samples ever swing more than `maxDeg` degrees. */
-function hasLocalOvershoot(samples: RoadMarkingNedPoint[], maxDeg: number): boolean {
-  const cosThreshold = Math.cos((maxDeg * Math.PI) / 180);
-  for (let i = 1; i < samples.length - 1; i++) {
-    const a = samples[i - 1];
-    const b = samples[i];
-    const c = samples[i + 1];
-    const v1n = b.north - a.north;
-    const v1e = b.east - a.east;
-    const v2n = c.north - b.north;
-    const v2e = c.east - b.east;
-    const m1 = Math.hypot(v1n, v1e);
-    const m2 = Math.hypot(v2n, v2e);
-    if (m1 < 1e-9 || m2 < 1e-9) continue;
-    const cos = (v1n * v2n + v1e * v2e) / (m1 * m2);
-    if (cos < cosThreshold) return true;
-  }
-  return false;
-}
-
-/**
- * Reclassify a sandwiched 'arc' primitive to 'line' when BOTH its neighbors turn sharply
- * away from it AND tessellating it with its real joint fillets actually overshoots —
- * i.e. it is really just the corner transition between two other runs, not a genuine
- * road-scale curve feature. A genuine curve has smooth tangent continuity at its own
- * boundaries by construction, so the neighbor-turn condition alone flags this as a
- * candidate; but neighbor turn angle cannot by itself distinguish a real, sagitta-significant
- * curve (which must be kept) from an S-jog remnant (which must be flattened) — both can
- * report similar sagitta and similar neighbor turn (measured: a real 2.55 m-radius survey
- * curve and a synthetic S-jog remnant both sit in the same 0.4-0.7 m sagitta band). What
- * differs is what actually happens once the real joint fillets are laid down: two
- * independent fillets straddling a short arc each compute their trim budget from the arc's
- * FULL length without knowing the sibling joint on the other end also claims a share of it,
- * and for a short, tightly-sandwiched arc this can produce conflicting trims and a
- * mis-parameterized (even backtracking) tessellated sample. Only collapse to a line when
- * that actually happens; otherwise keep the arc.
- */
-export function absorbSandwichedCornerArcs(
-  points: RoadMarkingNedPoint[],
-  prims: PathPrimitive[],
-  sharpCornerDeg: number,
-  tessellationOpts?: { sampleSpacingM: number; filletRadiusFraction: number; maxFilletRadiusM: number }
-): PathPrimitive[] {
-  if (prims.length < 3) return prims;
-  return prims.map((p, idx) => {
-    if (p.kind !== "arc" || idx === 0 || idx === prims.length - 1) return p;
-    const turnIn = primitiveNeighborTurnDeg(points, prims[idx - 1], p);
-    const turnOut = primitiveNeighborTurnDeg(points, p, prims[idx + 1]);
-    if (turnIn == null || turnOut == null) return p;
-    if (turnIn < sharpCornerDeg || turnOut < sharpCornerDeg) return p;
-    if (!tessellationOpts) return { kind: "line", i0: p.i0, i1: p.i1 };
-    const microChain = [prims[idx - 1], p, prims[idx + 1]];
-    const microSamples = tessellatePrimitivesWithJointFillets(points, microChain, {
-      sharpCornerDeg,
-      filletRadiusFraction: tessellationOpts.filletRadiusFraction,
-      maxFilletRadiusM: tessellationOpts.maxFilletRadiusM,
-      sampleSpacingM: tessellationOpts.sampleSpacingM,
-    });
-    if (!hasLocalOvershoot(microSamples, SANDWICHED_ARC_OVERSHOOT_DEG_THRESHOLD)) return p;
-    return { kind: "line", i0: p.i0, i1: p.i1 };
   });
 }
 
@@ -2546,8 +2483,10 @@ function blendArcBoundary(
 }
 
 /**
- * Tessellate primitives once, inserting geometric fillets only at joints.
- * Fillet samples are never re-fed into Hyper/Kåsa — avoids re-flatten bug.
+ * Tessellate primitives once, inserting small geometric fillets only at gentle joints
+ * (turn below `sharpCornerDeg`). A joint at or above `sharpCornerDeg` is a true corner and
+ * stays the exact surveyed vertex. Fillet samples are never re-fed into Hyper/Kasa - avoids
+ * the re-flatten bug.
  */
 export function tessellatePrimitivesWithJointFillets(
   points: RoadMarkingNedPoint[],
@@ -2615,23 +2554,26 @@ export function tessellatePrimitivesWithJointFillets(
       continue;
     }
 
+    // A joint where the surveyed polyline itself turns sharpCornerDeg or more is a true
+    // corner: it stays the exact surveyed vertex (no fillet, no trimming of the neighbouring
+    // primitives).
+    if (surveyedJointTurnDeg(points, prev, next, prev.i1) >= options.sharpCornerDeg) {
+      joints.push(null);
+      continue;
+    }
+
     // Probe turn with short steps along tangents.
     const probeA = add(jointPt, scale(uIn, -1));
     const probeB = add(jointPt, scale(uOut, 1));
     const turn = Math.abs(turningAngleDeg(probeA, jointPt, probeB));
-    // Gate on whichever is smaller: the caller's configured sharpCornerDeg, or
-    // MIN_VISIBLE_TURN_DEG. `sharpCornerDeg` alone (12° default) leaves plenty of
-    // genuinely visible joints unrounded: a real, gentle road bend routinely segments into
-    // several short line primitives each turning less than 12° (the arc-fit heuristic
-    // deliberately prefers "line" over a fragile short/shallow-sweep arc — see
-    // fitLineOrCircle) — every one of those sub-12° joints was a bare, unfilleted vertex, so
-    // a chain of them reads as a series of small "minor edges" even though each individual
-    // turn looks negligible in isolation. Confirmed against the real roads_coordinates.csv
-    // fixture: an ~11° joint stayed a bare kink even after the arc-sampling fix (which only
-    // helps a joint's SAMPLING density, not whether a joint gets rounded at all). A caller
-    // that explicitly configures a SMALLER sharpCornerDeg (more aggressive smoothing) is
-    // still honored via the min().
-    if (turn < Math.min(options.sharpCornerDeg, MIN_VISIBLE_TURN_DEG)) {
+    // Smooth the remaining joints (the survey turns less than sharpCornerDeg there). A real,
+    // gentle road bend routinely segments into several short line primitives each turning
+    // only a few degrees (the arc-fit heuristic deliberately prefers "line" over a fragile
+    // short/shallow-sweep arc - see fitLineOrCircle); rounding those joints keeps a chain of
+    // them from reading as a series of small "minor edges". The fitted-tangent `turn` may
+    // exceed sharpCornerDeg at a curve seam (fit artifact, see surveyedJointTurnDeg) and is
+    // smoothed too. Imperceptible bends are left alone.
+    if (turn < MIN_VISIBLE_TURN_DEG) {
       joints.push(null);
       continue;
     }
@@ -2642,20 +2584,16 @@ export function tessellatePrimitivesWithJointFillets(
     const budget = 0.45 * Math.min(lenPrev, lenNext);
     const fractionCap = options.filletRadiusFraction * Math.min(lenPrev, lenNext);
 
-    // Radius policy:
-    // - Real corners (≥ CORNER_CLASSIFY_MIN_TURN_DEG): same paint+leg+R_min formula as
-    //   sparse `buildWaypointFilletPath` so dense/sparse agree on squares & zig-zags.
-    // - Mild residual joints on a dense fit: keep the fraction×leg cap so paint-ceil
-    //   cannot invent a multi-metre fillet that over-trims short arcs (field_test_02).
+    // Radius policy: mild residual joints on a dense fit keep the fraction*leg cap so the
+    // paint ceiling cannot invent a multi-metre fillet that over-trims short arcs
+    // (field_test_02).
     const radiusInfo = waypointCornerRadiusM(turn, lenPrev, lenNext, {
       rMinM: R_MIN_ROVER_M,
       cornerTolM: CORNER_TOLERANCE_M,
       maxFilletM: options.maxFilletRadiusM,
     });
     let r: number;
-    if (turn >= CORNER_CLASSIFY_MIN_TURN_DEG && radiusInfo) {
-      r = radiusInfo.r;
-    } else if (radiusInfo) {
+    if (radiusInfo) {
       r = Math.min(radiusInfo.r, Math.max(fractionCap, 0.05));
     } else {
       r = Math.min(options.maxFilletRadiusM, Math.max(fractionCap, 0.05));
@@ -2809,27 +2747,33 @@ export function segmentAndTessellate(
   if (points.length < 2) return points.slice();
   if (points.length === 2) return sampleLine(points[0], points[1], options.sampleSpacingM);
 
-  let prims = segmentIntoPrimitives(points, {
-    fitToleranceM: options.fitToleranceM,
-    minArcPoints: options.minArcPoints,
-    maxArcRadiusM: options.maxArcRadiusM,
-  });
+  // Strong corners are hard breaks: each stretch between two of them is segmented on its own,
+  // so a primitive can never be fitted across (and round off) a surveyed corner, however
+  // loose the adaptive tolerance is. The break fix is the shared end of both neighbours.
+  const breaks = strongCornerIndices(points);
+  const breakSet: ReadonlySet<number> = new Set(breaks);
+  let prims: PathPrimitive[] = [];
+  let start = 0;
+  for (const end of [...breaks, points.length - 1]) {
+    const piece = segmentIntoPrimitives(points.slice(start, end + 1), {
+      fitToleranceM: options.fitToleranceM,
+      minArcPoints: options.minArcPoints,
+      maxArcRadiusM: options.maxArcRadiusM,
+    });
+    for (const p of piece) {
+      prims.push({ ...p, i0: p.i0 + start, i1: p.i1 + start });
+    }
+    start = end;
+  }
   // Repair fragmentation from the greedy left-to-right pass (one true arc/line split into
   // several neighbors because a local window transiently missed tolerance partway through).
-  prims = mergeAdjacentPrimitives(points, prims, options.fitToleranceM, options.minArcPoints, options.maxArcRadiusM);
+  prims = mergeAdjacentPrimitives(points, prims, options.fitToleranceM, options.minArcPoints, options.maxArcRadiusM, breakSet);
   // Undo large-radius false-arc artifacts from window boundaries landing mid-transition,
   // then merge once more — a reclassified line can now legitimately join a straight
   // neighbor it couldn't join as an arc.
   prims = dropNegligibleArcs(points, prims, options.fitToleranceM);
-  prims = mergeAdjacentPrimitives(points, prims, options.fitToleranceM, options.minArcPoints, options.maxArcRadiusM);
-  // Undo short arcs sandwiched between two real corners (conflicting joint-fillet trims);
-  // merge once more in case that also opens up a new same-kind neighbor merge.
-  prims = absorbSandwichedCornerArcs(points, prims, options.sharpCornerDeg, {
-    sampleSpacingM: options.sampleSpacingM,
-    filletRadiusFraction: options.filletRadiusFraction,
-    maxFilletRadiusM: options.maxFilletRadiusM,
-  });
-  prims = mergeAdjacentPrimitives(points, prims, options.fitToleranceM, options.minArcPoints, options.maxArcRadiusM);
+  prims = mergeAdjacentPrimitives(points, prims, options.fitToleranceM, options.minArcPoints, options.maxArcRadiusM, breakSet);
+  prims = anchorSharpJoints(points, prims, options.sharpCornerDeg, options.fitToleranceM, breakSet);
   return tessellatePrimitivesWithJointFillets(points, prims, {
     sharpCornerDeg: options.sharpCornerDeg,
     filletRadiusFraction: options.filletRadiusFraction,
@@ -2918,7 +2862,7 @@ function runDensePipeline(
   let pts = points.slice();
   pts = rejectPathSpikes(pts, fitToleranceM, opts.outlierPathChordRatio, opts.outlierResidualFactor);
   pts = ensureOpenPath(pts);
-  pts = dampenOppositeJogs(pts, Math.max(opts.sharpCornerDeg * 0.65, 6), 3.5);
+  pts = dampenOppositeJogs(pts, Math.max(opts.sharpCornerDeg * 0.65, 6), 3.5, opts.sharpCornerDeg);
   pts = dedupeNearPoints(pts, 0.02);
   pts = ensureOpenPath(pts);
   if (pts.length < 2) return { samples: pts, cleanedSource: pts };
@@ -2990,10 +2934,15 @@ export function buildRoadMarkingFittedPath(
   // Note: warning texts that reference point indices refer to the canonical
   // order when the input was flipped.
   const n = points.length;
+  // Pin the output to the OPEN source: when the survey loops back onto its start the closing
+  // duplicate is dropped by ensureOpenPath, and pinning the end to that duplicate would
+  // close the painted path into a ring.
+  const openSource = ensureOpenPath(dedupeNearPoints(points, 0.02));
   if (n >= 2) {
     const a = points[0];
     const b = points[n - 1];
-    const closed = Math.hypot(a.north - b.north, a.east - b.east) < 1e-6;
+    // Same criterion as ensureOpenPath: a loop is left in the caller's order.
+    const closed = Math.hypot(a.north - b.north, a.east - b.east) < 0.05;
     const reversedOrder =
       b.north < a.north - 1e-9 ||
       (Math.abs(b.north - a.north) <= 1e-9 && b.east < a.east - 1e-9);
@@ -3004,12 +2953,12 @@ export function buildRoadMarkingFittedPath(
       );
       return {
         ...result,
-        samples: pinFittedPathTermini([...result.samples].reverse(), points),
+        samples: pinFittedPathTermini([...result.samples].reverse(), openSource),
       };
     }
   }
   const result = buildRoadMarkingFittedPathDirected(points, options);
-  return { ...result, samples: pinFittedPathTermini(result.samples, points) };
+  return { ...result, samples: pinFittedPathTermini(result.samples, openSource) };
 }
 
 function buildRoadMarkingFittedPathDirected(
@@ -3100,7 +3049,7 @@ function buildRoadMarkingFittedPathDirected(
       samples: wp.samples,
       mode: "waypoint-fillet",
       warnings,
-      // Sharp corners stay paintable (teardrop at trajectory); only reversal / validation fail.
+      // Sharp corners stay paintable (the rover controller takes them); only reversal / validation fail.
       paintable: wp.paintable && v.ok && !hasReversal,
       quality: {
         class: "sparse-waypoints",
@@ -3187,7 +3136,7 @@ function buildRoadMarkingFittedPathDirected(
     maxFilletM: opts.maxFilletRadiusM,
   });
   for (const w of formatCornerWarnings(corners)) warnings.push(w);
-  // Reversal blocks paint; sharp is handled as teardrop at trajectory time.
+  // Reversal blocks paint; a sharp corner is an exact vertex handled by the rover controller.
   if (corners.some((c) => c.class === "reversal")) {
     paintable = false;
     warnings.push("Path has a reversal corner — fix the survey or skip this path before Send.");
