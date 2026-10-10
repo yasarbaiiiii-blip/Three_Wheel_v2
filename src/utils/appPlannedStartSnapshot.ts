@@ -8,7 +8,7 @@
 
 import type { PlanLine } from "../types/plan";
 import type { DashPattern } from "./appPlannedMissionBuilder";
-import { stageAppPlannedMission, type AdmittedMission } from "./missionStaging";
+import { stageAppPlannedMission, type AdmittedMission, type MissionStageStep } from "./missionStaging";
 import { buildTrajectory, type RoverPoseForEntry } from "./missionTrajectory";
 import {
   normalizeCsvExtensionConfig,
@@ -72,6 +72,9 @@ export type RestageWithLiveEntryResult =
 export async function restageAppTrajectoryWithLiveEntry(args: {
   snapshot: AppPlannedStartSnapshot;
   roverPose: RoverPoseForEntry | null | undefined;
+  /** The trajectory the caller just built from this snapshot and pose: reused, not rebuilt. */
+  prebuilt?: ReturnType<typeof buildTrajectory>;
+  onStep?: (step: MissionStageStep) => void;
 }): Promise<RestageWithLiveEntryResult> {
   const snap = args.snapshot;
 
@@ -85,15 +88,17 @@ export async function restageAppTrajectoryWithLiveEntry(args: {
     return { success: false, error: "Start snapshot is missing the GPS origin. Re-Send the mission." };
   }
 
-  const built = buildTrajectory(snap.paintedLines, {
-    markSpeedMs: 0.35,
-    travelSpeedMs: 0.5,
-    extensions: snap.extensionConfig,
-    roverPose: args.roverPose ?? null,
-    originGps: snap.originGps,
-    includeEntryTransit: true,
-    requireEntryTransit: true,
-  });
+  const built =
+    args.prebuilt ??
+    buildTrajectory(snap.paintedLines, {
+      markSpeedMs: 0.35,
+      travelSpeedMs: 0.5,
+      extensions: snap.extensionConfig,
+      roverPose: args.roverPose ?? null,
+      originGps: snap.originGps,
+      includeEntryTransit: true,
+      requireEntryTransit: true,
+    });
 
   if (built.entryTransit?.error) {
     return { success: false, error: built.entryTransit.error };
@@ -111,6 +116,7 @@ export async function restageAppTrajectoryWithLiveEntry(args: {
     runs: built.runs,
     dash: snap.dash,
     verifyStoredGeometry: false,
+    onStep: args.onStep,
   });
 
   if (!staged.success || !staged.missionId || !staged.admitted) {

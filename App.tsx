@@ -2943,6 +2943,18 @@ function AppRoot() {
     let startSha: string | null = null;
     // Single try/finally so every early return still clears busy + in-flight flags.
     try {
+      // Operator link / pose gate FIRST: the rover also refuses a Start without a live operator
+      // heartbeat, so tell the operator now instead of after a re-upload.
+      {
+        const earlyOrigin = appPlannedStartSnapshot?.originGps;
+        if (earlyOrigin) {
+          const early = evaluateMissionStartTelemetry(earlyOrigin);
+          if (!early.ok) throw new Error(early.reasons.join(" "));
+        }
+      }
+      const startT0 = Date.now();
+      const phase = (name: string, extra?: Record<string, unknown>) =>
+        logAction("START_PHASE", { phase: name, ms: Date.now() - startT0, ...(extra ?? {}) });
       showToast("Start", "Preparing mission…", "info");
       await yieldToUi();
 
@@ -3023,6 +3035,8 @@ function AppRoot() {
         requireEntryTransit: true,
       });
       if (previewed.entryTransit?.error) throw new Error(previewed.entryTransit.error);
+      phase("entry_built");
+      await yieldToUi(); // let the heartbeat timer and the toast run between the heavy steps
 
       const skipRestage = canSkipLiveEntryRestage({
         entryIncluded: previewed.entryTransit?.included === true,
@@ -3039,8 +3053,17 @@ function AppRoot() {
         });
       } else {
         showToast("Approach", "Building runtime entry from current rover position…", "info");
-        let restaged = await restageAppTrajectoryWithLiveEntry({ snapshot: startSnapshot, roverPose: livePose });
+        let restaged = await restageAppTrajectoryWithLiveEntry({
+          snapshot: startSnapshot,
+          roverPose: livePose,
+          prebuilt: previewed,
+          onStep: (step) => {
+            phase(`stage_${step}`);
+            if (step === "upload") showToast("Approach", "Uploading the mission with the entry leg…", "info");
+          },
+        });
         if (!restaged.success) throw new Error(restaged.error);
+        phase("restaged");
 
         // The upload takes time: if the rover moved, rebuild the entry from where it is now.
         const usedNed = resolveRoverNedInMissionFrame(livePose, startSnapshot.originGps);
@@ -3079,6 +3102,7 @@ function AppRoot() {
 
       const finalTelemetryGate = evaluateMissionStartTelemetry(snapshot.originGps);
       if (!finalTelemetryGate.ok) throw new Error(finalTelemetryGate.reasons.join(" "));
+      phase("sending_start");
 
       // One tap = one request id. The id is reused only if the outcome of this very send is unknown.
       const tap = beginStartTap(startSha);
