@@ -123,19 +123,19 @@ describe("stageAppPlannedMission", () => {
     expect(res.error).toMatch(/12\.0 mm/);
   });
 
-  it("blocks Load when admission reports a normalisation", async () => {
+  it("blocks Start when admission reports a normalisation", async () => {
     const { client } = fakeClient({
       upload: (p: AppPlannedMissionRequest) => ({ ...backendAnswer(p), normalisation: { densified_steps: 3, max_boundary_snap_m: 0.004 } }),
     });
     const res = await stageAppPlannedMission({ missionName: "j", anchor: ANCHOR, runs: RUNS, client });
     expect(res.success).toBe(false);
     expect(res.failedStep).toBe("verify");
-    expect(res.loadBlocked).toBe(true);
+    expect(res.startBlocked).toBe(true);
     expect(res.error).toMatch(/split 3 step/);
     expect(res.error).toMatch(/moved a run boundary by 4\.00 mm/);
   });
 
-  it("blocks Load when the stored lengths differ from the payload (no fabricated echo)", async () => {
+  it("blocks Start when the stored lengths differ from the payload (no fabricated echo)", async () => {
     const { client } = fakeClient({
       upload: (p: AppPlannedMissionRequest) => {
         const a = backendAnswer(p);
@@ -145,11 +145,11 @@ describe("stageAppPlannedMission", () => {
     });
     const res = await stageAppPlannedMission({ missionName: "j", anchor: ANCHOR, runs: RUNS, client });
     expect(res.success).toBe(false);
-    expect(res.loadBlocked).toBe(true);
+    expect(res.startBlocked).toBe(true);
     expect(res.error).toMatch(/Painted length/);
   });
 
-  it("blocks Load when the stored geometry differs from what was sent", async () => {
+  it("blocks Start when the stored geometry differs from what was sent", async () => {
     const { client } = fakeClient({
       path: (p: AppPlannedMissionRequest) => {
         const pts = computeExpectedAdmission(p).storedPoints.map((q) => [...q]);
@@ -159,7 +159,7 @@ describe("stageAppPlannedMission", () => {
     });
     const res = await stageAppPlannedMission({ missionName: "j", anchor: ANCHOR, runs: RUNS, client });
     expect(res.success).toBe(false);
-    expect(res.loadBlocked).toBe(true);
+    expect(res.startBlocked).toBe(true);
     expect(res.error).toMatch(/Stored point 2 differs/);
   });
 

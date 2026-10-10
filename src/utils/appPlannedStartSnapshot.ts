@@ -67,7 +67,7 @@ export type RestageWithLiveEntryResult =
 /**
  * Rebuild trajectory from the Send snapshot, prepend live entry from roverPose,
  * then upload through the same builder and authenticated client as Send.
- * Caller loads to controller and starts.
+ * Caller starts the returned mission id.
  */
 export async function restageAppTrajectoryWithLiveEntry(args: {
   snapshot: AppPlannedStartSnapshot;

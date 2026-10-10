@@ -1,9 +1,14 @@
 /**
  * Production Telemetry Store with Real-time Staleness Engine
  *
- * Ingests RoverTelemetrySnapshot from Socket.IO or REST polling.
+ * Ingests RoverTelemetrySnapshot (the periodic `telemetry` event, or one REST read for recovery).
  * Automatically ticks freshness every 250ms so stale values grey out even
  * if the socket goes silent.
+ *
+ * Link and mission status is NOT read from the snapshot: it comes from the `rover_event` channel
+ * (roverEventStore). `gatewayConnected`, `operatorAlive`, `estop*` and the adapted `mission_state`
+ * are derived from it, so a gateway that is down or a silent source reads as unknown, never as
+ * the last value.
  */
 
 import { useSyncExternalStore } from "react";
@@ -19,6 +24,16 @@ import {
   RPP_STATE_NAMES,
 } from "../../contract/prod/realtime";
 import { evaluateAgeStaleness, STALE_THRESHOLD_MS, type StalenessInfo } from "./staleness";
+import {
+  getRoverEventsState,
+  selectEstop,
+  selectFcuLink,
+  selectGatewayLink,
+  selectOperatorLink,
+  subscribeRoverEvents,
+  type RoverEventsState,
+} from "./roverEventStore";
+import { selectMission } from "../mission/missionLifecycle";
 import { resolveRoverNedInMissionFrame, type RoverPoseForEntry } from "../../utils/missionTrajectory";
 import { radToDeg, wrap360, wrapPi } from "../../contract/prod/units";
 import {
@@ -29,14 +44,11 @@ import {
 } from "./telemetryDerive";
 import type { TelemetrySnapshot } from "../../types/plan";
 
-export interface ProdTelemetryState {
+/** What the store holds itself (telemetry snapshots and their freshness). */
+interface TelemetryCore {
   snapshot: RoverTelemetrySnapshot | null;
   lastReceivedAt: number | null;
-  gatewayConnected: boolean;
-  estopAsserted: boolean;
-  estopSource: string;
   socketConnected: boolean;
-  operatorAlive: boolean;
   envelopeAgeMs: number;
   source: "socket" | "rest" | null;
   schemaCompatible: boolean;
@@ -46,16 +58,25 @@ export interface ProdTelemetryState {
   observedAt: number | null;
 }
 
+/** The public view: the core plus the link status derived from `rover_event`s. */
+export interface ProdTelemetryState extends TelemetryCore {
+  /** The backend's link to the gateway is up (gateway_link). Unknown reads as false. */
+  gatewayConnected: boolean;
+  /** The tablet heartbeat reaches the gateway (operator_link). Unknown reads as false. */
+  operatorAlive: boolean;
+  /** The estop event is known. */
+  estopKnown: boolean;
+  /** Known and asserted. Never true from a stale value. */
+  estopAsserted: boolean;
+  estopSource: string;
+}
+
 type Listener = () => void;
 
-let state: ProdTelemetryState = {
+let state: TelemetryCore = {
   snapshot: null,
   lastReceivedAt: null,
-  gatewayConnected: false,
-  estopAsserted: false,
-  estopSource: "",
   socketConnected: false,
-  operatorAlive: false,
   envelopeAgeMs: Infinity,
   source: null,
   schemaCompatible: true,
@@ -64,6 +85,37 @@ let state: ProdTelemetryState = {
   packetRevision: 0,
   observedAt: null,
 };
+
+let viewCache: { core: TelemetryCore; events: RoverEventsState; view: ProdTelemetryState } | null = null;
+
+function buildView(core: TelemetryCore, events: RoverEventsState): ProdTelemetryState {
+  const gateway = selectGatewayLink(events);
+  const operator = selectOperatorLink(events);
+  const estop = selectEstop(events);
+  return {
+    ...core,
+    gatewayConnected: gateway.known && gateway.connected,
+    operatorAlive: operator.known && operator.alive,
+    estopKnown: estop.known,
+    estopAsserted: estop.known && estop.asserted,
+    estopSource: estop.known ? estop.source : "",
+  };
+}
+
+function gatewayUp(): boolean {
+  const gateway = selectGatewayLink();
+  return gateway.known && gateway.connected;
+}
+
+function fcuConnected(): boolean | null {
+  const fcu = selectFcuLink();
+  return fcu.known ? fcu.healthy : null;
+}
+
+function operatorUp(): boolean {
+  const operator = selectOperatorLink();
+  return operator.known && operator.alive;
+}
 
 export const telemetryNow = () => performance.now();
 let session = 0;
@@ -100,18 +152,15 @@ export function ingestTelemetryPacket(packet: TelemetryPacket, options: {source:
   const schemaCompatible = schema === 1;
   if (snapshot && !schemaCompatible) console.warn("[Telemetry] gateway schema mismatch: expected numeric schema 1; Start disabled", schema);
   const age = finiteOrNull(packet?.age_s);
-  const estop = snapshot?.emergency_stop?.data;
   state = { ...state, snapshot, lastReceivedAt: now, envelopeAgeMs: age !== null && age >= 0 ? age * 1000 : Infinity,
-    source: options.source, gatewayConnected: packet.connected ?? (options.source === "socket" ? true : state.gatewayConnected),
-    operatorAlive: snapshot?.gateway?.operator_alive === true, schemaCompatible, awaitingPacket: false,
-    estopAsserted: estop ? Boolean(estop.asserted) : state.estopAsserted,
-    estopSource: estop?.source ?? state.estopSource, revision: state.revision + 1,
+    source: options.source, schemaCompatible, awaitingPacket: false,
+    revision: state.revision + 1,
     packetRevision: state.packetRevision + 1, observedAt: age !== null && age >= 0 ? now - age * 1000 : null };
   emit(); return true;
 }
 
 export function invalidateTelemetrySession(_reason: string) {
-  session++; state = { ...state, awaitingPacket: true, operatorAlive: false, revision: state.revision + 1 }; emit();
+  session++; state = { ...state, awaitingPacket: true, revision: state.revision + 1 }; emit();
 }
 export function setProdSocketConnected(connected: boolean) {
   if (state.socketConnected === connected) return;
@@ -122,8 +171,8 @@ export function setProdSocketConnected(connected: boolean) {
 export function evaluateMissionStartTelemetry(originGps?: [number, number] | null, now = telemetryNow()): {ok: boolean; reasons: string[]} {
   const reasons: string[] = [];
   if (!state.socketConnected) reasons.push("Socket disconnected.");
-  if (!state.gatewayConnected) reasons.push("Gateway disconnected.");
-  if (!state.operatorAlive || !getOverallStaleness(now).isLive) reasons.push("Operator heartbeat unavailable.");
+  if (!gatewayUp()) reasons.push("Gateway disconnected.");
+  if (!operatorUp() || !getOverallStaleness(now).isLive) reasons.push("Operator heartbeat unavailable.");
   if (!state.schemaCompatible) reasons.push("Telemetry schema incompatible.");
   if (state.awaitingPacket) reasons.push("Waiting for fresh telemetry after reconnect or resume.");
   if (getOverallStaleness(now).isDisconnected) reasons.push("Telemetry disconnected or silent.");
@@ -166,14 +215,21 @@ function ensureTicker() {
 }
 
 export function getProdTelemetryState(): ProdTelemetryState {
-  return state;
+  const events = getRoverEventsState();
+  if (viewCache && viewCache.core === state && viewCache.events === events) return viewCache.view;
+  const view = buildView(state, events);
+  viewCache = { core: state, events, view };
+  return view;
 }
 
 export function subscribeProdTelemetry(listener: Listener): () => void {
   listeners.add(listener);
+  // Link and mission status changes re-render telemetry subscribers too.
+  const unsubscribeEvents = subscribeRoverEvents(listener);
   ensureTicker();
   return () => {
     listeners.delete(listener);
+    unsubscribeEvents();
     if (listeners.size === 0 && tickerTimer !== null) {
       clearInterval(tickerTimer);
       tickerTimer = null;
@@ -181,18 +237,9 @@ export function subscribeProdTelemetry(listener: Listener): () => void {
   };
 }
 
-export function applyProdTelemetrySnapshot(
-  snapshot: RoverTelemetrySnapshot | null,
-  gatewayConnected?: boolean
-) {
+export function applyProdTelemetrySnapshot(snapshot: RoverTelemetrySnapshot | null) {
   // Compatibility for existing callers/tests. Production transports always pass a full envelope.
-  ingestTelemetryPacket({ snapshot, age_s: 0, connected: gatewayConnected }, { source: "socket" });
-}
-
-export function setProdGatewayConnected(connected: boolean) {
-  if (state.gatewayConnected === connected) return;
-  state = { ...state, gatewayConnected: connected };
-  emit();
+  ingestTelemetryPacket({ snapshot, age_s: 0 }, { source: "socket" });
 }
 
 export function clearProdTelemetry() {
@@ -200,11 +247,7 @@ export function clearProdTelemetry() {
   state = {
     snapshot: null,
     lastReceivedAt: null,
-    gatewayConnected: false,
-    estopAsserted: false,
-    estopSource: "",
     socketConnected: false,
-    operatorAlive: false,
     envelopeAgeMs: Infinity,
     source: null,
     schemaCompatible: true,
@@ -281,6 +324,13 @@ export function getDerivedVehiclePose(now = telemetryNow()): DerivedVehiclePose 
   };
 }
 
+/** Lower-case mission state from `mission_state` events; null while unknown (never a stale value). */
+function missionStateName(): string | null {
+  const view = selectMission();
+  if (!view.known) return null;
+  return MISSION_STATE_NAMES[view.run.state]?.toLowerCase() ?? "unknown";
+}
+
 /**
  * Adapts the production RoverTelemetrySnapshot into the UI TelemetrySnapshot shape
  * consumed by Home, Map, HUD, and path planning screens.
@@ -305,9 +355,7 @@ export function getAdaptedTelemetrySnapshot(now = telemetryNow()): TelemetrySnap
   const rtk = usableData(snap.rtk_status, now);
   const gnssFresh = usableData(snap.gnss_report, now);
   const gnss = gnssFresh?.valid === true ? gnssFresh : null;
-  const link = usableData(snap.px4_link, now);
   const battery = usableData(snap.battery, now);
-  const mission = usableData(snap.mission, now);
 
   const posOk = vs?.position_valid === true;
   const velOk = vs?.velocity_valid === true;
@@ -331,8 +379,8 @@ export function getAdaptedTelemetrySnapshot(now = telemetryNow()): TelemetrySnap
   const poseAge = getTelemetrySourceAgeMs(snap.vehicle_state, now);
 
   return {
-    gateway_connected: state.gatewayConnected,
-    operator_alive: state.operatorAlive && staleness.isLive && !state.awaitingPacket,
+    gateway_connected: gatewayUp(),
+    operator_alive: operatorUp() && staleness.isLive && !state.awaitingPacket,
     vehicle_telemetry_health: state.awaitingPacket || !state.schemaCompatible || snap.vehicle_state?.data.position_valid !== true ? "UNAVAILABLE" :
       snap.vehicle_state?.fresh !== true ? "STALE" :
       evaluateAgeStaleness(getTelemetrySourceAgeMs(snap.vehicle_state, now) ?? Infinity).grade,
@@ -355,13 +403,13 @@ export function getAdaptedTelemetrySnapshot(now = telemetryNow()): TelemetrySnap
     rpp_state: finiteOrNull(rpp?.state),
     rpp_state_name: rpp ? RPP_STATE_NAMES[rpp.state] ?? "UNKNOWN" : null,
     rpp_blocked_reason: blockedReason,
-    mission_state: mission?.state != null ? MISSION_STATE_NAMES[mission.state]?.toLowerCase() ?? "unknown" : null,
+    mission_state: missionStateName(),
     armed: vs ? vs.arming_state === ArmingStateEnum.ARMED : null,
     mode: vs ? (vs.nav_state === 14 ? "OFFBOARD" : "MANUAL") : null,
     pose_age_ms: poseAge,
-    connected: state.gatewayConnected && !state.awaitingPacket && !staleness.isDisconnected,
-    fcu_connected:
-      !staleness.isDisconnected && link !== null && link.session_alive === true && link.handshake_ok === true,
+    connected: gatewayUp() && !state.awaitingPacket && !staleness.isDisconnected,
+    // The fcu_link event, not the snapshot: unknown (null) while the gateway is down or the source is silent.
+    fcu_connected: fcuConnected(),
     battery_v: finiteOrNull(battery?.voltage_v),
     battery_pct: batteryPercentOrNull(battery?.remaining_pct),
     battery_a: finiteOrNull(battery?.current_a),

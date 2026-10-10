@@ -83,13 +83,18 @@ describe("missionLayerAssignment", () => {
     expect(layers[0].lastOutcome).toBe("completed");
   });
 
-  it("outcomeFromMissionStateTransition only finishes on completed", () => {
-    expect(outcomeFromMissionStateTransition("running", "completed")).toBe(
-      "completed"
-    );
-    expect(outcomeFromMissionStateTransition("running", "idle")).toBe("stopped");
+  it("outcomeFromMissionStateTransition only finishes on completed, from an active state", () => {
+    expect(outcomeFromMissionStateTransition("running", "completed")).toBe("completed");
+    expect(outcomeFromMissionStateTransition("paused", "completed")).toBe("completed");
+    expect(outcomeFromMissionStateTransition("running", "aborted")).toBe("stopped");
+    expect(outcomeFromMissionStateTransition("ready", "aborted")).toBe("stopped");
+    expect(outcomeFromMissionStateTransition("arming", "error")).toBe("failed");
+    // Nothing is concluded from idle, a finished state, or a state we never saw (reconnect).
     expect(outcomeFromMissionStateTransition("idle", "completed")).toBeNull();
+    expect(outcomeFromMissionStateTransition(null, "completed")).toBeNull();
+    expect(outcomeFromMissionStateTransition("completed", "aborted")).toBeNull();
     expect(outcomeFromMissionStateTransition("running", "running")).toBeNull();
+    expect(outcomeFromMissionStateTransition("running", null)).toBeNull();
   });
 
   describe("resolveVisibleStartLayerIds", () => {

@@ -86,6 +86,8 @@ export type FieldsPageProps = {
     missionId?: string,
     opts?: import("../api/missionApi").LoadMissionOptions
   ) => boolean | Promise<boolean>;
+  /** Send stored the mission on the rover (verified). There is no load step: Start does everything. */
+  onMissionStored: (missionId: string) => void;
   missionActionBusy: boolean;
   onBeginPathExclusive?: (kind: "send" | "load") => boolean;
   onEndPathExclusive?: (kind: "send" | "load") => void;
@@ -348,6 +350,7 @@ export function FieldsPage(props: FieldsPageProps) {
     selectedPathName,
     onSelectPath,
     onLoadSelectedPath,
+    onMissionStored,
     missionActionBusy,
     onBeginPathExclusive,
     onEndPathExclusive,
@@ -1872,10 +1875,9 @@ export function FieldsPage(props: FieldsPageProps) {
                         onSelectLine={onSelectLine}
                         setStagedMissionId={setStagedMissionId}
                         setStagedPlanResult={setStagedPlanResult}
-                        setStagedMissionInspection={setStagedMissionInspection}
                         setAlignedRefPoints={setAlignedRefPoints}
                         onWorkflowStep={onWorkflowStep}
-                        onLoadSelectedPath={onLoadSelectedPath}
+                        onMissionStored={onMissionStored}
                         missionActionBusy={missionActionBusy}
                         onBeginPathExclusive={onBeginPathExclusive}
                         onEndPathExclusive={onEndPathExclusive}

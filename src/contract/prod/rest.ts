@@ -37,17 +37,68 @@ export interface OffboardRequest {
   enable: boolean;
 }
 
+/** `POST /api/mission/abort` body. The operator's "Stop" sends `operator`. */
+export type AbortReason = "operator" | "safety" | "unspecified";
+
 export interface AbortRequest {
-  reason?: "operator" | "safety" | "unspecified" | string;
+  reason?: AbortReason;
 }
 
-/** Standard downstream verdict returned for gateway service commands */
+/** `POST /api/missions/{sha}/start` body. `request_id` is the idempotency key. */
+export interface StartMissionRequest {
+  request_id?: string;
+}
+
+/**
+ * Standard downstream verdict for gateway service commands (pause, resume, abort, estop, arm, offboard).
+ * `delivered`: true = the gateway answered; false = NOT delivered (nothing happened); null = unknown
+ * (no reply in time: the command may or may not have run).
+ */
 export interface GatewayVerdictResponse {
   ok: boolean;
   code: string;
   reason: string;
-  delivered: boolean;
+  delivered: boolean | null;
   data?: Record<string, unknown>;
+}
+
+/** The mission node's answer to a start, copied from the gateway reply (`data`, untouched). */
+export interface StartMissionReplyData {
+  accepted: boolean;
+  /** StartMission.srv REASON_*: 0 on accept. */
+  reason_code: number;
+  /** The execution id. */
+  mission_id: number;
+  /** True when `request_id` matched the most recent execution: nothing new was started. */
+  duplicate: boolean;
+  /** With reason 3 (SAFETY_GATE): the guard's first failing pre-arm gate. */
+  gate_reason_code: number;
+}
+
+/**
+ * `202 Accepted` of `POST /api/missions/{sha}/start`. An acknowledgement only: loading, placing,
+ * arming and engaging then arrive as `mission_state` rover events, never by polling.
+ */
+export interface StartMissionResponse {
+  ok: true;
+  accepted: true;
+  execution: {
+    /** The execution id (the gateway reply's `data.mission_id`); null if absent. */
+    mission_id: number | null;
+    /** The id the app sent; null without one. */
+    request_id: string | null;
+    /** True when the rover returned the existing execution of this request_id. */
+    duplicate: boolean | null;
+    gate_reason_code: number | null;
+  };
+  data: StartMissionReplyData;
+}
+
+/** Error body of the mission store routes (upload, read, start id checks): no `delivered`. */
+export interface MissionErrorResponse {
+  ok: false;
+  code: string;
+  reason: string;
 }
 
 export interface MissionSummary {

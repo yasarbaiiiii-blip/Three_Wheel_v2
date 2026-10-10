@@ -139,11 +139,8 @@ import type { DashPattern } from "./src/utils/appPlannedMissionBuilder";
 import {
   LIVE_ENTRY_CACHE_MAX_AGE_MS,
   canSkipLiveEntryRestage,
-  classifyLiveEntryStartRequirement,
   entryPoseDrifted,
-  isAppPlannedMissionContext,
   pickRoverPoseForEntry,
-  telemetryToRoverPoseForEntry,
 } from "./src/utils/liveEntryPose";
 import {
   buildTrajectory,
@@ -201,6 +198,17 @@ import { recoverProductionTelemetry } from "./src/features/telemetry/telemetryRe
 import { roverBeaconListener, type BeaconRover } from "./src/services/roverBeacon";
 import { loadLastRoverId } from "./src/api/prodStorage";
 import { getProdApiClient, ProdApiError } from "./src/api/prodClient";
+import { MissionStateEnum } from "./src/contract/prod/realtime";
+import { useRoverEvents } from "./src/features/telemetry/roverEventStore";
+import { missionControls, missionIsActive, selectMission } from "./src/features/mission/missionLifecycle";
+import { beginStartTap } from "./src/features/mission/startTap";
+import {
+  CommandFailedError,
+  pauseMissionCommand,
+  resumeMissionCommand,
+  startMissionCommand,
+  stopMissionCommand,
+} from "./src/features/mission/missionCommands";
 import {
   clearProdTelemetry,
   getAdaptedTelemetrySnapshot,
@@ -1045,8 +1053,16 @@ function AppRoot() {
   const missionIdentityRepeatRef = useRef(false);
   const [missionFileReady, setMissionFileReady] = useState(false);
   const [missionLoaded, setMissionLoaded] = useState(false);
-  const [missionLoadedPanelOpenToken, setMissionLoadedPanelOpenToken] = useState(0);
-  const [missionRunning, setMissionRunning] = useState(false);
+  const [missionPanelOpenToken, setMissionPanelOpenToken] = useState(0);
+  // Mission status comes from `mission_state` rover events only: never from a command's answer
+  // and never from a poll. Unknown (gateway down, no socket, stale) is not "idle".
+  const roverEvents = useRoverEvents();
+  const missionView = useMemo(() => selectMission(roverEvents), [roverEvents]);
+  const missionViewRef = useRef(missionView);
+  missionViewRef.current = missionView;
+  /** An execution holds the vehicle: LOADING ... RUNNING ... PAUSED. */
+  const missionRunning = missionIsActive(missionView);
+  const isPaused = missionView.known && missionView.run.state === MissionStateEnum.PAUSED;
   const [toast, setToast] = useState<AppToast | null>(null);
   const [rtkConnecting, setRtkConnecting] = useState(false);
   const [rtkStatus, setRtkStatus] = useState<RTKStatus>(EMPTY_RTK_STATUS);
@@ -1148,12 +1164,11 @@ function AppRoot() {
   const runningLayerIdsRef = useRef<string[]>([]);
   const runningMissionIdRef = useRef<string | null>(null);
   const [loadedPathInspection, setLoadedPathInspection] = useState<missionApi.LoadedPathResponse | null>(null);
-  const [isPaused, setIsPaused] = useState(false);
   const [extensionsEnabled, setExtensionsEnabled] = useState(false);
   const [extPre, setExtPre] = useState("0.5");
   const [extAft, setExtAft] = useState("0.5");
 
-  const [prevMissionState, setPrevMissionState] = useState<string | null>(null);
+  const prevMissionStateRef = useRef<string | null>(null);
 
   const [autoOrigin, setAutoOrigin] = useState(false);
   const [autoOriginReference, setAutoOriginReference] = useState<AutoOriginReference | null>(null);
@@ -1205,7 +1220,7 @@ function AppRoot() {
         setAutoOriginReference(null);
       } else {
         setPage("home");
-        setMissionLoadedPanelOpenToken((token) => token + 1);
+        setMissionPanelOpenToken((token) => token + 1);
       }
       return next;
     });
@@ -1529,6 +1544,21 @@ function AppRoot() {
     }
   }, []);
 
+  /**
+   * Send stored the mission on the rover and verified what it stored. There is no load step: go to the
+   * mission screen, where Start does everything (entry leg, start, then the rover's own lifecycle).
+   */
+  const handleMissionStored = useCallback(
+    (missionId: string) => {
+      setStagedMissionId(missionId);
+      setMissionPanelOpenToken((token) => token + 1);
+      setPage("home");
+      logAction("MISSION_STORED", { missionId });
+      showToast("Mission sent", "Stored on the rover. Press Start Mission when ready.", "success");
+    },
+    [logAction, showToast]
+  );
+
   const virtualJoystick = useVirtualJoystick({
     socket,
     authToken: operatorSession?.token ?? "",
@@ -1780,33 +1810,25 @@ function AppRoot() {
     };
   }, []);
 
+  // A mission that ends while we watch (COMPLETED / ABORTED / ERROR after an active state) settles the
+  // layer bookkeeping. A first state seen after a (re)connect is never read as an outcome.
+  const missionStateName = telemetrySnapshot?.mission_state ?? null;
   useEffect(() => {
-    if (telemetrySnapshot) {
-      const currentState = telemetrySnapshot.mission_state;
-      const terminal = outcomeFromMissionStateTransition(prevMissionState, currentState);
-      if (terminal && runningLayerIdsRef.current.length > 0) {
-        const ids = [...runningLayerIdsRef.current];
-        setMissionLayers((prev) => applyMissionTerminalOutcome(prev, ids, terminal));
-        if (terminal === "completed") {
-          runningLayerIdsRef.current = [];
-          runningMissionIdRef.current = null;
-        } else {
-          // stopped — keep refs cleared so a later idle does not re-apply
-          runningLayerIdsRef.current = [];
-          runningMissionIdRef.current = null;
-        }
-      }
-      if (prevMissionState === "running" && (currentState === "idle" || currentState === "completed")) {
-        setTimeout(() => {
-          if (currentState === "completed") {
-            Alert.alert("Mission Completed", "The rover has successfully finished the mission.");
-          }
-          // idle after running is stop/abort — do not claim success
-        }, 500);
-      }
-      setPrevMissionState(currentState ?? null);
+    const previous = prevMissionStateRef.current;
+    prevMissionStateRef.current = missionStateName;
+    if (previous === missionStateName) return;
+    const terminal = outcomeFromMissionStateTransition(previous, missionStateName);
+    if (!terminal) return;
+    if (runningLayerIdsRef.current.length > 0) {
+      const ids = [...runningLayerIdsRef.current];
+      setMissionLayers((prev) => applyMissionTerminalOutcome(prev, ids, terminal));
+      runningLayerIdsRef.current = [];
+      runningMissionIdRef.current = null;
     }
-  }, [telemetrySnapshot?.mission_state, prevMissionState]);
+    if (terminal === "completed") {
+      Alert.alert("Mission completed", "The rover has finished the mission.");
+    }
+  }, [missionStateName]);
 
   useEffect(() => {
     selectedWsRef.current = selectedWs;
@@ -1908,20 +1930,6 @@ function AppRoot() {
       } else if (status === "error") {
         setWsStatus("ready");
         if (detail) setWsError(detail);
-      }
-    });
-    return unsub;
-  }, []);
-
-  // Listen to live telemetry from unified production store
-  useEffect(() => {
-    const unsub = subscribeProdTelemetry(() => {
-      const snap = getAdaptedTelemetrySnapshot();
-      if (snap) {
-        if (snap.mission_state) {
-          setMissionRunning(snap.mission_state === "running");
-          setIsPaused(snap.mission_state === "paused");
-        }
       }
     });
     return unsub;
@@ -2571,7 +2579,6 @@ function AppRoot() {
       setSelectedLineId(normalized[0]?.id ?? null);
       setMissionFileReady(true);
       setMissionLoaded(false);
-      setMissionRunning(false);
     } catch (err) {
       if (!pathPipelineRef.current.isCurrent(previewToken)) return;
       console.log("Error loading path preview:", err);
@@ -2669,11 +2676,6 @@ function AppRoot() {
     try {
       const result = await recoverProductionTelemetry(getProdApiClient());
       if (!result.accepted) return;
-      const status = missionApi.missionStatusFromTelemetry();
-      if (status) {
-        setMissionRunning(status.state === "running");
-        setIsPaused(status.state === "paused");
-      }
     } catch (error) {
       if (!quiet) setTelemetryError(error instanceof Error ? error.message : "Unable to load telemetry");
     } finally {
@@ -2701,29 +2703,6 @@ function AppRoot() {
     }
   }
 
-  useEffect(() => {
-    if (apiBaseUrl && wsStatus === "connected" && telemetrySnapshot?.mission_state) void refreshMissionIdentity();
-  }, [apiBaseUrl, wsStatus, telemetrySnapshot?.mission_state]);
-
-  useEffect(() => {
-    if (!apiBaseUrl || wsStatus === "unauthorized" || wsStatus === "idle") return;
-    let stopped = false;
-    let inFlight = false;
-    const recover = async () => {
-      if (stopped || inFlight) return;
-      inFlight = true;
-      try { await refreshTelemetryPanel({ quiet: true }); }
-      finally { inFlight = false; }
-    };
-    // Reconnect bootstrap; disconnect and silence both have a recovery path.
-    void recover();
-    const timer = setInterval(() => {
-      const state = getProdTelemetryState();
-      const silent = state.lastReceivedAt === null || telemetryNow() - state.lastReceivedAt > 2500;
-      if (wsStatus !== "connected" || state.awaitingPacket || silent) void recover();
-    }, 2500);
-    return () => { stopped = true; clearInterval(timer); };
-  }, [apiBaseUrl, wsStatus]);
   async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
@@ -2941,10 +2920,9 @@ function AppRoot() {
         });
         setLoadedPathInspection(loadedData);
         setMissionLoaded(true);
-        setMissionLoadedPanelOpenToken((token) => token + 1);
+        setMissionPanelOpenToken((token) => token + 1);
         setWorkflowStep("staged", "verified");
         setWorkflowStep("loaded", "verified");
-        setMissionRunning(false);
         void refreshTelemetryPanel();
         logAction("LOAD_SUCCESS", { stagedMissionId: missionId, fileName: importedPlan?.fileName });
         if (!opts?.skipNavigate) {
@@ -2965,9 +2943,8 @@ function AppRoot() {
 
       setLoadedPathInspection(null);
       setMissionLoaded(true);
-      setMissionLoadedPanelOpenToken((token) => token + 1);
+      setMissionPanelOpenToken((token) => token + 1);
       setWorkflowStep("loaded", "verified");
-      setMissionRunning(false);
       void refreshTelemetryPanel();
       logAction("LOAD_SUCCESS", { fileName: importedPlan?.fileName });
       setPage("home");
@@ -3067,7 +3044,6 @@ function AppRoot() {
     }));
     setMissionFileReady(false);
     setMissionLoaded(false);
-    setMissionRunning(false);
     setStagedPlanResult(null);
     setStagedMissionInspection(null);
     setStagedMissionId(null);
@@ -3353,7 +3329,6 @@ function AppRoot() {
     setSelectedPathName(null);
     setMissionFileReady(false);
     setMissionLoaded(false);
-    setMissionRunning(false);
     setExtensionsEnabled(false);
     setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
@@ -3832,12 +3807,18 @@ function AppRoot() {
     );
   }
 
-  async function startLoadedMission() {
-    if (!apiBaseUrl || !importedPlan || lines.length === 0) {
+  /**
+   * Start: one tap, everything else is the rover's. The app (1) rebuilds the entry leg from the
+   * rover's live pose and re-uploads when needed, (2) sends `POST /api/missions/{sha}/start` with a
+   * fresh request id, and (3) watches the lifecycle (LOADING, PLACING, ARMING, ENGAGING, READY,
+   * RUNNING) arrive as `mission_state` rover events. The operator never arms or changes mode.
+   */
+  async function startMissionOnBackend() {
+    if (!apiBaseUrl) {
+      Alert.alert("No backend", "Connect to the rover before starting a mission.");
       return;
     }
-    // Re-entrancy: double-taps + slow restage previously stacked starts and
-    // could leave the UI busy or race Mapbox/state updates into a hard close.
+    // Re-entrancy: double-taps + a slow re-upload must never stack two starts.
     if (startInFlightRef.current || missionActionBusy || pathPipelineRef.current.isExclusive()) {
       const holder = pathPipelineRef.current.exclusiveKind();
       showToast(
@@ -3848,476 +3829,206 @@ function AppRoot() {
       return;
     }
 
-    if (virtualJoystick.joystickActive || telemetrySnapshot?.joystick_active) {
-      Alert.alert("Joystick active", "Release manual drive before starting a mission.");
-      showToast("Start blocked", "Release the joystick lease before starting.", "error");
+    // The buttons are enabled from the lifecycle; the same rule is checked here so a start is
+    // only sent when the rover reports no active execution and a mission is stored.
+    const controls = missionControls(missionViewRef.current, {
+      busy: false,
+      hasMission: Boolean(stagedMissionId) && stagedWorkflow.staged === "verified",
+    });
+    if (!controls.canStart) {
+      showToast("Start blocked", controls.startBlockedReason ?? "The mission cannot be started now.", "warning");
       return;
     }
 
     if (!beginPathExclusive("start")) return;
     startInFlightRef.current = true;
-    // Mission-layer Start selection — driven entirely by pill visibility now
-    // (missionLayers[].visible), same state MissionLayerPills toggles for map
-    // preview. No separate re-pick modal: what's visible is what runs.
+    // Mission-layer Start selection is driven by pill visibility (missionLayers[].visible).
     let selectedStartLayerIds: string[] | null = null;
+    let startSha: string | null = null;
     // Single try/finally so every early return still clears busy + in-flight flags.
     try {
-    // Paint busy state before any network / restage work (perceived lag).
-    showToast("Start", "Preparing mission…", "info");
-    await yieldToUi();
-
-    const startResolution = resolveVisibleStartLayerIds(missionLayers);
-    if (startResolution.kind === "blocked") {
-      if (startResolution.reason === "no_layers_ready") {
-        Alert.alert(
-          "No mission layers ready",
-          "Files are not assigned to any mission layer. Open Control and assign files, or clear empty layers."
-        );
-        showToast("Start blocked", "Assign files to a mission layer first.", "error");
-      } else {
-        Alert.alert(
-          "No layers visible",
-          "Toggle at least one mission layer on under Control to start."
-        );
-        showToast("Start blocked", "No visible mission layers.", "error");
-      }
-      return;
-    }
-    if (startResolution.kind === "start") {
-      selectedStartLayerIds = startResolution.ids;
-      const unassigned = countUnassignedFiles(uploadedFiles, missionLayers);
-      if (unassigned > 0) {
-        showToast(
-          "Some files won't run",
-          `${unassigned} file${unassigned === 1 ? "" : "s"} not in any mission layer — will not run.`,
-          "info"
-        );
-      }
-    }
-    // kind === "legacy_full" → selectedStartLayerIds stays null (today's full-snapshot behaviour)
-
-    // Step 1: Re-fetch backend mission status to reconcile local workflow state
-    // before evaluating the start gate. setWorkflowStep() below only takes
-    // effect on the next render, so evaluating the gate against the
-    // `stagedWorkflow`/`loadedPathInspection` closures here would still see
-    // the pre-reconcile snapshot — track the freshly-confirmed truth locally
-    // instead so a real confirmation isn't ignored by a stale read.
-    let effectiveStagedWorkflow = stagedWorkflow;
-    let effectiveLoadedInspection = loadedPathInspection;
-    const locallyReady =
-      stagedWorkflow.staged === "verified" &&
-      stagedWorkflow.loaded === "verified" &&
-      !!stagedMissionId;
-    if (!locallyReady) {
-      try {
-        // Only hit the rover when local Send/Load state is incomplete.
-        const [missionStatus, stagedStatus] = await Promise.all([
-          missionApi.fetchMissionStatus(apiBaseUrl),
-          missionApi.fetchStagedMissionStatus(apiBaseUrl, stagedMissionId),
-        ]);
-
-        if (stagedStatus?.verified) {
-          effectiveStagedWorkflow = { ...effectiveStagedWorkflow, staged: "verified" };
-          setWorkflowStep("staged", "verified");
-        }
-        if (missionStatus.running_mission_id) {
-          setMissionRunning(true);
-        }
-
-        if (
-          effectiveStagedWorkflow.staged === "verified" &&
-          stagedMissionId &&
-          effectiveStagedWorkflow.loaded !== "verified"
-        ) {
-          const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
-          if (loadedRes.ok) {
-            const loadedData = (await loadedRes.json()) as missionApi.LoadedPathResponse;
-            const verification = verifyStagedLoadedMission(loadedData, stagedMissionId);
-            if (verification.verified) {
-              effectiveStagedWorkflow = { ...effectiveStagedWorkflow, loaded: "verified" };
-              effectiveLoadedInspection = loadedData;
-              setWorkflowStep("loaded", "verified");
-              setLoadedPathInspection(loadedData);
-            }
-          }
-        }
-
-        logAction("START_RECONCILE", {
-          missionState: missionStatus.state,
-          loadedMissionId: missionStatus.loaded_mission_id,
-          stagedVerified: stagedStatus?.verified,
-        });
-      } catch (reconcileErr) {
-        console.warn("[START] Re-fetch failed, using cached workflow state:", reconcileErr);
-      }
-    }
-
-    const isCsvMissionEarly =
-      localCsvPreview != null ||
-      importedPlan.fileType === "csv" ||
-      !!importedPlan.fileName?.toLowerCase().endsWith(".csv");
-    // Phase 5: never allow path_name fall-through for CSV (including force-start).
-    if (
-      isCsvMissionEarly &&
-      effectiveStagedWorkflow.staged !== "verified"
-    ) {
-      setWorkflowStep("started", "failed");
-      const msg =
-        "This CSV mission is not staged and verified. Send/plan the trajectory and load it before starting — a filename start cannot place a surveyed CSV correctly.";
-      Alert.alert("Start blocked", msg);
-      showToast("Start blocked", msg, "error");
-      return;
-    }
-
-    let forceStart = false;
-    const gateResult = evaluateStagedStartGate(effectiveStagedWorkflow, effectiveLoadedInspection, stagedMissionId);
-
-    if (!gateResult.allowed) {
-      // Show dialog with force-start option — await user decision via promise wrapper
-      // Temporarily clear busy so the dialog is interactive; restore if force/retry continues.
-      setMissionActionBusy(false);
-      const userChoice = await new Promise<"cancel" | "force" | "retry">((resolve) => {
-        Alert.alert(
-          "Cannot Start",
-          (gateResult.message ?? "Staged mission is not ready to start.") +
-            "\n\n• Cancel to go back\n• Retry to re-stage and verify\n• Force Start to bypass checks",
-          [
-            { text: "Cancel", style: "cancel", onPress: () => resolve("cancel") },
-            { text: "Retry", onPress: () => resolve("retry") },
-            { text: "Force Start", style: "destructive", onPress: () => resolve("force") },
-          ]
-        );
-      });
-
-      if (userChoice === "cancel") {
-        setWorkflowStep("started", "failed");
-        showToast("Start blocked", gateResult.message ?? "Complete load verification first.", "error");
-        return;
-      }
-
-      if (userChoice === "retry") {
-        showToast("Re-staging", "Triggering plan & stage again...", "info");
-        // Trigger re-stage by setting the workflow back to pending
-        invalidateStagedWorkflowFrom("staged");
-        return;
-      }
-
-      // userChoice === "force" — bypass the gate
-      forceStart = true;
-      setMissionActionBusy(true);
+      showToast("Start", "Preparing mission…", "info");
       await yieldToUi();
-      logAction("FORCE_START", { reason: gateResult.message });
-      showToast("Force starting", "Bypassing workflow verification.", "warning");
-    }
 
-    const isStagedStart = forceStart ? false : gateResult.isStagedWorkflow;
+      const startResolution = resolveVisibleStartLayerIds(missionLayers);
+      if (startResolution.kind === "blocked") {
+        if (startResolution.reason === "no_layers_ready") {
+          Alert.alert(
+            "No mission layers ready",
+            "Files are not assigned to any mission layer. Open Control and assign files, or clear empty layers."
+          );
+          showToast("Start blocked", "Assign files to a mission layer first.", "error");
+        } else {
+          Alert.alert(
+            "No layers visible",
+            "Toggle at least one mission layer on under Control to start."
+          );
+          showToast("Start blocked", "No visible mission layers.", "error");
+        }
+        return;
+      }
+      if (startResolution.kind === "start") {
+        selectedStartLayerIds = startResolution.ids;
+        const unassigned = countUnassignedFiles(uploadedFiles, missionLayers);
+        if (unassigned > 0) {
+          showToast(
+            "Some files won't run",
+            `${unassigned} file${unassigned === 1 ? "" : "s"} not in any mission layer — will not run.`,
+            "info"
+          );
+        }
+      }
+      // kind === "legacy_full" → selectedStartLayerIds stays null (the full Send snapshot runs)
 
-    logAction("START_REQUEST", {
-      apiBaseUrl,
-      fileName: importedPlan.fileName,
-      missionRunning,
-      autoOrigin,
-      isStagedStart,
-      stagedMissionId: isStagedStart ? getLoadedMissionId(loadedPathInspection) : null,
-      hasAppPlannedSnapshot: appPlannedStartSnapshot != null,
-    });
-      showToast("Start", "Starting mission…", "info");
-      const isCsvMission =
-        localCsvPreview != null ||
-        importedPlan.fileType === "csv" ||
-        !!importedPlan.fileName?.toLowerCase().endsWith(".csv");
-      // App-planned = CSV / multi-file batch / local DXF Send snapshot path.
-      // Do not treat bare densified rover-path-* lines as app-planned: backend-only
-      // staged missions hydrate the same way and must still Start after recovery.
-      const isAppPlannedMission = isAppPlannedMissionContext({
-        hasAppPlannedSnapshot: appPlannedStartSnapshot != null,
-        isCsvMission,
-        isLocalDxfAppPlanned: localDxfMeta != null || uploadedFiles.length > 0,
-        hasStagedHydrationLines: false,
-      });
-      const liveEntryClass = classifyLiveEntryStartRequirement({
-        hasAppPlannedSnapshot: appPlannedStartSnapshot != null,
-        isAppPlannedMission,
-      });
-      // Local DXF / CSV app-planned Start path — only when snapshot + restage succeed.
-      const isAppPlannedStart = liveEntryClass === "restage_with_live_entry";
-
-      if (liveEntryClass === "block_resend_required") {
-        throw new Error(
-          "Approach path cannot be rebuilt from the current map geometry. " +
-            "Re-Send the plan (Path Order & Load), then Start again so entry uses the rover's current position."
-        );
+      // Every mission is app-planned: the Send snapshot is the source. Without it (cleared,
+      // re-imported, or the app restarted) the stored mission cannot be re-entered from the
+      // rover's pose, so Start is refused instead of starting an old entry.
+      const snapshot = appPlannedStartSnapshot;
+      if (!snapshot || !stagedMissionId || stagedWorkflow.staged !== "verified") {
+        throw new Error("Send the mission to the rover first (Path Order → Send), then Start.");
       }
 
-      let startMissionId = isStagedStart ? stagedMissionId : null;
+      logAction("START_REQUEST", {
+        apiBaseUrl,
+        fileName: importedPlan?.fileName ?? null,
+        storedMissionId: stagedMissionId,
+      });
+      showToast("Start", "Starting mission…", "info");
 
-      // Every app-planned Start: rebuild entry from a fresh rover pose (X→A, then Y→A, …)
-      // unless the rover is already at the first tip and Send's mission is still loaded.
-      if (isAppPlannedStart && appPlannedStartSnapshot) {
-        const nowMs = telemetryNow();
-        const cachePose = getMissionStartTelemetryPose(appPlannedStartSnapshot.originGps);
-        const cacheReceivedAtMs = getProdTelemetryState().lastReceivedAt;
-        const cacheAgeMs =
-          cacheReceivedAtMs != null ? nowMs - cacheReceivedAtMs : Number.POSITIVE_INFINITY;
-        let restPoseRaw: Awaited<ReturnType<typeof missionApi.fetchLatestTelemetryPose>> = null;
-        if (!(cachePose && cacheAgeMs >= 0 && cacheAgeMs <= LIVE_ENTRY_CACHE_MAX_AGE_MS)) {
-          restPoseRaw = await missionApi.fetchLatestTelemetryPose(apiBaseUrl, appPlannedStartSnapshot.originGps);
-        }
-        const eligibility = evaluateMissionStartTelemetry(appPlannedStartSnapshot.originGps);
-        if (!eligibility.ok) throw new Error(eligibility.reasons.join(" "));
-        const picked = pickRoverPoseForEntry({
-          eligibility,
-          restPose: telemetryToRoverPoseForEntry(restPoseRaw),
-          cachePose: getMissionStartTelemetryPose(appPlannedStartSnapshot.originGps),
+      // Entry leg from a live pose (socket telemetry only: status never comes from a poll).
+      const eligibility = evaluateMissionStartTelemetry(snapshot.originGps);
+      if (!eligibility.ok) throw new Error(eligibility.reasons.join(" "));
+      const picked = pickRoverPoseForEntry({
+        eligibility,
+        cachePose: getMissionStartTelemetryPose(snapshot.originGps),
+        cacheReceivedAtMs: getProdTelemetryState().lastReceivedAt,
+        nowMs: telemetryNow(),
+      });
+      if (!picked.ok) throw new Error(picked.error);
+      let livePose = picked.pose;
+      const poseSource = picked.source;
+
+      let startSnapshot = snapshot;
+      const scopedLayerIds = selectedStartLayerIds ?? [];
+      const layerScoped = scopedLayerIds.length > 0;
+      if (layerScoped) {
+        const scoped = buildLayerScopedStartSnapshot(snapshot, uploadedFiles, missionLayers, scopedLayerIds);
+        if (!scoped.ok) throw new Error(scoped.error);
+        startSnapshot = scoped.snapshot;
+      }
+
+      const previewed = buildTrajectory(startSnapshot.paintedLines, {
+        markSpeedMs: 0.35,
+        travelSpeedMs: 0.5,
+        extensions: startSnapshot.extensionConfig,
+        roverPose: livePose,
+        originGps: startSnapshot.originGps,
+        includeEntryTransit: true,
+        requireEntryTransit: true,
+      });
+      if (previewed.entryTransit?.error) throw new Error(previewed.entryTransit.error);
+
+      const skipRestage = canSkipLiveEntryRestage({
+        entryIncluded: previewed.entryTransit?.included === true,
+        storedVerified: stagedWorkflow.staged === "verified",
+        layerScoped,
+      });
+
+      if (skipRestage) {
+        startSha = stagedMissionId;
+        logAction("START_SKIP_RESTAGE", {
+          missionId: stagedMissionId,
+          reason: previewed.entryTransit?.skipReason ?? "entry omitted",
+          poseSource,
+        });
+      } else {
+        showToast("Approach", "Building runtime entry from current rover position…", "info");
+        let restaged = await restageAppTrajectoryWithLiveEntry({ snapshot: startSnapshot, roverPose: livePose });
+        if (!restaged.success) throw new Error(restaged.error);
+
+        // The upload takes time: if the rover moved, rebuild the entry from where it is now.
+        const usedNed = resolveRoverNedInMissionFrame(livePose, startSnapshot.originGps);
+        const picked2 = pickRoverPoseForEntry({
+          eligibility: evaluateMissionStartTelemetry(startSnapshot.originGps),
+          cachePose: getMissionStartTelemetryPose(startSnapshot.originGps),
           cacheReceivedAtMs: getProdTelemetryState().lastReceivedAt,
           nowMs: telemetryNow(),
         });
-        if (!picked.ok) {
-          throw new Error(picked.error);
-        }
-        let livePose = picked.pose;
-        let poseSource = picked.source;
-
-        let startSnapshot = appPlannedStartSnapshot;
-        const scopedLayerIds = selectedStartLayerIds ?? [];
-        const layerScoped = scopedLayerIds.length > 0;
-        if (layerScoped) {
-          const scoped = buildLayerScopedStartSnapshot(
-            appPlannedStartSnapshot,
-            uploadedFiles,
-            missionLayers,
-            scopedLayerIds
-          );
-          if (!scoped.ok) {
-            throw new Error(scoped.error);
-          }
-          startSnapshot = scoped.snapshot;
-        }
-
-        const previewed = buildTrajectory(startSnapshot.paintedLines, {
-          markSpeedMs: 0.35,
-          travelSpeedMs: 0.5,
-          extensions: startSnapshot.extensionConfig,
-          roverPose: livePose,
-          originGps: startSnapshot.originGps,
-          includeEntryTransit: true,
-          requireEntryTransit: true,
-        });
-        if (previewed.entryTransit?.error) {
-          throw new Error(previewed.entryTransit.error);
-        }
-
-        const skipRestage = canSkipLiveEntryRestage({
-          entryIncluded: previewed.entryTransit?.included === true,
-          loadedVerified: effectiveStagedWorkflow.loaded === "verified",
-          loadedMissionId:
-            getLoadedMissionId(effectiveLoadedInspection) ?? stagedMissionId,
-          stagedMissionId,
-          layerScoped,
-        });
-
-        const applyRestageUi = (
-          restaged: Extract<
-            Awaited<ReturnType<typeof restageAppTrajectoryWithLiveEntry>>,
-            { success: true }
-          >
-        ) => {
-          setStagedMissionId(restaged.missionId);
-          setStagedMissionInspection(null);
-          setWorkflowStep("staged", "verified");
-          setStagedPlanResult(stagedPlanResultFromAdmitted(restaged.admitted));
-        };
-
         let driftRetry = false;
-        if (skipRestage) {
-          startMissionId = stagedMissionId;
-          logAction("START_SKIP_RESTAGE", {
-            missionId: stagedMissionId,
-            reason: previewed.entryTransit?.skipReason ?? "entry omitted",
-            poseSource,
-          });
-        } else {
-          showToast("Approach", "Building runtime entry from current rover position…", "info");
-          let restaged = await restageAppTrajectoryWithLiveEntry({
-            snapshot: startSnapshot,
-            roverPose: livePose,
-          });
-          if (!restaged.success) {
-            throw new Error(restaged.error);
+        if (picked2.ok && usedNed.ok) {
+          const latestNed = resolveRoverNedInMissionFrame(picked2.pose, startSnapshot.originGps);
+          if (
+            latestNed.ok &&
+            entryPoseDrifted([usedNed.north, usedNed.east], [latestNed.north, latestNed.east])
+          ) {
+            driftRetry = true;
+            showToast("Approach", "Rover moved — rebuilding entry from new position…", "info");
+            livePose = picked2.pose;
+            restaged = await restageAppTrajectoryWithLiveEntry({ snapshot: startSnapshot, roverPose: livePose });
+            if (!restaged.success) throw new Error(restaged.error);
           }
-          applyRestageUi(restaged);
-
-          let loadedOk = await loadMissionOnBackend(restaged.missionId, {
-            hideRuntimeEntryLine: restaged.entryIncluded === true,
-            extensionLines: buildCsvExtensionLines(
-              startSnapshot.paintedLines,
-              startSnapshot.extensionConfig
-            ),
-            manageBusy: false,
-            skipNavigate: true,
-            skipMapHydration: true,
-            expectedPaintedLines: startSnapshot.paintedLines,
-            rethrow: true,
-          });
-          if (!loadedOk) {
-            throw new Error(
-              "Trajectory restaged with live entry but load to controller failed. Fix load, then Start again."
-            );
-          }
-
-          const usedNed = resolveRoverNedInMissionFrame(livePose, startSnapshot.originGps);
-          const picked2 = pickRoverPoseForEntry({
-            eligibility: evaluateMissionStartTelemetry(startSnapshot.originGps),
-            restPose: null,
-            cachePose: getMissionStartTelemetryPose(startSnapshot.originGps),
-            cacheReceivedAtMs: getProdTelemetryState().lastReceivedAt,
-            nowMs: telemetryNow(),
-          });
-          if (picked2.ok && usedNed.ok) {
-            const latestNed = resolveRoverNedInMissionFrame(picked2.pose, startSnapshot.originGps);
-            if (
-              latestNed.ok &&
-              entryPoseDrifted(
-                [usedNed.north, usedNed.east],
-                [latestNed.north, latestNed.east]
-              )
-            ) {
-              driftRetry = true;
-              showToast("Approach", "Rover moved — rebuilding entry from new position…", "info");
-              livePose = picked2.pose;
-              poseSource = picked2.source;
-              restaged = await restageAppTrajectoryWithLiveEntry({
-                snapshot: startSnapshot,
-                roverPose: livePose,
-              });
-              if (!restaged.success) {
-                throw new Error(restaged.error);
-              }
-              applyRestageUi(restaged);
-              loadedOk = await loadMissionOnBackend(restaged.missionId, {
-                hideRuntimeEntryLine: restaged.entryIncluded === true,
-                extensionLines: buildCsvExtensionLines(
-                  startSnapshot.paintedLines,
-                  startSnapshot.extensionConfig
-                ),
-                manageBusy: false,
-                skipNavigate: true,
-                skipMapHydration: true,
-                expectedPaintedLines: startSnapshot.paintedLines,
-                rethrow: true,
-              });
-              if (!loadedOk) {
-                throw new Error(
-                  "Trajectory restaged with live entry but load to controller failed. Fix load, then Start again."
-                );
-              }
-            }
-          }
-
-          startMissionId = restaged.missionId;
-          logAction("START_LIVE_ENTRY", {
-            missionId: restaged.missionId,
-            entryIncluded: restaged.entryIncluded,
-            entryLengthM: restaged.entryLengthM ?? null,
-            poseSource,
-            lat: livePose.lat ?? null,
-            lon: livePose.lon ?? null,
-            gps_fix: livePose.gps_fix ?? null,
-            pose_age_ms: livePose.pose_age_ms ?? null,
-            driftRetry,
-          });
         }
+        setStagedMissionId(restaged.missionId);
+        setWorkflowStep("staged", "verified");
+        setStagedPlanResult(stagedPlanResultFromAdmitted(restaged.admitted));
+        startSha = restaged.missionId;
+        logAction("START_LIVE_ENTRY", {
+          missionId: restaged.missionId,
+          entryIncluded: restaged.entryIncluded,
+          entryLengthM: restaged.entryLengthM ?? null,
+          poseSource,
+          driftRetry,
+        });
       }
 
-      const startPayload = buildMissionStartPayload({
-        stagedMissionId: startMissionId,
-        stagedVerified: isAppPlannedStart || isStagedStart,
-        fileName: importedPlan.fileName,
-        autoOrigin,
-        // Phase 5: CSV has no meaningful path_name reload — refuse the fallback.
-        // App-planned DXF/CSV with snapshot also require staged mission_id after restage.
-        // Also refuse for densified app-planned context that blocked without snapshot.
-        requireStagedMission: isCsvMission || isAppPlannedStart || isAppPlannedMission,
-      });
-      const finalTelemetryGate = evaluateMissionStartTelemetry(isAppPlannedStart ? appPlannedStartSnapshot?.originGps : null);
+      const finalTelemetryGate = evaluateMissionStartTelemetry(snapshot.originGps);
       if (!finalTelemetryGate.ok) throw new Error(finalTelemetryGate.reasons.join(" "));
-      const res = await missionApi.startMission(apiBaseUrl, startPayload);
-      if (!res.ok) {
-        throw await parseMissionResponseError(res, "Start failed");
-      }
-      setMissionRunning(true);
-      setWorkflowStep("started", "verified");
+
+      // One tap = one request id. The id is reused only if the outcome of this very send is unknown.
+      const tap = beginStartTap(startSha);
+      const result = await startMissionCommand(tap);
+      if (!result.ok) throw new CommandFailedError(result);
+
       if (selectedStartLayerIds && selectedStartLayerIds.length > 0) {
         runningLayerIdsRef.current = [...selectedStartLayerIds];
-        runningMissionIdRef.current = startMissionId;
+        runningMissionIdRef.current = startSha;
         setMissionLayers((prev) =>
-          markLayersStarted(prev, selectedStartLayerIds!, startMissionId, Date.now())
+          markLayersStarted(prev, selectedStartLayerIds!, startSha, Date.now())
         );
       } else {
         runningLayerIdsRef.current = [];
-        runningMissionIdRef.current = startMissionId;
+        runningMissionIdRef.current = startSha;
       }
-      if (!isStagedStart && !isAppPlannedStart && autoOrigin && autoOriginReference) {
-        const planStart = getPlanStartPoint(displayedLines);
-        console.log("[CANVAS] start-anchor", JSON.stringify({
-          capturedOrigin: {
-            n: autoOriginReference.roverNorth,
-            e: autoOriginReference.roverEast,
-          },
-          planFirstPoint: planStart,
-          expectedDelta: planStart
-            ? {
-                dN: autoOriginReference.roverNorth - autoOriginReference.planStartNorth,
-                dE: autoOriginReference.roverEast - autoOriginReference.planStartEast,
-              }
-            : null,
-        }));
-      }
-      // Defer non-critical refresh so Start feels instant after backend ACK.
-      setTimeout(() => {
-        void refreshTelemetryPanel();
-      }, 0);
-      logAction("START_SUCCESS", {
-        fileName: importedPlan.fileName,
-        autoOrigin,
-        missionId: startMissionId,
-        liveEntry: isAppPlannedStart,
+      logAction("START_ACCEPTED", {
+        missionId: startSha,
+        executionId: result.missionId ?? null,
+        duplicate: result.duplicate === true,
+        requestId: result.requestId ?? null,
       });
-      const entryNote =
-        isAppPlannedStart
-          ? " Approach path was built from the rover's current position."
-          : "";
-      // Baseline UX: confirm Start; toast for non-blocking HUD feedback.
-      showToast("Mission running", `${importedPlan.fileName} is now active.`, "success");
-      Alert.alert("Started", `${importedPlan.fileName} started on the rover.${entryNote}`);
+      // 202 is an acknowledgement. The lifecycle is on screen from the rover's events.
+      showToast("Start accepted", result.message, "success");
     } catch (error) {
-      const missionError = error && typeof error === "object" && "kind" in error
-        ? error as ReturnType<typeof classifyMissionError>
-        : null;
-      setWorkflowStep("started", "failed");
       runningLayerIdsRef.current = [];
       runningMissionIdRef.current = null;
-      if (selectedStartLayerIds && selectedStartLayerIds.length > 0) {
-        setMissionLayers((prev) =>
-          applyMissionTerminalOutcome(prev, selectedStartLayerIds!, "failed")
-        );
+      const failure = error instanceof CommandFailedError ? error.failure : null;
+      // A start whose outcome is unknown may be running: keep the layer bookkeeping untouched then.
+      if (selectedStartLayerIds && selectedStartLayerIds.length > 0 && failure?.kind !== "unknown") {
+        setMissionLayers((prev) => applyMissionTerminalOutcome(prev, selectedStartLayerIds!, "failed"));
       }
       logAction("START_FAILED", {
-        fileName: importedPlan.fileName,
+        fileName: importedPlan?.fileName ?? null,
+        code: failure?.code ?? null,
         error: error instanceof Error ? error.message : String(error),
       });
-      const message = missionError?.message ?? (error instanceof Error ? error.message : "Could not start the mission.");
-      const title = missionError?.title ?? "Start failed";
+      const title = failure?.title ?? "Start failed";
+      const message = failure?.message ?? (error instanceof Error ? error.message : "Could not start the mission.");
       showToast(title, message, "error");
       Alert.alert(title, message);
-      if (missionError?.status === 409) void refreshMissionIdentity();
     } finally {
       startInFlightRef.current = false;
       endPathExclusive("start");
     }
   }
-
-  
 
   async function startLora() {
     if (!apiBaseUrl) {
@@ -4481,43 +4192,28 @@ function AppRoot() {
     }
   }, [stagedWorkflow.staged, stagedMissionId, selectedPathName, importedPlan]);
 
+  /**
+   * Stop = abort the active mission (reason: operator). Always allowed while a mission is active
+   * or its state is unknown. The result arrives as an ABORTED `mission_state` event; the rover
+   * releases OFFBOARD and disarms itself.
+   */
   async function stopMissionOnBackend() {
-    const transport = getAppTransport();
-    if (transport.getStatus() !== "connected" && !apiBaseUrl) {
-      Alert.alert("No backend", "Connect to a backend before stopping a mission.");
+    if (!apiBaseUrl) {
+      Alert.alert("No backend", "Connect to the rover before stopping a mission.");
       return;
     }
-
     logAction("STOP_REQUEST", { apiBaseUrl });
     setMissionActionBusy(true);
     try {
-      showToast("Stop", "Stopping mission...", "warning");
-      SecureStore.deleteItemAsync(STAGED_MISSION_KEY).catch(() => {});
-      if (transport.getStatus() === "connected") {
-        const prodClient = getProdApiClient();
-        const verdict = await prodClient.abortMission("operator");
-        if (!verdict.ok) {
-          throw new Error(verdict.reason || "Stop failed");
-        }
-      } else {
-        const res = await missionApi.stopMission(apiBaseUrl);
-        if (!res.ok) {
-          const errMsg = await parseFetchError(res, "Stop failed");
-          throw new Error(errMsg);
-        }
+      const result = await stopMissionCommand();
+      if (!result.ok) {
+        logAction("STOP_FAILED", { code: result.code, kind: result.kind });
+        showToast(result.title, result.message, "error");
+        Alert.alert(result.title, result.message);
+        return;
       }
-
-      setMissionRunning(false);
-      void refreshTelemetryPanel();
-      logAction("STOP_SUCCESS");
-      Alert.alert("Stopped", "Mission stop command sent to the rover.");
-      showToast("Mission stopped", "Stop command accepted by the rover.", "success");
-    } catch (error) {
-      logAction("STOP_FAILED", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      showToast("Stop failed", error instanceof Error ? error.message : "Could not stop the mission.", "error");
-      Alert.alert("Stop failed", error instanceof Error ? error.message : "Could not stop the mission.");
+      logAction("STOP_ACCEPTED");
+      showToast("Stop", "Stop requested. Watching the rover.", "warning");
     } finally {
       setMissionActionBusy(false);
     }
@@ -4568,7 +4264,6 @@ function AppRoot() {
       sharedOriginGpsRef.current = null;
       setMissionFileReady(false);
       setMissionLoaded(false);
-      setMissionRunning(false);
       setAutoOrigin(false);
       setAutoOriginReference(null);
       setExtractedCorners(null);
@@ -4607,154 +4302,35 @@ function AppRoot() {
     }
   }
 
+  /** Pause the running mission. The PAUSED state arrives as a `mission_state` event. */
   async function pauseMissionOnBackend() {
-    const transport = getAppTransport();
-    if (transport.getStatus() !== "connected" && !apiBaseUrl) return;
+    if (!apiBaseUrl) return;
     setMissionActionBusy(true);
     try {
-      showToast("Pause", "Pausing mission...", "info");
-      if (transport.getStatus() === "connected") {
-        const prodClient = getProdApiClient();
-        const verdict = await prodClient.pauseMission();
-        if (!verdict.ok) {
-          throw new Error(verdict.reason || "Pause failed");
-        }
-      } else {
-        const res = await missionApi.pauseMission(apiBaseUrl);
-        if (!res.ok) {
-          const errMsg = await parseFetchError(res, "Pause failed");
-          throw new Error(errMsg);
-        }
+      const result = await pauseMissionCommand();
+      if (!result.ok) {
+        showToast(result.title, result.message, "error");
+        Alert.alert(result.title, result.message);
+        return;
       }
-      setIsPaused(true);
-      showToast("Mission paused", "Mission has been paused.", "info");
-      void refreshTelemetryPanel();
-    } catch (error) {
-      Alert.alert("Pause failed", error instanceof Error ? error.message : "Could not pause the mission.");
-      showToast("Pause failed", error instanceof Error ? error.message : "Could not pause.", "error");
+      showToast("Pause", "Pause requested.", "info");
     } finally {
       setMissionActionBusy(false);
     }
   }
 
+  /** Resume a paused mission. Never automatic: only this explicit action. */
   async function resumeMissionOnBackend() {
-    const transport = getAppTransport();
-    if (transport.getStatus() !== "connected" && !apiBaseUrl) return;
+    if (!apiBaseUrl) return;
     setMissionActionBusy(true);
     try {
-      showToast("Resume", "Resuming mission...", "info");
-      if (transport.getStatus() === "connected") {
-        const prodClient = getProdApiClient();
-        const verdict = await prodClient.resumeMission();
-        if (!verdict.ok) {
-          throw new Error(verdict.reason || "Resume failed");
-        }
-      } else {
-        const res = await missionApi.resumeMission(apiBaseUrl);
-        if (!res.ok) {
-          const errMsg = await parseFetchError(res, "Resume failed");
-          throw new Error(errMsg);
-        }
+      const result = await resumeMissionCommand();
+      if (!result.ok) {
+        showToast(result.title, result.message, "error");
+        Alert.alert(result.title, result.message);
+        return;
       }
-      setIsPaused(false);
-      showToast("Mission resumed", "Mission has been resumed.", "success");
-      void refreshTelemetryPanel();
-    } catch (error) {
-      Alert.alert("Resume failed", error instanceof Error ? error.message : "Could not resume the mission.");
-      showToast("Resume failed", error instanceof Error ? error.message : "Could not resume.", "error");
-    } finally {
-      setMissionActionBusy(false);
-    }
-  }
-
-  async function armVehicle(arm: boolean) {
-    const transport = getAppTransport();
-    if (transport.getStatus() !== "connected" && !apiBaseUrl) {
-      Alert.alert("No backend", "Connect to a backend before sending commands.");
-      return;
-    }
-    logAction("ARM_REQUEST", { apiBaseUrl, arm });
-    setMissionActionBusy(true);
-    try {
-      showToast(arm ? "Arm" : "Disarm", arm ? "Arming vehicle..." : "Disarming vehicle...", "info");
-      if (transport.getStatus() === "connected") {
-        const prodClient = getProdApiClient();
-        const verdict = await prodClient.arm(arm);
-        if (!verdict.ok) {
-          throw new Error(verdict.reason || (arm ? "Arm failed" : "Disarm failed"));
-        }
-      } else {
-        const res = await fetch(`${apiBaseUrl}/api/arm`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ arm }),
-        });
-        let data;
-        try { data = await res.clone().json(); } catch (e) { }
-
-        if (!res.ok || (data && data.success === false)) {
-          const errMsg = data?.message || (await parseFetchError(res, arm ? "Arm failed" : "Disarm failed"));
-          throw new Error(errMsg);
-        }
-      }
-      void refreshTelemetryPanel();
-      logAction("ARM_SUCCESS", { arm });
-      Alert.alert(arm ? "Armed" : "Disarmed", `Vehicle was successfully ${arm ? "armed" : "disarmed"}.`);
-      showToast(arm ? "Armed" : "Disarmed", `Vehicle is now ${arm ? "armed" : "disarmed"}.`, "success");
-    } catch (error) {
-      logAction("ARM_FAILED", {
-        arm,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      Alert.alert(arm ? "Arm failed" : "Disarm failed", error instanceof Error ? error.message : "Command rejected.");
-      showToast(arm ? "Arm failed" : "Disarm failed", error instanceof Error ? error.message : "Command rejected.", "error");
-    } finally {
-      setMissionActionBusy(false);
-    }
-  }
-
-  async function setVehicleMode(targetMode: "MANUAL") {
-    const transport = getAppTransport();
-    if (transport.getStatus() !== "connected" && !apiBaseUrl) {
-      Alert.alert("No backend", "Connect to a backend before sending commands.");
-      return;
-    }
-    logAction("SET_MODE_REQUEST", { apiBaseUrl, targetMode });
-    setMissionActionBusy(true);
-    try {
-      showToast("Mode", `Switching to ${targetMode}...`, "info");
-      if (transport.getStatus() === "connected") {
-        const prodClient = getProdApiClient();
-        // In production PX4/ROS graph, manual driving disables offboard mode
-        const verdict = await prodClient.setOffboard(false);
-        if (!verdict.ok) {
-          throw new Error(verdict.reason || "Set mode failed");
-        }
-      } else {
-        const res = await fetch(`${apiBaseUrl}/api/set_mode`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: targetMode })
-        });
-        if (!res.ok) {
-          const errMsg = await parseFetchError(res, "Set mode failed");
-          throw new Error(errMsg);
-        }
-      }
-      await refreshTelemetryPanel();
-      logAction("SET_MODE_SUCCESS", { targetMode });
-      Alert.alert("Mode Changed", `Vehicle mode set to ${targetMode}.`);
-      showToast("Mode Changed", `Vehicle mode is now ${targetMode}.`, "success");
-    } catch (error) {
-      logAction("SET_MODE_FAILED", {
-        targetMode,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      Alert.alert("Mode Change Failed", error instanceof Error ? error.message : "Command rejected.");
-      showToast("Mode Change Failed", error instanceof Error ? error.message : "Command rejected.", "error");
-      throw error;
+      showToast("Resume", "Resume requested.", "info");
     } finally {
       setMissionActionBusy(false);
     }
@@ -4845,8 +4421,7 @@ function AppRoot() {
       setLines(safeGeneratedLines);
       setSelectedLineId(safeGeneratedLines[0]?.id ?? null);
       setMissionLoaded(true);
-      setMissionLoadedPanelOpenToken((token) => token + 1);
-      setMissionRunning(false);
+      setMissionPanelOpenToken((token) => token + 1);
       void refreshTelemetryPanel();
       setPage("home");
       showToast("Template loaded", "Template path loaded successfully.", "success");
@@ -5228,17 +4803,15 @@ function AppRoot() {
                   onToggleMissionLayerVisibility={handleToggleMissionLayerVisibility}
                   onStopPlan={stopMissionOnBackend}
                   onClearMission={clearResidentMissionOnBackend}
-                  onStartPlan={startLoadedMission}
+                  onStartPlan={startMissionOnBackend}
                   onPausePlan={pauseMissionOnBackend}
                   onResumePlan={resumeMissionOnBackend}
-                  onArmVehicle={armVehicle}
-                  onSetMode={setVehicleMode}
                   onEstopVehicle={estopVehicle}
                   virtualJoystick={virtualJoystick}
                   missionActionBusy={missionActionBusy}
                   missionFileReady={missionFileReady}
                   missionLoaded={missionLoaded}
-                  missionLoadedPanelOpenToken={missionLoadedPanelOpenToken}
+                  missionPanelOpenToken={missionPanelOpenToken}
                   missionRunning={missionRunning}
                   systemHealth={systemHealth}
                   telemetrySnapshot={telemetrySnapshot}
@@ -5247,7 +4820,6 @@ function AppRoot() {
                   telemetryError={telemetryError}
                   telemetryLoading={telemetryLoading}
                   isPaused={isPaused}
-                  setIsPaused={setIsPaused}
                   rtkConnecting={rtkConnecting}
                   rtkStatus={rtkStatus}
                   startLora={startLora}
@@ -5297,6 +4869,7 @@ function AppRoot() {
                             selectedPathName={selectedPathName}
                             onSelectPath={previewSelectedPath}
                             onLoadSelectedPath={loadMissionOnBackend}
+                            onMissionStored={handleMissionStored}
                             missionActionBusy={missionActionBusy}
                             onBeginPathExclusive={beginPathExclusive}
                             onEndPathExclusive={endPathExclusive}
@@ -5343,7 +4916,6 @@ function AppRoot() {
                               setSelectedLineId(safeGeneratedLines[0]?.id ?? null);
                               setMissionFileReady(false);
                               setMissionLoaded(false);
-                              setMissionRunning(false);
                               setPage("home");
                               showToast("Template ready", `${name}.dxf is ready to upload.`, "success");
                             }}
@@ -5657,14 +5229,12 @@ type HomeViewProps = {
   onStartPlan: () => Promise<void>;
   onPausePlan: () => Promise<void>;
   onResumePlan: () => Promise<void>;
-  onArmVehicle: (arm: boolean) => Promise<void>;
-  onSetMode: (mode: "MANUAL") => Promise<void>;
   onEstopVehicle: () => Promise<void>;
   virtualJoystick: ReturnType<typeof useVirtualJoystick>;
   missionActionBusy: boolean;
   missionFileReady: boolean;
   missionLoaded: boolean;
-  missionLoadedPanelOpenToken: number;
+  missionPanelOpenToken: number;
   missionRunning: boolean;
   systemHealth: SystemHealth | null;
   telemetrySnapshot: TelemetrySnapshot | null;
@@ -5673,7 +5243,6 @@ type HomeViewProps = {
   telemetryError: string;
   telemetryLoading: boolean;
   isPaused: boolean;
-  setIsPaused: React.Dispatch<React.SetStateAction<boolean>>;
   rtkConnecting: boolean;
   rtkStatus: RTKStatus;
   startLora: () => Promise<void>;
@@ -5746,8 +5315,6 @@ function HomeView(props: HomeViewProps) {
     onStartPlan,
     onPausePlan,
     onResumePlan,
-    onArmVehicle,
-    onSetMode,
     onEstopVehicle,
     virtualJoystick,
     missionActionBusy,
@@ -5761,7 +5328,6 @@ function HomeView(props: HomeViewProps) {
     telemetryError,
     telemetryLoading,
     isPaused,
-    setIsPaused,
     rtkConnecting,
     rtkStatus,
     startLora,
@@ -6877,6 +6443,8 @@ function SectionPages(props: {
     missionId?: string,
     opts?: missionApi.LoadMissionOptions
   ) => boolean | Promise<boolean>;
+  /** Send stored the mission on the rover (verified). There is no load step. */
+  onMissionStored: (missionId: string) => void;
   missionActionBusy: boolean;
   onBeginPathExclusive?: (kind: PathExclusiveKind) => boolean;
   onEndPathExclusive?: (kind: PathExclusiveKind) => void;

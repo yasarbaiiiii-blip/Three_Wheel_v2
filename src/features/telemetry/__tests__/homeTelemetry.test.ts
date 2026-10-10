@@ -13,6 +13,7 @@ import {
   usableData,
 } from "../telemetryDerive";
 import type { RoverTelemetrySnapshot, SnapshotEntry } from "../../../contract/prod/realtime";
+import { fcuLinkData, liveRover, pushRoverEvent } from "../../../test/roverEvents";
 
 function entry<T>(data: T, over: Partial<SnapshotEntry<T>> = {}): SnapshotEntry<T> {
   return { age_s: 0.1, fresh: true, data, ...over };
@@ -99,7 +100,7 @@ function adapted(snap: RoverTelemetrySnapshot) {
 }
 
 describe("Home telemetry derivation", () => {
-  beforeEach(() => clearProdTelemetry());
+  beforeEach(() => { clearProdTelemetry(); liveRover(); });
 
   it("fills the Home values from fresh sections", () => {
     const t = adapted(baseSnapshot());
@@ -178,26 +179,24 @@ describe("Home telemetry derivation", () => {
     expect(nan.lat).toBeNull();
   });
 
-  it("FCU is connected only when the PX4 link is alive and fresh", () => {
-    const base = baseSnapshot();
-    expect(adapted(baseSnapshot({ px4_link: null })).fcu_connected).toBe(false);
+  it("FCU is connected only when the fcu_link event says the session is alive and the handshake done", () => {
+    expect(adapted(baseSnapshot()).fcu_connected).toBe(true);
 
-    clearProdTelemetry();
-    expect(
-      adapted(baseSnapshot({ px4_link: entry({ ...base.px4_link!.data, session_alive: false }) }))
-        .fcu_connected
-    ).toBe(false);
+    pushRoverEvent("fcu_link", fcuLinkData(false));
+    expect(adapted(baseSnapshot()).fcu_connected).toBe(false);
 
-    clearProdTelemetry();
-    expect(
-      adapted(baseSnapshot({ px4_link: entry({ ...base.px4_link!.data, handshake_ok: false }) }))
-        .fcu_connected
-    ).toBe(false);
+    pushRoverEvent("fcu_link", { fresh: true, session_alive: true, handshake_ok: false, fault: 0, session_resets: 0 });
+    expect(adapted(baseSnapshot()).fcu_connected).toBe(false);
+  });
 
-    clearProdTelemetry();
-    expect(
-      adapted(baseSnapshot({ px4_link: { ...base.px4_link!, fresh: false } })).fcu_connected
-    ).toBe(false);
+  it("FCU is unknown (null), never the last value, when the source is stale or the gateway is down", () => {
+    pushRoverEvent("fcu_link", { fresh: false });
+    expect(adapted(baseSnapshot()).fcu_connected).toBeNull();
+
+    pushRoverEvent("fcu_link", fcuLinkData(true));
+    expect(adapted(baseSnapshot()).fcu_connected).toBe(true);
+    pushRoverEvent("gateway_link", { connected: false });
+    expect(adapted(baseSnapshot()).fcu_connected).toBeNull();
   });
 
   it("never invents a battery value", () => {

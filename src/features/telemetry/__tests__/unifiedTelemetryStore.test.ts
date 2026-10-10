@@ -10,10 +10,12 @@ import {
   applyTelemetryPacket,
 } from "../telemetryStore";
 import type { RoverTelemetrySnapshot } from "../../../contract/prod/realtime";
+import { fcuLinkData, liveRover, missionData, pushRoverEvent } from "../../../test/roverEvents";
 
 describe("Unified Telemetry Store", () => {
   beforeEach(() => {
     clearProdTelemetry();
+    liveRover();
   });
 
   it("syncs from prodTelemetryStore into legacy telemetryStore with adapted fields", () => {
@@ -90,23 +92,14 @@ describe("Unified Telemetry Store", () => {
           loop_overrun_count: 0,
         },
       },
-      mission: {
-        age_s: 0.1,
-        fresh: true,
-        data: {
-          state: 3, // RUNNING
-          mission_id: 1,
-          run_index: 0,
-          point_index: 4,
-          reason_code: 0,
-          path_artifact_sha256: "abc",
-        },
-      },
+      // Mission progress is read from mission_state rover events, not from the snapshot.
+      mission: null,
       last_point_result: null,
       spray: null,
       recorder: null,
     };
 
+    pushRoverEvent("mission_state", missionData({ state: 3, mission_id: 1, point_index: 4, path_artifact_sha256: "abc" }));
     applyProdTelemetrySnapshot(mockSnap);
 
     const legacySnap = getTelemetrySnapshot();

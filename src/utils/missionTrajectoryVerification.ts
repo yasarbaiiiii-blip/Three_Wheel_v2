@@ -6,7 +6,7 @@
  * count, same lengths and bounding box, and a normalisation report of zero.
  * The expected values come from the payload itself
  * ({@link computeExpectedAdmission}), never from a fabricated echo. A mismatch
- * blocks Load.
+ * blocks Start.
  */
 
 import type { MissionPathResponse } from "../contract/prod/rest";
@@ -46,7 +46,7 @@ export type AdmissionIssue = {
 };
 
 export type AdmissionVerifyResult = {
-  /** Load must stay blocked when false. */
+  /** Start must stay blocked when false. */
   ok: boolean;
   issues: AdmissionIssue[];
   expected: ExpectedAdmission;

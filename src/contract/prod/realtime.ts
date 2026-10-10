@@ -136,13 +136,33 @@ export interface RppData {
   dist_to_goal_m?: number | null;
 }
 
+/**
+ * `mission` source of the telemetry snapshot and, with `fresh` / `stamp_s`, the `data` of a
+ * `mission_state` rover event (dyx3_system_gateway `mission_fields`, interfaces 0.15.0).
+ * The app reads mission progress only from the event; the snapshot copy is not used for it.
+ */
 export interface MissionData {
+  /** MissionStateEnum. */
   state: number;
+  /** Execution id: incremented on every accepted start. */
   mission_id: number;
   run_index: number;
   point_index: number;
+  /** MissionReasonEnum; with SAFETY / RTK, `gate_reason_code` names the guard gate. */
   reason_code: number;
+  /** The EXECUTION artifact (placed in the EKF frame) RPP loads. */
   path_artifact_sha256: string;
+  /** The artifact the operator started (what the app uploaded). */
+  source_artifact_sha256: string;
+  /** The start's request_id; empty when none was given. */
+  request_id: string;
+  /** Human-readable cause of the current state or reason; may carry `; release: ...`. */
+  reason_detail: string;
+  gate_reason_code: number;
+  /** MissionWaitingOnEnum: the step the lifecycle is waiting on. */
+  waiting_on: number;
+  /** ROS time (s) the current state was entered. */
+  state_entered: number;
 }
 
 export interface PointResultData {
@@ -215,15 +235,90 @@ export interface TelemetryPacket {
   snapshot: RoverTelemetrySnapshot | null;
 }
 
-/** Inbound `gateway` event */
-export interface GatewayEventPacket {
+// -----------------------------------------------------------------------------
+// rover_event: the single status event (docs/contracts/backend.md section 4)
+// -----------------------------------------------------------------------------
+
+/** Socket.IO event name of the status channel. `telemetry` stays a separate periodic event. */
+export const ROVER_EVENT = "rover_event";
+
+export type RoverEventKind =
+  | "mission_state"
+  | "operator_link"
+  | "fcu_link"
+  | "estop"
+  | "gateway_link";
+
+export const ROVER_EVENT_KINDS: readonly RoverEventKind[] = [
+  "mission_state",
+  "operator_link",
+  "fcu_link",
+  "estop",
+  "gateway_link",
+];
+
+/** Stale is a transition: a gateway-sourced kind whose source went silent arrives as exactly this. */
+export interface StaleEventData {
+  fresh: false;
+}
+
+export type MissionStateEventData = MissionData & { fresh: true; stamp_s: number };
+
+export interface OperatorLinkEventData {
+  alive: boolean;
+  age_s: number | null;
+  cause: "heartbeat" | "timeout" | "connection_closed" | "never" | string;
+}
+
+export interface FcuLinkEventData {
+  fresh: boolean;
+  session_alive: boolean;
+  handshake_ok: boolean;
+  fault: number;
+  session_resets: number;
+}
+
+export interface EstopEventData {
+  fresh: boolean;
+  asserted: boolean;
+  source: string;
+}
+
+/** The backend's own socket to the gateway. While `connected` is false every other kind is unknown. */
+export interface GatewayLinkEventData {
   connected: boolean;
+}
+
+export interface RoverEventDataByKind {
+  mission_state: MissionStateEventData | StaleEventData;
+  operator_link: OperatorLinkEventData | StaleEventData;
+  fcu_link: FcuLinkEventData | StaleEventData;
+  estop: EstopEventData | StaleEventData;
+  gateway_link: GatewayLinkEventData;
+}
+
+/** One `rover_event` as the backend sends it. */
+export interface RoverEvent<K extends RoverEventKind = RoverEventKind> {
+  kind: K;
+  /** The backend's ordering number (per backend process, across all kinds). Per kind, the highest is current. */
+  seq: number;
+  /** The gateway's own seq; null for gateway_link. Restarts with the gateway: never used for ordering. */
+  gateway_seq: number | null;
+  t_mono_s: number | null;
+  t_wall_ms: number | null;
+  /** Transitions the gateway folded into this event (0 = none lost). */
+  coalesced: number;
+  /** True on the copy sent right after connecting. */
+  replay: boolean;
+  /** The full current value of the kind, never a delta. */
+  data: RoverEventDataByKind[K];
 }
 
 // -----------------------------------------------------------------------------
 // ABI Enums matching dyx3_interfaces and PX4 ABI
 // -----------------------------------------------------------------------------
 
+/** MissionState.msg STATE_* (interfaces 0.15.0; 0..7 frozen, 8..10 appended). */
 export enum MissionStateEnum {
   IDLE = 0,
   LOADING = 1,
@@ -233,6 +328,9 @@ export enum MissionStateEnum {
   COMPLETED = 5,
   ABORTED = 6,
   ERROR = 7,
+  PLACING = 8,
+  ARMING = 9,
+  ENGAGING = 10,
 }
 
 export const MISSION_STATE_NAMES: Record<number, string> = {
@@ -244,7 +342,45 @@ export const MISSION_STATE_NAMES: Record<number, string> = {
   [MissionStateEnum.COMPLETED]: "COMPLETED",
   [MissionStateEnum.ABORTED]: "ABORTED",
   [MissionStateEnum.ERROR]: "ERROR",
+  [MissionStateEnum.PLACING]: "PLACING",
+  [MissionStateEnum.ARMING]: "ARMING",
+  [MissionStateEnum.ENGAGING]: "ENGAGING",
 };
+
+/** MissionState.msg REASON_* (0..17). */
+export enum MissionReasonEnum {
+  NONE = 0,
+  OPERATOR = 1,
+  SAFETY = 2,
+  RTK = 3,
+  PATH_ERROR = 4,
+  INTERNAL_ERROR = 5,
+  EKF_RESET = 6,
+  EKF_REFERENCE_INVALID = 7,
+  PLACEMENT_OUT_OF_BOUNDS = 8,
+  NO_PLACEMENT_FRAME = 9,
+  ARM_REFUSED = 10,
+  ARM_TIMEOUT = 11,
+  OFFBOARD_REFUSED = 12,
+  OFFBOARD_TIMEOUT = 13,
+  RPP_ACK_TIMEOUT = 14,
+  ESTOP = 15,
+  RPP_ERROR = 16,
+  RPP_STALE = 17,
+}
+
+/** MissionState.msg WAIT_*: the step the lifecycle is waiting on. */
+export enum MissionWaitingOnEnum {
+  NONE = 0,
+  ARTIFACT = 1,
+  PLACEMENT = 2,
+  ARM = 3,
+  OFFBOARD = 4,
+  RPP_ACK = 5,
+  OPERATOR = 6,
+  OFFBOARD_RELEASE = 7,
+  DISARM = 8,
+}
 
 export enum RppStateEnum {
   IDLE = 0,

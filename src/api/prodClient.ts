@@ -14,6 +14,9 @@ import type {
   HealthResponse,
   HeartbeatResponse,
   GatewayVerdictResponse,
+  AbortReason,
+  StartMissionRequest,
+  StartMissionResponse,
   MissionsListResponse,
   MissionDetailResponse,
   MissionPathResponse,
@@ -44,7 +47,12 @@ export class ProdApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly reason: string;
-  readonly delivered: boolean;
+  /**
+   * true = the rover answered; false = the command was NOT delivered (nothing happened);
+   * null = unknown (no reply in time: it may or may not have run). A transport failure
+   * before any answer (timeout, network) is also unknown for a command, see isOutcomeUnknown.
+   */
+  readonly delivered: boolean | null;
   readonly data?: Record<string, unknown>;
 
   constructor(
@@ -52,7 +60,7 @@ export class ProdApiError extends Error {
     status: number,
     code = "HTTP_ERROR",
     reason = "",
-    delivered = false,
+    delivered: boolean | null = false,
     data?: Record<string, unknown>
   ) {
     super(message);
@@ -172,10 +180,23 @@ export class ProdApiClient {
 
       if (!response.ok) {
         const status = response.status;
-        const code = (typeof payload === "object" && payload?.code) ? String(payload.code) : `HTTP_${status}`;
-        const reason = (typeof payload === "object" && payload?.reason) ? String(payload.reason) : (typeof payload === "string" ? payload : response.statusText);
-        const delivered = (typeof payload === "object" && typeof payload?.delivered === "boolean") ? payload.delivered : false;
-        const data = (typeof payload === "object" && payload?.data) ? payload.data : undefined;
+        const body = payload !== null && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
+        const code = body?.code ? String(body.code) : `HTTP_${status}`;
+        // Typed bodies carry `reason`; FastAPI's own 401/403/422 carry `detail` (string or a list).
+        const detail =
+          typeof body?.detail === "string"
+            ? body.detail
+            : Array.isArray(body?.detail) && body.detail.length > 0
+              ? String((body.detail[0] as { msg?: unknown })?.msg ?? "")
+              : "";
+        const reason = body?.reason
+          ? String(body.reason)
+          : detail || (typeof payload === "string" && payload ? payload : response.statusText);
+        // `delivered`: true / false as sent; an explicit null (504) stays unknown, never false.
+        const delivered =
+          typeof body?.delivered === "boolean" ? body.delivered : body && body.delivered === null ? null : false;
+        const data =
+          body?.data && typeof body.data === "object" ? (body.data as Record<string, unknown>) : undefined;
 
         throw new ProdApiError(
           reason || `Request failed with status ${status}`,
@@ -198,11 +219,11 @@ export class ProdApiClient {
           408,
           "TIMEOUT",
           "Request timed out",
-          false
+          null
         );
       }
       const msg = err instanceof Error ? err.message : String(err);
-      throw new ProdApiError(msg, 0, "NETWORK_ERROR", msg, false);
+      throw new ProdApiError(msg, 0, "NETWORK_ERROR", msg, null);
     } finally {
       clearTimeout(timer);
     }
@@ -253,7 +274,7 @@ export class ProdApiClient {
   }
 
   /** POST /api/mission/abort */
-  async abortMission(reason = "operator"): Promise<GatewayVerdictResponse> {
+  async abortMission(reason: AbortReason = "operator"): Promise<GatewayVerdictResponse> {
     return this.request<GatewayVerdictResponse>("/api/mission/abort", {
       method: "POST",
       body: { reason },
@@ -298,10 +319,19 @@ export class ProdApiClient {
     });
   }
 
-  /** POST /api/missions/{sha}/start */
-  async startMission(sha: string): Promise<GatewayVerdictResponse> {
-    return this.request<GatewayVerdictResponse>(`/api/missions/${encodeURIComponent(sha)}/start`, {
+  /**
+   * POST /api/missions/{sha}/start with a client `request_id` (the idempotency key).
+   *
+   * Answers 202 `{ok, accepted, execution: {mission_id, request_id, duplicate, gate_reason_code}, data}`:
+   * an acknowledgement only. The lifecycle then arrives as `mission_state` rover events.
+   * A retry of the same user tap must pass the SAME `requestId` (see startTap.ts); the rover then returns
+   * the existing execution with `duplicate: true` instead of starting a second one.
+   */
+  async startMission(sha: string, requestId: string): Promise<StartMissionResponse> {
+    const body: StartMissionRequest = { request_id: requestId };
+    return this.request<StartMissionResponse>(`/api/missions/${encodeURIComponent(sha)}/start`, {
       method: "POST",
+      body,
     });
   }
 

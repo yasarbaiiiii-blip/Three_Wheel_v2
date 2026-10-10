@@ -1,6 +1,6 @@
 import { getProdApiClient } from "./prodClient";
 import { beginTelemetryRequest, ingestTelemetryPacket, getMissionStartTelemetryPose, getAdaptedTelemetrySnapshot, getProdTelemetryState, getTelemetrySourceAgeMs } from "../features/telemetry/prodTelemetryStore";
-import { STALE_THRESHOLD_MS } from "../features/telemetry/staleness";
+import { selectMission } from "../features/mission/missionLifecycle";
 
 export type LoadMissionPayload = {
   path_name?: string;
@@ -178,11 +178,10 @@ export function exportLog(apiBaseUrl: string): Promise<Response> {
 }
 
 export function missionStatusFromTelemetry(): MissionStatus | null {
-  const entry = getProdTelemetryState().snapshot?.mission;
-  const age = getTelemetrySourceAgeMs(entry);
+  const view = selectMission();
   const adapted = getAdaptedTelemetrySnapshot();
-  if (entry?.fresh !== true || age === null || age > STALE_THRESHOLD_MS || !adapted?.mission_state) return null;
-  const id = entry.data.path_artifact_sha256 || null;
+  if (!view.known || !adapted?.mission_state) return null;
+  const id = view.run.executionSha || null;
   return {state: adapted.mission_state, rpp_state: adapted.rpp_state ?? null,
     rpp_state_name: adapted.rpp_state_name ?? "UNKNOWN", dist_to_goal: adapted.dist_to_goal_m ?? null,
     speed: adapted.speed_m_s ?? null, xtrack: adapted.xtrack_m ?? null, loaded_mission_id: id,

@@ -5,12 +5,12 @@ import { GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps, withSpring, withTiming, cancelAnimation, Easing, runOnJS, Keyframe } from "react-native-reanimated";
 import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText, Path, Polyline } from "react-native-svg";
 import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check, Pencil, Undo2, Layers, ChevronRight, Ruler, Spline, LayoutList } from "lucide-react-native";
-import { ManualJoystick } from "./ManualJoystick";
 import { Compass } from "./Compass";
 import { Navbar } from "./Navbar";
-import { pauseMission, nextMission, exportLog } from "../api/missionApi";
+import { useRoverEvents } from "../features/telemetry/roverEventStore";
+import { describeRoverLinks, linkUnknownNote } from "../features/telemetry/roverLinkStatus";
+import { describeMission, missionControls, selectMission } from "../features/mission/missionLifecycle";
 import { MapView } from "./MapView";
-import { canAcquireJoystick as canAcquireJoystickForState } from "../utils/joystickFrontendSafety";
 import { getPlanLineSegmentKind, isSegmentKindVisible } from "../utils/curveGeometry";
 import * as pathApi from "../api/pathApi";
 import { MissionLayerPills } from "./fields/MissionLayerPills";
@@ -265,68 +265,6 @@ const QuickChip = ({ icon: Icon, label, value, tone = COLORS.textMain }) => (
     <Text style={[styles.quickChipValue, { color: tone }]} numberOfLines={1}>{value}</Text>
   </View>
 );
-
-const normalizeVehicleMode = (raw) => {
-  const upper = (raw || "MANUAL").toUpperCase();
-  if (upper === "AUTO" || upper === "MISSION") return "OFFBOARD";
-  return upper;
-};
-
-const VehicleModePill = ({ mode, onPress }) => {
-  const isManual = mode === "MANUAL";
-  const isOffboard = mode === "OFFBOARD";
-  const isOther = !isManual && !isOffboard;
-  const Icon = isManual ? Gamepad2 : isOffboard ? Hexagon : Zap;
-
-  const pillStyle = isOffboard
-    ? styles.pillActiveBrand
-    : isOther
-      ? styles.pillActiveWarn
-      : styles.pillManualIdle;
-
-  const iconColor = isOffboard
-    ? COLORS.accentText
-    : isOther
-      ? COLORS.warning
-      : COLORS.textMuted;
-
-  const textStyle = isOffboard
-    ? styles.pillTextActive
-    : isOther
-      ? styles.pillTextWarn
-      : styles.pillTextIdle;
-
-  return (
-    <Pressable
-      style={[styles.pillButton, pillStyle, isManual && styles.pillButtonDisabled]}
-      onPress={onPress}
-      disabled={isManual}
-    >
-      <Icon
-        color={iconColor}
-        size={16}
-        strokeWidth={2.2}
-        fill={isOffboard ? COLORS.accentText : "transparent"}
-      />
-      <Text style={[styles.pillText, textStyle]}>{mode}</Text>
-      {isOffboard ? (
-        <View style={styles.pillOnBadge}>
-          <Text style={styles.pillOnBadgeText}>ON</Text>
-        </View>
-      ) : null}
-      {isManual ? (
-        <View style={styles.pillReadyBadge}>
-          <Text style={styles.pillReadyBadgeText}>READY</Text>
-        </View>
-      ) : null}
-      {isOther ? (
-        <View style={styles.pillTapBadge}>
-          <Text style={styles.pillTapBadgeText}>→ MANUAL</Text>
-        </View>
-      ) : null}
-    </Pressable>
-  );
-};
 
 const TopBarTogglePill = ({ icon: Icon, label, active, onPress, iconFill }) => (
   <Pressable
@@ -645,15 +583,16 @@ const MAPBOX_STYLES = [
 export default function ModernHomeUI(props) {
   const {
     lines = [], importedPlan, systemHealth, telemetrySnapshot, missionRunning,
-    onNav, onToggleMenu, onArmVehicle, onSetMode, onEstopVehicle,
+    onNav, onToggleMenu, onEstopVehicle,
     onStartPlan, onStopPlan, onClearMission, rtkStatus: rtkStatusProp = EMPTY_RTK_STATUS,
     rtkConnecting = false, startLora, selectedLineId, onSelectLine,
     autoOriginEnabled, mapSourceLines, alignedRefPoints, autoOriginReference,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
     isPlanEditingMode,
     layerVisibility, setLayerVisibility, extensionsEnabled,
-    virtualJoystick, onPausePlan, onResumePlan, isPaused = false, missionActionBusy = false,
-    missionLoaded = false, missionLoadedPanelOpenToken = 0,
+    onPausePlan, onResumePlan, missionActionBusy = false,
+    stagedMissionId = null,
+    missionPanelOpenToken = 0,
     mapViewEnabled = true, setMapViewEnabled, renderPlanPreview,
     csvMapPins = null, showRefPointLabels = false,
     onFocusRover, onFocusPlan,
@@ -687,8 +626,6 @@ export default function ModernHomeUI(props) {
   const [mapStyleIndex, setMapStyleIndex] = useState(0);
   const [showTelemetry, setShowTelemetry] = useState(false);
   const [showMissionControl, setShowMissionControl] = useState(false);
-  const [showJoystick, setShowJoystick] = useState(false);
-  const [pendingJoystickOpen, setPendingJoystickOpen] = useState(false);
   const [quickAccessExpanded, setQuickAccessExpanded] = useState(false);
   const [mapFullscreen, setMapFullscreen] = useState(false);
   const [navExpanded, setNavExpanded] = useState(false);
@@ -696,11 +633,6 @@ export default function ModernHomeUI(props) {
   const [activeNav, setActiveNav] = useState(PAGE_TO_NAV[currentPage] || "main");
   const lastMenuTapRef = useRef(0);
   const lastNavTapRef = useRef({ id: null, time: 0 });
-  const autoArmAttemptedRef = useRef(false);
-  const autoAcquireAttemptedRef = useRef(false);
-  const wasMissionControlOpenRef = useRef(false);
-  const virtualJoystickRef = useRef(virtualJoystick);
-  virtualJoystickRef.current = virtualJoystick;
   const hudLayerRef = useRef(null);
   const quickAccessAnchorRef = useRef(null);
   const [quickAccessAnchor, setQuickAccessAnchor] = useState(QUICK_ACCESS_ANCHOR_FALLBACK);
@@ -804,14 +736,22 @@ export default function ModernHomeUI(props) {
     });
   }, [setLayerVisibility]);
 
-  const vehicleMode = normalizeVehicleMode(telemetrySnapshot?.mode ?? systemHealth?.mode);
-  const isVehicleArmed = telemetrySnapshot?.armed ?? systemHealth?.armed ?? false;
+  // Mission status comes from `rover_event`s only. The rover arms and switches to OFFBOARD itself:
+  // nothing on this screen arms or changes the mode.
+  const roverEvents = useRoverEvents();
+  const missionView = useMemo(() => selectMission(roverEvents), [roverEvents]);
+  const lifecycle = useMemo(() => describeMission(missionView), [missionView]);
+  const controls = useMemo(
+    () => missionControls(missionView, { busy: missionActionBusy, hasMission: Boolean(stagedMissionId) }),
+    [missionView, missionActionBusy, stagedMissionId]
+  );
+  const linkChips = useMemo(() => describeRoverLinks(roverEvents), [roverEvents]);
+  const linkNote = linkUnknownNote(roverEvents);
 
   // Null means the rover does not report battery: show N/A, never a fake 0% / CRIT.
   const batteryPctRaw = telemetrySnapshot?.battery_pct ?? null;
   const hasBattery = batteryPctRaw !== null;
   const batteryPct = batteryPctRaw ?? 0;
-  const missionProgress = lines.length > 0 ? Math.min(100, Math.round(((telemetrySnapshot?.projection_segment_index || 0) / lines.length) * 100)) : 0;
 
   // Derived Telemetry Values
   const lat = telemetrySnapshot?.lat?.toFixed(8) ?? "N/A";
@@ -831,7 +771,8 @@ export default function ModernHomeUI(props) {
   // hrms/vrms displayed in centimetres (m * 100), 2 decimal places
   const hrms = telemetrySnapshot?.hrms != null ? (telemetrySnapshot.hrms * 100).toFixed(2) : "—";
   const vrms = telemetrySnapshot?.vrms != null ? (telemetrySnapshot.vrms * 100).toFixed(2) : "—";
-  const missionStateStr = telemetrySnapshot?.mission_state ?? "unavailable";
+  // From the rover's mission_state events; "unknown" until the rover has reported (never a stale value).
+  const missionStateStr = lifecycle.stateName ? lifecycle.stateName.toLowerCase() : "unknown";
   const xtrack = telemetrySnapshot?.xtrack_m != null ? telemetrySnapshot.xtrack_m.toFixed(2) : "—";
   const headingErr = telemetrySnapshot?.heading_err_deg != null ? telemetrySnapshot.heading_err_deg.toFixed(2) : "—";
   const headingDeg = telemetrySnapshot?.heading_ned_deg != null ? telemetrySnapshot.heading_ned_deg.toFixed(2) : "—";
@@ -846,31 +787,21 @@ export default function ModernHomeUI(props) {
   const rppBlocked = telemetrySnapshot?.rpp_blocked_reason ?? null;
   const rppState = telemetrySnapshot?.rpp_state_name ?? "N/A";
   const rppStateText = rppBlocked ? `${rppState} · ${rppBlocked}` : rppState;
-  const fcuConn = systemHealth?.fcu_connected ? "Connected" : "Disconnected";
+  const fcuChip = linkChips.find((c) => c.key === "fcu");
+  const fcuConn = fcuChip?.tone === "ok" ? "Connected" : fcuChip?.tone === "bad" ? "Disconnected" : "Unknown";
   const poseAge = telemetrySnapshot?.pose_age_ms != null ? telemetrySnapshot.pose_age_ms.toFixed(0) : "—";
   const battV = telemetrySnapshot?.battery_v != null ? telemetrySnapshot.battery_v.toFixed(2) : "—";
   const battA = telemetrySnapshot?.battery_a != null ? telemetrySnapshot.battery_a.toFixed(1) : null;
   const battSub = battV !== "—" || battA
     ? `${battV !== "—" ? `${battV}V` : "—"} · ${battA ? `${battA}A` : "—"}`
     : "No battery data from rover";
-  const joystickState = virtualJoystick?.state ?? "DISABLED";
-  const hasJoystickLease = Boolean(virtualJoystick?.leaseId);
-  const joystickActive = virtualJoystick?.joystickActive || telemetrySnapshot?.joystick_active;
-  const stickEnabled =
-    hasJoystickLease &&
-    (joystickState === "ACTIVE" || joystickState === "HELD");
-  const canAcquireJoystick = canAcquireJoystickForState({
-    missionRunning,
-    frontendState: joystickState,
-    backendJoystickActive: telemetrySnapshot?.joystick_active,
-    controlOwner: telemetrySnapshot?.control_owner,
-  });
-
-  const missionStateTone =
-    missionStateStr === "running" ? COLORS.success
-    : missionStateStr === "paused" ? COLORS.warning
-    : missionStateStr === "error" ? COLORS.danger
+  const toneColor = (tone) =>
+    tone === "ok" ? COLORS.success
+    : tone === "progress" ? COLORS.accentBrand
+    : tone === "warn" ? COLORS.warning
+    : tone === "danger" || tone === "bad" ? COLORS.danger
     : COLORS.textMuted;
+  const missionStateTone = toneColor(lifecycle.tone);
 
   const batteryTone =
     !hasBattery ? COLORS.textMuted
@@ -884,12 +815,6 @@ export default function ModernHomeUI(props) {
     gpsFixSev === "ok" ? COLORS.success
     : gpsFixSev === "warn" ? COLORS.warning
     : COLORS.danger;
-
-  const joystickStateTone =
-    joystickActive ? COLORS.success
-    : hasJoystickLease ? COLORS.accentBrand
-    : joystickState === "BLOCKED_BY_MISSION" ? COLORS.warning
-    : COLORS.textMuted;
 
   useEffect(() => {
     if (!mapViewEnabled && mapFullscreen) setMapFullscreen(false);
@@ -920,77 +845,11 @@ export default function ModernHomeUI(props) {
   }, [currentPage]);
 
   useEffect(() => {
-    if (vehicleMode !== "MANUAL" || missionRunning) {
-      setShowJoystick(false);
-      if (missionRunning) setPendingJoystickOpen(false);
-    }
-  }, [vehicleMode, missionRunning]);
-
-  useEffect(() => {
-    if (!pendingJoystickOpen) return;
-    if (vehicleMode === "MANUAL" && !missionRunning) {
-      setShowJoystick(true);
-      setPendingJoystickOpen(false);
-    }
-  }, [pendingJoystickOpen, vehicleMode, missionRunning]);
-
-  useEffect(() => {
-    if (missionLoadedPanelOpenToken <= 0) return;
+    if (missionPanelOpenToken <= 0) return;
     setShowTelemetry(true);
     setShowMissionControl(true);
-    setShowJoystick(false);
-    setPendingJoystickOpen(false);
     setQuickAccessExpanded(false);
-  }, [missionLoadedPanelOpenToken]);
-
-  useEffect(() => {
-    const wasOpen = wasMissionControlOpenRef.current;
-    wasMissionControlOpenRef.current = showMissionControl;
-
-    if (wasOpen && !showMissionControl) {
-      virtualJoystickRef.current?.release();
-      setShowJoystick(false);
-      setPendingJoystickOpen(false);
-    }
-  }, [showMissionControl]);
-
-  useEffect(() => {
-    if (!showJoystick) {
-      autoArmAttemptedRef.current = false;
-      autoAcquireAttemptedRef.current = false;
-      return;
-    }
-    if (vehicleMode !== "MANUAL" || missionRunning || isVehicleArmed || missionActionBusy) return;
-    if (autoArmAttemptedRef.current || !onArmVehicle) return;
-
-    autoArmAttemptedRef.current = true;
-    void onArmVehicle(true);
-  }, [showJoystick, vehicleMode, missionRunning, isVehicleArmed, missionActionBusy, onArmVehicle]);
-
-  useEffect(() => {
-    if (!showJoystick || vehicleMode !== "MANUAL" || missionRunning || !isVehicleArmed) return;
-    if (
-      !canAcquireJoystick ||
-      hasJoystickLease ||
-      joystickState === "ACQUIRING" ||
-      joystickState === "RELEASING"
-    ) {
-      return;
-    }
-    if (autoAcquireAttemptedRef.current || !virtualJoystick) return;
-
-    autoAcquireAttemptedRef.current = true;
-    virtualJoystick.acquire();
-  }, [
-    showJoystick,
-    vehicleMode,
-    missionRunning,
-    isVehicleArmed,
-    canAcquireJoystick,
-    hasJoystickLease,
-    joystickState,
-    virtualJoystick,
-  ]);
+  }, [missionPanelOpenToken]);
 
   useEffect(() => {
     quickAccessSubNavProgress.value = withTiming(quickAccessExpanded ? 1 : 0, PANEL_TIMING);
@@ -1074,71 +933,11 @@ export default function ModernHomeUI(props) {
 
   const handlePause = () => {
     if (onPausePlan) onPausePlan();
-    else pauseMission(getApiBase()).catch(console.error);
   };
 
   const handleResume = () => {
     if (onResumePlan) onResumePlan();
   };
-
-  const handleNext = () => {
-    nextMission(getApiBase()).catch(console.error);
-  };
-
-  const handleExport = () => {
-    exportLog(getApiBase()).catch(console.error);
-  };
-
-  const handleCloseManualPanel = useCallback(() => {
-    virtualJoystickRef.current?.release();
-    setShowJoystick(false);
-    setPendingJoystickOpen(false);
-  }, []);
-
-  const manualDriveHint = stickEnabled
-    ? "Move the stick to drive. Return to centre or lift finger to stop."
-    : joystickState === "BLOCKED_BY_MISSION"
-      ? "Mission active — stop mission before manual drive."
-      : joystickState === "ACQUIRING"
-        ? "Acquiring joystick control..."
-        : hasJoystickLease
-          ? "Lease held neutral — move the stick to drive."
-          : joystickState === "SUSPENDED"
-            ? "App resumed — close and reopen manual control."
-            : !isVehicleArmed
-              ? missionActionBusy
-                ? "Arming vehicle..."
-                : "Waiting for vehicle arm..."
-              : "Preparing joystick control...";
-
-  const openManualJoystickPanel = useCallback(() => {
-    setShowMissionControl(true);
-    setShowJoystick(true);
-    setPendingJoystickOpen(true);
-    setQuickAccessExpanded(false);
-  }, []);
-
-  const handleSetManualMode = useCallback(async () => {
-    if (missionRunning) {
-      Alert.alert("Mission Running", "Stop the mission before using manual drive.");
-      return;
-    }
-    try {
-      if (onSetMode) {
-        await onSetMode("MANUAL");
-      } else {
-        const res = await fetch(`${getApiBase()}/api/set_mode`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: "MANUAL" }),
-        });
-        if (!res.ok) throw new Error("Set mode failed");
-      }
-      openManualJoystickPanel();
-    } catch {
-      // setVehicleMode surfaces errors via alert/toast
-    }
-  }, [missionRunning, onSetMode, openManualJoystickPanel]);
 
   const handleStartLora = useCallback(() => {
     if (rtkConnecting || !canStartLora) return;
@@ -1587,14 +1386,6 @@ export default function ModernHomeUI(props) {
         <View style={styles.quickAccessSubNavInner} pointerEvents="auto">
           <View style={styles.quickAccessSubNavBridge} />
           <View style={styles.quickAccessSubNavRow}>
-            <Text style={styles.quickSubNavSectionLabel}>Vehicle</Text>
-            <QuickSubNavItem
-              icon={vehicleMode === "MANUAL" ? Gamepad2 : vehicleMode === "OFFBOARD" ? Hexagon : Zap}
-              label={vehicleMode || "MANUAL"}
-              active={vehicleMode === "MANUAL"}
-              onPress={handleSetManualMode}
-            />
-            <View style={styles.quickSubNavDivider} />
             <Text style={styles.quickSubNavSectionLabel}>RTK</Text>
             <QuickSubNavItem
               icon={rtkStatus.running ? Activity : RadioTower}
@@ -1663,7 +1454,7 @@ export default function ModernHomeUI(props) {
     if (!showTelemetry) return null;
 
     const battPctClamped = Math.min(100, Math.max(0, batteryPct));
-    const fcuTone = systemHealth?.fcu_connected ? COLORS.success : COLORS.danger;
+    const fcuTone = toneColor(fcuChip?.tone ?? "unknown");
 
     return (
       <View
@@ -1679,11 +1470,11 @@ export default function ModernHomeUI(props) {
         />
 
         <View style={styles.telemetryQuickStrip}>
-          <QuickChip icon={Radio} label="Gateway" value={telemetrySnapshot?.gateway_connected ? "ONLINE" : "DISCONNECTED"} tone={telemetrySnapshot?.gateway_connected ? COLORS.success : COLORS.danger} />
-          <QuickChip icon={Radio} label="Operator" value={telemetrySnapshot?.operator_alive ? "ALIVE" : "UNAVAILABLE"} tone={telemetrySnapshot?.operator_alive ? COLORS.success : COLORS.danger} />
+          {linkChips.map((chip) => (
+            <QuickChip key={chip.key} icon={Radio} label={chip.label} value={chip.value} tone={toneColor(chip.tone)} />
+          ))}
           <QuickChip icon={Activity} label="Vehicle" value={telemetrySnapshot?.vehicle_telemetry_health ?? "UNAVAILABLE"} tone={telemetrySnapshot?.vehicle_telemetry_health === "LIVE" ? COLORS.success : COLORS.danger} />
           <QuickChip icon={Satellite} label="Fix" value={gpsFix} tone={gpsFixTone} />
-          <QuickChip icon={Radio} label="FCU" value={fcuConn} tone={fcuTone} />
           <QuickChip icon={Battery} label="Batt" value={hasBattery ? `${batteryPct}%` : "N/A"} tone={batteryTone} />
         </View>
 
@@ -1787,18 +1578,26 @@ export default function ModernHomeUI(props) {
     );
   };
 
-  const renderJoystickPanel = () => {
-    return null;
-  };
+  const stepStyleFor = (status) => ({
+    backgroundColor:
+      status === "done" ? COLORS.successMuted
+      : status === "active" ? COLORS.accentMuted
+      : status === "failed" ? COLORS.dangerMuted
+      : COLORS.surfaceSolid,
+    borderColor:
+      status === "done" ? COLORS.successBorder
+      : status === "active" ? COLORS.accentBorder
+      : status === "failed" ? COLORS.dangerBorder
+      : COLORS.panelBorder,
+  });
+  const stepTextColorFor = (status) =>
+    status === "done" ? COLORS.success
+    : status === "active" ? COLORS.accentBrand
+    : status === "failed" ? COLORS.danger
+    : COLORS.textDim;
 
   const renderMissionControl = () => {
     if (!showMissionControl) return null;
-
-    const statusLabel = joystickActive
-      ? "Driving"
-      : hasJoystickLease
-        ? "Lease active"
-        : joystickState.replace(/_/g, " ").toLowerCase();
 
     return (
       <View
@@ -1811,189 +1610,145 @@ export default function ModernHomeUI(props) {
         ]}
       >
         <PanelHeader
-          icon={showJoystick ? Gamepad2 : Route}
-          title={showJoystick ? "Manual Control" : "Mission Control"}
-          subtitle={
-            showJoystick
-              ? stickEnabled
-                ? "Ready to drive"
-                : joystickState === "ACQUIRING"
-                  ? "Acquiring joystick..."
-                  : hasJoystickLease
-                    ? "Lease active — move stick"
-                    : missionActionBusy
-                      ? "Arming vehicle..."
-                      : isVehicleArmed
-                        ? "Preparing joystick..."
-                        : "Preparing manual drive..."
-              : missionRunning
-                ? "Mission in progress"
-                : "Ready to start"
-          }
+          icon={Route}
+          title="Mission Control"
+          subtitle={lifecycle.headline}
           live={missionRunning}
-          onClose={!missionRunning ? () => {
-            if (showJoystick) handleCloseManualPanel();
-            else setShowMissionControl(false);
-          } : undefined}
+          onClose={!missionRunning ? () => setShowMissionControl(false) : undefined}
         />
 
-        <View
-          style={[styles.panelScrollContent, showJoystick && styles.joystickScrollContent]}
-        >
-          {showJoystick && vehicleMode === "MANUAL" && !missionRunning ? (
-            <>
-              <View style={styles.joystickCard}>
-                <ManualJoystick
-                  onChange={(vals) => {
-                    if (virtualJoystick) virtualJoystick.setIntent(vals.forward, vals.yaw);
-                  }}
-                  onRelease={() => {
-                    if (virtualJoystick) virtualJoystick.setIntent(0, 0);
-                  }}
-                  size={160}
-                  knobSize={50}
-                  disabled={!stickEnabled}
+        <ScrollView style={styles.panelScroll} contentContainerStyle={styles.panelScrollContent} showsVerticalScrollIndicator={false}>
+          <View style={styles.lifecycleCard}>
+            <View style={styles.lifecycleTopRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.lifecycleHeadline} numberOfLines={2}>{lifecycle.headline}</Text>
+                {lifecycle.missionId ? <Text style={styles.lifecycleMeta}>Run #{lifecycle.missionId}</Text> : null}
+              </View>
+              <StatusPill
+                label={lifecycle.stateName ?? "UNKNOWN"}
+                tone={missionStateTone}
+                pulse={lifecycle.phase === "starting" || lifecycle.phase === "running"}
+              />
+            </View>
+
+            {lifecycle.unknownText ? (
+              <Text style={styles.lifecycleUnknown}>
+                {lifecycle.unknownText}. Nothing is shown as live until the rover reports again.
+              </Text>
+            ) : null}
+
+            {lifecycle.steps.length > 0 ? (
+              <View style={styles.lifecycleSteps}>
+                {lifecycle.steps.map((step) => (
+                  <View key={step.state} style={[styles.lifecycleStep, stepStyleFor(step.status)]}>
+                    <Text style={[styles.lifecycleStepText, { color: stepTextColorFor(step.status) }]} numberOfLines={1}>
+                      {step.label}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+
+            {lifecycle.waitingText ? <Text style={styles.lifecycleWaiting}>{lifecycle.waitingText}…</Text> : null}
+            {lifecycle.reasonText ? (
+              <Text style={[styles.lifecycleReason, { color: missionStateTone }]}>{lifecycle.reasonText}</Text>
+            ) : null}
+            {lifecycle.detail ? <Text style={styles.lifecycleDetail}>{lifecycle.detail}</Text> : null}
+          </View>
+
+          {linkNote ? (
+            <Text style={styles.lifecycleUnknown}>{linkNote}: link status below is unknown, not live.</Text>
+          ) : null}
+          <View style={styles.linkChipRow}>
+            {linkChips.map((chip) => (
+              <QuickChip key={chip.key} icon={Radio} label={chip.label} value={chip.value} tone={toneColor(chip.tone)} />
+            ))}
+          </View>
+
+          <View style={styles.progressCard}>
+            <View style={styles.progressMetaRow}>
+              <View style={styles.progressMetaItem}>
+                <Text style={styles.progressMetaLabel}>X-Track</Text>
+                <Text style={styles.progressMetaValue}>{xtrack} m</Text>
+              </View>
+              <View style={styles.progressMetaDivider} />
+              <View style={styles.progressMetaItem}>
+                <Text style={styles.progressMetaLabel}>Speed</Text>
+                <Text style={styles.progressMetaValue}>{speed} m/s</Text>
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.missionActionsGrid}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10, width: "100%" }}>
+              <View style={{ flex: 1 }}>
+                <MissionActionBtn
+                  icon={Play}
+                  label={missionActionBusy ? "Working…" : "Start Mission"}
+                  variant="primary"
+                  fullWidth
+                  big
+                  disabled={!controls.canStart}
+                  onPress={onStartPlan}
                 />
-                {!stickEnabled ? (
-                  <View style={styles.joystickOverlay}>
-                    <ShieldAlert color="#fff" size={18} strokeWidth={2} />
-                    <Text style={styles.joystickOverlayText}>
-                      {joystickState === "ACQUIRING"
-                        ? "Acquiring..."
-                        : isVehicleArmed
-                          ? "Preparing drive..."
-                          : missionActionBusy
-                            ? "Arming..."
-                            : "Waiting for arm..."}
-                    </Text>
-                  </View>
-                ) : null}
               </View>
-
-              {/* Throttle & Steering readout at bottom */}
-              {virtualJoystick?.displayIntent ? (
-                <View style={styles.joystickReadoutRow}>
-                  <View style={styles.joystickReadoutItem}>
-                    <Text style={styles.joystickReadoutLabel}>THROTTLE</Text>
-                    <Text style={styles.joystickReadoutValue}>
-                      {virtualJoystick.displayIntent.throttle >= 0 ? "+" : ""}
-                      {virtualJoystick.displayIntent.throttle.toFixed(2)}
-                    </Text>
-                  </View>
-                  <View style={styles.joystickReadoutDivider} />
-                  <View style={styles.joystickReadoutItem}>
-                    <Text style={styles.joystickReadoutLabel}>STEERING</Text>
-                    <Text style={styles.joystickReadoutValue}>
-                      {virtualJoystick.displayIntent.steering >= 0 ? "+" : ""}
-                      {virtualJoystick.displayIntent.steering.toFixed(2)}
-                    </Text>
-                  </View>
-                </View>
+              {!missionRunning ? (
+                <Pressable
+                  onPress={onToggleAutoOrigin}
+                  accessibilityLabel="Auto Origin Checkbox"
+                  style={{
+                    width: 48,
+                    height: 48,
+                    borderRadius: 12,
+                    backgroundColor: autoOrigin ? "rgba(16, 185, 129, 0.15)" : COLORS.surfaceSolid,
+                    borderWidth: 1.5,
+                    borderColor: autoOrigin ? "#10b981" : COLORS.panelBorder,
+                    justifyContent: "center",
+                    alignItems: "center",
+                  }}
+                >
+                  {autoOrigin ? <Check color="#10b981" size={22} strokeWidth={3} /> : null}
+                </Pressable>
               ) : null}
-            </>
-          ) : (
-            <>
-              <View style={styles.progressCard}>
-                <View style={styles.progressTopRow}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                    <Text style={styles.progressTitle}>Route Completed</Text>
-                    <Text style={{ color: missionStateTone, fontSize: 11, fontWeight: "700", textTransform: "lowercase" }}>
-                      • {missionStateStr || "idle"}
-                    </Text>
-                  </View>
-                  <Text style={styles.progressPercent}>{missionProgress}%</Text>
-                </View>
-                <View style={styles.progressBarTrack}>
-                  <View style={[styles.progressBarFill, { width: `${missionProgress}%` }]} />
-                </View>
-                <View style={styles.progressMetaRow}>
-                  <View style={styles.progressMetaItem}>
-                    <Text style={styles.progressMetaLabel}>X-Track</Text>
-                    <Text style={styles.progressMetaValue}>{xtrack} m</Text>
-                  </View>
-                  <View style={styles.progressMetaDivider} />
-                  <View style={styles.progressMetaItem}>
-                    <Text style={styles.progressMetaLabel}>Speed</Text>
-                    <Text style={styles.progressMetaValue}>{speed} m/s</Text>
-                  </View>
-                  <View style={styles.progressMetaDivider} />
-                  <View style={styles.progressMetaItem}>
-                    <Text style={styles.progressMetaLabel}>ETA</Text>
-                    <Text style={styles.progressMetaValue}>--:--</Text>
-                  </View>
-                </View>
+            </View>
+            {!controls.canStart && controls.startBlockedReason ? (
+              <Text style={styles.lifecycleHint}>{controls.startBlockedReason}</Text>
+            ) : null}
+            <View style={{ flexDirection: "row", gap: 10, width: "100%" }}>
+              <View style={{ flex: 1 }}>
+                <MissionActionBtn
+                  icon={Pause}
+                  label="Pause"
+                  variant="warning"
+                  fullWidth
+                  big
+                  disabled={!controls.canPause}
+                  onPress={handlePause}
+                />
               </View>
-
-              <View style={styles.missionActionsGrid}>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 10, width: "100%" }}>
-                  <View style={{ flex: 1 }}>
-                    <MissionActionBtn
-                      icon={missionRunning ? Square : Play}
-                      label={
-                        missionActionBusy
-                          ? missionRunning
-                            ? "Stopping…"
-                            : "Starting…"
-                          : missionRunning
-                            ? "Stop Mission"
-                            : "Start Mission"
-                      }
-                      variant={missionRunning ? "danger" : "primary"}
-                      fullWidth
-                      big
-                      disabled={missionActionBusy}
-                      onPress={missionRunning ? onStopPlan : onStartPlan}
-                    />
-                  </View>
-                  {!missionRunning ? (
-                    <Pressable
-                      onPress={onToggleAutoOrigin}
-                      accessibilityLabel="Auto Origin Checkbox"
-                      style={{
-                        width: 48,
-                        height: 48,
-                        borderRadius: 12,
-                        backgroundColor: autoOrigin ? "rgba(16, 185, 129, 0.15)" : COLORS.surfaceSolid,
-                        borderWidth: 1.5,
-                        borderColor: autoOrigin ? "#10b981" : COLORS.panelBorder,
-                        justifyContent: "center",
-                        alignItems: "center",
-                      }}
-                    >
-                      {autoOrigin ? <Check color="#10b981" size={22} strokeWidth={3} /> : null}
-                    </Pressable>
-                  ) : null}
-                </View>
-                {isPaused ? (
-                  <MissionActionBtn
-                    icon={Play}
-                    label="Resume"
-                    variant="primary"
-                    fullWidth
-                    big
-                    onPress={handleResume}
-                  />
-                ) : (
-                  <MissionActionBtn
-                    icon={Pause}
-                    label="Pause"
-                    variant="warning"
-                    fullWidth
-                    big
-                    onPress={handlePause}
-                  />
-                )}
-                <View style={styles.missionSubActionsRow}>
-                  <MissionActionBtn icon={SkipForward} label="Next" onPress={handleNext} />
-                  <MissionActionBtn icon={Download} label="Export Log" onPress={handleExport} />
-                  {vehicleMode === "MANUAL" && !missionRunning ? (
-                    <MissionActionBtn icon={Gamepad2} label="Joystick" onPress={() => setShowJoystick(true)} />
-                  ) : null}
-                </View>
+              <View style={{ flex: 1 }}>
+                <MissionActionBtn
+                  icon={Play}
+                  label="Resume"
+                  variant="primary"
+                  fullWidth
+                  big
+                  disabled={!controls.canResume}
+                  onPress={handleResume}
+                />
               </View>
-            </>
-          )}
-        </View>
+            </View>
+            <MissionActionBtn
+              icon={Square}
+              label="Stop"
+              variant="danger"
+              fullWidth
+              big
+              disabled={!controls.canStop}
+              onPress={onStopPlan}
+            />
+          </View>
+        </ScrollView>
       </View>
     );
   };
@@ -2106,7 +1861,7 @@ export default function ModernHomeUI(props) {
               {renderMissionControl()}
             </View>
           ) : null}
-          {isHomePage ? <FloatingEStop visible={missionRunning || isVehicleArmed} onTrigger={handleEStop} /> : null}
+          {isHomePage ? <FloatingEStop visible onTrigger={handleEStop} /> : null}
 
           {/* Drawing floating toolbar */}
           {drawingMode !== "none" && (
@@ -2887,49 +2642,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
   },
-  pillManualIdle: {
-    backgroundColor: COLORS.surfaceSolid,
-    borderWidth: 1,
-    borderColor: COLORS.panelBorder,
-  },
-  pillActiveWarn: {
-    backgroundColor: COLORS.warningMuted,
-    borderWidth: 1,
-    borderColor: COLORS.warningBorder,
-  },
-  pillButtonDisabled: {
-    opacity: 0.92,
-  },
-  pillTextWarn: {
-    color: COLORS.warning,
-    fontWeight: "800",
-  },
-  pillReadyBadge: {
-    backgroundColor: COLORS.cardSolid,
-    borderRadius: 6,
-    paddingHorizontal: 5,
-    paddingVertical: 2,
-    borderWidth: 1,
-    borderColor: COLORS.panelBorder,
-  },
-  pillReadyBadgeText: {
-    color: COLORS.textMuted,
-    fontSize: 8,
-    fontWeight: "800",
-    letterSpacing: 0.4,
-  },
-  pillTapBadge: {
-    backgroundColor: COLORS.warning,
-    borderRadius: 6,
-    paddingHorizontal: 5,
-    paddingVertical: 2,
-  },
-  pillTapBadgeText: {
-    color: COLORS.accentText,
-    fontSize: 8,
-    fontWeight: "800",
-    letterSpacing: 0.3,
-  },
   pillText: { fontWeight: "600", fontSize: 12, textTransform: "uppercase", letterSpacing: 0.4 },
   divider: { width: 1, height: TOP_BAR_ITEM_HEIGHT - 8, backgroundColor: COLORS.panelBorder, marginHorizontal: 2, alignSelf: "center" },
 
@@ -3194,18 +2906,37 @@ const styles = StyleSheet.create({
   telemetryPanel: { top: HUD_PAD, right: HUD_PAD },
   missionPanel: { bottom: HUD_PAD, right: HUD_PAD },
   // Content-sized with a ceiling, never a hard pinned height — matches every
-  // other floating HUD panel (mapToolsGroupCard, quickAccessSubNav, joystickPanel).
-  // Applies in both Mission Control and Manual Control (joystick) modes.
+  // other floating HUD panel (mapToolsGroupCard, quickAccessSubNav).
   missionPanelAuto: { maxHeight: "68%", height: "auto" },
-  joystickPanel: {
-    bottom: HUD_PAD,
-    left: HUD_PAD + NAV_WIDTH_COLLAPSED + SIDE_GAP + 8,
-    right: undefined,
-    width: 300,
-    maxHeight: "58%",
-    zIndex: 110,
-  },
+  panelScroll: { flexGrow: 0 },
   panelScrollContent: { paddingBottom: 10, gap: 12 },
+
+  // Mission lifecycle (mission_state events): headline, step chips, waiting-on, reason.
+  lifecycleCard: {
+    backgroundColor: COLORS.cardSolid,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    borderRadius: 16,
+    padding: 14,
+    gap: 10,
+  },
+  lifecycleTopRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  lifecycleHeadline: { color: COLORS.textMain, fontSize: 14, fontWeight: "800" },
+  lifecycleMeta: { color: COLORS.textDim, fontSize: 10, fontWeight: "600", marginTop: 2 },
+  lifecycleSteps: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  lifecycleStep: {
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  lifecycleStepText: { fontSize: 10, fontWeight: "800", letterSpacing: 0.4 },
+  lifecycleWaiting: { color: COLORS.textMuted, fontSize: 11, fontWeight: "600" },
+  lifecycleReason: { fontSize: 12, fontWeight: "700", lineHeight: 17 },
+  lifecycleDetail: { color: COLORS.textMuted, fontSize: 11, lineHeight: 15 },
+  lifecycleUnknown: { color: COLORS.textMuted, fontSize: 11, lineHeight: 15 },
+  lifecycleHint: { color: COLORS.textDim, fontSize: 11, fontWeight: "600" },
+  linkChipRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
 
   panelHeader: {
     flexDirection: "row",
@@ -3461,137 +3192,8 @@ const styles = StyleSheet.create({
   batteryTrack: { height: 5, backgroundColor: COLORS.panelSolid, borderRadius: 999, overflow: "hidden", borderWidth: 1, borderColor: COLORS.panelBorder },
   batteryFill: { height: "100%", borderRadius: 999 },
 
-  joystickScrollContent: { paddingBottom: 10, gap: 14 },
-  manualStatusBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 4,
-  },
-  manualStatusDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-  },
-  manualStatusText: {
-    color: COLORS.textMuted,
-    fontSize: 12,
-    fontWeight: "600",
-    textTransform: "capitalize",
-  },
-  manualMetaRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-    paddingHorizontal: 4,
-  },
-  manualMetaText: {
-    color: COLORS.textMuted,
-    fontSize: 9.5,
-    fontWeight: "700",
-    textTransform: "uppercase",
-  },
-  manualIntentText: {
-    color: COLORS.textMuted,
-    fontSize: 10,
-    textAlign: "center",
-    lineHeight: 15,
-  },
-  manualHintText: {
-    color: COLORS.textDim,
-    fontSize: 10,
-    textAlign: "center",
-    lineHeight: 15,
-    paddingHorizontal: 4,
-  },
-  manualHintTextWarn: {
-    color: COLORS.danger,
-  },
-  manualStopReasonText: {
-    color: COLORS.warning,
-    fontSize: 9.5,
-    textAlign: "center",
-  },
-  joystickCard: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 16,
-    borderRadius: 16,
-    backgroundColor: COLORS.cardSolid,
-    borderWidth: 1,
-    borderColor: COLORS.panelBorder,
-    position: "relative",
-  },
-  joystickOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    borderRadius: 16,
-    backgroundColor: COLORS.overlay,
-  },
-  joystickOverlayText: { color: "#fff", fontSize: 11, fontWeight: "600" },
 
-  joystickReadoutRow: {
-    flexDirection: "row",
-    backgroundColor: COLORS.surfaceSolid,
-    borderWidth: 1,
-    borderColor: COLORS.panelBorder,
-    borderRadius: 12,
-    overflow: "hidden",
-  },
-  joystickReadoutItem: {
-    flex: 1,
-    alignItems: "center",
-    paddingVertical: 10,
-    gap: 4,
-  },
-  joystickReadoutDivider: {
-    width: 1,
-    backgroundColor: COLORS.panelBorder,
-  },
-  joystickReadoutLabel: {
-    color: COLORS.textDim,
-    fontSize: 8,
-    fontWeight: "800",
-    letterSpacing: 0.8,
-    textTransform: "uppercase",
-  },
-  joystickReadoutValue: {
-    color: COLORS.textMain,
-    fontSize: 15,
-    fontWeight: "700",
-    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
-  },
 
-  acquireSegment: {
-    flexDirection: "row",
-    borderRadius: 12,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: COLORS.panelBorder,
-  },
-  acquireSegmentBtn: {
-    flex: 1,
-    height: 40,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  acquireSegmentBtnDisabled: {
-    opacity: 0.45,
-  },
-  acquireSegmentLeft: { backgroundColor: COLORS.accentBrand },
-  acquireSegmentRight: { backgroundColor: COLORS.surfaceSolid },
-  acquireSegmentDivider: {
-    width: 1,
-    backgroundColor: COLORS.panelBorder,
-  },
-  acquireSegmentText: {
-    color: "#fff",
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  acquireSegmentTextDark: { color: COLORS.accentText },
   armToggle: {
     flexDirection: "row",
     alignItems: "center",
@@ -3649,11 +3251,6 @@ const styles = StyleSheet.create({
     borderLeftWidth: 3,
     borderLeftColor: COLORS.accentBrand,
   },
-  progressTopRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  progressTitle: { color: COLORS.textMain, fontSize: 13, fontWeight: "700" },
-  progressPercent: { color: COLORS.accentBrand, fontSize: 16, fontWeight: "800" },
-  progressBarTrack: { height: 8, backgroundColor: COLORS.surfaceSolid, borderRadius: 4, marginTop: 14, overflow: "hidden" },
-  progressBarFill: { height: "100%", backgroundColor: COLORS.accentBrand, borderRadius: 4 },
   progressMetaRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -3682,7 +3279,6 @@ const styles = StyleSheet.create({
   },
 
   missionActionsGrid: { flexDirection: "column", gap: 12 },
-  missionSubActionsRow: { flexDirection: "row", width: "100%", gap: 8 },
   missionActionBtn: {
     minHeight: 48,
     borderRadius: 12,

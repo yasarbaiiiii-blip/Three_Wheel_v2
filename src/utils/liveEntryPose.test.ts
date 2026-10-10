@@ -4,48 +4,15 @@ import {
   LIVE_ENTRY_CACHE_MAX_AGE_MS,
   LIVE_ENTRY_RECHECK_MOVE_M,
   canSkipLiveEntryRestage,
-  classifyLiveEntryStartRequirement,
   entryPoseDrifted,
-  isAppPlannedMissionContext,
   pickRoverPoseForEntry,
-  telemetryToRoverPoseForEntry,
 } from "./liveEntryPose";
-
-describe("telemetryToRoverPoseForEntry", () => {
-  it("returns null for empty / null input", () => {
-    expect(telemetryToRoverPoseForEntry(null)).toBeNull();
-    expect(telemetryToRoverPoseForEntry(undefined)).toBeNull();
-    expect(telemetryToRoverPoseForEntry({})).toBeNull();
-    expect(telemetryToRoverPoseForEntry({ lat: NaN })).toBeNull();
-  });
-
-  it("keeps finite pose fields only", () => {
-    const pose = telemetryToRoverPoseForEntry({
-      lat: 12.9,
-      lon: 77.5,
-      gps_fix: 4,
-      pose_age_ms: 40,
-      pos_n: 1,
-      pos_e: 2,
-    });
-    expect(pose).toEqual({
-      lat: 12.9,
-      lon: 77.5,
-      gps_fix: 4,
-      pose_age_ms: 40,
-      pos_n: 1,
-      pos_e: 2,
-    });
-  });
-});
 
 describe("pickRoverPoseForEntry", () => {
   const cache = { lat: 1, lon: 2, gps_fix: 4, pose_age_ms: 10 };
-  const rest = { lat: 3, lon: 4, gps_fix: 5, pose_age_ms: 20 };
 
-  it("prefers a fresh socket cache over REST", () => {
+  it("uses a fresh socket cache", () => {
     const r = pickRoverPoseForEntry({
-      restPose: rest,
       cachePose: cache,
       cacheReceivedAtMs: Date.now(),
       nowMs: Date.now(),
@@ -57,40 +24,19 @@ describe("pickRoverPoseForEntry", () => {
     }
   });
 
-  it("uses REST when the socket cache is stale", () => {
+  it("accepts a cache received well inside the window", () => {
     const now = 100_000;
     const r = pickRoverPoseForEntry({
-      restPose: rest,
-      cachePose: cache,
-      cacheReceivedAtMs: now - LIVE_ENTRY_CACHE_MAX_AGE_MS - 1,
-      nowMs: now,
-    });
-    expect(r.ok).toBe(true);
-    if (r.ok) {
-      expect(r.source).toBe("rest_latest");
-      expect(r.pose.lat).toBe(3);
-    }
-  });
-
-  it("falls back to fresh socket cache when REST is null", () => {
-    const now = 100_000;
-    const r = pickRoverPoseForEntry({
-      restPose: null,
       cachePose: cache,
       cacheReceivedAtMs: now - 500,
       nowMs: now,
     });
     expect(r.ok).toBe(true);
-    if (r.ok) {
-      expect(r.source).toBe("socket_cache");
-      expect(r.pose.lat).toBe(1);
-    }
   });
 
-  it("rejects stale socket cache", () => {
+  it("rejects a stale socket cache and never falls back to REST", () => {
     const now = 100_000;
     const r = pickRoverPoseForEntry({
-      restPose: null,
       cachePose: cache,
       cacheReceivedAtMs: now - LIVE_ENTRY_CACHE_MAX_AGE_MS - 1,
       nowMs: now,
@@ -100,13 +46,12 @@ describe("pickRoverPoseForEntry", () => {
   });
 
   it("rejects an old source even when its cache receive timestamp is recent", () => {
-    const r = pickRoverPoseForEntry({restPose:null, cachePose:{...cache, pose_age_ms:1001}, cacheReceivedAtMs:100, nowMs:100});
+    const r = pickRoverPoseForEntry({cachePose:{...cache, pose_age_ms:1001}, cacheReceivedAtMs:100, nowMs:100});
     expect(r.ok).toBe(false);
   });
 
   it("rejects cache without receive timestamp", () => {
     const r = pickRoverPoseForEntry({
-      restPose: null,
       cachePose: cache,
       cacheReceivedAtMs: null,
       nowMs: Date.now(),
@@ -114,9 +59,8 @@ describe("pickRoverPoseForEntry", () => {
     expect(r.ok).toBe(false);
   });
 
-  it("rejects when both sources missing", () => {
+  it("rejects when no pose exists", () => {
     const r = pickRoverPoseForEntry({
-      restPose: null,
       cachePose: null,
       cacheReceivedAtMs: null,
       nowMs: Date.now(),
@@ -124,34 +68,15 @@ describe("pickRoverPoseForEntry", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toMatch(/No rover pose/i);
   });
-});
 
-describe("classifyLiveEntryStartRequirement", () => {
-  it("restages when snapshot exists", () => {
-    expect(
-      classifyLiveEntryStartRequirement({
-        hasAppPlannedSnapshot: true,
-        isAppPlannedMission: true,
-      })
-    ).toBe("restage_with_live_entry");
-  });
-
-  it("blocks app-planned without snapshot", () => {
-    expect(
-      classifyLiveEntryStartRequirement({
-        hasAppPlannedSnapshot: false,
-        isAppPlannedMission: true,
-      })
-    ).toBe("block_resend_required");
-  });
-
-  it("allows legacy start for non-app-planned", () => {
-    expect(
-      classifyLiveEntryStartRequirement({
-        hasAppPlannedSnapshot: false,
-        isAppPlannedMission: false,
-      })
-    ).toBe("legacy_start_ok");
+  it("reports the eligibility reasons first", () => {
+    const r = pickRoverPoseForEntry({
+      cachePose: cache,
+      cacheReceivedAtMs: Date.now(),
+      nowMs: Date.now(),
+      eligibility: { ok: false, reasons: ["Gateway disconnected."] },
+    });
+    expect(r).toEqual({ ok: false, error: "Gateway disconnected." });
   });
 });
 
@@ -168,86 +93,21 @@ describe("entryPoseDrifted", () => {
 });
 
 describe("canSkipLiveEntryRestage", () => {
-  it("skips when entry is omitted and the Send mission is still loaded", () => {
+  it("skips when entry is omitted and the Send mission is stored", () => {
     expect(
-      canSkipLiveEntryRestage({
-        entryIncluded: false,
-        loadedVerified: true,
-        loadedMissionId: "stg_1",
-        stagedMissionId: "stg_1",
-        layerScoped: false,
-      })
+      canSkipLiveEntryRestage({ entryIncluded: false, storedVerified: true, layerScoped: false })
     ).toBe(true);
   });
 
-  it("restages when entry is needed, layers are scoped, or ids differ", () => {
+  it("re-uploads when entry is needed, layers are scoped, or nothing is stored", () => {
     expect(
-      canSkipLiveEntryRestage({
-        entryIncluded: true,
-        loadedVerified: true,
-        loadedMissionId: "stg_1",
-        stagedMissionId: "stg_1",
-        layerScoped: false,
-      })
+      canSkipLiveEntryRestage({ entryIncluded: true, storedVerified: true, layerScoped: false })
     ).toBe(false);
     expect(
-      canSkipLiveEntryRestage({
-        entryIncluded: false,
-        loadedVerified: true,
-        loadedMissionId: "stg_1",
-        stagedMissionId: "stg_1",
-        layerScoped: true,
-      })
+      canSkipLiveEntryRestage({ entryIncluded: false, storedVerified: true, layerScoped: true })
     ).toBe(false);
     expect(
-      canSkipLiveEntryRestage({
-        entryIncluded: false,
-        loadedVerified: true,
-        loadedMissionId: "stg_old",
-        stagedMissionId: "stg_new",
-        layerScoped: false,
-      })
-    ).toBe(false);
-    expect(
-      canSkipLiveEntryRestage({
-        entryIncluded: false,
-        loadedVerified: false,
-        loadedMissionId: "stg_1",
-        stagedMissionId: "stg_1",
-        layerScoped: false,
-      })
-    ).toBe(false);
-  });
-});
-
-describe("isAppPlannedMissionContext", () => {
-  it("true for any app-planned signal", () => {
-    expect(
-      isAppPlannedMissionContext({
-        hasAppPlannedSnapshot: false,
-        isCsvMission: true,
-        isLocalDxfAppPlanned: false,
-        hasStagedHydrationLines: false,
-      })
-    ).toBe(true);
-    expect(
-      isAppPlannedMissionContext({
-        hasAppPlannedSnapshot: false,
-        isCsvMission: false,
-        isLocalDxfAppPlanned: false,
-        hasStagedHydrationLines: true,
-      })
-    ).toBe(true);
-  });
-
-  it("false when none match", () => {
-    expect(
-      isAppPlannedMissionContext({
-        hasAppPlannedSnapshot: false,
-        isCsvMission: false,
-        isLocalDxfAppPlanned: false,
-        hasStagedHydrationLines: false,
-      })
+      canSkipLiveEntryRestage({ entryIncluded: false, storedVerified: false, layerScoped: false })
     ).toBe(false);
   });
 });

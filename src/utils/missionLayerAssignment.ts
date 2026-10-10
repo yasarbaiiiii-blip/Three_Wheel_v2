@@ -137,17 +137,31 @@ export function applyMissionTerminalOutcome(
   });
 }
 
+/** Lower-case `mission_state` names (from rover events) while an execution holds the vehicle. */
+const ACTIVE_MISSION_STATE_NAMES: readonly string[] = [
+  "loading",
+  "placing",
+  "arming",
+  "engaging",
+  "ready",
+  "running",
+  "paused",
+];
+
 /**
- * Interpret mission_state transition for finished bookkeeping.
- * Only `completed` marks finished; `idle` after running is stop/abort.
+ * Interpret a mission_state transition for finished bookkeeping.
+ * Only a transition seen from an active state counts: `completed` marks the layer finished,
+ * `aborted` is a stop (not finished), `error` a failure. Nothing is concluded from an unknown
+ * state (first event after a reconnect) or from idle.
  */
 export function outcomeFromMissionStateTransition(
   prev: string | null | undefined,
   current: string | null | undefined
-): "completed" | "stopped" | null {
-  if (prev !== "running") return null;
+): "completed" | "stopped" | "failed" | null {
+  if (!prev || !ACTIVE_MISSION_STATE_NAMES.includes(prev)) return null;
   if (current === "completed") return "completed";
-  if (current === "idle") return "stopped";
+  if (current === "aborted") return "stopped";
+  if (current === "error") return "failed";
   return null;
 }
 

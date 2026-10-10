@@ -8,7 +8,7 @@
  * must equal what was sent. Status never comes from polling; the only reads are
  * the upload answer and one optional geometry read-back at Send.
  *
- * The committing step (load to controller, then Start) is deliberately NOT
+ * The committing step (Start) is deliberately NOT
  * here. This module stops at a stored mission the operator can still walk away
  * from.
  */
@@ -44,7 +44,7 @@ export const MISSION_STAGE_STEP_LABELS: Record<MissionStageStep, string> = {
 
 /** What the rover stored, as reported by its answer and the app's own run lengths. */
 export type AdmittedMission = {
-  /** Content hash of the stored artifact: the mission id used by Load and Start. */
+  /** Content hash of the stored artifact: the mission id used by Start. */
   missionId: string;
   mission: AppPlannedMissionSummary;
   normalisation: AppPlannedNormalisation;
@@ -64,8 +64,8 @@ export type MissionStageResult = {
   admitted?: AdmittedMission;
   /** The exact payload that was sent. */
   payload?: AppPlannedMissionRequest;
-  /** True when verification failed: Load must stay blocked. */
-  loadBlocked?: boolean;
+  /** True when verification failed: Start must stay blocked. */
+  startBlocked?: boolean;
 };
 
 function issuesToMessage(issues: AdmissionIssue[]): string {
@@ -145,11 +145,11 @@ export async function stageAppPlannedMission(args: {
     return {
       success: false,
       failedStep: "verify",
-      loadBlocked: true,
+      startBlocked: true,
       missionName,
       missionId,
       payload,
-      error: `The rover's stored mission does not match what was sent. Load blocked.\n${issuesToMessage(verdict.issues)}`,
+      error: `The rover's stored mission does not match what was sent. Start blocked.\n${issuesToMessage(verdict.issues)}`,
     };
   }
 
@@ -161,22 +161,22 @@ export async function stageAppPlannedMission(args: {
         return {
           success: false,
           failedStep: "verify",
-          loadBlocked: true,
+          startBlocked: true,
           missionName,
           missionId,
           payload,
-          error: `The rover's stored geometry does not match what was sent. Load blocked.\n${issuesToMessage(issues)}`,
+          error: `The rover's stored geometry does not match what was sent. Start blocked.\n${issuesToMessage(issues)}`,
         };
       }
     } catch (err) {
       return {
         success: false,
         failedStep: "verify",
-        loadBlocked: true,
+        startBlocked: true,
         missionName,
         missionId,
         payload,
-        error: `Could not read the stored mission back to verify it. Load blocked.\n${describeMissionPlanFailure(err)}`,
+        error: `Could not read the stored mission back to verify it. Start blocked.\n${describeMissionPlanFailure(err)}`,
       };
     }
   }

@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import * as store from "../prodTelemetryStore";
 import type { RoverTelemetrySnapshot } from "../../../contract/prod/realtime";
+import { liveRover, operatorLinkData, pushRoverEvent } from "../../../test/roverEvents";
 
 function snapshot(): RoverTelemetrySnapshot {
   return {
@@ -10,12 +11,10 @@ function snapshot(): RoverTelemetrySnapshot {
   } as RoverTelemetrySnapshot;
 }
 const ingest = (snap = snapshot(), age_s = 0, options: Record<string, unknown> = {}) =>
-  (store as any).ingestTelemetryPacket
-    ? (store as any).ingestTelemetryPacket({ snapshot: snap, age_s, connected: true }, { source: "socket", ...options })
-    : store.applyProdTelemetrySnapshot(snap, true);
+  store.ingestTelemetryPacket({ snapshot: snap, age_s }, { source: "socket", ...options } as any);
 
 describe("production telemetry failure contract", () => {
-  beforeEach(() => { vi.useFakeTimers(); store.clearProdTelemetry(); (store as any).setProdSocketConnected?.(true); });
+  beforeEach(() => { vi.useFakeTimers(); store.clearProdTelemetry(); (store as any).setProdSocketConnected?.(true); liveRover(); });
   afterEach(() => { store.clearProdTelemetry(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
   it("cached envelopes and source ages add rather than resetting freshness", () => {
@@ -64,11 +63,16 @@ describe("production telemetry failure contract", () => {
   });
   it("gateway loss, operator loss and silent telemetry are distinct", () => {
     let now = 100; vi.spyOn(performance, "now").mockImplementation(() => now);
-    ingest(); store.setProdGatewayConnected(false);
+    ingest(); pushRoverEvent("gateway_link", { connected: false });
     expect((store as any).evaluateMissionStartTelemetry().reasons).toContain("Gateway disconnected.");
-    const s = snapshot(); s.gateway!.operator_alive = false; ingest(s);
+    // The gateway comes back (its replay re-establishes the kinds): the operator link is lost.
+    pushRoverEvent("gateway_link", { connected: true });
+    pushRoverEvent("operator_link", operatorLinkData(false));
+    ingest();
     expect(store.getProdTelemetryState().gatewayConnected).toBe(true);
+    expect(store.getProdTelemetryState().operatorAlive).toBe(false);
     expect((store as any).evaluateMissionStartTelemetry().reasons).toContain("Operator heartbeat unavailable.");
+    pushRoverEvent("operator_link", operatorLinkData(true));
     ingest(); now += 2501;
     expect((store as any).evaluateMissionStartTelemetry().reasons).toContain("Telemetry disconnected or silent.");
   });

@@ -12,6 +12,10 @@
  * - Heartbeat interval measurement (500 ms target, actual measured interval & jitter).
  * - Last command result verbatim (ok, code, reason, delivered, data).
  * - Controls: Arm/Disarm, Offboard On/Off, Mission Start/Pause/Resume/Abort/SkipPoint.
+ *   This is a SEPARATE engineering tool (own connection panel, reached from the connection screen).
+ *   The arm and OFFBOARD buttons live only here: the operator mission flow never arms and never
+ *   changes mode, the rover does both (mission contract v2).
+ * - Mission state is read from `mission_state` rover events, like the operator screen.
  * - E-stop: 1-tap assert; clearing protected by confirmation modal.
  * - Mission upload (client half of GAP-04): POST /api/missions/plan. Clearly indicates 404 if unimplemented.
  * - Spray controls: HIDDEN / DISABLED for Saturday.
@@ -68,10 +72,10 @@ import {
   useProdTelemetry,
   getDerivedVehiclePose,
   getOverallStaleness,
-  applyProdTelemetrySnapshot,
-  setProdGatewayConnected,
-  clearProdTelemetry,
 } from "../features/telemetry/prodTelemetryStore";
+import { useRoverEvents } from "../features/telemetry/roverEventStore";
+import { selectMission } from "../features/mission/missionLifecycle";
+import { beginStartTap } from "../features/mission/startTap";
 import {
   MissionStateEnum,
   MISSION_STATE_NAMES,
@@ -161,6 +165,7 @@ export function DebugDriveScreen({ onBack, currentPlanLines, originGps }: DebugD
 
   // Telemetry store hook
   const telemetry = useProdTelemetry();
+  const roverEvents = useRoverEvents();
   const vehiclePose = getDerivedVehiclePose();
   const overallStaleness = getOverallStaleness();
 
@@ -396,9 +401,11 @@ export function DebugDriveScreen({ onBack, currentPlanLines, originGps }: DebugD
     const client = getProdApiClient();
     setCommandBusy(true);
     const cmdName = `POST /api/missions/${selectedMissionSha.slice(0, 8)}.../start`;
+    // One tap = one request id; an unknown outcome is retried once with the same id.
+    const tap = beginStartTap(selectedMissionSha);
     try {
-      const res = await client.startMission(selectedMissionSha);
-      recordResult(cmdName, 200, res);
+      const res = await tap.submit(client);
+      recordResult(cmdName, 202, res as unknown as Record<string, unknown>);
     } catch (err) {
       const apiErr = err instanceof ProdApiError ? err : null;
       recordResult(
@@ -496,12 +503,16 @@ export function DebugDriveScreen({ onBack, currentPlanLines, originGps }: DebugD
 
   // ---- Derived State Fields ----
   const snap = telemetry.snapshot;
-  const isEstopAsserted = Boolean(telemetry.estopAsserted || snap?.emergency_stop?.data?.asserted);
-  const estopSource = telemetry.estopSource || snap?.emergency_stop?.data?.source || "unknown";
+  // E-stop, gateway link and mission state come from `rover_event`s (unknown reads as unknown, never the last value).
+  const isEstopAsserted = telemetry.estopAsserted;
+  const estopSource = telemetry.estopSource || "unknown";
 
-  const missionStateNum = snap?.mission?.data?.state ?? MissionStateEnum.IDLE;
-  const missionStateName = MISSION_STATE_NAMES[missionStateNum] ?? `UNKNOWN(${missionStateNum})`;
-  const activeMissionSha = snap?.mission?.data?.path_artifact_sha256 || "";
+  const missionView = selectMission(roverEvents);
+  const missionStateNum = missionView.known ? missionView.run.state : null;
+  const missionStateName = missionView.known
+    ? MISSION_STATE_NAMES[missionView.run.state] ?? `UNKNOWN(${missionView.run.state})`
+    : "UNKNOWN";
+  const activeMissionSha = missionView.known ? missionView.run.executionSha : "";
 
   const rppStateNum = snap?.rpp?.data?.state ?? RppStateEnum.IDLE;
   const rppStateName = RPP_STATE_NAMES[rppStateNum] ?? `UNKNOWN(${rppStateNum})`;
@@ -898,7 +909,7 @@ export function DebugDriveScreen({ onBack, currentPlanLines, originGps }: DebugD
             <View style={styles.metricCard}>
               <Text style={styles.metricCardLabel}>Mission FSM State</Text>
               <Text style={[styles.metricCardVal, styles.valGood]}>
-                {missionStateName} ({missionStateNum})
+                {missionStateName}{missionStateNum !== null ? ` (${missionStateNum})` : ""}
               </Text>
             </View>
 

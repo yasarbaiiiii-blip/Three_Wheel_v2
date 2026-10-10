@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Platform, Text, TouchableOpacity, View } from "react-native";
 
-import type * as pathApi from "../../../api/pathApi";
 import type { StagedPlanResultState, StagedWorkflowStatus, StagedWorkflowStep } from "../../../types/fieldsWorkflow";
 import type { PlanLine } from "../../../types/plan";
 import type { MissionLayer } from "../../../types/missionLayers";
@@ -89,17 +88,16 @@ type CsvStageAndLoadPanelProps = {
   onSelectLine: (id: string | null) => void;
   setStagedMissionId: React.Dispatch<React.SetStateAction<string | null>>;
   setStagedPlanResult: React.Dispatch<React.SetStateAction<StagedPlanResultState | null>>;
-  setStagedMissionInspection: React.Dispatch<React.SetStateAction<pathApi.StagedMissionResponse | null>>;
   /** Map projection origin — must be set with staged geometry (never independently). */
   setAlignedRefPoints?: React.Dispatch<
     React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>
   >;
   onWorkflowStep?: (step: StagedWorkflowStep, status: StagedWorkflowStatus) => void;
-  /** App's staged-load commit: loads to the controller, verifies, re-hydrates, navigates. */
-  onLoadSelectedPath: (
-    missionId?: string,
-    opts?: import("../../../api/missionApi").LoadMissionOptions
-  ) => boolean | Promise<boolean>;
+  /**
+   * The mission is stored on the rover and verified. There is no load step: Start (on Home) does
+   * everything. The app uses this to open the mission screen.
+   */
+  onMissionStored: (missionId: string) => void;
   missionActionBusy: boolean;
   onBeginPathExclusive?: (kind: "send") => boolean;
   onEndPathExclusive?: (kind: "send") => void;
@@ -110,11 +108,14 @@ function metres(value: number | null | undefined): string {
 }
 
 /**
- * Verify & Load panel (Send to Rover) — status, block reason, Send.
+ * Send panel (Send to Rover) — status, block reason, Send.
  *
  * - CSV: fit points → buildTrajectory → app-planned mission (`POST /api/missions/plan`).
  * - DXF (`sourceKind === "dxf"`): real file path geometry in `lines` → the same path.
  *   Never re-fits CAD entities; never uploads the DXF file.
+ *
+ * Send stores the mission on the rover and verifies what was stored. Nothing else is staged:
+ * there is no load step, Start does everything.
  */
 export function CsvStageAndLoadPanel({
   apiBaseUrl,
@@ -136,10 +137,9 @@ export function CsvStageAndLoadPanel({
   onSelectLine: _onSelectLine,
   setStagedMissionId,
   setStagedPlanResult,
-  setStagedMissionInspection,
   setAlignedRefPoints: _setAlignedRefPoints,
   onWorkflowStep,
-  onLoadSelectedPath,
+  onMissionStored,
   missionActionBusy,
   onBeginPathExclusive,
   onEndPathExclusive,
@@ -157,10 +157,10 @@ export function CsvStageAndLoadPanel({
   void _mapPinCount;
   const [busy, setBusy] = useState(false);
   const sendInFlightRef = useRef(false);
-  const [step, setStep] = useState<MissionStageStep | "loadMission" | null>(null);
+  const [step, setStep] = useState<MissionStageStep | null>(null);
   const [staged, setStaged] = useState<AdmittedMission | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loadBlocked, setLoadBlocked] = useState(false);
+  const [startBlocked, setStartBlocked] = useState(false);
   /** Operator accepted remaining non-paintable painted paths (they are still refused in buildTrajectory). */
   const [geometryAcknowledged, setGeometryAcknowledged] = useState(false);
   /** Operator confirmed critical parse-frame warnings. */
@@ -256,32 +256,17 @@ export function CsvStageAndLoadPanel({
     (appTrajectory?.runs.length ?? 0) < 1 ||
     resolvedOriginGps == null;
 
-  const stepLabel =
-    step === "loadMission"
-      ? "Loading to controller…"
-      : step
-        ? MISSION_STAGE_STEP_LABELS[step]
-        : null;
+  const stepLabel = step ? MISSION_STAGE_STEP_LABELS[step] : null;
 
-  const applyStagedSuccess = async (admitted: AdmittedMission, allowLoad: boolean) => {
+  const applyStagedSuccess = (admitted: AdmittedMission) => {
     setStaged(admitted);
     setStagedMissionId(admitted.missionId);
-    setStagedMissionInspection(null);
     setStagedPlanResult(stagedPlanResultFromAdmitted(admitted));
     onWorkflowStep?.("staged", "verified");
-    onWorkflowStep?.("loaded", "pending");
-
-    // Keep operator DXF/CSV segments on the map. Hydrating densified rover
-    // waypoints here collapsed every painted run into one `rover-path-N` line
-    // so Path Order could no longer toggle spray per original segment.
-    // Load still posts to the controller; skipMapHydration keeps `lines` intact.
-    if (allowLoad) {
-      setLoadBlocked(false);
-      setStep("loadMission");
-      await onLoadSelectedPath(admitted.missionId, {
-        skipMapHydration: true,
-      });
-    }
+    setStartBlocked(false);
+    // Keep operator DXF/CSV segments on the map: the rover's densified waypoints are never
+    // hydrated back, so Path Order keeps one row per original segment.
+    onMissionStored(admitted.missionId);
   };
 
   const handleSendAppPlanned = async () => {
@@ -337,7 +322,7 @@ export function CsvStageAndLoadPanel({
     setBusy(true);
     setError(null);
     setStep(null);
-    setLoadBlocked(false);
+    setStartBlocked(false);
     await yieldToUi();
     try {
       // CSV: paintedLines are frontend-fitted from survey points.
@@ -369,10 +354,10 @@ export function CsvStageAndLoadPanel({
       if (!result.success || !result.admitted) {
         const message = result.error || "Could not stage the trajectory.";
         setError(message);
-        setLoadBlocked(result.loadBlocked === true);
+        setStartBlocked(result.startBlocked === true);
         onWorkflowStep?.("staged", "failed");
         Alert.alert(
-          result.loadBlocked ? "Verification Failed — Load Blocked" : "Send Failed",
+          result.startBlocked ? "Verification Failed — Start Blocked" : "Send Failed",
           `Failed at step "${MISSION_STAGE_STEP_LABELS[result.failedStep ?? "build"]}"\n\n${message}`
         );
         return;
@@ -389,7 +374,7 @@ export function CsvStageAndLoadPanel({
         })
       );
 
-      await applyStagedSuccess(result.admitted, true);
+      applyStagedSuccess(result.admitted);
     } catch (err) {
       const message = err instanceof Error && err.message ? err.message : "Could not send the path.";
       setError(message);
@@ -405,10 +390,10 @@ export function CsvStageAndLoadPanel({
   return (
     <View style={{ gap: 10 }}>
       {/* Compact status — only when something needs attention or send is running */}
-      {(busy || error || loadBlocked || staged) && (
+      {(busy || error || startBlocked || staged) && (
         <Text
           style={{
-            color: error || loadBlocked
+            color: error || startBlocked
               ? FIELDS_COLORS.danger
               : staged
                 ? FIELDS_COLORS.success
@@ -422,10 +407,10 @@ export function CsvStageAndLoadPanel({
             ? stepLabel ?? "Working…"
             : error
               ? error
-              : loadBlocked
-                ? "Load blocked"
+              : startBlocked
+                ? "Start blocked"
                 : staged
-                  ? `Loaded · ${metres(staged.markLengthM)}`
+                  ? `Sent · ${metres(staged.markLengthM)}`
                   : ""}
         </Text>
       )}

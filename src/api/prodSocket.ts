@@ -9,12 +9,16 @@
  * 5. Immediate "disconnected" status on disconnect.
  * 6. AppState listener: tablet wake-up / app foregrounding checks connection immediately.
  * 7. Fixed-rate heartbeat emit via socket "heartbeat" event (capped at 350ms).
+ * 8. Inbound: "telemetry" (periodic snapshot) and "rover_event" (the one status event: mission_state,
+ *    operator_link, fcu_link, estop, gateway_link; per kind the highest seq wins, see roverEventStore).
+ *    There is no "gateway" or "mission_event" event any more.
  */
 
 import { io, type Socket } from "socket.io-client";
 import { AppState, type NativeEventSubscription } from "react-native";
-import type { TelemetryPacket, GatewayEventPacket } from "../contract/prod/realtime";
-import { ingestTelemetryPacket, setProdGatewayConnected, setProdSocketConnected, invalidateTelemetrySession } from "../features/telemetry/prodTelemetryStore";
+import { ROVER_EVENT, type TelemetryPacket } from "../contract/prod/realtime";
+import { ingestTelemetryPacket, setProdSocketConnected, invalidateTelemetrySession } from "../features/telemetry/prodTelemetryStore";
+import { ingestRoverEvent, setRoverSocketConnected } from "../features/telemetry/roverEventStore";
 
 export type ProdSocketStatus = "disconnected" | "connecting" | "connected" | "error" | "unauthorized";
 export type SocketStatusListener = (status: ProdSocketStatus, detail?: string) => void;
@@ -41,7 +45,7 @@ export class ProdSocketManager {
             if (this.socket) {
               if (!this.socket.connected) {
                 this.setStatus("disconnected", "app_foreground_offline");
-                setProdGatewayConnected(false);
+                setRoverSocketConnected(false);
                 this.socket.connect();
               }
             }
@@ -106,6 +110,9 @@ export class ProdSocketManager {
 
         this.socket.on("connect", () => {
           clearTimeout(timer);
+          // A new connection: forget every kind. The backend now replays the latest event of each
+          // kind (replay:true) before anything else, so the state is rebuilt without polling.
+          setRoverSocketConnected(true);
           setProdSocketConnected(true);
           this.setStatus("connected");
           if (!resolved) {
@@ -115,9 +122,10 @@ export class ProdSocketManager {
         });
 
         this.socket.on("disconnect", (reason) => {
+          // Nothing is known about the rover while the link is down: never keep the last values.
+          setRoverSocketConnected(false);
           setProdSocketConnected(false);
           this.setStatus("disconnected", String(reason));
-          setProdGatewayConnected(false);
         });
 
         this.socket.on("connect_error", (err) => {
@@ -159,13 +167,9 @@ export class ProdSocketManager {
           }
         });
 
-        this.socket.on("gateway", (packet: GatewayEventPacket | string) => {
-          try {
-            const data: GatewayEventPacket = typeof packet === "string" ? JSON.parse(packet) : packet;
-            setProdGatewayConnected(Boolean(data?.connected));
-          } catch (e) {
-            console.warn("[ProdSocket] Error parsing gateway event:", e);
-          }
+        this.socket.on(ROVER_EVENT, (packet: unknown) => {
+          const result = ingestRoverEvent(packet);
+          if (result === "invalid") console.warn("[ProdSocket] Ignored a malformed rover_event:", packet);
         });
       } catch (err) {
         this.setStatus("error", err instanceof Error ? err.message : String(err));
@@ -254,6 +258,7 @@ export class ProdSocketManager {
   }
 
   disconnect() {
+    setRoverSocketConnected(false);
     setProdSocketConnected(false);
     if (this.socket) {
       this.socket.removeAllListeners();
@@ -261,7 +266,6 @@ export class ProdSocketManager {
       this.socket = null;
     }
     this.setStatus("disconnected");
-    setProdGatewayConnected(false);
   }
 
   destroy() {
