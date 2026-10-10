@@ -12,8 +12,8 @@ import {
   buildCsvExtensionPreviews,
   buildExtensionTransitLines,
   csvExtensionLengthM,
-  isLineLikePlanLine,
   normalizeCsvExtensionConfig,
+  terminalUnitVector,
   type CsvExtensionConfig,
   type CsvExtensionPreview,
 } from "./missionExtensions";
@@ -138,11 +138,10 @@ export const CURVE_DIRECTION_WARN_MIN_M = 1;
 /**
  * For each curve (ARC/CIRCLE) in an already-ordered painted sequence, compare the
  * transit gap actually needed to enter it against the gap that would be needed if it
- * could be entered from its other end. A large gap between the two means this curve's
- * authored rotation direction is fighting the walk direction —
- * {@link chainMarkLinesByGeometry} cannot fix this (curves are never reversed; see
- * `analyticCurveTangents` in missionExtensions.ts), so this surfaces it for the operator
- * to fix at the source (re-author the arc, or accept the transit).
+ * were driven the other way. A large gap between the two means this curve's direction is
+ * fighting the walk direction. {@link chainMarkLinesByGeometry} already drives curves
+ * either way when it orders a file, so this is for orders it did not produce (operator
+ * drag-and-drop, a re-anchored path) — it surfaces the avoidable transit for the operator.
  *
  * Heuristic, not a global optimum: only checks the immediate entry gap, not knock-on
  * effects reversing this curve would have on the rest of the walk.
@@ -258,10 +257,10 @@ export function defaultPathOrder(markLines: PlanLine[]): CsvPathOrderEntry[] {
 
 // ── Geometric chaining (seeds the default order for CAD imports) ──────────────
 
+type Ned = [number, number];
+
 /** First and last point of a plan line, in [north, east]. */
-function lineEndpoints(
-  line: PlanLine
-): { start: [number, number]; end: [number, number] } | null {
+function lineEndpoints(line: PlanLine): { start: Ned; end: Ned } | null {
   const pts = planLineToNedPolyline(line);
   if (!pts || pts.length < 2) return null;
   return { start: pts[0], end: pts[pts.length - 1] };
@@ -270,9 +269,10 @@ function lineEndpoints(
 /**
  * Same line driven the other way: vertices reversed, `from`/`to` swapped.
  *
- * Only ever applied to line-like geometry. An ARC/CIRCLE takes its extension tangents from
- * `geometry.startAngle`/`endAngle` via `analyticCurveTangents`, which reversing the sampled
- * points alone would not flip — the run-ups would then point back into the curve.
+ * Valid for every geometry, curves included. An ARC/CIRCLE derives its extension tangents
+ * from the direction its polyline actually runs (see `analyticCurveTangents` in
+ * missionExtensions.ts), so a reversed arc's run-up and run-out flip with the points and
+ * stay consistent with `planLineToNedPolyline`, the trajectory and the preview.
  */
 export function reversePlanLineDirection(line: PlanLine): PlanLine {
   const entity = line.entity;
@@ -292,64 +292,382 @@ export function reversePlanLineDirection(line: PlanLine): PlanLine {
   };
 }
 
+/** Rover start position in the plan frame: [north, east] metres. */
+export type ChainStartPosition = readonly [number, number];
+
+export type ChainOptions = {
+  /**
+   * Where the rover starts. When given, the greedy walk may begin at the nearest endpoint to
+   * it and the travel from this point to the first mark counts in every cost. Omitted: the
+   * walk is free to start anywhere and the entry leg costs nothing.
+   */
+  startPosition?: ChainStartPosition | null;
+  /**
+   * Extension config the order will be driven with. Run-ups shift where the rover leaves one
+   * mark and joins the next, which decides what a connector drives over. Disabled or omitted:
+   * connectors span mark end to next mark start.
+   */
+  extensionConfig?: Partial<CsvExtensionConfig> | null;
+};
+
 /**
- * Greedy nearest-endpoint walk over `placeable`, seeded at `placeable[seedIdx]` (optionally
- * driven backwards if it's line-like). Pure helper — does not know about `unplaceable`/`others`.
+ * Cost, in metres, charged for each mark already on the ground that a connector drives over
+ * (wet paint). Port of `wet_paint_penalty_m` in the rover's `segment_order.py`.
  */
-function greedyChainFrom(
-  placeable: PlanLine[],
-  seedIdx: number,
-  seedReversed: boolean
-): PlanLine[] {
-  const remaining = placeable.slice();
-  const [seed] = remaining.splice(seedIdx, 1);
-  const chained: PlanLine[] = [seedReversed ? reversePlanLineDirection(seed) : seed];
-  let cursor = lineEndpoints(chained[0])!.end;
+export const WET_PAINT_PENALTY_M = 5;
 
-  while (remaining.length > 0) {
-    let bestIdx = 0;
-    let bestDist = Infinity;
-    let bestReversed = false;
+/**
+ * Improvement passes (2-opt slice reversal, or-opt relocation) run only up to this many
+ * placeable marks; above it the multi-start greedy result is returned as is. Port of the
+ * rover's `max_two_opt_segments`.
+ */
+export const CHAIN_OPTIMIZE_MAX_MARKS = 80;
 
-    remaining.forEach((line, idx) => {
-      const ends = lineEndpoints(line);
-      if (!ends) return;
-      const forward = Math.hypot(ends.start[0] - cursor[0], ends.start[1] - cursor[1]);
-      if (forward < bestDist) {
-        bestDist = forward;
-        bestIdx = idx;
-        bestReversed = false;
-      }
-      // A path whose far end is the nearer one continues the walk only when driven
-      // backwards. Curves keep their authored direction (see reversePlanLineDirection).
-      if (!isLineLikePlanLine(line)) return;
-      const backward = Math.hypot(ends.end[0] - cursor[0], ends.end[1] - cursor[1]);
-      if (backward < bestDist) {
-        bestDist = backward;
-        bestIdx = idx;
-        bestReversed = true;
-      }
-    });
+/** Fewer marks than this are left to the greedy walk (the rover's 2-opt returns early). */
+const CHAIN_OPTIMIZE_MIN_MARKS = 4;
 
-    const [picked] = remaining.splice(bestIdx, 1);
-    const next = bestReversed ? reversePlanLineDirection(picked) : picked;
-    chained.push(next);
-    cursor = lineEndpoints(next)!.end;
+/** Maximum alternating 2-opt / or-opt rounds. */
+const CHAIN_OPTIMIZE_MAX_PASSES = 20;
+
+/** Longest run of consecutive marks or-opt will lift out and re-insert. */
+const OR_OPT_MAX_RUN = 3;
+
+/** A candidate must beat the incumbent by more than this to be accepted. */
+const COST_EPS = 1e-9;
+
+/** Collinear-point tolerance when simplifying obstacle polylines (m). */
+const SIMPLIFY_TOL_M = 0.01;
+
+/**
+ * A connector springs from one mark's run-out and lands on the next mark's run-up, so it
+ * grazes both near its own endpoints. Crossings within this distance of either end are
+ * ignored; the marks themselves are not skipped, because a connector leaving a closed shape
+ * can genuinely re-cross it further along.
+ */
+const ENDPOINT_GRAZE_M = 0.06;
+
+/** Drop collinear interior vertices so crossing tests stay cheap on densified marks. */
+function simplifyPolyline(points: Ned[], tolM: number = SIMPLIFY_TOL_M): Ned[] {
+  if (points.length < 3) return points.slice();
+  const out: Ned[] = [points[0]];
+  for (let i = 1; i < points.length - 1; i++) {
+    const a = out[out.length - 1];
+    const b = points[i];
+    const c = points[i + 1];
+    const ex = c[0] - a[0];
+    const ey = c[1] - a[1];
+    const len = Math.hypot(ex, ey);
+    if (len < 1e-9) continue;
+    const d = Math.abs((b[0] - a[0]) * ey - (b[1] - a[1]) * ex) / len;
+    if (d > tolM) out.push(b);
   }
-
-  return chained;
+  out.push(points[points.length - 1]);
+  return out;
 }
 
-/** Sum of the transit gaps between consecutive entries — the quantity a chain minimizes. */
-function totalGapM(chain: PlanLine[]): number {
+/** Where the open segments p1p2 and p3p4 properly cross, or null. */
+function properCrossPoint(p1: Ned, p2: Ned, p3: Ned, p4: Ned): Ned | null {
+  const d = (p2[0] - p1[0]) * (p4[1] - p3[1]) - (p2[1] - p1[1]) * (p4[0] - p3[0]);
+  if (Math.abs(d) < 1e-12) return null;
+  const t = ((p3[0] - p1[0]) * (p4[1] - p3[1]) - (p3[1] - p1[1]) * (p4[0] - p3[0])) / d;
+  const u = ((p3[0] - p1[0]) * (p2[1] - p1[1]) - (p3[1] - p1[1]) * (p2[0] - p1[0])) / d;
+  if (t > 0 && t < 1 && u > 0 && u < 1) {
+    return [p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1])];
+  }
+  return null;
+}
+
+function nedDist(a: Ned, b: Ned): number {
+  return Math.hypot(a[0] - b[0], a[1] - b[1]);
+}
+
+/**
+ * A route is a list of oriented marks. Each entry is `index * 2 + (reversed ? 1 : 0)`, where
+ * `index` is the mark's position in the placeable list. Flipping a mark's direction is `^ 1`.
+ */
+type RouteCode = number;
+
+type OrderModel = {
+  readonly n: number;
+  readonly startPosition: Ned | null;
+  /** Mark start / end per code (what the deadhead distance measures). */
+  readonly start: Ned[];
+  readonly end: Ned[];
+  /** Where the rover leaves (AFT tip) and joins (PRE tip) per code. */
+  readonly exit: Ned[];
+  readonly entry: Ned[];
+  /** Line as driven, per code. */
+  readonly lineOf: PlanLine[];
+  /** Simplified obstacle polyline and bounding box per mark index. */
+  readonly poly: Ned[][];
+  readonly bbox: [number, number, number, number][];
+  readonly crossCache: Map<number, number[]>;
+};
+
+function resolveExtensionLengths(
+  config: Partial<CsvExtensionConfig> | null | undefined
+): { preM: number; aftM: number } {
+  const cfg = normalizeCsvExtensionConfig(config);
+  return cfg.enabled ? { preM: cfg.preM, aftM: cfg.aftM } : { preM: 0, aftM: 0 };
+}
+
+/**
+ * Unit run-in / run-out directions of a line as driven. Curves use their analytic tangents
+ * (the same ones the extensions are built from); everything else the end segments.
+ */
+function runDirections(line: PlanLine, pts: Ned[]): { startDir: Ned | null; endDir: Ned | null } {
+  const curve = analyticCurveTangents(line);
+  if (curve) return { startDir: curve[0], endDir: curve[1] };
+  return { startDir: terminalUnitVector(pts, "start"), endDir: terminalUnitVector(pts, "end") };
+}
+
+function buildOrderModel(
+  placeable: PlanLine[],
+  options: ChainOptions | undefined
+): OrderModel {
+  const { preM, aftM } = resolveExtensionLengths(options?.extensionConfig);
+  const sp = options?.startPosition;
+  const startPosition: Ned | null =
+    sp && Number.isFinite(sp[0]) && Number.isFinite(sp[1]) ? [sp[0], sp[1]] : null;
+
+  const n = placeable.length;
+  const model: OrderModel = {
+    n,
+    startPosition,
+    start: new Array<Ned>(2 * n),
+    end: new Array<Ned>(2 * n),
+    exit: new Array<Ned>(2 * n),
+    entry: new Array<Ned>(2 * n),
+    lineOf: new Array<PlanLine>(2 * n),
+    poly: new Array<Ned[]>(n),
+    bbox: new Array<[number, number, number, number]>(n),
+    crossCache: new Map(),
+  };
+
+  placeable.forEach((line, idx) => {
+    const forward = planLineToNedPolyline(line)!;
+    const backward = forward.slice().reverse();
+    const reversedLine = reversePlanLineDirection(line);
+    const orientations: [PlanLine, Ned[]][] = [
+      [line, forward],
+      [reversedLine, backward],
+    ];
+    orientations.forEach(([oriented, pts], flip) => {
+      const code = idx * 2 + flip;
+      const s = pts[0];
+      const e = pts[pts.length - 1];
+      model.lineOf[code] = oriented;
+      model.start[code] = s;
+      model.end[code] = e;
+      let entry = s;
+      let exit = e;
+      if (preM > 0 || aftM > 0) {
+        const { startDir, endDir } = runDirections(oriented, pts);
+        if (preM > 0 && startDir) entry = [s[0] - startDir[0] * preM, s[1] - startDir[1] * preM];
+        if (aftM > 0 && endDir) exit = [e[0] + endDir[0] * aftM, e[1] + endDir[1] * aftM];
+      }
+      model.entry[code] = entry;
+      model.exit[code] = exit;
+    });
+    model.poly[idx] = simplifyPolyline(forward);
+    let minN = Infinity;
+    let minE = Infinity;
+    let maxN = -Infinity;
+    let maxE = -Infinity;
+    for (const p of model.poly[idx]) {
+      if (p[0] < minN) minN = p[0];
+      if (p[0] > maxN) maxN = p[0];
+      if (p[1] < minE) minE = p[1];
+      if (p[1] > maxE) maxE = p[1];
+    }
+    model.bbox[idx] = [minN, minE, maxN, maxE];
+  });
+  return model;
+}
+
+/** Indices of the marks the connector `a -> b` drives over, whatever the paint order. */
+function connectorCrossings(model: OrderModel, a: RouteCode, b: RouteCode): number[] {
+  const key = a * 2 * model.n + b;
+  const cached = model.crossCache.get(key);
+  if (cached) return cached;
+
+  const p1 = model.exit[a];
+  const p2 = model.entry[b];
+  const loN = Math.min(p1[0], p2[0]) - 1e-9;
+  const hiN = Math.max(p1[0], p2[0]) + 1e-9;
+  const loE = Math.min(p1[1], p2[1]) - 1e-9;
+  const hiE = Math.max(p1[1], p2[1]) + 1e-9;
+
+  const hits: number[] = [];
+  for (let m = 0; m < model.n; m++) {
+    const [minN, minE, maxN, maxE] = model.bbox[m];
+    if (maxN < loN || minN > hiN || maxE < loE || minE > hiE) continue;
+    const poly = model.poly[m];
+    for (let i = 0; i < poly.length - 1; i++) {
+      const x = properCrossPoint(p1, p2, poly[i], poly[i + 1]);
+      if (!x) continue;
+      if (nedDist(x, p1) < ENDPOINT_GRAZE_M || nedDist(x, p2) < ENDPOINT_GRAZE_M) continue;
+      hits.push(m);
+      break;
+    }
+  }
+  model.crossCache.set(key, hits);
+  return hits;
+}
+
+/** Transit distance of a route: start position (if any) -> first mark, then end -> next start. */
+function deadheadM(model: OrderModel, route: RouteCode[]): number {
   let total = 0;
-  for (let i = 0; i < chain.length - 1; i++) {
-    const a = lineEndpoints(chain[i]);
-    const b = lineEndpoints(chain[i + 1]);
-    if (!a || !b) continue;
-    total += Math.hypot(b.start[0] - a.end[0], b.start[1] - a.end[1]);
+  let cursor = model.startPosition;
+  for (const code of route) {
+    if (cursor) total += nedDist(cursor, model.start[code]);
+    cursor = model.end[code];
   }
   return total;
+}
+
+/**
+ * Metres-equivalent cost of driving over paint already on the ground. Only marks laid
+ * earlier in the route count (the mark just finished included); crossing geometry that has
+ * not been painted yet is free, which is what lets an enclosed shape be visited before the
+ * shape around it.
+ */
+function wetPaintPenaltyM(model: OrderModel, route: RouteCode[]): number {
+  const painted = new Uint8Array(model.n);
+  let hitsOnPaint = 0;
+  for (let k = 0; k < route.length - 1; k++) {
+    painted[route[k] >> 1] = 1;
+    for (const m of connectorCrossings(model, route[k], route[k + 1])) {
+      if (painted[m]) hitsOnPaint++;
+    }
+  }
+  return WET_PAINT_PENALTY_M * hitsOnPaint;
+}
+
+function routeCostM(model: OrderModel, route: RouteCode[]): number {
+  return deadheadM(model, route) + wetPaintPenaltyM(model, route);
+}
+
+/**
+ * Nearest-endpoint walk. Seeded at `seedCode` when given, else at the start position (which
+ * the caller guarantees exists). Ties favour the earlier mark, and the forward direction
+ * over the backward one.
+ */
+function greedyRoute(model: OrderModel, seedCode: RouteCode | null): RouteCode[] {
+  const { n } = model;
+  const used = new Uint8Array(n);
+  const route: RouteCode[] = [];
+  let cursor: Ned;
+  if (seedCode !== null) {
+    route.push(seedCode);
+    used[seedCode >> 1] = 1;
+    cursor = model.end[seedCode];
+  } else {
+    cursor = model.startPosition!;
+  }
+
+  while (route.length < n) {
+    let bestCode = -1;
+    let bestDist = Infinity;
+    for (let id = 0; id < n; id++) {
+      if (used[id]) continue;
+      const forward = nedDist(cursor, model.start[id * 2]);
+      if (forward < bestDist) {
+        bestDist = forward;
+        bestCode = id * 2;
+      }
+      // A mark whose far end is nearer continues the walk when driven backwards.
+      const backward = nedDist(cursor, model.start[id * 2 + 1]);
+      if (backward < bestDist) {
+        bestDist = backward;
+        bestCode = id * 2 + 1;
+      }
+    }
+    route.push(bestCode);
+    used[bestCode >> 1] = 1;
+    cursor = model.end[bestCode];
+  }
+  return route;
+}
+
+/** Reverse a slice of the route: order flips and so does every mark's direction. */
+function reverseSlice(route: RouteCode[], i: number, k: number): RouteCode[] {
+  const out = route.slice(0, i);
+  for (let x = k; x >= i; x--) out.push(route[x] ^ 1);
+  for (let x = k + 1; x < route.length; x++) out.push(route[x]);
+  return out;
+}
+
+/**
+ * Lift a run of 1-3 marks out and re-insert it elsewhere, in either direction. Returns the
+ * first improving move found, or null. `locked` leading marks never move and nothing is
+ * inserted before them.
+ */
+function orOptMove(
+  model: OrderModel,
+  best: RouteCode[],
+  bestCost: number,
+  locked: number
+): { route: RouteCode[]; cost: number } | null {
+  const n = best.length;
+  for (let run = 1; run <= OR_OPT_MAX_RUN; run++) {
+    for (let i = locked; i <= n - run; i++) {
+      const chunk = best.slice(i, i + run);
+      const rest = best.slice(0, i).concat(best.slice(i + run));
+      const flipped = chunk.slice().reverse().map((c) => c ^ 1);
+      for (let j = locked; j <= rest.length; j++) {
+        if (j === i) continue; // back where it came from
+        for (const piece of [chunk, flipped]) {
+          const cand = rest.slice(0, j).concat(piece, rest.slice(j));
+          const cost = routeCostM(model, cand);
+          if (cost + COST_EPS < bestCost) return { route: cand, cost };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * 2-opt slice reversals alternated with or-opt relocations until neither improves (at most
+ * {@link CHAIN_OPTIMIZE_MAX_PASSES} rounds). Faithful port of the rover's `_apply_two_opt`:
+ * 2-opt cannot lift a stranded mark out and re-place it, or-opt cannot undo a crossed pair
+ * of legs, so the two move sets are used together.
+ *
+ * The first `locked` marks (an operator-pinned seed) keep their place and direction.
+ */
+function improveRoute(model: OrderModel, route: RouteCode[], locked: number): RouteCode[] {
+  const n = route.length;
+  if (n < CHAIN_OPTIMIZE_MIN_MARKS) return route;
+
+  let best = route.slice();
+  let bestCost = routeCostM(model, best);
+
+  for (let pass = 0; pass < CHAIN_OPTIMIZE_MAX_PASSES; pass++) {
+    let changed = false;
+
+    for (let i = locked; i < n - 2; i++) {
+      for (let k = i + 1; k < n; k++) {
+        const cand = reverseSlice(best, i, k);
+        const cost = routeCostM(model, cand);
+        if (cost + COST_EPS < bestCost) {
+          best = cand;
+          bestCost = cost;
+          changed = true;
+        }
+      }
+    }
+
+    const moved = orOptMove(model, best, bestCost, locked);
+    if (moved) {
+      best = moved.route;
+      bestCost = moved.cost;
+      changed = true;
+    }
+
+    if (!changed) break;
+  }
+  return best;
 }
 
 /**
@@ -359,6 +677,45 @@ function totalGapM(chain: PlanLine[]): number {
  * pathological input.
  */
 export const CHAIN_MULTI_START_MAX_MARKS = 200;
+
+/**
+ * Cheapest greedy walk over every candidate seed. The incumbent is the start-position walk
+ * when a start position exists, else `placeable[0]` forward; a later candidate replaces it
+ * only when strictly cheaper, so ties keep the earliest-tried one.
+ */
+function bestGreedyRoute(model: OrderModel): RouteCode[] {
+  let bestRoute = greedyRoute(model, model.startPosition ? null : 0);
+  let bestTotal = deadheadM(model, bestRoute);
+  if (model.n > CHAIN_MULTI_START_MAX_MARKS) return bestRoute;
+
+  const consider = (seed: RouteCode) => {
+    const candidate = greedyRoute(model, seed);
+    const total = deadheadM(model, candidate);
+    if (total < bestTotal) {
+      bestTotal = total;
+      bestRoute = candidate;
+    }
+  };
+  for (let i = 0; i < model.n; i++) {
+    // Without a start position `i = 0` forward is already the incumbent.
+    if (model.startPosition || i > 0) consider(i * 2);
+    consider(i * 2 + 1);
+  }
+  return bestRoute;
+}
+
+/**
+ * Split marks into those with a usable polyline and those without. Paths with no usable
+ * polyline cannot be chained; callers keep them, in file order, after the chain.
+ */
+function partitionPlaceable(marks: PlanLine[]): { placeable: PlanLine[]; unplaceable: PlanLine[] } {
+  const placeable: PlanLine[] = [];
+  const unplaceable: PlanLine[] = [];
+  for (const line of marks) {
+    (lineEndpoints(line) ? placeable : unplaceable).push(line);
+  }
+  return { placeable, unplaceable };
+}
 
 /**
  * Order painted paths into one continuous walk, flipping any path drawn against it.
@@ -376,68 +733,57 @@ export const CHAIN_MULTI_START_MAX_MARKS = 200;
  * no-op on a file already stored in perimeter order, and the operator can still drag rows
  * afterwards; nothing re-chains behind them.
  *
- * Multi-start greedy nearest-endpoint: always seeding from the first mark in file order (in
- * its own authored direction) can lock in a bad walk when that entity happens to sit at the
- * "wrong end" relative to a fixed-direction curve elsewhere in the file — confirmed on a real
- * survey DXF, where seeding from entity 0 forced ~10 m of transit that seeding from a
+ * Construction is multi-start greedy nearest-endpoint: always seeding from the first mark in
+ * file order (in its own authored direction) can lock in a bad walk when that entity happens
+ * to sit at the "wrong end" relative to another entity elsewhere in the file — confirmed on a
+ * real survey DXF, where seeding from entity 0 forced ~10 m of transit that seeding from a
  * different entity (or that entity reversed) does not. So every placeable entity is tried as
- * a candidate seed (and its reverse, when line-like), and whichever produces the least total
- * transit wins. Ties — most commonly a file that's already one continuous walk or a fully
- * closed loop, where every seed is equally good — favor the earliest-tried candidate, which
- * is `placeable[0]` walked forward: the mission still starts where file order started it
- * whenever that's already an optimal choice, matching prior behavior exactly in that case.
+ * a candidate seed in both directions, and whichever produces the least total transit wins.
+ * Ties — most commonly a file that's already one continuous walk or a fully closed loop,
+ * where every seed is equally good — favor the earliest-tried candidate, which is
+ * `placeable[0]` walked forward: the mission still starts where file order started it
+ * whenever that's already an optimal choice.
+ *
+ * Any path, a curve included, may be driven in either direction. A reversed ARC/CIRCLE keeps
+ * consistent extension tangents because they follow the direction its polyline runs.
+ *
+ * Up to {@link CHAIN_OPTIMIZE_MAX_MARKS} marks the greedy result is then refined by 2-opt
+ * slice reversal and or-opt relocation, against transit distance plus a
+ * {@link WET_PAINT_PENALTY_M} charge per already-painted mark a connector drives over. Port
+ * of the rover's `optimize_segment_order`. Deterministic: same input, same output.
  */
-export function chainMarkLinesByGeometry(lines: PlanLine[]): PlanLine[] {
+export function chainMarkLinesByGeometry(
+  lines: PlanLine[],
+  options?: ChainOptions
+): PlanLine[] {
   const marks = selectMarkPlanLines(lines);
   const markIds = new Set(marks.map((m) => m.id));
   const others = lines.filter((l) => !markIds.has(l.id));
-  if (marks.length < 2) return [...marks, ...others];
+  const { placeable, unplaceable } = partitionPlaceable(marks);
 
-  // Paths with no usable polyline cannot be chained — keep them, in file order, at the end.
-  const placeable: PlanLine[] = [];
-  const unplaceable: PlanLine[] = [];
-  for (const line of marks) {
-    (lineEndpoints(line) ? placeable : unplaceable).push(line);
+  if (placeable.length === 1 && options?.startPosition && marks.length === 1) {
+    // A lone mark is only worth turning around: enter it from whichever end is nearer.
+    const model = buildOrderModel(placeable, options);
+    const sp = model.startPosition;
+    const reversed = sp != null && nedDist(sp, model.start[1]) < nedDist(sp, model.start[0]);
+    return [model.lineOf[reversed ? 1 : 0], ...others];
   }
-  if (placeable.length < 2) return [...marks, ...others];
+  if (marks.length < 2 || placeable.length < 2) return [...marks, ...others];
 
-  let bestChain: PlanLine[] = greedyChainFrom(placeable, 0, false);
-  let bestTotal = totalGapM(bestChain);
+  const model = buildOrderModel(placeable, options);
+  let route = bestGreedyRoute(model);
+  if (model.n <= CHAIN_OPTIMIZE_MAX_MARKS) route = improveRoute(model, route, 0);
 
-  if (placeable.length <= CHAIN_MULTI_START_MAX_MARKS) {
-    for (let i = 0; i < placeable.length; i++) {
-      if (i > 0) {
-        const forward = greedyChainFrom(placeable, i, false);
-        const forwardTotal = totalGapM(forward);
-        if (forwardTotal < bestTotal) {
-          bestTotal = forwardTotal;
-          bestChain = forward;
-        }
-      }
-      if (isLineLikePlanLine(placeable[i])) {
-        const reversed = greedyChainFrom(placeable, i, true);
-        const reversedTotal = totalGapM(reversed);
-        if (reversedTotal < bestTotal) {
-          bestTotal = reversedTotal;
-          bestChain = reversed;
-        }
-      }
-    }
-  }
-
-  return [...bestChain, ...unplaceable, ...others];
+  return [...route.map((code) => model.lineOf[code]), ...unplaceable, ...others];
 }
 
 /**
  * Re-chain mark lines starting from an operator-picked seed (Anchor point selection),
- * instead of `chainMarkLinesByGeometry`'s auto-optimized seed. Thin wrapper around the
- * same `greedyChainFrom` walk that import-time chaining already uses — never exports
- * the raw internal helper so callers stay on one supported entry point.
+ * instead of `chainMarkLinesByGeometry`'s auto-optimized seed. The same greedy walk and
+ * improvement passes as import-time chaining, with the seed pinned: it stays first, and in
+ * the direction asked for, however the rest is rearranged.
  *
- * `seedFromEnd` requests starting the seed line from its `to` end instead of `from`;
- * forced false for curves and CSV road-marking lines (matches `isLineLikePlanLine`,
- * the same rule the auto-chain already applies — their extension tangents / fitted
- * geometry are authored in one direction and must never be silently reversed here).
+ * `seedFromEnd` requests starting the seed line from its `to` end instead of `from`.
  *
  * No-ops (returns `lines` marks/others unchanged) when `seedLineId` is not a
  * placeable mark line in `lines` — defensive only; callers are expected to pass a
@@ -446,25 +792,45 @@ export function chainMarkLinesByGeometry(lines: PlanLine[]): PlanLine[] {
 export function chainMarkLinesFromSeed(
   lines: PlanLine[],
   seedLineId: string,
-  seedFromEnd: boolean
+  seedFromEnd: boolean,
+  options?: Pick<ChainOptions, "extensionConfig">
 ): PlanLine[] {
   const marks = selectMarkPlanLines(lines);
   const markIds = new Set(marks.map((m) => m.id));
   const others = lines.filter((l) => !markIds.has(l.id));
   if (marks.length < 2) return [...marks, ...others];
 
-  const placeable: PlanLine[] = [];
-  const unplaceable: PlanLine[] = [];
-  for (const line of marks) {
-    (lineEndpoints(line) ? placeable : unplaceable).push(line);
-  }
+  const { placeable, unplaceable } = partitionPlaceable(marks);
 
   const seedIdx = placeable.findIndex((l) => l.id === seedLineId);
   if (seedIdx < 0) return [...marks, ...others];
 
-  const seedReversed = seedFromEnd && isLineLikePlanLine(placeable[seedIdx]);
-  const chained = greedyChainFrom(placeable, seedIdx, seedReversed);
-  return [...chained, ...unplaceable, ...others];
+  const model = buildOrderModel(placeable, options);
+  let route = greedyRoute(model, seedIdx * 2 + (seedFromEnd ? 1 : 0));
+  if (model.n <= CHAIN_OPTIMIZE_MAX_MARKS) route = improveRoute(model, route, 1);
+
+  return [...route.map((code) => model.lineOf[code]), ...unplaceable, ...others];
+}
+
+export type MarkOrderCost = {
+  /** Transit distance: start position (if any) to the first mark, then each end to the next start. */
+  deadheadM: number;
+  /** {@link WET_PAINT_PENALTY_M} per already-painted mark a connector drives over. */
+  wetPaintPenaltyM: number;
+  totalM: number;
+};
+
+/**
+ * The objective the chaining minimizes, for an order as given (marks without a usable
+ * polyline are ignored). Exposed so callers and tests can compare orders on the same terms.
+ */
+export function evaluateMarkOrder(lines: PlanLine[], options?: ChainOptions): MarkOrderCost {
+  const { placeable } = partitionPlaceable(selectMarkPlanLines(lines));
+  const model = buildOrderModel(placeable, options);
+  const route = placeable.map((_, idx) => idx * 2);
+  const deadhead = deadheadM(model, route);
+  const penalty = wetPaintPenaltyM(model, route);
+  return { deadheadM: deadhead, wetPaintPenaltyM: penalty, totalM: deadhead + penalty };
 }
 
 export function reorderPathOrder(

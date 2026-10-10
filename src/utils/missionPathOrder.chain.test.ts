@@ -155,7 +155,7 @@ describe("chainMarkLinesByGeometry", () => {
     ]);
   });
 
-  it("does not reverse curved geometry", () => {
+  it("reverses a curve when entering it from its far end is nearer", () => {
     const arc: PlanLine = {
       ...seg("arc", TR, TL),
       entity: {
@@ -164,12 +164,12 @@ describe("chainMarkLinesByGeometry", () => {
         geometry: { startAngle: 0, endAngle: 90 },
       },
     };
-    // The walk out of `bottom` ends at BR, nearer the arc's END (TL is far) — a line-like
-    // path would flip here; the arc must keep its authored direction.
+    // The walk out of `bottom` ends at TL, which is the arc's END: driven backwards the
+    // arc continues the walk with no transit at all.
     const chained = chainMarkLinesByGeometry([seg("bottom", BL, TL), arc]);
     const placed = chained.find((l) => l.id === "arc")!;
-    expect(placed.from).toMatchObject({ x: TR[0], y: TR[1] });
-    expect(placed.to).toMatchObject({ x: TL[0], y: TL[1] });
+    expect(placed.from).toMatchObject({ x: TL[0], y: TL[1] });
+    expect(placed.to).toMatchObject({ x: TR[0], y: TR[1] });
   });
 
   it("tries alternate seeds when the file-order start is a bad one (confirmed on field_test_01.DXF)", () => {
@@ -204,10 +204,12 @@ describe("chainMarkLinesByGeometry", () => {
       );
     }
     expect(total).toBeLessThan(15); // well below the naive 29.19 m
-    // The arc itself must never be reversed, regardless of which seed won.
+    // With the arc free to be driven backwards the whole walk joins up: lineA reversed
+    // ends at P1, the arc reversed runs P1 -> P3, and lineB leaves from P3.
+    expect(total).toBeCloseTo(0, 9);
     const placedArc = chained.find((l) => l.id === "arc")!;
-    expect(placedArc.from).toMatchObject({ x: p3[0], y: p3[1] });
-    expect(placedArc.to).toMatchObject({ x: p1[0], y: p1[1] });
+    expect(placedArc.from).toMatchObject({ x: p1[0], y: p1[1] });
+    expect(placedArc.to).toMatchObject({ x: p3[0], y: p3[1] });
   });
 });
 
@@ -237,7 +239,7 @@ describe("chainMarkLinesFromSeed", () => {
     expect(chained[0].to).toMatchObject({ x: TR[0], y: TR[1] });
   });
 
-  it("never reverses a curved seed even when seedFromEnd is requested", () => {
+  it("reverses a curved seed when seedFromEnd is requested", () => {
     const arc: PlanLine = {
       ...seg("arc", TR, TL),
       entity: {
@@ -249,9 +251,9 @@ describe("chainMarkLinesFromSeed", () => {
     const lines = [seg("bottom", BL, BR), seg("right", BR, TR), arc, seg("left", TL, BL)];
     const chained = chainMarkLinesFromSeed(lines, "arc", true);
     expect(chained[0].id).toBe("arc");
-    // Authored direction preserved — seedFromEnd is a no-op on curves.
-    expect(chained[0].from).toMatchObject({ x: TR[0], y: TR[1] });
-    expect(chained[0].to).toMatchObject({ x: TL[0], y: TL[1] });
+    // Curves honour seedFromEnd like any other path: authored TR→TL becomes TL→TR.
+    expect(chained[0].from).toMatchObject({ x: TL[0], y: TL[1] });
+    expect(chained[0].to).toMatchObject({ x: TR[0], y: TR[1] });
   });
 
   it("keeps unplaceable marks and non-mark lines appended, not lost", () => {

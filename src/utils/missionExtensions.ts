@@ -1,7 +1,7 @@
 /**
  * Mission path PRE/AFT extensions — pure geometry + config.
  *
- * App-owned: travel runs in plan-trajectory, spray-off by construction.
+ * App-owned: travel runs in the app-planned mission, spray-off by construction.
  * Source-agnostic (CSV + DXF). See docs/CSV_EXTENSIONS_EXECUTION_PLAN.md.
  *
  * Renamed from csvExtensions.ts (DXF_APP_PLANNED_TRAJECTORY_PLAN Phase 0).
@@ -142,20 +142,37 @@ export function dxfArcTangent(angleDeg: number): NedPair {
  *
  * Port of `entity_extension_directions` (ARC / CIRCLE branch). A CIRCLE is densified from
  * 0° travelling CCW and ends where it began, so both tangents are the one at 0°.
+ *
+ * The angles describe the curve as authored (CCW). When the polyline actually runs the
+ * other way (the curve was driven reversed, see `reversePlanLineDirection`) the tangents
+ * flip with it: the start tangent becomes the negated end tangent and vice versa. Taking
+ * the direction from the polyline itself keeps the run-ups consistent with the points the
+ * trajectory is built from, and cannot go stale if the curve is later re-sampled.
  */
 export function analyticCurveTangents(line: PlanLine): [NedPair, NedPair] | null {
   const type = String(line.entity?.entity_type ?? "").trim().toUpperCase();
   const geom = line.entity?.geometry;
+  let ccw: [NedPair, NedPair];
   if (type === "CIRCLE") {
-    return [dxfArcTangent(0), dxfArcTangent(0)];
-  }
-  if (type === "ARC") {
+    ccw = [dxfArcTangent(0), dxfArcTangent(0)];
+  } else if (type === "ARC") {
     const start = Number(geom?.startAngle);
     const end = Number(geom?.endAngle);
     if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-    return [dxfArcTangent(start), dxfArcTangent(end)];
+    ccw = [dxfArcTangent(start), dxfArcTangent(end)];
+  } else {
+    return null;
   }
-  return null;
+
+  const pts = planLineToNed(line);
+  const runs = pts ? terminalUnitVector(pts, "start") : null;
+  if (runs && runs[0] * ccw[0][0] + runs[1] * ccw[0][1] < 0) {
+    return [
+      [-ccw[1][0], -ccw[1][1]],
+      [-ccw[0][0], -ccw[0][1]],
+    ];
+  }
+  return ccw;
 }
 
 export type EndpointFreeness = { startFree: boolean; endFree: boolean };
