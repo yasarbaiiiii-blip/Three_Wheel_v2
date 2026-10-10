@@ -653,8 +653,8 @@ export default function ModernHomeUI(props) {
 
   // Local UI State
   const [mapStyleIndex, setMapStyleIndex] = useState(0);
-  const [showTelemetry, setShowTelemetry] = useState(false);
-  const [showMissionControl, setShowMissionControl] = useState(false);
+  const [showTelemetry, setShowTelemetry] = useState(true);
+  const [showMissionControl, setShowMissionControl] = useState(true);
   const [quickAccessExpanded, setQuickAccessExpanded] = useState(false);
   const [mapFullscreen, setMapFullscreen] = useState(false);
   const [navExpanded, setNavExpanded] = useState(false);
@@ -1465,14 +1465,6 @@ export default function ModernHomeUI(props) {
           onClose={() => setShowTelemetry(false)}
         />
 
-        <View style={styles.telemetryQuickStrip}>
-          {linkChips.map((chip) => (
-            <QuickChip key={chip.key} icon={Radio} label={chip.label} value={chip.value} tone={toneColor(chip.tone)} />
-          ))}
-          <QuickChip icon={Activity} label="Vehicle" value={telemetrySnapshot?.vehicle_telemetry_health ?? "UNAVAILABLE"} tone={telemetrySnapshot?.vehicle_telemetry_health === "LIVE" ? COLORS.success : COLORS.danger} />
-          <QuickChip icon={Satellite} label="Fix" value={gpsFix} tone={gpsFixTone} />
-          <QuickChip icon={Battery} label="Batt" value={hasBattery ? `${batteryPct}%` : "N/A"} tone={batteryTone} />
-        </View>
 
         <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.telemetryScroll} showsVerticalScrollIndicator={false}>
           <TelemetryBlock title="Position" icon={MapPin}>
@@ -2974,12 +2966,6 @@ const styles = StyleSheet.create({
   liveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: COLORS.success },
   liveText: { color: COLORS.success, fontSize: 9, fontWeight: "800", letterSpacing: 0.8 },
 
-  telemetryQuickStrip: {
-    flexDirection: "row",
-    gap: 6,
-    marginBottom: 12,
-    flexShrink: 0,
-  },
   quickChip: {
     flex: 1,
     backgroundColor: COLORS.cardSolid,
