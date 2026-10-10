@@ -1640,6 +1640,8 @@ export function FieldsPage(props: FieldsPageProps) {
                       ).length,
                       ignoredCount: 0,
                       warnings: localDxfMeta.warnings.slice(),
+                      // Blocking warnings already ride in `warnings` (see handleLocalDxfParsed).
+                      blockingWarnings: [],
                     }
                   : null
               }

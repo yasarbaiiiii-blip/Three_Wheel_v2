@@ -565,27 +565,32 @@ export function CsvStageAndLoadPanel({
         </Text>
       )}
 
-      {/* Single ack when needed */}
+      {/* Single ack when needed - show what is being acknowledged (e.g. the assumed DXF unit scale). */}
       {readiness.needsAck.length > 0 && !busy ? (
-        <TouchableOpacity
-          onPress={() => {
-            if (readiness.needsGeometryAck) setGeometryAcknowledged(true);
-            if (readiness.needsParseAck) setParseAcknowledged(true);
-          }}
-          style={{
-            height: 40,
-            borderRadius: 10,
-            alignItems: "center",
-            justifyContent: "center",
-            backgroundColor: FIELDS_COLORS.warningMuted,
-            borderWidth: 1,
-            borderColor: FIELDS_COLORS.warningBorder,
-          }}
-        >
-          <Text style={{ color: FIELDS_COLORS.warning, fontSize: 12, fontWeight: "800" }}>
-            Acknowledge
+        <View style={{ gap: 6 }}>
+          <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}>
+            {readiness.needsAck.slice(0, 3).join("\n")}
           </Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => {
+              if (readiness.needsGeometryAck) setGeometryAcknowledged(true);
+              if (readiness.needsParseAck) setParseAcknowledged(true);
+            }}
+            style={{
+              height: 40,
+              borderRadius: 10,
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: FIELDS_COLORS.warningMuted,
+              borderWidth: 1,
+              borderColor: FIELDS_COLORS.warningBorder,
+            }}
+          >
+            <Text style={{ color: FIELDS_COLORS.warning, fontSize: 12, fontWeight: "800" }}>
+              Acknowledge
+            </Text>
+          </TouchableOpacity>
+        </View>
       ) : null}
 
       <TouchableOpacity

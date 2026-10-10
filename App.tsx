@@ -3358,11 +3358,18 @@ function AppRoot() {
     setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
 
-    setLocalDxfMeta({
+    // Blocking warnings (assumed unit scale) travel with the ordinary ones so the
+    // send-readiness gate sees them as critical parse warnings and demands an
+    // acknowledgement before the mission can be staged or loaded. A batch keeps the
+    // warnings of every file, not only the last one parsed.
+    const fileWarnings = [...data.blockingWarnings, ...data.warnings].map(
+      (w) => `${data.fileName}: ${w}`
+    );
+    setLocalDxfMeta((prev) => ({
       fileName: data.fileName,
       isGeographic: !!data.isGeographic,
-      warnings: data.warnings.slice(),
-    });
+      warnings: Array.from(new Set([...(prev?.warnings ?? []), ...fileWarnings])),
+    }));
 
     const used = usedPrefixesFromUploaded(uploadedFilesRef.current);
     const prefix = allocateLineIdPrefix(data.fileName, used);
