@@ -1374,23 +1374,12 @@ export function MapViewNative(props: MapViewProps) {
   // re-render the plan/boundary/item sources.
   const roverGeo = useMemo(() => {
     const heading = telemetrySnapshot?.heading_ned_deg ?? null;
-    const posN = telemetrySnapshot?.pos_n;
-    const posE = telemetrySnapshot?.pos_e;
-    let lat = telemetrySnapshot?.lat;
-    let lon = telemetrySnapshot?.lon;
-    // Same frame as the drawn plan: planner NED projected through the plan origin.
-    // GPS lat/lon is only a fallback when local pose is missing (filtered GPS lags).
-    if (
-      projectionOrigin &&
-      typeof posN === "number" &&
-      Number.isFinite(posN) &&
-      typeof posE === "number" &&
-      Number.isFinite(posE)
-    ) {
-      const gps = projectPlanNorthEastToGps(posN, posE, projectionOrigin);
-      lat = gps.lat;
-      lon = gps.lon;
-    }
+    // The EKF position as lat/lon through PX4's projection about the EKF origin (the frame RPP
+    // tracks in). It is never projected through the plan origin: the EKF origin is not the mission
+    // anchor (that drew the rover ~1 m off a path it was driving to 2 cm). Without an EKF origin
+    // the GNSS fix is shown.
+    const lat = telemetrySnapshot?.ekf_lat ?? telemetrySnapshot?.lat;
+    const lon = telemetrySnapshot?.ekf_lon ?? telemetrySnapshot?.lon;
 
     if (lat == null || lon == null || !Number.isFinite(lat) || !Number.isFinite(lon)) {
       return { center: null as Coord | null, heading, rangeCircle: null as GeoJSON.Feature<GeoJSON.Polygon> | null, targetLine: null as GeoJSON.FeatureCollection | null, targetPoint: null as Coord | null };
@@ -1447,8 +1436,8 @@ export function MapViewNative(props: MapViewProps) {
   }, [
     telemetrySnapshot?.lat,
     telemetrySnapshot?.lon,
-    telemetrySnapshot?.pos_n,
-    telemetrySnapshot?.pos_e,
+    telemetrySnapshot?.ekf_lat,
+    telemetrySnapshot?.ekf_lon,
     telemetrySnapshot?.heading_ned_deg,
     telemetrySnapshot?.mission_state,
     telemetrySnapshot?.projection_segment_index,

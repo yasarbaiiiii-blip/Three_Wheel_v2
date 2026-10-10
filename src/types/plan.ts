@@ -130,6 +130,9 @@ export type Page = "connection" | "home" | "fields" | "templates" | "swozi" | "s
 export interface TelemetrySnapshot {
   pos_n?: number | null;
   pos_e?: number | null;
+  /** pos_n/pos_e as lat/lon through PX4's own projection about the EKF origin (null without one). */
+  ekf_lat?: number | null;
+  ekf_lon?: number | null;
   heading_ned_deg?: number | null;
   xtrack_m?: number | null;
   heading_err_deg?: number | null;

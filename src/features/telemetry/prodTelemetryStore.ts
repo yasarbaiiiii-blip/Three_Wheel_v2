@@ -11,6 +11,7 @@
  * the last value.
  */
 
+import { px4LocalToGps } from "../../utils/geoProjection";
 import { useSyncExternalStore } from "react";
 import type {
   RoverTelemetrySnapshot,
@@ -371,6 +372,15 @@ export function getAdaptedTelemetrySnapshot(now = telemetryNow()): TelemetrySnap
   const lateralSpeed =
     vn !== null && ve !== null && headingRad !== null ? -vn * Math.sin(headingRad) + ve * Math.cos(headingRad) : null;
   const batteryOk = vs?.battery_valid === true;
+  // EKF position as lat/lon (PX4's own projection about the EKF origin): the frame RPP tracks in.
+  const posN = posOk ? finiteOrNull(vs!.north_m) : null;
+  const posE = posOk ? finiteOrNull(vs!.east_m) : null;
+  const refLat = vs?.global_reference_valid === true ? finiteOrNull(vs.reference_latitude_deg) : null;
+  const refLon = vs?.global_reference_valid === true ? finiteOrNull(vs.reference_longitude_deg) : null;
+  const ekfGps =
+    posN !== null && posE !== null && refLat !== null && refLon !== null
+      ? px4LocalToGps(posN, posE, refLat, refLon)
+      : null;
   const batteryRemaining = batteryOk ? finiteOrNull(vs!.battery_remaining) : null;
   const headingDegrees = headingRad !== null ? finiteOrNull(radToDeg(headingRad)) : null;
   const heading = headingDegrees !== null ? wrap360(headingDegrees) : null;
@@ -393,6 +403,8 @@ export function getAdaptedTelemetrySnapshot(now = telemetryNow()): TelemetrySnap
       evaluateAgeStaleness(getTelemetrySourceAgeMs(snap.vehicle_state, now) ?? Infinity).grade,
     pos_n: posOk ? finiteOrNull(vs!.north_m) : null,
     pos_e: posOk ? finiteOrNull(vs!.east_m) : null,
+    ekf_lat: ekfGps ? ekfGps.lat : null,
+    ekf_lon: ekfGps ? ekfGps.lon : null,
     heading_ned_deg: heading,
     speed_m_s: speed,
     measured_speed_m_s: speed,

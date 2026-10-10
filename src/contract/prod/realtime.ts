@@ -34,6 +34,9 @@ export interface VehicleStateData {
   ground_speed_mps?: number | null;
   forward_speed_mps?: number | null;
   global_reference_valid?: boolean;
+  /** The EKF origin north_m/east_m are relative to (PX4 sphere projection). */
+  reference_latitude_deg?: number | null;
+  reference_longitude_deg?: number | null;
   xy_reset_counter?: number;
   /** PX4 battery_status; values are null unless battery_valid. remaining is 0..1. */
   battery_valid?: boolean;

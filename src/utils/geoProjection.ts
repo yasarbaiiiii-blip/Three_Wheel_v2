@@ -162,6 +162,34 @@ export function projectLocalMetersToGps(
   return { lat: lat / DEG, lon: Math.atan2(y, x) / DEG };
 }
 
+/** PX4 CONSTANTS_RADIUS_OF_EARTH: the sphere EKF2's local frame is built on. */
+export const PX4_EARTH_RADIUS_M = 6371000;
+
+/**
+ * The rover's EKF local position (north/east metres from the EKF origin) -> lat/lon, exactly as
+ * PX4 does it (MapProjection::reproject: azimuthal equidistant on the PX4 sphere about the EKF
+ * origin). The EKF origin is NOT the mission anchor, so EKF metres must never be drawn through a
+ * plan origin: convert them with this, then place the lat/lon like any other point.
+ */
+export function px4LocalToGps(
+  north: number,
+  east: number,
+  refLat: number,
+  refLon: number
+): { lat: number; lon: number } {
+  const rlat = refLat * DEG;
+  const rlon = refLon * DEG;
+  const x = north / PX4_EARTH_RADIUS_M;
+  const y = east / PX4_EARTH_RADIUS_M;
+  const c = Math.sqrt(x * x + y * y);
+  if (c === 0) return { lat: refLat, lon: refLon };
+  const sinC = Math.sin(c);
+  const cosC = Math.cos(c);
+  const lat = Math.asin(cosC * Math.sin(rlat) + (x * sinC * Math.cos(rlat)) / c);
+  const lon = rlon + Math.atan2(y * sinC, c * Math.cos(rlat) * cosC - x * Math.sin(rlat) * sinC);
+  return { lat: lat / DEG, lon: lon / DEG };
+}
+
 /** True ground distance (m) between two lat/lon points on the tangent plane. */
 export function groundDistanceMeters(
   latA: number,

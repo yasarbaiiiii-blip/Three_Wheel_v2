@@ -13,6 +13,7 @@ import {
   projectGeographicToLocalNed,
   projectGpsToLocalMeters,
   projectLocalMetersToGps,
+  px4LocalToGps,
 } from "./geoProjection";
 
 const RAD = Math.PI / 180;
@@ -298,5 +299,18 @@ describe("projectGeographicToLocalNed", () => {
     const fwd = projectGpsToLocalMeters(pts[1].north, pts[1].east, origin.lat, origin.lon);
     expect(fwd.north).toBeCloseTo(points[1].north, 9);
     expect(fwd.east).toBeCloseTo(points[1].east, 9);
+  });
+});
+
+describe("px4LocalToGps (EKF local -> lat/lon, PX4 MapProjection::reproject)", () => {
+  it("recovers the mission anchor from its placed EKF coordinates (rover 01 data, 2026-10-10)", () => {
+    // The rover placed anchor 13.07206119, 80.2619641 at N 0.5285535721248442, E 0.8661575325505281 about
+    // its EKF origin 13.072056436603651, 80.26195610323292 (dyx3_mission execution meta).
+    const g = px4LocalToGps(0.5285535721248442, 0.8661575325505281, 13.072056436603651, 80.26195610323292);
+    expect(g.lat).toBeCloseTo(13.07206119, 9);
+    expect(g.lon).toBeCloseTo(80.2619641, 9);
+  });
+  it("is the identity at the origin", () => {
+    expect(px4LocalToGps(0, 0, 13, 80)).toEqual({ lat: 13, lon: 80 });
   });
 });
