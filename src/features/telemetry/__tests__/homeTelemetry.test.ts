@@ -20,6 +20,7 @@ function entry<T>(data: T, over: Partial<SnapshotEntry<T>> = {}): SnapshotEntry<
 
 function baseSnapshot(over: Partial<RoverTelemetrySnapshot> = {}): RoverTelemetrySnapshot {
   return {
+    gateway: { schema: 1, operator_alive: true, clients: 1 },
     vehicle_state: entry({
       position_valid: true,
       velocity_valid: true,

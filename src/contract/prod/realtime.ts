@@ -184,7 +184,7 @@ export interface BatteryData {
 export interface GatewayInfoData {
   operator_alive: boolean;
   clients: number;
-  schema: string;
+  schema: number;
 }
 
 export interface RoverTelemetrySnapshot {
@@ -209,6 +209,7 @@ export interface RoverTelemetrySnapshot {
 
 /** Inbound `telemetry` event from Socket.IO or GET /api/telemetry */
 export interface TelemetryPacket {
+  connected?: boolean;
   v?: number;
   age_s: number | null;
   snapshot: RoverTelemetrySnapshot | null;

@@ -78,7 +78,7 @@ export interface MissionPathResponse {
 export interface TelemetryRestResponse {
   connected: boolean;
   age_s: number | null;
-  snapshot: Record<string, unknown> | null;
+  snapshot: import("./realtime").RoverTelemetrySnapshot | null;
 }
 
 export interface RunSummary {

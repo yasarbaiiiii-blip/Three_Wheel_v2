@@ -18,6 +18,7 @@ describe("Unified Telemetry Store", () => {
 
   it("syncs from prodTelemetryStore into legacy telemetryStore with adapted fields", () => {
     const mockSnap: RoverTelemetrySnapshot = {
+      gateway: { schema: 1, operator_alive: true, clients: 1 },
       vehicle_state: {
         age_s: 0.1,
         fresh: true,

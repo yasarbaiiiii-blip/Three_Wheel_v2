@@ -1,4 +1,6 @@
 import { normalizeTelemetryPacket } from "../utils/telemetryDeadband";
+import { getProdApiClient } from "./prodClient";
+import { beginTelemetryRequest, ingestTelemetryPacket, getMissionStartTelemetryPose } from "../features/telemetry/prodTelemetryStore";
 
 export type LoadMissionPayload = {
   path_name?: string;
@@ -225,30 +227,18 @@ export type LatestTelemetryPose = {
 };
 
 /**
- * Fresh rover pose from GET /api/telemetry/latest.
+ * Validated production pose from GET /api/telemetry, with the same Start gate as socket telemetry.
  * Returns null on network/HTTP failure so callers can fall back to a timed socket cache.
  */
 export async function fetchLatestTelemetryPose(
-  apiBaseUrl: string
+  _apiBaseUrl: string,
+  originGps?: [number, number] | null
 ): Promise<LatestTelemetryPose | null> {
   try {
-    const res = await fetch(apiUrl(apiBaseUrl, "/api/telemetry/latest"), {
-      method: "GET",
-      headers: { Accept: "application/json" },
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as Record<string, unknown>;
-    const packet = normalizeTelemetryPacket(data);
-    if (!packet) return null;
-
-    return {
-      pos_n: packet.pos_n ?? null,
-      pos_e: packet.pos_e ?? null,
-      lat: packet.lat ?? null,
-      lon: packet.lon ?? null,
-      gps_fix: packet.gps_fix ?? null,
-      pose_age_ms: packet.pose_age_ms ?? null,
-    };
+    const request = beginTelemetryRequest();
+    const data = await getProdApiClient().getTelemetry();
+    ingestTelemetryPacket(data, { source: "rest", request });
+    return getMissionStartTelemetryPose(originGps);
   } catch {
     return null;
   }

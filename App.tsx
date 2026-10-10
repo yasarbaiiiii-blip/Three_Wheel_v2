@@ -206,6 +206,10 @@ import {
   setProdGatewayConnected,
   getAdaptedTelemetrySnapshot,
   subscribeProdTelemetry,
+  getProdTelemetryState,
+  telemetryNow,
+  evaluateMissionStartTelemetry,
+  getMissionStartTelemetryPose,
 } from "./src/features/telemetry/prodTelemetryStore";
 import type {
   ActivityEntry,
@@ -1039,26 +1043,12 @@ function AppRoot() {
       gps_fix?: number | null;
       pose_age_ms?: number | null;
     }) => {
-      const prev = telemetrySnapshotRef.current ?? getTelemetrySnapshot();
-      const next = { ...(prev ?? {}) } as TelemetrySnapshot;
-      if (partial.pos_n != null) next.pos_n = partial.pos_n;
-      if (partial.pos_e != null) next.pos_e = partial.pos_e;
-      if (partial.lat != null) next.lat = partial.lat;
-      if (partial.lon != null) next.lon = partial.lon;
-      if (partial.gps_fix != null) next.gps_fix = partial.gps_fix;
-      if (partial.pose_age_ms != null) next.pose_age_ms = partial.pose_age_ms;
-      telemetrySnapshotRef.current = next;
-      telemetryReceivedAtMsRef.current = Date.now();
+      // Never merge null fields into a last-known pose, or stamp ticker notifications as packets.
+      telemetrySnapshotRef.current = { ...partial } as TelemetrySnapshot;
+      telemetryReceivedAtMsRef.current = getProdTelemetryState().lastReceivedAt ?? 0;
     },
     []
   );
-
-  // Keep ref aligned whenever the React snapshot advances (map/Start share one truth).
-  useEffect(() => {
-    if (telemetrySnapshot) {
-      telemetrySnapshotRef.current = telemetrySnapshot;
-    }
-  }, [telemetrySnapshot]);
 
   // Latch first finite GPS after telemetry exists — must not run above this declaration.
   useEffect(() => {
@@ -1950,10 +1940,17 @@ function AppRoot() {
 
   // Listen to live telemetry from unified production store
   useEffect(() => {
+    let lastPacketRevision = -1;
     const unsub = subscribeProdTelemetry(() => {
       const snap = getAdaptedTelemetrySnapshot();
+      if (getProdTelemetryState().awaitingPacket) {
+        telemetrySnapshotRef.current = null;
+        telemetryReceivedAtMsRef.current = 0;
+      }
       if (snap) {
-        noteTelemetryForLiveEntry({
+        if (!getProdTelemetryState().awaitingPacket && lastPacketRevision !== getProdTelemetryState().packetRevision) {
+          lastPacketRevision = getProdTelemetryState().packetRevision;
+          noteTelemetryForLiveEntry({
           pos_n: snap.pos_n,
           pos_e: snap.pos_e,
           lat: snap.lat,
@@ -1961,6 +1958,7 @@ function AppRoot() {
           gps_fix: snap.gps_fix,
           pose_age_ms: snap.pose_age_ms,
         });
+        }
 
         if (snap.mission_state) {
           setMissionRunning(snap.mission_state === "running");
@@ -4213,23 +4211,22 @@ function AppRoot() {
       // Every app-planned Start: rebuild entry from a fresh rover pose (X→A, then Y→A, …)
       // unless the rover is already at the first tip and Send's mission is still loaded.
       if (isAppPlannedStart && appPlannedStartSnapshot) {
-        const nowMs = Date.now();
-        const cachePose = telemetryToRoverPoseForEntry(telemetrySnapshotRef.current);
+        const nowMs = telemetryNow();
+        const cachePose = getMissionStartTelemetryPose(appPlannedStartSnapshot.originGps);
         const cacheReceivedAtMs = telemetryReceivedAtMsRef.current || null;
         const cacheAgeMs =
           cacheReceivedAtMs != null ? nowMs - cacheReceivedAtMs : Number.POSITIVE_INFINITY;
         let restPoseRaw: Awaited<ReturnType<typeof missionApi.fetchLatestTelemetryPose>> = null;
         if (!(cachePose && cacheAgeMs >= 0 && cacheAgeMs <= LIVE_ENTRY_CACHE_MAX_AGE_MS)) {
-          restPoseRaw = await missionApi.fetchLatestTelemetryPose(apiBaseUrl);
-          if (restPoseRaw) {
-            noteTelemetryForLiveEntry(restPoseRaw);
-          }
+          restPoseRaw = await missionApi.fetchLatestTelemetryPose(apiBaseUrl, appPlannedStartSnapshot.originGps);
         }
+        const eligibility = evaluateMissionStartTelemetry(appPlannedStartSnapshot.originGps);
+        if (!eligibility.ok) throw new Error(eligibility.reasons.join(" "));
         const picked = pickRoverPoseForEntry({
           restPose: telemetryToRoverPoseForEntry(restPoseRaw),
-          cachePose,
-          cacheReceivedAtMs,
-          nowMs: Date.now(),
+          cachePose: getMissionStartTelemetryPose(appPlannedStartSnapshot.originGps),
+          cacheReceivedAtMs: getProdTelemetryState().lastReceivedAt,
+          nowMs: telemetryNow(),
         });
         if (!picked.ok) {
           throw new Error(picked.error);
@@ -4348,9 +4345,9 @@ function AppRoot() {
           const usedNed = resolveRoverNedInMissionFrame(livePose, startSnapshot.originGps);
           const picked2 = pickRoverPoseForEntry({
             restPose: null,
-            cachePose: telemetryToRoverPoseForEntry(telemetrySnapshotRef.current),
-            cacheReceivedAtMs: telemetryReceivedAtMsRef.current || null,
-            nowMs: Date.now(),
+            cachePose: getMissionStartTelemetryPose(startSnapshot.originGps),
+            cacheReceivedAtMs: getProdTelemetryState().lastReceivedAt,
+            nowMs: telemetryNow(),
           });
           if (picked2.ok && usedNed.ok) {
             const latestNed = resolveRoverNedInMissionFrame(picked2.pose, startSnapshot.originGps);
@@ -4420,6 +4417,8 @@ function AppRoot() {
         // Also refuse for densified app-planned context that blocked without snapshot.
         requireStagedMission: isCsvMission || isAppPlannedStart || isAppPlannedMission,
       });
+      const finalTelemetryGate = evaluateMissionStartTelemetry(isAppPlannedStart ? appPlannedStartSnapshot?.originGps : null);
+      if (!finalTelemetryGate.ok) throw new Error(finalTelemetryGate.reasons.join(" "));
       const res = await missionApi.startMission(apiBaseUrl, startPayload);
       if (!res.ok) {
         throw await parseMissionResponseError(res, "Start failed");

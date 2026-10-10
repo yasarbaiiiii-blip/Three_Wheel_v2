@@ -145,6 +145,9 @@ export interface TelemetrySnapshot {
   armed?: boolean | null;
   mode?: string | null;
   connected?: boolean | null;
+  gateway_connected?: boolean;
+  operator_alive?: boolean;
+  vehicle_telemetry_health?: "LIVE" | "STALE" | "DISCONNECTED" | "UNAVAILABLE";
   /** Null means the backend does not report battery (never a real 0). */
   battery_v?: number | null;
   battery_pct?: number | null;

@@ -14,7 +14,7 @@
 import { io, type Socket } from "socket.io-client";
 import { AppState, type NativeEventSubscription } from "react-native";
 import type { TelemetryPacket, GatewayEventPacket } from "../contract/prod/realtime";
-import { applyProdTelemetrySnapshot, setProdGatewayConnected } from "../features/telemetry/prodTelemetryStore";
+import { ingestTelemetryPacket, setProdGatewayConnected, setProdSocketConnected, invalidateTelemetrySession } from "../features/telemetry/prodTelemetryStore";
 
 export type ProdSocketStatus = "disconnected" | "connecting" | "connected" | "error" | "unauthorized";
 export type SocketStatusListener = (status: ProdSocketStatus, detail?: string) => void;
@@ -36,6 +36,7 @@ export class ProdSocketManager {
       if (AppState && typeof AppState.addEventListener === "function") {
         this.appStateSubscription = AppState.addEventListener("change", (nextState) => {
           if (nextState === "active") {
+            invalidateTelemetrySession("resume");
             // Tablet woke up / app foregrounded: verify socket state immediately
             if (this.socket) {
               if (!this.socket.connected) {
@@ -105,6 +106,7 @@ export class ProdSocketManager {
 
         this.socket.on("connect", () => {
           clearTimeout(timer);
+          setProdSocketConnected(true);
           this.setStatus("connected");
           if (!resolved) {
             resolved = true;
@@ -113,6 +115,7 @@ export class ProdSocketManager {
         });
 
         this.socket.on("disconnect", (reason) => {
+          setProdSocketConnected(false);
           this.setStatus("disconnected", String(reason));
           setProdGatewayConnected(false);
         });
@@ -150,7 +153,7 @@ export class ProdSocketManager {
         this.socket.on("telemetry", (packet: TelemetryPacket | string) => {
           try {
             const data: TelemetryPacket = typeof packet === "string" ? JSON.parse(packet) : packet;
-            applyProdTelemetrySnapshot(data?.snapshot ?? null);
+            ingestTelemetryPacket(data, { source: "socket" });
           } catch (e) {
             console.warn("[ProdSocket] Error parsing telemetry event:", e);
           }
@@ -251,6 +254,7 @@ export class ProdSocketManager {
   }
 
   disconnect() {
+    setProdSocketConnected(false);
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.disconnect();

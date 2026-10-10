@@ -9,6 +9,8 @@
 import { useSyncExternalStore } from "react";
 import type {
   RoverTelemetrySnapshot,
+  TelemetryPacket,
+  SnapshotEntry,
 } from "../../contract/prod/realtime";
 import {
   ArmingStateEnum,
@@ -16,7 +18,8 @@ import {
   MISSION_STATE_NAMES,
   RPP_STATE_NAMES,
 } from "../../contract/prod/realtime";
-import { evaluateStaleness, type StalenessInfo } from "./staleness";
+import { evaluateAgeStaleness, STALE_THRESHOLD_MS, type StalenessInfo } from "./staleness";
+import { resolveRoverNedInMissionFrame, type RoverPoseForEntry } from "../../utils/missionTrajectory";
 import { radToDeg, wrap360, wrapPi } from "../../contract/prod/units";
 import {
   batteryPercentOrNull,
@@ -24,7 +27,6 @@ import {
   finiteOrNull,
   positiveOrNull,
   rppBlockedReason,
-  usableData,
 } from "./telemetryDerive";
 import type { TelemetrySnapshot } from "../../types/plan";
 
@@ -34,6 +36,15 @@ export interface ProdTelemetryState {
   gatewayConnected: boolean;
   estopAsserted: boolean;
   estopSource: string;
+  socketConnected: boolean;
+  operatorAlive: boolean;
+  envelopeAgeMs: number;
+  source: "socket" | "rest" | null;
+  schemaCompatible: boolean;
+  awaitingPacket: boolean;
+  revision: number;
+  packetRevision: number;
+  observedAt: number | null;
 }
 
 type Listener = () => void;
@@ -44,7 +55,93 @@ let state: ProdTelemetryState = {
   gatewayConnected: false,
   estopAsserted: false,
   estopSource: "",
+  socketConnected: false,
+  operatorAlive: false,
+  envelopeAgeMs: Infinity,
+  source: null,
+  schemaCompatible: true,
+  awaitingPacket: true,
+  revision: 0,
+  packetRevision: 0,
+  observedAt: null,
 };
+
+export const telemetryNow = () => performance.now();
+let session = 0;
+let requestId = 0;
+let acceptedRestId = 0;
+let socketSequence = 0;
+export interface TelemetryRequest { id: number; session: number; socketSequence: number; startedAt: number }
+export function beginTelemetryRequest(): TelemetryRequest {
+  return { id: ++requestId, session, socketSequence, startedAt: telemetryNow() };
+}
+function packetAgeMs(now = telemetryNow()) {
+  return state.lastReceivedAt === null ? Infinity : state.envelopeAgeMs + Math.max(0, now - state.lastReceivedAt);
+}
+export function getTelemetrySourceAgeMs(entry: SnapshotEntry<unknown> | null | undefined, now = telemetryNow()) {
+  const age = finiteOrNull(entry?.age_s);
+  const packetAge = packetAgeMs(now);
+  return age !== null && age >= 0 && Number.isFinite(packetAge) ? age * 1000 + packetAge : null;
+}
+function usableData<T>(entry: SnapshotEntry<T> | null | undefined, now = telemetryNow()): T | null {
+  const age = getTelemetrySourceAgeMs(entry, now);
+  return entry?.fresh === true && age !== null && age <= STALE_THRESHOLD_MS && !state.awaitingPacket && state.schemaCompatible ? entry.data : null;
+}
+
+/** A single ingress for socket events and REST snapshots. Request tokens prevent races, including across sessions. */
+export function ingestTelemetryPacket(packet: TelemetryPacket, options: {source: "socket" | "rest"; request?: TelemetryRequest}): boolean {
+  if (options.source === "rest") {
+    const r = options.request;
+    if (!r || r.session !== session || r.socketSequence !== socketSequence || r.id <= acceptedRestId) return false;
+    acceptedRestId = r.id;
+  } else socketSequence++;
+  const now = telemetryNow();
+  const snapshot = packet?.snapshot ?? null;
+  const schema = snapshot?.gateway?.schema;
+  const schemaCompatible = schema === 1;
+  if (!schemaCompatible) console.warn("[Telemetry] gateway schema mismatch: expected numeric schema 1; Start disabled", schema);
+  const age = finiteOrNull(packet?.age_s);
+  const estop = snapshot?.emergency_stop?.data;
+  state = { ...state, snapshot, lastReceivedAt: now, envelopeAgeMs: age !== null && age >= 0 ? age * 1000 : Infinity,
+    source: options.source, gatewayConnected: packet.connected ?? (options.source === "socket" ? true : state.gatewayConnected),
+    operatorAlive: snapshot?.gateway?.operator_alive === true, schemaCompatible, awaitingPacket: false,
+    estopAsserted: estop ? Boolean(estop.asserted) : state.estopAsserted,
+    estopSource: estop?.source ?? state.estopSource, revision: state.revision + 1,
+    packetRevision: state.packetRevision + 1, observedAt: age !== null && age >= 0 ? now - age * 1000 : null };
+  emit(); return true;
+}
+
+export function invalidateTelemetrySession(_reason: string) {
+  session++; state = { ...state, awaitingPacket: true, operatorAlive: false, revision: state.revision + 1 }; emit();
+}
+export function setProdSocketConnected(connected: boolean) {
+  if (state.socketConnected === connected) return;
+  state = { ...state, socketConnected: connected };
+  invalidateTelemetrySession(connected ? "reconnect" : "disconnect");
+}
+
+export function evaluateMissionStartTelemetry(originGps?: [number, number] | null, now = telemetryNow()): {ok: boolean; reasons: string[]} {
+  const reasons: string[] = [];
+  if (!state.socketConnected) reasons.push("Socket disconnected.");
+  if (!state.gatewayConnected) reasons.push("Gateway disconnected.");
+  if (!state.operatorAlive || !getOverallStaleness(now).isLive) reasons.push("Operator heartbeat unavailable.");
+  if (!state.schemaCompatible) reasons.push("Telemetry schema incompatible.");
+  if (state.awaitingPacket) reasons.push("Waiting for fresh telemetry after reconnect or resume.");
+  if (getOverallStaleness(now).isDisconnected) reasons.push("Telemetry disconnected or silent.");
+  const pose = getAdaptedTelemetrySnapshot(now);
+  const hasPose = pose && (originGps ? Number.isFinite(pose.lat) && Number.isFinite(pose.lon) :
+    (Number.isFinite(pose.pos_n) && Number.isFinite(pose.pos_e)) || (Number.isFinite(pose.lat) && Number.isFinite(pose.lon)));
+  if (!hasPose) reasons.push("No valid, fresh rover pose available.");
+  else if (originGps) {
+    const resolved = resolveRoverNedInMissionFrame(pose, originGps);
+    if (!resolved.ok) reasons.push(resolved.reason);
+  }
+  return { ok: reasons.length === 0, reasons };
+}
+
+export function getMissionStartTelemetryPose(originGps?: [number, number] | null): RoverPoseForEntry | null {
+  return evaluateMissionStartTelemetry(originGps).ok ? getAdaptedTelemetrySnapshot() : null;
+}
 
 const listeners = new Set<Listener>();
 let tickerTimer: ReturnType<typeof setInterval> | null = null;
@@ -58,6 +155,7 @@ function ensureTicker() {
     tickerTimer = setInterval(() => {
       // Re-render subscribers so age and staleness update
       if (listeners.size > 0 && state.lastReceivedAt !== null) {
+        state = { ...state, revision: state.revision + 1 };
         emit();
       }
     }, 250);
@@ -84,16 +182,8 @@ export function applyProdTelemetrySnapshot(
   snapshot: RoverTelemetrySnapshot | null,
   gatewayConnected?: boolean
 ) {
-  const now = Date.now();
-  const estop = snapshot?.emergency_stop?.data;
-  state = {
-    snapshot,
-    lastReceivedAt: snapshot ? now : state.lastReceivedAt,
-    gatewayConnected: gatewayConnected ?? (snapshot?.gateway?.operator_alive ?? state.gatewayConnected),
-    estopAsserted: estop ? Boolean(estop.asserted) : state.estopAsserted,
-    estopSource: estop?.source || state.estopSource,
-  };
-  emit();
+  // Compatibility for existing callers/tests. Production transports always pass a full envelope.
+  ingestTelemetryPacket({ snapshot, age_s: 0, connected: gatewayConnected }, { source: "socket" });
 }
 
 export function setProdGatewayConnected(connected: boolean) {
@@ -103,12 +193,22 @@ export function setProdGatewayConnected(connected: boolean) {
 }
 
 export function clearProdTelemetry() {
+  session++;
   state = {
     snapshot: null,
     lastReceivedAt: null,
     gatewayConnected: false,
     estopAsserted: false,
     estopSource: "",
+    socketConnected: false,
+    operatorAlive: false,
+    envelopeAgeMs: Infinity,
+    source: null,
+    schemaCompatible: true,
+    awaitingPacket: true,
+    revision: state.revision + 1,
+    packetRevision: state.packetRevision,
+    observedAt: null,
   };
   emit();
 }
@@ -119,8 +219,8 @@ export function useProdTelemetry() {
 }
 
 /** Evaluates overall telemetry freshness */
-export function getOverallStaleness(now = Date.now()): StalenessInfo {
-  return evaluateStaleness(state.lastReceivedAt, now);
+export function getOverallStaleness(now = telemetryNow()): StalenessInfo {
+  return evaluateAgeStaleness(state.awaitingPacket ? Infinity : packetAgeMs(now));
 }
 
 /** Extracted and unit-converted live vehicle state */
@@ -137,7 +237,7 @@ export interface DerivedVehiclePose {
   staleness: StalenessInfo;
 }
 
-export function getDerivedVehiclePose(now = Date.now()): DerivedVehiclePose {
+export function getDerivedVehiclePose(now = telemetryNow()): DerivedVehiclePose {
   const vs = state.snapshot?.vehicle_state;
   if (!vs || !vs.data) {
     return {
@@ -150,28 +250,30 @@ export function getDerivedVehiclePose(now = Date.now()): DerivedVehiclePose {
       armingState: null,
       navState: null,
       failsafe: false,
-      staleness: evaluateStaleness(null, now),
+      staleness: evaluateAgeStaleness(Infinity),
     };
   }
 
-  const d = vs.data;
-  const speed = Math.sqrt(d.velocity_north_mps * d.velocity_north_mps + d.velocity_east_mps * d.velocity_east_mps);
-  const headingDeg = wrap360(radToDeg(d.heading_rad));
-  const yawRateDegps = radToDeg(d.yaw_rate_radps);
+  const d = usableData(vs, now);
+  const adapted = getAdaptedTelemetrySnapshot(now);
+  const speed = adapted?.speed_m_s ?? null;
+  const headingDeg = adapted?.heading_ned_deg ?? null;
+  const rate = d?.attitude_valid === true ? finiteOrNull(d.yaw_rate_radps) : null;
+  const yawRateDegps = rate === null ? null : radToDeg(rate);
 
   // Use subsystem receive stamp if available, or fall back to snapshot stamp
-  const staleness = evaluateStaleness(state.lastReceivedAt, now);
+  const staleness = evaluateAgeStaleness(getTelemetrySourceAgeMs(vs, now) ?? Infinity);
 
   return {
-    northM: d.north_m,
-    eastM: d.east_m,
-    downM: d.down_m,
+    northM: adapted?.pos_n ?? null,
+    eastM: adapted?.pos_e ?? null,
+    downM: d?.position_valid === true ? finiteOrNull(d.down_m) : null,
     headingDeg,
     yawRateDegps,
     speedMps: speed,
-    armingState: d.arming_state,
-    navState: d.nav_state,
-    failsafe: d.failsafe,
+    armingState: d?.arming_state ?? null,
+    navState: d?.nav_state ?? null,
+    failsafe: d?.failsafe ?? false,
     staleness,
   };
 }
@@ -189,25 +291,24 @@ export function getDerivedVehiclePose(now = Date.now()): DerivedVehiclePose {
  * - Fields the gateway does not send yet (battery, vrms, heading error, distance to goal)
  *   stay null instead of showing a fake 0. See docs/BACKEND_TELEMETRY_REQUESTS.md.
  */
-export function getAdaptedTelemetrySnapshot(now = Date.now()): TelemetrySnapshot | null {
-  if (!state.snapshot || !state.lastReceivedAt) {
+export function getAdaptedTelemetrySnapshot(now = telemetryNow()): TelemetrySnapshot | null {
+  if (!state.snapshot || state.lastReceivedAt === null) {
     return null;
   }
-  const staleness = evaluateStaleness(state.lastReceivedAt, now);
+  const staleness = getOverallStaleness(now);
   const snap = state.snapshot;
-  const vs = usableData(snap.vehicle_state);
-  const vsRaw = snap.vehicle_state?.data;
-  const rpp = usableData(snap.rpp);
-  const rtk = usableData(snap.rtk_status);
-  const gnssFresh = usableData(snap.gnss_report);
-  const gnss = gnssFresh && gnssFresh.valid !== false ? gnssFresh : null;
-  const link = usableData(snap.px4_link);
-  const battery = usableData(snap.battery);
-  const mission = snap.mission?.data;
+  const vs = usableData(snap.vehicle_state, now);
+  const rpp = usableData(snap.rpp, now);
+  const rtk = usableData(snap.rtk_status, now);
+  const gnssFresh = usableData(snap.gnss_report, now);
+  const gnss = gnssFresh?.valid === true ? gnssFresh : null;
+  const link = usableData(snap.px4_link, now);
+  const battery = usableData(snap.battery, now);
+  const mission = usableData(snap.mission, now);
 
-  const posOk = vs !== null && vs.position_valid !== false;
-  const velOk = vs !== null && vs.velocity_valid !== false;
-  const attOk = vs !== null && vs.attitude_valid !== false;
+  const posOk = vs?.position_valid === true;
+  const velOk = vs?.velocity_valid === true;
+  const attOk = vs?.attitude_valid === true;
 
   const vn = velOk ? finiteOrNull(vs!.velocity_north_mps) : null;
   const ve = velOk ? finiteOrNull(vs!.velocity_east_mps) : null;
@@ -223,9 +324,14 @@ export function getAdaptedTelemetrySnapshot(now = Date.now()): TelemetrySnapshot
   const blockedReason =
     rpp && rpp.state !== 0 ? rppBlockedReason(rpp.tick_state, rpp.rtk_reason) : null;
 
-  const poseAge = entryAgeMs(snap.vehicle_state, staleness.ageMs);
+  const poseAge = getTelemetrySourceAgeMs(snap.vehicle_state, now);
 
   return {
+    gateway_connected: state.gatewayConnected,
+    operator_alive: state.operatorAlive && staleness.isLive && !state.awaitingPacket,
+    vehicle_telemetry_health: state.awaitingPacket || !state.schemaCompatible || snap.vehicle_state?.data.position_valid !== true ? "UNAVAILABLE" :
+      snap.vehicle_state?.fresh !== true ? "STALE" :
+      evaluateAgeStaleness(getTelemetrySourceAgeMs(snap.vehicle_state, now) ?? Infinity).grade,
     pos_n: posOk ? finiteOrNull(vs!.north_m) : null,
     pos_e: posOk ? finiteOrNull(vs!.east_m) : null,
     heading_ned_deg: heading,
@@ -245,11 +351,11 @@ export function getAdaptedTelemetrySnapshot(now = Date.now()): TelemetrySnapshot
     rpp_state: finiteOrNull(rpp?.state),
     rpp_state_name: rpp ? RPP_STATE_NAMES[rpp.state] ?? "UNKNOWN" : null,
     rpp_blocked_reason: blockedReason,
-    mission_state: mission?.state != null ? MISSION_STATE_NAMES[mission.state]?.toLowerCase() ?? "idle" : "idle",
-    armed: vsRaw ? vsRaw.arming_state === ArmingStateEnum.ARMED : false,
-    mode: vsRaw ? (vsRaw.nav_state === 14 ? "OFFBOARD" : "MANUAL") : "MANUAL",
+    mission_state: mission?.state != null ? MISSION_STATE_NAMES[mission.state]?.toLowerCase() ?? "unknown" : null,
+    armed: vs ? vs.arming_state === ArmingStateEnum.ARMED : null,
+    mode: vs ? (vs.nav_state === 14 ? "OFFBOARD" : "MANUAL") : null,
     pose_age_ms: poseAge,
-    connected: !staleness.isDisconnected,
+    connected: state.gatewayConnected && !state.awaitingPacket && !staleness.isDisconnected,
     fcu_connected:
       !staleness.isDisconnected && link !== null && link.session_alive === true && link.handshake_ok === true,
     battery_v: finiteOrNull(battery?.voltage_v),

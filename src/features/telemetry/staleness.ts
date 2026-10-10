@@ -40,7 +40,12 @@ export function evaluateStaleness(
     };
   }
 
-  const ageMs = Math.max(0, nowEpochMs - receivedAtEpochMs);
+  return evaluateAgeStaleness(Math.max(0, nowEpochMs - receivedAtEpochMs));
+}
+
+/** Age-only evaluation also supports monotonic timestamps starting at zero. */
+export function evaluateAgeStaleness(ageMs: number): StalenessInfo {
+  if (!Number.isFinite(ageMs) || ageMs < 0) ageMs = Infinity;
   const ageSec = ageMs / 1000;
 
   let grade: StalenessGrade;
