@@ -17,6 +17,7 @@ import { MissionLayerPills } from "./fields/MissionLayerPills";
 import { nonEmptyMissionLayers } from "../utils/missionLayerAssignment";
 import { EMPTY_RTK_STATUS, hasLiveCorrections, rtkStatusLabel } from "../api/rtkStatus";
 import { AppErrorBoundary } from "./AppErrorBoundary";
+import { gpsFixSeverity } from "../features/telemetry/telemetryDerive";
 
 // Using 127.0.0.1:5001 as fallback if window location is unavailable
 const getApiBase = () => {
@@ -806,7 +807,10 @@ export default function ModernHomeUI(props) {
   const vehicleMode = normalizeVehicleMode(telemetrySnapshot?.mode ?? systemHealth?.mode);
   const isVehicleArmed = telemetrySnapshot?.armed ?? systemHealth?.armed ?? false;
 
-  const batteryPct = telemetrySnapshot?.battery_pct ?? 0;
+  // Null means the rover does not report battery: show N/A, never a fake 0% / CRIT.
+  const batteryPctRaw = telemetrySnapshot?.battery_pct ?? null;
+  const hasBattery = batteryPctRaw !== null;
+  const batteryPct = batteryPctRaw ?? 0;
   const missionProgress = lines.length > 0 ? Math.min(100, Math.round(((telemetrySnapshot?.projection_segment_index || 0) / lines.length) * 100)) : 0;
 
   // Derived Telemetry Values
@@ -823,7 +827,7 @@ export default function ModernHomeUI(props) {
       : telemetrySnapshot.gps_fix === 5 ? "RTK Float"
       : telemetrySnapshot.gps_fix === 6 ? "RTK Fixed"
       : `Fix ${telemetrySnapshot.gps_fix}`);
-  const sats = telemetrySnapshot?.gps_sat ?? 0;
+  const sats = telemetrySnapshot?.gps_sat != null ? String(telemetrySnapshot.gps_sat) : "—";
   // hrms/vrms displayed in centimetres (m * 100), 2 decimal places
   const hrms = telemetrySnapshot?.hrms != null ? (telemetrySnapshot.hrms * 100).toFixed(2) : "—";
   const vrms = telemetrySnapshot?.vrms != null ? (telemetrySnapshot.vrms * 100).toFixed(2) : "—";
@@ -839,12 +843,16 @@ export default function ModernHomeUI(props) {
   const displaySpeed = measuredSpeed ?? speed;
   const alongTrackSpeed = telemetrySnapshot?.along_track_speed_mps != null ? telemetrySnapshot.along_track_speed_mps.toFixed(2) : "—";
   const crossTrackSpeed = telemetrySnapshot?.cross_track_speed_mps != null ? telemetrySnapshot.cross_track_speed_mps.toFixed(2) : "—";
+  const rppBlocked = telemetrySnapshot?.rpp_blocked_reason ?? null;
   const rppState = telemetrySnapshot?.rpp_state_name ?? "N/A";
+  const rppStateText = rppBlocked ? `${rppState} · ${rppBlocked}` : rppState;
   const fcuConn = systemHealth?.fcu_connected ? "Connected" : "Disconnected";
   const poseAge = telemetrySnapshot?.pose_age_ms != null ? telemetrySnapshot.pose_age_ms.toFixed(0) : "—";
   const battV = telemetrySnapshot?.battery_v != null ? telemetrySnapshot.battery_v.toFixed(2) : "—";
-  // Ampere not explicitly in schema, show N/A
-  const battA = "N/A";
+  const battA = telemetrySnapshot?.battery_a != null ? telemetrySnapshot.battery_a.toFixed(1) : null;
+  const battSub = battV !== "—" || battA
+    ? `${battV !== "—" ? `${battV}V` : "—"} · ${battA ? `${battA}A` : "—"}`
+    : "No battery data from rover";
   const joystickState = virtualJoystick?.state ?? "DISABLED";
   const hasJoystickLease = Boolean(virtualJoystick?.leaseId);
   const joystickActive = virtualJoystick?.joystickActive || telemetrySnapshot?.joystick_active;
@@ -865,13 +873,16 @@ export default function ModernHomeUI(props) {
     : COLORS.textMuted;
 
   const batteryTone =
-    batteryPct > 50 ? COLORS.success
+    !hasBattery ? COLORS.textMuted
+    : batteryPct > 50 ? COLORS.success
     : batteryPct > 20 ? COLORS.warning
     : COLORS.danger;
 
+  // RTK FIXED = green, RTK FLOAT / DGPS = amber, anything else = red.
+  const gpsFixSev = gpsFixSeverity(gpsFix);
   const gpsFixTone =
-    gpsFix.toLowerCase().includes("rtk") || gpsFix.toLowerCase().includes("fixed") ? COLORS.success
-    : gpsFix.toLowerCase().includes("float") ? COLORS.warning
+    gpsFixSev === "ok" ? COLORS.success
+    : gpsFixSev === "warn" ? COLORS.warning
     : COLORS.danger;
 
   const joystickStateTone =
@@ -1670,7 +1681,7 @@ export default function ModernHomeUI(props) {
         <View style={styles.telemetryQuickStrip}>
           <QuickChip icon={Satellite} label="Fix" value={gpsFix} tone={gpsFixTone} />
           <QuickChip icon={Radio} label="FCU" value={fcuConn} tone={fcuTone} />
-          <QuickChip icon={Battery} label="Batt" value={`${batteryPct}%`} tone={batteryTone} />
+          <QuickChip icon={Battery} label="Batt" value={hasBattery ? `${batteryPct}%` : "N/A"} tone={batteryTone} />
         </View>
 
         <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.telemetryScroll} showsVerticalScrollIndicator={false}>
@@ -1681,7 +1692,7 @@ export default function ModernHomeUI(props) {
               <CoordRow label="LON" value={lon} />
             </View>
             <View style={styles.statGrid}>
-              <StatTile icon={Satellite} label="Satellites" value={String(sats)} accent={COLORS.accentBrand} />
+              <StatTile icon={Satellite} label="Satellites" value={sats} accent={COLORS.accentBrand} />
               <StatTile icon={Target} label="HRMS" value={hrms !== "—" ? `${hrms} cm` : "—"} accent={COLORS.textMuted} />
               <StatTile icon={Target} label="VRMS" value={vrms !== "—" ? `${vrms} cm` : "—"} accent={COLORS.textMuted} />
               <StatTile icon={Activity} label="Pose Age" value={poseAge !== "—" ? `${poseAge} ms` : "—"} accent={COLORS.textMuted} />
@@ -1737,7 +1748,7 @@ export default function ModernHomeUI(props) {
             <View style={styles.systemsRow}>
               <View style={styles.systemsItem}>
                 <Text style={styles.systemsLabel}>RPP</Text>
-                <Text style={styles.systemsValue} numberOfLines={1}>{rppState}</Text>
+                <Text style={styles.systemsValue} numberOfLines={2}>{rppStateText}</Text>
               </View>
               <View style={styles.systemsDivider} />
               <View style={styles.systemsItem}>
@@ -1754,12 +1765,12 @@ export default function ModernHomeUI(props) {
                   <Battery color={batteryTone} size={16} strokeWidth={2.2} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={[styles.batteryCardTitle, { color: batteryTone }]}>{batteryPct}%</Text>
-                  <Text style={styles.batteryCardSub}>{battV}V · {battA}A</Text>
+                  <Text style={[styles.batteryCardTitle, { color: batteryTone }]}>{hasBattery ? `${batteryPct}%` : "N/A"}</Text>
+                  <Text style={styles.batteryCardSub}>{battSub}</Text>
                 </View>
                 <View style={[styles.batteryPctBadge, { backgroundColor: pillBgFor(batteryTone), borderColor: pillBorderFor(batteryTone) }]}>
                   <Text style={[styles.batteryPctBadgeText, { color: batteryTone }]}>
-                    {batteryPct > 50 ? "OK" : batteryPct > 20 ? "LOW" : "CRIT"}
+                    {!hasBattery ? "N/A" : batteryPct > 50 ? "OK" : batteryPct > 20 ? "LOW" : "CRIT"}
                   </Text>
                 </View>
               </View>

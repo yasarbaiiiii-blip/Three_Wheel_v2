@@ -27,7 +27,7 @@ subscribeProdTelemetry(() => {
   const nextHealth: SystemHealth | null = adapted
     ? {
         ros_node: true,
-        fcu_connected: Boolean(adapted.connected),
+        fcu_connected: Boolean(adapted.fcu_connected),
         armed: Boolean(adapted.armed),
         mode: adapted.mode ?? "MANUAL",
         rpp_state: adapted.rpp_state_name ?? null,

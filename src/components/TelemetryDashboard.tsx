@@ -2,6 +2,7 @@
 import React, { memo } from "react";
 import { View, Text } from "react-native";
 import type { TelemetrySnapshot } from "../types/plan";
+import { gpsFixSeverity } from "../features/telemetry/telemetryDerive";
 
 /**
  * Custom comparator — only re-render when meaningful telemetry fields change.
@@ -42,6 +43,9 @@ const areTelemetrySnapshotsEqual = (
     prev.control_owner === next.control_owner &&
     prev.pose_age_ms === next.pose_age_ms &&
     prev.battery_v === next.battery_v &&
+    prev.battery_a === next.battery_a &&
+    prev.fcu_connected === next.fcu_connected &&
+    prev.rpp_blocked_reason === next.rpp_blocked_reason &&
     prev.projection_segment_index === next.projection_segment_index &&
     prev.gps_safety_ok === next.gps_safety_ok &&
     prev.manual_resume_required === next.manual_resume_required
@@ -90,7 +94,7 @@ export const TelemetryDashboard = memo(
         : snapshot.gps_fix === 6
         ? "RTK Fixed"
         : `Fix ${snapshot.gps_fix}`);
-    const sats = snapshot.gps_sat ?? 0;
+    const sats = snapshot.gps_sat != null ? snapshot.gps_sat : "—";
     const hrms =
       snapshot.hrms != null ? (snapshot.hrms * 100).toFixed(2) : "—";
     const vrms =
@@ -124,24 +128,27 @@ export const TelemetryDashboard = memo(
       snapshot.cross_track_speed_mps != null
         ? snapshot.cross_track_speed_mps.toFixed(2)
         : "—";
-    const rppState = snapshot.rpp_state_name ?? "N/A";
+    const rppState = snapshot.rpp_blocked_reason
+      ? `${snapshot.rpp_state_name ?? "N/A"} · ${snapshot.rpp_blocked_reason}`
+      : snapshot.rpp_state_name ?? "N/A";
     const poseAge =
       snapshot.pose_age_ms != null ? snapshot.pose_age_ms.toFixed(0) : "—";
     const battV =
       snapshot.battery_v != null ? snapshot.battery_v.toFixed(2) : "—";
+    // Null means the rover does not report battery: show N/A, never a fake 0% / CRIT.
+    const hasBattery = snapshot.battery_pct != null;
     const batteryPct = snapshot.battery_pct ?? 0;
+    const batteryText = hasBattery ? `${batteryPct}%` : "N/A";
     const missionStateStr = snapshot.mission_state ?? "idle";
 
+    const gpsFixSev = gpsFixSeverity(gpsFix);
     const gpsFixTone =
-      gpsFix.toLowerCase().includes("rtk") ||
-      gpsFix.toLowerCase().includes("fixed")
-        ? "#10b981"
-        : gpsFix.toLowerCase().includes("float")
-        ? "#f59e0b"
-        : "#ef4444";
+      gpsFixSev === "ok" ? "#10b981" : gpsFixSev === "warn" ? "#f59e0b" : "#ef4444";
 
     const batteryTone =
-      batteryPct > 50
+      !hasBattery
+        ? "#94a3b8"
+        : batteryPct > 50
         ? "#10b981"
         : batteryPct > 20
         ? "#f59e0b"
@@ -161,7 +168,7 @@ export const TelemetryDashboard = memo(
         {/* Quick status row */}
         <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
           <TelemetryChip label="Fix" value={gpsFix} tone={gpsFixTone} />
-          <TelemetryChip label="Batt" value={`${batteryPct}%`} tone={batteryTone} />
+          <TelemetryChip label="Batt" value={batteryText} tone={batteryTone} />
           <TelemetryChip label="Sats" value={String(sats)} tone="#94a3b8" />
         </View>
 
@@ -250,7 +257,7 @@ export const TelemetryDashboard = memo(
           <View style={dashboardStyles.row}>
             <Text style={dashboardStyles.label}>Battery</Text>
             <Text style={[dashboardStyles.value, { color: batteryTone }]}>
-              {batteryPct}% ({battV}V)
+              {hasBattery ? `${batteryPct}% (${battV}V)` : "N/A"}
             </Text>
           </View>
         </View>

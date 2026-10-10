@@ -17,7 +17,15 @@ import {
   RPP_STATE_NAMES,
 } from "../../contract/prod/realtime";
 import { evaluateStaleness, type StalenessInfo } from "./staleness";
-import { radToDeg, wrap360 } from "../../contract/prod/units";
+import { radToDeg, wrap360, wrapPi } from "../../contract/prod/units";
+import {
+  batteryPercentOrNull,
+  entryAgeMs,
+  finiteOrNull,
+  positiveOrNull,
+  rppBlockedReason,
+  usableData,
+} from "./telemetryDerive";
 import type { TelemetrySnapshot } from "../../types/plan";
 
 export interface ProdTelemetryState {
@@ -172,9 +180,14 @@ export function getDerivedVehiclePose(now = Date.now()): DerivedVehiclePose {
  * Adapts the production RoverTelemetrySnapshot into the UI TelemetrySnapshot shape
  * consumed by Home, Map, HUD, and path planning screens.
  *
- * Guarantees honest staleness:
- * - When disconnected (age > 2.5s or no telemetry), connected=false and pose_age_ms reflects truth.
- * - Never shows frozen values as live.
+ * Guarantees honest staleness (gateway contract: a stale or missing source is unknown,
+ * never the last value):
+ * - Each value comes only from a section the gateway marks fresh; otherwise it is null ("—" in the UI).
+ * - Accuracy values of 0 are the "unknown" sentinel and become null.
+ * - pose_age_ms is the age of the vehicle pose, not of the last packet.
+ * - fcu_connected means the PX4 link is alive; `connected` only means telemetry is arriving.
+ * - Fields the gateway does not send yet (battery, vrms, heading error, distance to goal)
+ *   stay null instead of showing a fake 0. See docs/BACKEND_TELEMETRY_REQUESTS.md.
  */
 export function getAdaptedTelemetrySnapshot(now = Date.now()): TelemetrySnapshot | null {
   if (!state.snapshot || !state.lastReceivedAt) {
@@ -182,43 +195,65 @@ export function getAdaptedTelemetrySnapshot(now = Date.now()): TelemetrySnapshot
   }
   const staleness = evaluateStaleness(state.lastReceivedAt, now);
   const snap = state.snapshot;
-  const vs = snap.vehicle_state?.data;
-  const rpp = snap.rpp?.data;
-  const rtk = snap.rtk_status?.data;
-  const gnss = snap.gnss_report?.data;
+  const vs = usableData(snap.vehicle_state);
+  const vsRaw = snap.vehicle_state?.data;
+  const rpp = usableData(snap.rpp);
+  const rtk = usableData(snap.rtk_status);
+  const gnssFresh = usableData(snap.gnss_report);
+  const gnss = gnssFresh && gnssFresh.valid !== false ? gnssFresh : null;
+  const link = usableData(snap.px4_link);
+  const battery = usableData(snap.battery);
   const mission = snap.mission?.data;
 
-  const speed = vs
-    ? Math.sqrt(vs.velocity_north_mps * vs.velocity_north_mps + vs.velocity_east_mps * vs.velocity_east_mps)
-    : null;
-  const heading = vs ? wrap360(radToDeg(vs.heading_rad)) : null;
+  const posOk = vs !== null && vs.position_valid !== false;
+  const velOk = vs !== null && vs.velocity_valid !== false;
+  const attOk = vs !== null && vs.attitude_valid !== false;
 
-  const fixType = rtk?.fix_type ?? gnss?.fix_type ?? null;
-  const fixName = fixType != null ? FIX_TYPE_NAMES[fixType] ?? `Fix ${fixType}` : "No Fix";
+  const vn = velOk ? finiteOrNull(vs!.velocity_north_mps) : null;
+  const ve = velOk ? finiteOrNull(vs!.velocity_east_mps) : null;
+  const speed = vn !== null && ve !== null ? Math.sqrt(vn * vn + ve * ve) : null;
+  const headingRad = attOk ? finiteOrNull(vs!.heading_rad) : null;
+  const heading = headingRad !== null ? wrap360(radToDeg(headingRad)) : null;
+
+  const fixType = finiteOrNull(rtk?.fix_type) ?? finiteOrNull(gnss?.fix_type);
+  const fixName = fixType !== null ? FIX_TYPE_NAMES[fixType] ?? `Fix ${fixType}` : "NO DATA";
+
+  const headingErrRad = finiteOrNull(rpp?.heading_error_rad);
+  const distToGo = finiteOrNull(rpp?.dist_to_goal_m);
+  const blockedReason =
+    rpp && rpp.state !== 0 ? rppBlockedReason(rpp.tick_state, rpp.rtk_reason) : null;
+
+  const poseAge = entryAgeMs(snap.vehicle_state, staleness.ageMs);
 
   return {
-    pos_n: vs?.north_m ?? null,
-    pos_e: vs?.east_m ?? null,
+    pos_n: posOk ? finiteOrNull(vs!.north_m) : null,
+    pos_e: posOk ? finiteOrNull(vs!.east_m) : null,
     heading_ned_deg: heading,
     speed_m_s: speed,
     measured_speed_m_s: speed,
-    lat: gnss?.latitude_deg ?? null,
-    lon: gnss?.longitude_deg ?? null,
-    alt: gnss?.altitude_msl_m ?? null,
+    lat: finiteOrNull(gnss?.latitude_deg),
+    lon: finiteOrNull(gnss?.longitude_deg),
+    alt: finiteOrNull(gnss?.altitude_msl_m),
     gps_fix: fixType,
     gps_fix_name: fixName,
-    gps_sat: rtk?.satellites_used ?? gnss?.satellites_used ?? 0,
-    hrms: rtk?.horizontal_accuracy_m ?? gnss?.horizontal_accuracy_m ?? null,
-    vrms: null,
-    xtrack_m: rpp?.cross_track_right_m ?? null,
-    rpp_state: rpp?.state ?? null,
-    rpp_state_name: rpp?.state != null ? RPP_STATE_NAMES[rpp.state] ?? "UNKNOWN" : null,
+    gps_sat: finiteOrNull(rtk?.satellites_used) ?? finiteOrNull(gnss?.satellites_used),
+    hrms: positiveOrNull(rtk?.horizontal_accuracy_m) ?? positiveOrNull(gnss?.horizontal_accuracy_m),
+    vrms: positiveOrNull(gnss?.vertical_accuracy_m),
+    xtrack_m: finiteOrNull(rpp?.cross_track_right_m),
+    heading_err_deg: headingErrRad !== null ? radToDeg(wrapPi(headingErrRad)) : null,
+    dist_to_goal_m: distToGo !== null && distToGo >= 0 ? distToGo : null,
+    rpp_state: finiteOrNull(rpp?.state),
+    rpp_state_name: rpp ? RPP_STATE_NAMES[rpp.state] ?? "UNKNOWN" : null,
+    rpp_blocked_reason: blockedReason,
     mission_state: mission?.state != null ? MISSION_STATE_NAMES[mission.state]?.toLowerCase() ?? "idle" : "idle",
-    armed: vs ? vs.arming_state === ArmingStateEnum.ARMED : false,
-    mode: vs ? (vs.nav_state === 14 ? "OFFBOARD" : "MANUAL") : "MANUAL",
-    pose_age_ms: staleness.ageMs,
+    armed: vsRaw ? vsRaw.arming_state === ArmingStateEnum.ARMED : false,
+    mode: vsRaw ? (vsRaw.nav_state === 14 ? "OFFBOARD" : "MANUAL") : "MANUAL",
+    pose_age_ms: poseAge,
     connected: !staleness.isDisconnected,
-    battery_v: null,
-    battery_pct: null,
+    fcu_connected:
+      !staleness.isDisconnected && link !== null && link.session_alive === true && link.handshake_ok === true,
+    battery_v: finiteOrNull(battery?.voltage_v),
+    battery_pct: batteryPercentOrNull(battery?.remaining_pct),
+    battery_a: finiteOrNull(battery?.current_a),
   };
 }

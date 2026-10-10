@@ -145,8 +145,14 @@ export interface TelemetrySnapshot {
   armed?: boolean | null;
   mode?: string | null;
   connected?: boolean | null;
+  /** Null means the backend does not report battery (never a real 0). */
   battery_v?: number | null;
   battery_pct?: number | null;
+  battery_a?: number | null;
+  /** True only when the PX4 link is alive and fresh (px4_link), not merely "telemetry is arriving". */
+  fcu_connected?: boolean | null;
+  /** Why RPP is not driving (for example "RTK WAIT · accuracy too large"); null when nothing blocks. */
+  rpp_blocked_reason?: string | null;
   gps_fix?: number | null;
   /** Human-readable GPS fix type name from API, e.g. "RTK Fixed", "Float", "No Fix" */
   gps_fix_name?: string | null;

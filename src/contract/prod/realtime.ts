@@ -59,6 +59,9 @@ export interface GnssReportData {
   longitude_deg: number;
   altitude_msl_m: number;
   hdop: number;
+  /** Not sent by the gateway yet (docs/BACKEND_TELEMETRY_REQUESTS.md R3). */
+  vertical_accuracy_m?: number | null;
+  heading_accuracy_rad?: number | null;
 }
 
 export interface NtripStatusData {
@@ -121,6 +124,16 @@ export interface RppData {
   commanded_speed_mps: number;
   loop_jitter_max_us: number;
   loop_overrun_count: number;
+  /**
+   * Not sent by the gateway yet (docs/BACKEND_TELEMETRY_REQUESTS.md R1/R2).
+   * The app reads each one only when present.
+   */
+  heading_error_rad?: number | null;
+  tick_state?: number | null;
+  rtk_reason?: number | null;
+  path_travel_m?: number | null;
+  commanded_yaw_rate_radps?: number | null;
+  dist_to_goal_m?: number | null;
 }
 
 export interface MissionData {
@@ -137,12 +150,35 @@ export interface PointResultData {
   point_index: number;
   result_code: number;
   north_m: number;
+  east_m: number;
+  error_m: number;
 }
 
+/** Matches the gateway `spray` subscription (gateway_node.cpp). */
 export interface SprayData {
-  valve_open: boolean;
-  flow_lpm?: number;
-  pressure_bar?: number;
+  fsm_state: number;
+  spraying: boolean;
+  desired: boolean;
+  safety_ok: boolean;
+  safety_reason: string;
+  manual_active: boolean;
+  xtrack_tripped: boolean;
+  xtrack_error_m: number;
+}
+
+/** Matches the gateway `recorder` subscription (gateway_node.cpp). */
+export interface RecorderData {
+  state: number;
+  bag_healthy: boolean;
+  bytes_written: number;
+  free_bytes: number;
+}
+
+/** Not sent by the gateway yet (docs/BACKEND_TELEMETRY_REQUESTS.md R4). `remaining_pct` is 0-100. */
+export interface BatteryData {
+  voltage_v?: number | null;
+  current_a?: number | null;
+  remaining_pct?: number | null;
 }
 
 export interface GatewayInfoData {
@@ -165,7 +201,9 @@ export interface RoverTelemetrySnapshot {
   mission: SnapshotEntry<MissionData> | null;
   last_point_result: SnapshotEntry<PointResultData> | null;
   spray: SnapshotEntry<SprayData> | null;
-  recorder: SnapshotEntry<Record<string, unknown>> | null;
+  recorder: SnapshotEntry<RecorderData> | null;
+  /** Absent until the backend adds it (docs/BACKEND_TELEMETRY_REQUESTS.md R4). */
+  battery?: SnapshotEntry<BatteryData> | null;
   gateway?: GatewayInfoData;
 }
 
