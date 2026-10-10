@@ -9,6 +9,14 @@
 
 ---
 
+> **Status 2026-10-10 (mission contract v2).** The rover-side flows in the tables below are **removed from the app**, not just dropped by the backend:
+> `src/api/pathApi.ts` and all `/api/path/*`, `/api/paths`, `/api/mission/load|start|stop|next|export|clear|loaded-path` calls (rows 13-15, 23-44);
+> the Load step and `load-to-controller` (Start does everything); `PathOrderAndSprayStep` and the rover plan-and-stage flow; the Socket.IO `gateway` event (now `rover_event` kind `gateway_link`).
+> The app now uses `POST /api/missions/plan`, `POST /api/missions/{sha}/start` (202, `request_id`), `POST /api/mission/pause|resume|abort`, and `rover_event` for status.
+> See `docs/contracts/app_planned_mission.md` and `docs/contracts/mission_run.md`. The `file:line` references below describe the code as audited on 2026-10-08.
+
+---
+
 ## Executive Summary & The Key Architectural Decision
 
 The operator tablet client (`Three_Wheel_v2`) was designed and tested against the prototype rover stack (`PX4_DXP`). The rover has now transitioned to the high-reliability production ROS 2 Humble stack (`DYX_3WD`), where PX4 is reached via `dyx3_px4_link` in OFFBOARD mode, safety is enforced by `dyx3_motion_guard`, mission execution is governed by `dyx3_mission` and `dyx3_rpp`, and external communications pass strictly through `dyx3_system_gateway` and `dyx3_backend`.

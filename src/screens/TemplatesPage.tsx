@@ -1,6 +1,5 @@
 import React, { useCallback, useMemo, useState, useEffect, useRef } from "react";
 import { Alert, Modal, Pressable, ScrollView, Switch, Text, TextInput, View } from "react-native";
-import * as FileSystem from "expo-file-system/legacy";
 import { X } from "lucide-react-native";
 import Slider from "@react-native-community/slider";
 
@@ -10,6 +9,7 @@ import { generateAlphabetLines, FontStyle, AlphabetType, NumberType, generateNum
 import { generateRoadSignLines, RoadSignType, ROAD_SIGN_LABELS } from "../utils/roadSignTemplates";
 import { generateTemplateLines, ShapeType, ArcType } from "../utils/shapeTemplates";
 import { linesToDxf } from "../utils/dxfGenerator";
+import { parseLocalDxf, type LocalDxfResult } from "../utils/dxfLocalImport";
 import { DesignDocument, DesignNode, isDesignInstance, isDesignEntity, createDesignDocument, createDesignInstance, createDesignEntity, createDesignVertex, DesignPreviewAnchor } from "../types/designDocument";
 import { TemplateRegistry, createTemplateDefinition, snapshotTemplateId } from "../utils/designTemplateRegistry";
 import { flattenDesignDocument, flattenDesignNode } from "../utils/designTransform";
@@ -33,10 +33,10 @@ interface TemplatesPageProps {
   selectedLineId: string | null;
   onSelectLine: (id: string | null) => void;
   previewRoverPoint: { north: number; east: number } | null;
-  onGenerateTemplate: (name: string, lines: PlanLine[]) => void;
-  apiBaseUrl: string;
-  onSelectPath: (name: string) => void;
-  onRefreshPaths: () => void;
+  /** The generated template enters the plan through the same on-device DXF import as a picked file. */
+  onBeginLocalImportBatch?: () => void;
+  onLocalDxfParsed?: (data: LocalDxfResult) => void;
+  setImportedPlan: React.Dispatch<React.SetStateAction<import("../types/plan").ImportedPlan | null>>;
   onNav: (page: Page) => void;
   renderPlanPreview: (previewProps: {
     lines: PlanLine[];
@@ -916,7 +916,6 @@ export function TemplatesPage(props: TemplatesPageProps) {
   }, [designDocument.nodes, selectedItemIds, executeCommand]);
 
   const handleParse = async () => {
-    if (!props.apiBaseUrl) return;
     let finalLines: PlanLine[] = [];
     let title = "";
 
@@ -974,27 +973,18 @@ export function TemplatesPage(props: TemplatesPageProps) {
 
     setIsParsing(true);
     try {
+      // The template is a plan like any other: write its DXF, parse it on the device and hand it to
+      // the Fields workflow (align, order, Send). Nothing goes to the rover until Send.
       const fileName = `${title.replace(/\s+/g, "_")}.dxf`;
-      const fileContent = linesToDxf(finalLines, fileName);
-      const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
-      await FileSystem.writeAsStringAsync(fileUri, fileContent, { encoding: FileSystem.EncodingType.UTF8 });
-
-      const formData = new FormData();
-      formData.append("file", { uri: fileUri, name: fileName, type: "application/dxf" } as any);
-
-      const res = await fetch(`${props.apiBaseUrl}/api/path/parse-dxf`, { method: "POST", body: formData });
-      if (res.ok) {
-        Alert.alert("Success", `Template "${fileName}" sent. Switching to alignment view.`);
-        props.onRefreshPaths();
-        props.onSelectPath(fileName);
-        setTimeout(() => props.onNav("fields"), 500);
-      } else {
-        const errText = await res.text();
-        Alert.alert("Parse Failed", errText || "Unknown error");
-      }
+      const parsed = parseLocalDxf(linesToDxf(finalLines, fileName), fileName);
+      props.onBeginLocalImportBatch?.();
+      props.onLocalDxfParsed?.(parsed);
+      props.setImportedPlan({ fileName, uri: "", fileType: "dxf", source: "generated" });
+      Alert.alert("Template ready", `"${fileName}" is in the plan. Switching to the Fields view.`);
+      setTimeout(() => props.onNav("fields"), 300);
     } catch (err: any) {
-      console.log("Error parsing template:", err);
-      Alert.alert("Error", err.message || "Failed to send template to backend.");
+      console.log("Error importing template:", err);
+      Alert.alert("Error", err.message || "Could not use the template.");
     } finally {
       setIsParsing(false);
     }
@@ -1737,7 +1727,7 @@ export function TemplatesPage(props: TemplatesPageProps) {
               }}
             >
               <Text style={{ color: "#fff", fontSize: 15, fontWeight: "800" }}>
-                {isParsing ? "Parsing..." : "Parse & Send to Alignment"}
+                {isParsing ? "Working..." : "Use in Fields"}
               </Text>
             </Pressable>
           </View>

@@ -12,23 +12,12 @@ import { describeRoverLinks, linkUnknownNote } from "../features/telemetry/rover
 import { describeMission, missionControls, selectMission } from "../features/mission/missionLifecycle";
 import { MapView } from "./MapView";
 import { getPlanLineSegmentKind, isSegmentKindVisible } from "../utils/curveGeometry";
-import * as pathApi from "../api/pathApi";
+import { parseLocalPointCsv } from "../utils/localPointCsv";
 import { MissionLayerPills } from "./fields/MissionLayerPills";
 import { nonEmptyMissionLayers } from "../utils/missionLayerAssignment";
 import { EMPTY_RTK_STATUS, hasLiveCorrections, rtkStatusLabel } from "../api/rtkStatus";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { gpsFixSeverity } from "../features/telemetry/telemetryDerive";
-
-// Using 127.0.0.1:5001 as fallback if window location is unavailable
-const getApiBase = () => {
-  if (typeof window !== "undefined" && window.location && window.location.hostname) {
-    const host = window.location.hostname;
-    if (host && host !== "localhost" && host !== "127.0.0.1") {
-      return `http://${host}:5001`;
-    }
-  }
-  return "http://127.0.0.1:5001";
-};
 
 // Theme Constants
 const COLORS = {
@@ -667,7 +656,7 @@ export default function ModernHomeUI(props) {
     return drawnStrokes.flat();
   }, [drawingMode, canvasStrokes, drawnStrokes]);
 
-  const [isUploadingDrawn, setIsUploadingDrawn] = useState(false);
+  const [isFinishingDrawn, setIsFinishingDrawn] = useState(false);
 
   // ── Layers visibility filter (extension / rover / plan segment type) ──
   // Applies the same filter the SVG PlanPreview already honors to the native
@@ -989,8 +978,8 @@ export default function ModernHomeUI(props) {
     setCanvasStrokes([]);
   }, []);
 
-  const handleFinishAndUpload = useCallback(async () => {
-    let pointsToUpload: { lat: number; lon: number }[] = [];
+  const handleFinishDrawing = useCallback(async () => {
+    let drawnGpsPoints: { lat: number; lon: number }[] = [];
 
     if (drawingMode === "manual") {
       if (canvasStrokes.length === 0) {
@@ -1002,7 +991,7 @@ export default function ModernHomeUI(props) {
         return;
       }
       
-      setIsUploadingDrawn(true);
+      setIsFinishingDrawn(true);
       try {
         const converted: { lat: number; lon: number }[] = [];
         for (const stroke of canvasStrokes) {
@@ -1015,14 +1004,14 @@ export default function ModernHomeUI(props) {
         }
         if (converted.length === 0) {
           Alert.alert("Error", "Failed to resolve coordinates from the drawing.");
-          setIsUploadingDrawn(false);
+          setIsFinishingDrawn(false);
           return;
         }
-        pointsToUpload = converted;
+        drawnGpsPoints = converted;
       } catch (err) {
         console.error("Coordinate conversion error:", err);
         Alert.alert("Error", "An error occurred during path conversion.");
-        setIsUploadingDrawn(false);
+        setIsFinishingDrawn(false);
         return;
       }
     } else {
@@ -1030,67 +1019,33 @@ export default function ModernHomeUI(props) {
         Alert.alert("No Points", "Please tap the map to add at least one point.");
         return;
       }
-      pointsToUpload = drawnPoints;
-      setIsUploadingDrawn(true);
+      drawnGpsPoints = drawnPoints;
+      setIsFinishingDrawn(true);
     }
 
     try {
-      const apiBaseUrl = props.apiBaseUrl || getApiBase();
-
-      // Generate a standard QGC WPL 110 format waypoints file.
-      // This allows the backend to naturally handle GPS coordinates and convert them to a local cartesian path.
-      let fileContent = "QGC WPL 110\n";
-      for (let i = 0; i < pointsToUpload.length; i++) {
-        const p = pointsToUpload[i];
-        // format: <INDEX> <CURRENT_WP> <COORD_FRAME> <COMMAND> <PARAM1> <PARAM2> <PARAM3> <PARAM4> <LAT> <LON> <ALT> <AUTOCONTINUE>
-        // COMMAND 16 is WAYPOINT.
-        fileContent += `${i}\t${i === 0 ? 1 : 0}\t0\t16\t0\t0\t0\t0\t${p.lat}\t${p.lon}\t0\t1\n`;
+      // The drawn points are a GPS survey: turn them into a local point CSV and hand it to the same
+      // on-device import as a picked file. Nothing is sent to the rover until Send (Fields).
+      let csv = "latitude,longitude\n";
+      for (const p of drawnGpsPoints) {
+        csv += `${p.lat.toFixed(9)},${p.lon.toFixed(9)}\n`;
       }
-
-      // Create a Blob/FormData and upload
-      const formData = new FormData();
-      if (Platform.OS === "web") {
-        const blob = new Blob([fileContent], { type: "text/plain" });
-        formData.append("file", blob, "click_to_mark.waypoints");
-      } else {
-        // For React Native, write to a temp file first
-        const FileSystem = require("expo-file-system/legacy");
-        const tempUri = FileSystem.cacheDirectory + "click_to_mark.waypoints";
-        await FileSystem.writeAsStringAsync(tempUri, fileContent, {
-          encoding: "utf8",
-        });
-        formData.append("file", {
-          uri: tempUri,
-          name: "click_to_mark.waypoints",
-          type: "text/plain",
-        } as any);
-      }
-
-      const uploadRes = await pathApi.uploadPath(apiBaseUrl, formData);
-      if (!uploadRes.ok) {
-        const errText = await uploadRes.text();
-        Alert.alert("Upload Error", errText || "Failed to upload the drawn path.");
-        setIsUploadingDrawn(false);
-        return;
-      }
-
-      // Success — set imported plan and navigate to fields page
+      const parsed = parseLocalPointCsv(csv, "click_to_mark.csv");
+      props.onBeginLocalImportBatch?.();
+      props.onLocalCsvParsed?.(parsed);
       if (props.setImportedPlan) {
         props.setImportedPlan({
-          fileName: "click_to_mark.waypoints",
+          fileName: "click_to_mark.csv",
           uri: "",
-          fileType: "waypoints",
-          source: "builtin",
+          fileType: "csv",
+          source: "imported",
         });
-      }
-      if (props.onSelectPath) {
-        props.onSelectPath("click_to_mark.waypoints");
       }
 
       setDrawingMode("none");
       setDrawnStrokes([]);
       setCanvasStrokes([]);
-      Alert.alert("Success", "Path uploaded! Redirecting to Fields page for alignment.", [
+      Alert.alert("Path ready", "The drawn path is in the plan. Opening Fields to order it and send it to the rover.", [
         {
           text: "OK",
           onPress: () => {
@@ -1099,12 +1054,12 @@ export default function ModernHomeUI(props) {
         },
       ]);
     } catch (err) {
-      console.error("Drawing upload error:", err);
-      Alert.alert("Error", "Could not upload the drawn path. Check connection.");
+      console.error("Drawing import error:", err);
+      Alert.alert("Error", err instanceof Error ? err.message : "Could not use the drawn path.");
     } finally {
-      setIsUploadingDrawn(false);
+      setIsFinishingDrawn(false);
     }
-  }, [drawingMode, drawnPoints, canvasStrokes, onNav, props.setImportedPlan, props.onSelectPath, props.apiBaseUrl]);
+  }, [drawingMode, drawnPoints, canvasStrokes, onNav, props.setImportedPlan, props.onBeginLocalImportBatch, props.onLocalCsvParsed]);
 
   const renderMapToolsColumn = () => {
     if ((!isHomePage && !isFieldsPage) || !navIconsVisible) return null;
@@ -1910,14 +1865,14 @@ export default function ModernHomeUI(props) {
                         styles.drawingBtn,
                         styles.drawingBtnPrimary,
                         pressed && { opacity: 0.7 },
-                        isUploadingDrawn && { opacity: 0.5 },
+                        isFinishingDrawn && { opacity: 0.5 },
                       ]}
-                      onPress={handleFinishAndUpload}
-                      disabled={isUploadingDrawn}
+                      onPress={handleFinishDrawing}
+                      disabled={isFinishingDrawn}
                     >
                       <Check color="#ffffff" size={14} strokeWidth={2.5} />
                       <Text style={[styles.drawingBtnText, { color: "#ffffff" }]}>
-                        {isUploadingDrawn ? "Uploading..." : "Finish & Upload"}
+                        {isFinishingDrawn ? "Working..." : "Finish"}
                       </Text>
                     </Pressable>
                   )}

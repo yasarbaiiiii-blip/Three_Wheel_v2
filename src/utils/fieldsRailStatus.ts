@@ -26,7 +26,7 @@ export type FieldsRailStatusInput = {
   templatesVisible: boolean;
   /** Upload (+ align) complete — Path Order can send. */
   pathOrderReady: boolean;
-  stagedOrLoaded: boolean;
+  missionSent: boolean;
   autoOrigin: boolean;
   hasGpsOrigin: boolean;
 };
@@ -51,7 +51,7 @@ export function deriveFieldsRailStatus(input: FieldsRailStatusInput): FieldsRail
   }
 
   readyTotal += 1;
-  if (input.pathOrderReady || input.stagedOrLoaded) readyDone += 1;
+  if (input.pathOrderReady || input.missionSent) readyDone += 1;
 
   readyDone = Math.min(readyDone, readyTotal);
 
@@ -66,7 +66,7 @@ export function deriveFieldsRailStatus(input: FieldsRailStatusInput): FieldsRail
   if (input.uploadDone && input.alignRequired && !input.alignDone) {
     ctaId = "align";
     ctaLabel = "Align DXF";
-  } else if (input.uploadDone && (!input.alignRequired || input.alignDone) && !input.stagedOrLoaded) {
+  } else if (input.uploadDone && (!input.alignRequired || input.alignDone) && !input.missionSent) {
     ctaId = "pathOrder";
     ctaLabel = "Send";
   }

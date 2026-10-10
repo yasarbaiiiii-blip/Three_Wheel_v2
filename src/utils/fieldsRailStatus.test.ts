@@ -14,7 +14,7 @@ const empty = {
   alignDone: false,
   templatesVisible: false,
   pathOrderReady: false,
-  stagedOrLoaded: false,
+  missionSent: false,
   autoOrigin: false,
   hasGpsOrigin: false,
 };
@@ -88,7 +88,7 @@ describe("deriveFieldsRailStatus", () => {
       alignDone: true,
       templatesVisible: true,
       pathOrderReady: true,
-      stagedOrLoaded: true,
+      missionSent: true,
       hasGpsOrigin: true,
     });
     expect(s.ctaId).toBe("none");

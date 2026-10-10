@@ -4,9 +4,9 @@ import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { Plus, RefreshCw, Trash2, Upload, X } from "lucide-react-native";
 
-import * as pathApi from "../../../api/pathApi";
 import type { MissionLayer } from "../../../types/missionLayers";
 import type { ImportedPlan } from "../../../types/plan";
+import type { StagedWorkflowStep } from "../../../types/fieldsWorkflow";
 import { layerForFile, nonEmptyMissionLayers, sortedMissionLayers } from "../../../utils/missionLayerAssignment";
 import {
   CSV_EXT_AFT_FLOOR_M,
@@ -31,27 +31,19 @@ import { FIELDS_COLORS } from "../fieldsTheme";
 import { PlanOffsetCard } from "./PlanOffsetCard";
 
 type UploadAndPreviewStepProps = {
-  apiBaseUrl: string;
   importedPlan: ImportedPlan | null;
   setImportedPlan: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
-  onRefreshPaths: () => void;
+  onInvalidateWorkflow: (step: StagedWorkflowStep) => void;
+  blockPlanEdit: (action: string) => boolean;
+  /** A mission holds the vehicle: the plan is read-only and files cannot be added, replaced or removed. */
+  planLocked: boolean;
   /**
-   * `refreshOnly=true` tells the parent this call is just re-fetching `lines` for the
-   * already-loaded path (e.g. after saving extension config) — it must not advance the
-   * step or toggle plan-editing/map-interaction on, unlike a genuine new path selection.
-   */
-  onSelectPath: (name: string, refreshOnly?: boolean) => void;
-  onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
-  blockProtectedWorkflowMutation: (action: string) => boolean;
-  protectedResident: boolean;
-  /**
-   * Local-only CSV parse result (no backend). Parent draws map points from this.
-   * Mission Select File .csv never calls parse-point-* / upload / preview.
+   * Local-only CSV parse result. Parent draws map points from this. Nothing is sent to the
+   * rover until Send.
    */
   onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
   /**
-   * Local-only DXF parse. Parent sets lines + alignment.
-   * No parse-dxf / entities / upload.
+   * Local-only DXF parse. Parent sets lines + alignment. Nothing is sent to the rover until Send.
    */
   onLocalDxfParsed?: (data: LocalDxfResult) => void;
   /**
@@ -118,30 +110,17 @@ type UploadAndPreviewStepProps = {
   onOffsetDragStateChange?: (dragging: boolean) => void;
 };
 
-const MAX_IMPORT_ATTEMPTS = 3;
-const IMPORT_RETRY_BASE_MS = 450;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Transient network / gateway failures are common on first upload over Wi‑Fi. */
-function isRetryableHttpStatus(status: number): boolean {
-  return status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
-}
-
 function mimeForUpload(fileName: string, mimeType?: string | null): string {
   const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
   if (mimeType && mimeType !== "application/octet-stream") return mimeType;
   if (ext === "csv") return "text/csv";
   if (ext === "dxf") return "application/dxf";
-  if (ext === "waypoints") return "text/plain";
   return "application/octet-stream";
 }
 
 /**
- * DocumentPicker URIs (esp. content:// right after pick) can flake on the first
- * FormData upload. Copy into app cache so every attempt uses a stable file:// URI.
+ * DocumentPicker URIs (esp. content:// right after pick) can flake on first read.
+ * Copy into app cache so every read uses a stable file:// URI.
  */
 async function resolveStableUploadAsset(
   file: DocumentPicker.DocumentPickerAsset
@@ -170,55 +149,6 @@ async function resolveStableUploadAsset(
   return { uri: file.uri, name, mimeType };
 }
 
-function appendNativeFile(
-  formData: FormData,
-  asset: { uri: string; name: string; mimeType: string }
-) {
-  formData.append("file", {
-    uri: asset.uri,
-    name: asset.name,
-    type: asset.mimeType,
-  } as any);
-}
-
-/**
- * Rebuilds the request body each attempt (FormData is single-use after fetch).
- * Retries network throws and 5xx/408/429 so the operator rarely needs manual Retry.
- */
-async function fetchWithImportRetry(
-  label: string,
-  build: () => Promise<Response>,
-  maxAttempts = MAX_IMPORT_ATTEMPTS
-): Promise<Response> {
-  let lastRes: Response | null = null;
-  let lastErr: unknown = null;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const res = await build();
-      if (res.ok) return res;
-      lastRes = res;
-      if (!isRetryableHttpStatus(res.status) || attempt === maxAttempts) {
-        return res;
-      }
-      console.warn(
-        `[import] ${label} attempt ${attempt}/${maxAttempts} status=${res.status} — retrying`
-      );
-    } catch (e) {
-      lastErr = e;
-      if (attempt === maxAttempts) throw e;
-      console.warn(
-        `[import] ${label} attempt ${attempt}/${maxAttempts} network error — retrying`,
-        e
-      );
-    }
-    await sleep(IMPORT_RETRY_BASE_MS * attempt);
-  }
-
-  if (lastRes) return lastRes;
-  throw lastErr ?? new Error(`${label} failed`);
-}
-
 /** Read picked file text via stable cache copy (native) or blob (web). */
 async function readPickedFileText(
   file: DocumentPicker.DocumentPickerAsset
@@ -237,14 +167,11 @@ async function readPickedFileText(
 }
 
 export function UploadAndPreviewStep({
-  apiBaseUrl,
   importedPlan,
   setImportedPlan,
-  onRefreshPaths,
-  onSelectPath,
   onInvalidateWorkflow,
-  blockProtectedWorkflowMutation,
-  protectedResident,
+  blockPlanEdit,
+  planLocked,
   onLocalCsvParsed,
   onLocalDxfParsed,
   onClearLocalCsv,
@@ -281,13 +208,12 @@ export function UploadAndPreviewStep({
   onResetOffset,
   onOffsetDragStateChange,
 }: UploadAndPreviewStepProps) {
-  /** Last failed batch (for Retry). Single-file rover uploads use length 1. */
+  /** Last failed batch (for Retry). */
   const [pickedFiles, setPickedFiles] = useState<DocumentPicker.DocumentPickerAsset[]>([]);
   /** When true, next successful local import merges into the already-loaded plan. */
   const [appendOnImport, setAppendOnImport] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
-  const [previewData, setPreviewData] = useState<pathApi.PathPreviewResponse | null>(null);
   /** Source file names when multi-file import was merged into one plan. */
   const [loadedSourceFiles, setLoadedSourceFiles] = useState<string[]>(() =>
     localCsvPreview?.fileName ? [localCsvPreview.fileName] : []
@@ -440,31 +366,6 @@ export function UploadAndPreviewStep({
    * and inner/outer buffer are local plan edits, not tied to Extension. */
   const showOffsetCard = onApplyOffset != null;
 
-  // Backend path preview for rover DXF / waypoints only — never local CSV or local DXF.
-  useEffect(() => {
-    if (isLocalDxfPlanner) return;
-    if (!targetPathName || !apiBaseUrl || isCsvPath) return;
-    setPreviewData(null);
-    const requestedName = targetPathName;
-    const controller = new AbortController();
-    pathApi.getPathPreview(apiBaseUrl, requestedName)
-      .then(res => {
-        if (controller.signal.aborted) return;
-        if (res.ok) {
-          return res.json().then((data: pathApi.PathPreviewResponse) => {
-            if (controller.signal.aborted) return;
-            setPreviewData(data);
-          });
-        }
-      })
-      .catch(() => {
-        // Preview is optional — swallow errors silently
-      });
-    return () => {
-      controller.abort();
-    };
-  }, [targetPathName, apiBaseUrl, isCsvPath, isLocalDxfPlanner]);
-
   /**
    * Local multi-CSV: parse each file on-device and merge into one plan.
    * When `append` is true, new files are merged into the already-loaded CSV plan.
@@ -522,7 +423,6 @@ export function UploadAndPreviewStep({
       setLoadedSourceFiles((prev) =>
         append && prev.length > 0 ? [...prev, ...newNames] : newNames
       );
-      setPreviewData(null);
       setPickedFiles([]);
       setImportError(null);
       setAppendOnImport(false);
@@ -591,7 +491,6 @@ export function UploadAndPreviewStep({
       setLoadedSourceFiles((prev) =>
         append && prev.length > 0 ? [...prev, ...newNames] : newNames
       );
-      setPreviewData(null);
       setPickedFiles([]);
       setImportError(null);
       setAppendOnImport(false);
@@ -617,144 +516,19 @@ export function UploadAndPreviewStep({
   };
 
   /**
-   * Rover DXF / waypoints: single-file upload + backend preview.
-   * Multi-select is rejected for rover-side paths (one path name per upload).
-   */
-  const importRoverFile = async (file: DocumentPicker.DocumentPickerAsset) => {
-    if (!apiBaseUrl) {
-      Alert.alert("Not connected", "Connect to the rover before importing a file.");
-      return;
-    }
-
-    const ext = file.name.split(".").pop()?.toLowerCase();
-    setPickedFiles([file]);
-    setImportError(null);
-    setIsUploading(true);
-    try {
-      const stable = await resolveStableUploadAsset(file);
-
-      const buildNativeFormData = () => {
-        const formData = new FormData();
-        appendNativeFile(formData, stable);
-        return formData;
-      };
-
-      const buildWebFormData = async () => {
-        const formData = new FormData();
-        const webFile = (file as any).file ?? (await (await fetch(file.uri)).blob());
-        formData.append("file", webFile, file.name);
-        return formData;
-      };
-
-      let res: Response;
-      if (ext === "dxf") {
-        res = await fetchWithImportRetry("parse-dxf", async () => {
-          const formData =
-            Platform.OS === "web" ? await buildWebFormData() : buildNativeFormData();
-          return pathApi.parseDxf(apiBaseUrl, formData);
-        });
-      } else {
-        res = await fetchWithImportRetry("upload-path", async () => {
-          const formData =
-            Platform.OS === "web" ? await buildWebFormData() : buildNativeFormData();
-          return pathApi.uploadPath(apiBaseUrl, formData);
-        });
-      }
-
-      if (res.ok) {
-        onInvalidateWorkflow("alignment");
-        onClearLocalCsv?.();
-        setLocalCsvSummary(null);
-        if (ext === "dxf") {
-          setImportedPlan({
-            fileName: file.name,
-            uri: stable.uri,
-            fileType: "dxf",
-            source: "builtin",
-          });
-        } else {
-          setImportedPlan({
-            fileName: file.name,
-            uri: stable.uri,
-            fileType: (ext as "csv" | "waypoints") || "csv",
-            source: "imported",
-          });
-        }
-        setLoadedSourceFiles([file.name]);
-        setPickedFiles([]);
-        setImportError(null);
-        onRefreshPaths();
-
-        // Map geometry preview (entities + /plan overlay) — backend paths only.
-        onSelectPath(file.name);
-
-        try {
-          const previewRes = await pathApi.getPathPreview(apiBaseUrl, file.name);
-          if (previewRes.ok) {
-            const data = await previewRes.json();
-            setPreviewData(data);
-          }
-        } catch {
-          // Preview summary is optional; map lines still load via onSelectPath.
-        }
-
-      } else {
-        const errorText = (await res.text()) || `Import failed (${res.status})`;
-        setImportError(errorText);
-        Alert.alert("Import Failed", errorText);
-      }
-    } catch (err) {
-      console.log("Error importing file:", err);
-      const msg =
-        err instanceof Error && err.message
-          ? err.message
-          : "Could not connect to the rover to import the file.";
-      setImportError(msg);
-      Alert.alert("Error", msg);
-    } finally {
-      setIsUploading(false);
-    }
-  };
-
-  /**
    * CSV + DXF: multi-file parse on-device (mixed types allowed).
-   * Waypoints: single-file upload + backend preview.
    * `append` adds into the local batch already shown as LOADED (Add more files).
    */
   const importAndPreviewFiles = async (
     files: DocumentPicker.DocumentPickerAsset[],
     opts?: { append?: boolean }
   ) => {
-    if (blockProtectedWorkflowMutation("Parsing a new path")) return;
+    if (blockPlanEdit("Parsing a new path")) return;
     if (files.length === 0) return;
 
     const append = !!opts?.append;
     const csvFiles = files.filter((f) => (f.name.split(".").pop()?.toLowerCase() ?? "") === "csv");
     const dxfFiles = files.filter((f) => (f.name.split(".").pop()?.toLowerCase() ?? "") === "dxf");
-    const waypointFiles = files.filter(
-      (f) => (f.name.split(".").pop()?.toLowerCase() ?? "") === "waypoints"
-    );
-
-    // Waypoints stay single-file.
-    if (waypointFiles.length > 0) {
-      if (csvFiles.length > 0 || dxfFiles.length > 0 || waypointFiles.length > 1) {
-        Alert.alert(
-          "One File at a Time",
-          "Waypoints uploads support a single file. Select one .waypoints file alone."
-        );
-        return;
-      }
-      if (append) {
-        Alert.alert(
-          "Cannot Add Files",
-          "Adding more files is only available for local CSV and DXF plans."
-        );
-        return;
-      }
-      await importRoverFile(waypointFiles[0]);
-      return;
-    }
-
     const hasLocalBatch = uploadedFiles.length > 0 || localCsvPreview != null || isLocalDxfPlanner;
 
     if (append) {
@@ -808,11 +582,11 @@ export function UploadAndPreviewStep({
       return;
     }
 
-    Alert.alert("Invalid File", "Please select one or more .dxf, .csv, or .waypoints files.");
+    Alert.alert("Invalid File", "Please select one or more .dxf or .csv files.");
   };
 
   const pickAndImport = async (opts?: { append?: boolean }) => {
-    if (blockProtectedWorkflowMutation(opts?.append ? "Adding files to the plan" : "Uploading a new path"))
+    if (blockPlanEdit(opts?.append ? "Adding files to the plan" : "Uploading a new path"))
       return;
     if (isUploading) return;
     try {
@@ -825,11 +599,11 @@ export function UploadAndPreviewStep({
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const valid = result.assets.filter((asset) => {
           const ext = asset.name.split(".").pop()?.toLowerCase();
-          return ext === "dxf" || ext === "csv" || ext === "waypoints";
+          return ext === "dxf" || ext === "csv";
         });
         if (valid.length === 0) {
           setAppendOnImport(false);
-          Alert.alert("Invalid File", "Please select one or more .dxf, .csv, or .waypoints files.");
+          Alert.alert("Invalid File", "Please select one or more .dxf or .csv files.");
           return;
         }
         if (valid.length < result.assets.length) {
@@ -860,7 +634,7 @@ export function UploadAndPreviewStep({
   };
 
   const handleReplaceOneFile = async (fileId: string) => {
-    if (blockProtectedWorkflowMutation("Replacing a file")) return;
+    if (blockPlanEdit("Replacing a file")) return;
     if (isUploading || !onRemoveUploadedFile) return;
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -891,7 +665,7 @@ export function UploadAndPreviewStep({
   };
 
   const handleDeleteOneFile = (file: UploadedFileEntry) => {
-    if (blockProtectedWorkflowMutation("Removing a file")) return;
+    if (blockPlanEdit("Removing a file")) return;
     if (!onRemoveUploadedFile) return;
     Alert.alert("Remove file", `Remove ${file.fileName} from this mission? The other files stay.`, [
       { text: "Cancel", style: "cancel" },
@@ -904,7 +678,6 @@ export function UploadAndPreviewStep({
           setLoadedSourceFiles((prev) => prev.filter((name) => name !== file.fileName));
           if (wasLast) {
             setImportedPlan(null);
-            setPreviewData(null);
             setLocalCsvSummary(null);
             setLoadedSourceFiles([]);
             setLastLocalDxf(null);
@@ -939,7 +712,7 @@ export function UploadAndPreviewStep({
       {pickedFiles.length === 0 && !targetPathName ? (
         <TouchableOpacity
           onPress={handlePickFile}
-          disabled={protectedResident || isUploading}
+          disabled={planLocked || isUploading}
           activeOpacity={0.8}
           style={{
             height: 52,
@@ -952,7 +725,7 @@ export function UploadAndPreviewStep({
             borderWidth: 1,
             borderColor: FIELDS_COLORS.accentBorder,
             borderStyle: "dashed",
-            opacity: protectedResident || isUploading ? 0.6 : 1,
+            opacity: planLocked || isUploading ? 0.6 : 1,
           }}
         >
           <Upload size={16} color={FIELDS_COLORS.accentBrand} />
@@ -992,7 +765,7 @@ export function UploadAndPreviewStep({
           {!isUploading ? (
             <TouchableOpacity
               onPress={handleRetryImport}
-              disabled={protectedResident}
+              disabled={planLocked}
               activeOpacity={0.85}
               style={{
                 height: 40,
@@ -1000,7 +773,7 @@ export function UploadAndPreviewStep({
                 borderRadius: 8,
                 alignItems: "center",
                 justifyContent: "center",
-                backgroundColor: protectedResident ? FIELDS_COLORS.textDim : FIELDS_COLORS.teal,
+                backgroundColor: planLocked ? FIELDS_COLORS.textDim : FIELDS_COLORS.teal,
               }}
             >
               <Text style={{ color: "#fff", fontSize: 13, fontWeight: "800" }}>Retry</Text>
@@ -1041,7 +814,7 @@ export function UploadAndPreviewStep({
                 onPress={() => {
                   void handleAddMoreFiles();
                 }}
-                disabled={protectedResident || isUploading}
+                disabled={planLocked || isUploading}
                 accessibilityLabel="Add more files"
                 accessibilityRole="button"
                 style={{
@@ -1051,7 +824,7 @@ export function UploadAndPreviewStep({
                   alignItems: "center",
                   justifyContent: "center",
                   backgroundColor: FIELDS_COLORS.accentBrand,
-                  opacity: protectedResident || isUploading ? 0.5 : 1,
+                  opacity: planLocked || isUploading ? 0.5 : 1,
                   marginRight: 4,
                 }}
               >
@@ -1061,7 +834,6 @@ export function UploadAndPreviewStep({
             <Pressable
               onPress={() => {
                 setImportedPlan(null);
-                setPreviewData(null);
                 setLocalCsvSummary(null);
                 setLoadedSourceFiles([]);
                 setLastLocalDxf(null);
@@ -1243,7 +1015,7 @@ export function UploadAndPreviewStep({
                               e?.stopPropagation?.();
                               void handleReplaceOneFile(f.id);
                             }}
-                            disabled={protectedResident || isUploading}
+                            disabled={planLocked || isUploading}
                             accessibilityLabel={`Replace ${f.fileName}`}
                             accessibilityRole="button"
                             hitSlop={6}
@@ -1256,7 +1028,7 @@ export function UploadAndPreviewStep({
                               backgroundColor: FIELDS_COLORS.cardSolid,
                               borderWidth: 1,
                               borderColor: FIELDS_COLORS.panelBorder,
-                              opacity: protectedResident || isUploading ? 0.45 : 1,
+                              opacity: planLocked || isUploading ? 0.45 : 1,
                             }}
                           >
                             <RefreshCw size={13} color={FIELDS_COLORS.textMuted} strokeWidth={2.3} />
@@ -1266,7 +1038,7 @@ export function UploadAndPreviewStep({
                               e?.stopPropagation?.();
                               handleDeleteOneFile(f);
                             }}
-                            disabled={protectedResident || isUploading}
+                            disabled={planLocked || isUploading}
                             accessibilityLabel={`Remove ${f.fileName}`}
                             accessibilityRole="button"
                             hitSlop={6}
@@ -1279,7 +1051,7 @@ export function UploadAndPreviewStep({
                               backgroundColor: FIELDS_COLORS.dangerMuted,
                               borderWidth: 1,
                               borderColor: FIELDS_COLORS.dangerBorder,
-                              opacity: protectedResident || isUploading ? 0.45 : 1,
+                              opacity: planLocked || isUploading ? 0.45 : 1,
                             }}
                           >
                             <Trash2 size={13} color={FIELDS_COLORS.danger} strokeWidth={2.3} />
@@ -1410,7 +1182,7 @@ export function UploadAndPreviewStep({
                 onPress={() => {
                   void handleAddMoreFiles();
                 }}
-                disabled={protectedResident || isUploading}
+                disabled={planLocked || isUploading}
                 style={{
                   flex: 1,
                   height: 36,
@@ -1422,7 +1194,7 @@ export function UploadAndPreviewStep({
                   backgroundColor: "transparent",
                   borderWidth: 1,
                   borderColor: FIELDS_COLORS.stepActive,
-                  opacity: protectedResident || isUploading ? 0.5 : 1,
+                  opacity: planLocked || isUploading ? 0.5 : 1,
                 }}
               >
                 <Plus size={14} color={FIELDS_COLORS.stepActive} strokeWidth={2.5} />
@@ -1433,7 +1205,7 @@ export function UploadAndPreviewStep({
             ) : null}
             <Pressable
               onPress={handlePickFile}
-              disabled={protectedResident || isUploading}
+              disabled={planLocked || isUploading}
               style={{
                 flex: 1,
                 height: 36,
@@ -1443,7 +1215,7 @@ export function UploadAndPreviewStep({
                 backgroundColor: "transparent",
                 borderWidth: 1,
                 borderColor: FIELDS_COLORS.panelBorder,
-                opacity: protectedResident || isUploading ? 0.5 : 1,
+                opacity: planLocked || isUploading ? 0.5 : 1,
               }}
             >
               <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, fontWeight: "600" }}>
@@ -1611,9 +1383,9 @@ export function UploadAndPreviewStep({
         onOffsetDragStateChange={onOffsetDragStateChange}
       />
 
-      {protectedResident && (
+      {planLocked && (
         <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11 }}>
-          A protected mission is currently resident. Upload is blocked.
+          A mission is active. Editing the plan is blocked until it is stopped.
         </Text>
       )}
     </View>

@@ -16,8 +16,7 @@ export type FieldsStepSlice =
   | "csvUpload"
   | "csvPathOrder"
   | "csvScroll"
-  | "dxfTop"
-  | "dxfPathOrder"
+  | "emptyTop"
   | "localDxfTop";
 
 /**
@@ -33,6 +32,6 @@ export function shouldRenderAlignCard(input: {
   isDxfPath: boolean;
   needsBatchAlignment: boolean;
 }): boolean {
-  const isTopSlice = input.slice === "dxfTop" || input.slice === "localDxfTop";
+  const isTopSlice = input.slice === "emptyTop" || input.slice === "localDxfTop";
   return isTopSlice && (input.isDxfPath || input.needsBatchAlignment);
 }

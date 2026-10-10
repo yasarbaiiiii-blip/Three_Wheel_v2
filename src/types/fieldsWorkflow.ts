@@ -69,29 +69,52 @@ export type StagedPlanResultState = {
   warnings: string[];
 };
 
-export type StagedWorkflowStep =
-  | "upload"
-  | "entities"
-  | "order"
-  | "alignment"
-  | "spray"
-  | "staged"
-  | "loaded"
-  | "started";
+/**
+ * The operator-visible steps that can be verified or invalidated.
+ * - alignment: the plan has a GPS origin (every file aligned).
+ * - spray: the path order / paint flags (only ever invalidated, by an edit).
+ * - staged: the mission is stored on the rover and verified (Send). Start does the rest; there is no load step.
+ */
+export type StagedWorkflowStep = "alignment" | "spray" | "staged";
 
 export type StagedWorkflowStatus = "pending" | "verified" | "failed";
 
 export type StagedWorkflowState = Record<StagedWorkflowStep, StagedWorkflowStatus>;
 
 export const INITIAL_STAGED_WORKFLOW_STATE: StagedWorkflowState = {
-  upload: "pending",
-  entities: "pending",
-  order: "pending",
   alignment: "pending",
   spray: "pending",
   staged: "pending",
-  loaded: "pending",
-  started: "pending",
+};
+
+/**
+ * A change at `step` invalidates it and everything after it: a new alignment demotes spray and
+ * the stored mission; an edit of the path order demotes the stored mission.
+ */
+export function invalidateWorkflowFrom<T extends StagedWorkflowState>(current: T, step: StagedWorkflowStep): T {
+  const next = { ...current };
+  if (step === "alignment") next.alignment = "pending";
+  if (step === "alignment" || step === "spray") next.spray = "pending";
+  next.staged = "pending";
+  return next;
+}
+
+/** A surveyed reference point: plan position (dxf_x = east, dxf_y = north) and its GPS position. */
+export type AlignRefPoint = {
+  dxf_x: number;
+  dxf_y: number;
+  lat: number;
+  lon: number;
+};
+
+/**
+ * What a verified alignment produced. `origin_gps` is the GPS position of the plan's local (0, 0),
+ * the mission anchor; `ref_points` are the points it was fitted on.
+ */
+export type VerifiedAlignment = {
+  ref_points?: AlignRefPoint[];
+  origin_gps?: [number, number];
+  rotation_deg?: number;
 };
 
 export type AccordionStatus = StagedWorkflowStatus | "idle";

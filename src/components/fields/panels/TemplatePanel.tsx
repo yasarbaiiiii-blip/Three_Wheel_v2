@@ -11,9 +11,6 @@ export type PlacedTemplateSummary = {
 };
 
 type TemplatePanelProps = {
-  apiBaseUrl: string;
-  onRefreshPaths: () => void;
-  onSelectPath: (name: string) => void;
   canPlace?: boolean;
   placeBlockedReason?: string | null;
   session?: "idle" | "picking" | "ghost";

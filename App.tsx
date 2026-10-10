@@ -67,10 +67,8 @@ import {
 } from "react-native";
 
 import Slider from "@react-native-community/slider";
-import * as FileSystem from "expo-file-system/legacy";
 import * as DocumentPicker from "expo-document-picker";
 import * as Network from "expo-network";
-import * as SecureStore from "expo-secure-store";
 import { SafeAreaInsetsContext, SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView, TouchableOpacity as RNGHTouchableOpacity, GestureDetector, Gesture } from "react-native-gesture-handler";
 import AnimatedReanimated, { runOnJS, useAnimatedStyle, useSharedValue, withSpring } from "react-native-reanimated";
@@ -109,26 +107,11 @@ import {
 } from "lucide-react-native";
 
 import { BoundaryEditor, PlacedItem } from "./src/components/BoundaryEditor";
-import { DeadmanButton } from "./src/components/DeadmanButton";
-import { ManualJoystick } from "./src/components/ManualJoystick";
 import { useImmersiveMode } from "./src/hooks/useImmersiveMode";
 import { useVirtualJoystick } from "./src/hooks/useVirtualJoystick";
 import { readImportedPlanFile, normalizePlanLines } from "./src/utils/planImport";
 import type { ImportedPlan, PlanLine } from "./src/types/plan";
-import * as missionApi from "./src/api/missionApi";
 import * as authApi from "./src/api/authApi";
-import {
-  buildMissionStartPayload,
-  classifyMissionError,
-  confirmStagedMissionLoaded,
-  evaluateMissionStartGate,
-  getLoadedMissionId,
-  invalidateWorkflowFrom,
-  isProtectedMissionResident,
-  runningMissionMismatch,
-  verifyStagedLoadedMission,
-  verifyHydratedMarkCount,
-} from "./src/api/missionContract";
 import {
   clonePlanLinesForSnapshot,
   restageAppTrajectoryWithLiveEntry,
@@ -174,10 +157,7 @@ import {
 } from "./src/utils/missionLayerLines";
 import { splitRoadMarkingPathAtAnchor } from "./src/utils/roadMarkingCsvPath";
 import type { AnchorCandidatePoint } from "./src/components/mapViewTypes";
-import { recoverCornersAfterHydration } from "./src/utils/cornerLifecycle";
-import * as pathApi from "./src/api/pathApi";
 // Template generators live only in lazy TemplatesPage (not on the connection entry graph).
-import { canAcquireJoystick as canAcquireJoystickForState } from "./src/utils/joystickFrontendSafety";
 
 import type { Page, TelemetrySnapshot, LayerVisibility } from "./src/types/plan";
 
@@ -187,14 +167,12 @@ import { ConnectionView } from "./src/features/connection/ConnectionView";
 import {
   applyTelemetryPacket,
   clearTelemetryRuntime,
-  patchTelemetryMissionState,
   setSystemHealth,
   setTelemetrySnapshot,
   useSystemHealth,
   useTelemetrySnapshot,
 } from "./src/features/telemetry/telemetryStore";
 import { getAppTransport } from "./src/services/appTransport";
-import { recoverProductionTelemetry } from "./src/features/telemetry/telemetryRecovery";
 import { roverBeaconListener, type BeaconRover } from "./src/services/roverBeacon";
 import { loadLastRoverId } from "./src/api/prodStorage";
 import { getProdApiClient, ProdApiError } from "./src/api/prodClient";
@@ -270,13 +248,9 @@ const FieldsPage = lazyDefault(
 import {
   coerceFiniteNumber,
   formatFinite,
-  formatSprayFlagSample,
-  formatWaypointPair,
   getLineLengthM,
   isPrimaryEditableLine,
   normalizeEntityType,
-  parsePathSegmentsResponse,
-  parsePlanAndStageResponse,
   sanitizePlanLines,
 } from "./src/utils/pathWorkflow";
 import {
@@ -292,9 +266,9 @@ import type {
   StagedWorkflowState,
   StagedWorkflowStatus,
   StagedWorkflowStep,
+  VerifiedAlignment,
 } from "./src/types/fieldsWorkflow";
-import { INITIAL_STAGED_WORKFLOW_STATE } from "./src/types/fieldsWorkflow";
-import { linesToDxf } from "./src/utils/dxfGenerator";
+import { INITIAL_STAGED_WORKFLOW_STATE, invalidateWorkflowFrom } from "./src/types/fieldsWorkflow";
 import {
   buildPlanLineSvgPath,
   computePlanBoundingBoxLegacy,
@@ -321,8 +295,6 @@ import { computeShapeSnapPoints } from "./src/utils/planShapeSnapPoints";
 import { computeBestSimilarityFit } from "./src/utils/similarityRefPointSnap";
 import {
   anchorToAlignedRefPoints,
-  hydrateStagedMissionForMap,
-  stagedMissionMatchesId,
 } from "./src/utils/stagedMissionHydration";
 import {
   buildCsvTransitLines,
@@ -360,7 +332,6 @@ import {
 import { normalizeBearingDeg } from "./src/utils/planOffset";
 import { computeOffsetResultLines } from "./src/utils/planOffsetApply";
 import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
-import { rehydrateAlignedPlanLines } from "./src/utils/rehydrateAlignedPlan";
 import type { AutoOriginReference, MapGeometryFrame } from "./src/types/autoOrigin";
 import {
   applyAutoOriginShift,
@@ -374,36 +345,6 @@ import {
 
 function lineAngleDeg(line: PlanLine): number {
   return (Math.atan2(line.to.y - line.from.y, line.to.x - line.from.x) * 180) / Math.PI;
-}
-
-type StagedStartGate = {
-  isStagedWorkflow: boolean;
-  allowed: boolean;
-  message: string | null;
-};
-
-function evaluateStagedStartGate(
-  stagedWorkflow: StagedWorkflowState,
-  loadedPathInspection: missionApi.LoadedPathResponse | null,
-  stagedMissionId: string | null
-): StagedStartGate {
-  return evaluateMissionStartGate({
-    stagedVerified: stagedWorkflow.staged === "verified",
-    loadedVerified: stagedWorkflow.loaded === "verified",
-    stagedMissionId,
-    loaded: loadedPathInspection,
-    alignmentVerified: stagedWorkflow.alignment === "verified",
-  });
-}
-
-function createUploadFormData(fileUri: string, fileName: string, mimeType: string) {
-  const form = new FormData();
-  form.append("file", {
-    uri: fileUri,
-    name: fileName,
-    type: mimeType,
-  } as any);
-  return form;
 }
 
 const BG = "#d9d9dc";
@@ -922,8 +863,7 @@ function AppRoot() {
     // `lines` before enabling Send. Never set origin_gps while leaving design-frame
     // geometry (that used to ship an untransformed DXF trajectory).
     const isLocalAppDxf =
-      selectedPathName == null &&
-      (importedPlan?.fileType === "dxf" || !!importedPlan?.fileName?.toLowerCase().endsWith(".dxf"));
+      importedPlan?.fileType === "dxf" || !!importedPlan?.fileName?.toLowerCase().endsWith(".dxf");
 
     if (isLocalAppDxf) {
       if (!Number.isFinite(baseLat) || !Number.isFinite(baseLon) || (baseLat === 0 && baseLon === 0)) {
@@ -1050,9 +990,6 @@ function AppRoot() {
   const startInFlightRef = useRef(false);
   /** Shared preview/send/start/load generation + exclusive lock. */
   const pathPipelineRef = useRef(createPathPipelineGuard());
-  const missionIdentityRepeatRef = useRef(false);
-  const [missionFileReady, setMissionFileReady] = useState(false);
-  const [missionLoaded, setMissionLoaded] = useState(false);
   const [missionPanelOpenToken, setMissionPanelOpenToken] = useState(0);
   // Mission status comes from `mission_state` rover events only: never from a command's answer
   // and never from a poll. Unknown (gateway down, no socket, stale) is not "idle".
@@ -1073,24 +1010,15 @@ function AppRoot() {
   const [toggleD, setToggleD] = useState(false);
   const [delayA, setDelayA] = useState(0.1);
   const [delayB, setDelayB] = useState(0.1);
-  const [backendPaths, setBackendPaths] = useState<any[]>([]);
-  const [selectedPathName, setSelectedPathName] = useState<string | null>(null);
   const [stagedWorkflow, setStagedWorkflow] = useState<StagedWorkflowState>(INITIAL_STAGED_WORKFLOW_STATE);
   const [alignmentResult, setAlignmentResult] = useState<AlignmentResultState | null>(null);
-  // Always-current Fix Alignment params for async path rehydrates (extension toggle, re-select).
-  // previewSelectedPath awaits network I/O; reading this ref at setLines time avoids a stale
-  // closure that would drop the bake and leave design-frame geometry under a NED origin.
+  // Always-current Fix Alignment params for async rehydrates of design-frame geometry.
   const alignmentResultRef = useRef<AlignmentResultState | null>(null);
   alignmentResultRef.current = alignmentResult;
-  const [verifiedAlignmentRequest, setVerifiedAlignmentRequest] = useState<pathApi.AlignPathRequest | null>(null);
-  // Georeferenced DXF: backend auto-places at its own WGS84 origin, so no manual
-  // ref-point alignment is required. Threaded to the Fields workflow to relax the
-  // alignment gate for these files only (metric DXFs still require alignment).
-  const [isGeographicDxf, setIsGeographicDxf] = useState<boolean>(false);
+  const [verifiedAlignmentRequest, setVerifiedAlignmentRequest] = useState<VerifiedAlignment | null>(null);
+  /** WGS84 origin of a georeferenced DXF already in the plan (it needs no alignment). */
   const [geoOriginDxf, setGeoOriginDxf] = useState<[number, number] | null>(null);
-  const [segmentVerification, setSegmentVerification] = useState<pathApi.PathSegmentsResponse | null>(null);
   const [stagedPlanResult, setStagedPlanResult] = useState<StagedPlanResultState | null>(null);
-  const [stagedMissionInspection, setStagedMissionInspection] = useState<pathApi.StagedMissionResponse | null>(null);
   const [stagedMissionId, setStagedMissionId] = useState<string | null>(null);
   /**
    * Source geometry from last successful app-planned Send. Start Mission restages
@@ -1163,10 +1091,6 @@ function AppRoot() {
   const [offsetPreviewLines, setOffsetPreviewLines] = useState<PlanLine[] | null>(null);
   const runningLayerIdsRef = useRef<string[]>([]);
   const runningMissionIdRef = useRef<string | null>(null);
-  const [loadedPathInspection, setLoadedPathInspection] = useState<missionApi.LoadedPathResponse | null>(null);
-  const [extensionsEnabled, setExtensionsEnabled] = useState(false);
-  const [extPre, setExtPre] = useState("0.5");
-  const [extAft, setExtAft] = useState("0.5");
 
   const prevMissionStateRef = useRef<string | null>(null);
 
@@ -1192,19 +1116,12 @@ function AppRoot() {
     }
   }, [visualAlignmentItem, alignedRefPoints]);
 
-  const protectedMissionResident = isProtectedMissionResident(loadedPathInspection);
+  /** A mission holds the vehicle: the plan on the map is the path being driven and is not edited meanwhile. */
+  const planLocked = missionRunning;
   const autoOriginEligible =
     autoOrigin &&
     stagedWorkflow.staged !== "verified" &&
     alignedRefPoints.length === 0;
-  const missionStateRef = useRef<string | null>(null);
-  const recoveryAttemptedRef = useRef(false);
-  const isRecoveringRef = useRef(false);
-  // Bumped whenever a mutating mission action (load/stage/clear/reset) starts,
-  // so an in-flight refreshMissionIdentity() poll issued before that action
-  // can't land afterward and clobber the fresher state with a stale snapshot.
-  const missionIdentityGenerationRef = useRef(0);
-  const missionIdentityInFlightRef = useRef(false);
   const [mapViewEnabled, setMapViewEnabled] = useState(true);
   const [resetNorthCount, setResetNorthCount] = useState(0);
   // Shared across every page (Home, Fields, Templates) so the top toolbar's
@@ -1225,10 +1142,6 @@ function AppRoot() {
       return next;
     });
   }, [setPage]);
-
-  useEffect(() => {
-    missionStateRef.current = telemetrySnapshot?.mission_state ?? null;
-  }, [telemetrySnapshot?.mission_state]);
 
   useEffect(() => {
     if (!autoOriginEligible) {
@@ -1451,7 +1364,6 @@ function AppRoot() {
   const socketRef = useRef<Socket | null>(null);
   const invalidSessionLockRef = useRef(false);
   const wsStatusRef = useRef(wsStatus);
-  const previousSelectedPathRef = useRef<string | null>(null);
   socketRef.current = socket;
 
   const activeMenu = useMemo(() => MENU_ITEMS.find((x) => x.key === page), [page]);
@@ -1532,7 +1444,6 @@ function AppRoot() {
       showToast("Busy", exclusiveBusyMessage(acquired.holder), "info");
       return false;
     }
-    missionIdentityGenerationRef.current += 1;
     setMissionActionBusy(true);
     return true;
   }, [showToast]);
@@ -1597,8 +1508,7 @@ function AppRoot() {
     setWorkflowStep,
   ]);
 
-  const invalidateStagedWorkflowFrom = useCallback((step: "alignment" | "spray" | "staged" | "loaded") => {
-    missionIdentityGenerationRef.current += 1;
+  const invalidateStagedWorkflowFrom = useCallback((step: StagedWorkflowStep) => {
     setStagedWorkflow((prev) => invalidateWorkflowFrom(prev, step));
 
     const localBatchActive = uploadedFilesRef.current.length > 0;
@@ -1610,12 +1520,8 @@ function AppRoot() {
         setVerifiedAlignmentRequest(null);
       }
     }
-    if (step === "alignment" || step === "spray") {
-      setSegmentVerification(null);
-    }
     if (step === "alignment" || step === "spray" || step === "staged") {
       setStagedPlanResult(null);
-      setStagedMissionInspection(null);
       setStagedMissionId(null);
       // Geometry / order change invalidates frozen Send snapshot (must re-Send).
       setAppPlannedStartSnapshot(null);
@@ -1623,184 +1529,13 @@ function AppRoot() {
       // baked a transform into `lines` after the baseline was captured).
       setPreOffsetSnapshot(null);
     }
-    setLoadedPathInspection(null);
-    setMissionLoaded(false);
-    // Multi-file batch: keep parse metadata and geometry; only demote send/load stages.
+    // Multi-file batch: keep parse metadata and geometry; only demote the stored (sent) mission.
     if (!localBatchActive) {
       setLocalCsvPreview(null);
       localCsvParsesRef.current = [];
       setLocalDxfMeta(null);
     }
   }, []);
-
-  /**
-   * Recover the frontend visual state (DXF lines, staged mission geometry)
-   * from the backend when the app reloads and finds a mission already loaded.
-   */
-  const recoverLoadedMissionContext = useCallback(async (
-    sourceName: string | null | undefined,
-    missionId: string | null | undefined
-  ) => {
-    if (!apiBaseUrl) return;
-    if (pathPipelineRef.current.isExclusive()) {
-      console.warn("[RECOVERY] Skipped — another path action is exclusive.");
-      return;
-    }
-    const recoverToken = pathPipelineRef.current.beginAsyncMapWrite();
-    try {
-      console.log(`[RECOVERY] Recovering loaded mission context: source=${sourceName}, missionId=${missionId}`);
-      // Flag to prevent the selectedPathName change effect from wiping staged state
-      isRecoveringRef.current = true;
-
-      // Step 1: Only hit the filename-based preview when sourceName actually looks
-      // like a real file. /api/path/{name}/preview does a literal file lookup and
-      // 404s on anything else — in particular, the backend can report a staged
-      // mission's ID as source_name when no real DXF filename is known.
-      // When it IS a real filename, this still runs because it's what refreshes
-      // importedPlan/selectedPathName and the per-entity spray/extension editor state.
-      const looksLikeFilename = /\.(dxf|csv|waypoints)$/i.test(sourceName || "");
-      if (looksLikeFilename) {
-        await previewSelectedPath(sourceName!, { ignoreExclusive: true, reuseToken: recoverToken });
-      } else if (sourceName) {
-        console.warn(`[RECOVERY] sourceName "${sourceName}" is not a real filename, skipping DXF preview.`);
-      }
-
-      if (!pathPipelineRef.current.isCurrent(recoverToken)) {
-        console.warn("[RECOVERY] Abandoned — a newer path write started.");
-        return;
-      }
-
-      // Step 2: If we have a mission ID, fetch the staged mission geometry and use
-      // it as the authoritative map source — /api/path/staged/{id} works even when
-      // Step 1 was skipped or failed, so this always runs last and its geometry
-      // wins, guaranteeing the map reflects what's really loaded.
-      if (missionId) {
-        try {
-          const stagedRes = await pathApi.getStagedMission(apiBaseUrl, missionId);
-          if (!pathPipelineRef.current.isCurrent(recoverToken)) {
-            console.warn("[RECOVERY] Abandoned after staged fetch — a newer path write started.");
-            return;
-          }
-          if (stagedRes.ok) {
-            const stagedArtifact = (await stagedRes.json()) as pathApi.StagedMissionResponse;
-            // Geometry + origin from one hydrator — never set lines without the staged anchor.
-            const hydrated = hydrateStagedMissionForMap(stagedArtifact);
-            if (hydrated) {
-              setAlignedRefPoints(hydrated.alignedRefPoints);
-              setLines(sanitizePlanLines(hydrated.lines));
-              setSelectedLineId(hydrated.selectedLineId);
-            } else {
-              console.warn(`[RECOVERY] Staged mission ${missionId} had no drawable waypoints.`);
-            }
-            setStagedMissionInspection(stagedArtifact);
-            setStagedMissionId(missionId);
-            // Mark the workflow steps as verified so the UI reflects that
-            // the plan is fully staged and loaded
-            setStagedWorkflow({
-              entities: "verified",
-              upload: "verified",
-              order: "verified",
-              alignment: "verified",
-              spray: "verified",
-              staged: "verified",
-              loaded: "verified",
-              started: "pending",
-            });
-            setMissionLoaded(true);
-            console.log(`[RECOVERY] Successfully recovered staged mission ${missionId}`);
-          } else {
-            console.warn(`[RECOVERY] Staged mission fetch failed: ${stagedRes.status}`);
-          }
-        } catch (err) {
-          console.warn("[RECOVERY] Failed to fetch staged mission:", err);
-        }
-      } else if (!looksLikeFilename) {
-        console.warn("[RECOVERY] No sourceName or missionId provided, skipping map preview.");
-      }
-
-      // Step 3: Re-fetch loaded-path inspection since previewSelectedPath clears it
-      try {
-        const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
-        if (!pathPipelineRef.current.isCurrent(recoverToken)) return;
-        if (loadedRes.ok) {
-          const loadedData = (await loadedRes.json()) as missionApi.LoadedPathResponse;
-          setLoadedPathInspection(loadedData);
-        }
-      } catch (err) {
-        console.warn("[RECOVERY] Failed to re-fetch loaded path:", err);
-      }
-    } catch (err) {
-      console.warn("[RECOVERY] Failed to recover loaded mission context:", err);
-    } finally {
-      isRecoveringRef.current = false;
-    }
-  }, [apiBaseUrl]);
-
-  const reconcileLoadedMission = useCallback((
-    loaded: missionApi.LoadedPathResponse,
-    status?: missionApi.MissionStatus
-  ) => {
-    const inspection = {
-      ...loaded,
-      running_mission_id: status?.running_mission_id ?? loaded.running_mission_id ?? null,
-    };
-    setLoadedPathInspection(inspection);
-
-    if (stagedWorkflow.staged === "verified" && stagedMissionId) {
-      const verification = verifyStagedLoadedMission(inspection, stagedMissionId);
-      setMissionLoaded(verification.verified);
-      setStagedWorkflow((prev) => ({
-        ...prev,
-        loaded: verification.verified ? "verified" : "pending",
-        started: verification.verified ? prev.started : "pending",
-      }));
-      return;
-    }
-
-    const targetSourceName = inspection.source_name || inspection.name;
-
-    // If the app just booted blank (no local plan data) but the backend
-    // reports a loaded mission, auto-recover the visual state.
-    if (
-      inspection.loaded &&
-      !selectedPathName &&
-      !importedPlan &&
-      !recoveryAttemptedRef.current
-    ) {
-      recoveryAttemptedRef.current = true;
-      void recoverLoadedMissionContext(targetSourceName, inspection.mission_id);
-    }
-
-    setMissionLoaded(Boolean(inspection.loaded && !isProtectedMissionResident(inspection)));
-  }, [stagedMissionId, stagedWorkflow.staged, selectedPathName, importedPlan, recoverLoadedMissionContext]);
-
-  useEffect(() => {
-    if (previousSelectedPathRef.current === selectedPathName) return;
-    previousSelectedPathRef.current = selectedPathName;
-    // Skip the reset when we are recovering a loaded mission on reload
-    if (isRecoveringRef.current) return;
-    // Clearing selection (null) is owned by clear-mission / local CSV import so
-    // those flows can set their own map + alignment state without this wipe.
-    if (selectedPathName == null) return;
-    missionIdentityGenerationRef.current += 1;
-    setStagedWorkflow((prev) => ({
-      ...prev,
-      alignment: "pending",
-      spray: "pending",
-      staged: "pending",
-      loaded: "pending",
-      started: "pending",
-    }));
-    setAlignmentResult(null);
-    setVerifiedAlignmentRequest(null);
-    setIsGeographicDxf(false);
-    setGeoOriginDxf(null);
-    setSegmentVerification(null);
-    setStagedPlanResult(null);
-    setStagedMissionInspection(null);
-    setStagedMissionId(null);
-    setLoadedPathInspection(null);
-  }, [selectedPathName]);
 
   useEffect(() => {
     return () => {
@@ -1852,8 +1587,8 @@ function AppRoot() {
 
   const deleteSelectedLine = () => {
     if (!selectedLineId) return;
-    if (protectedMissionResident) {
-      Alert.alert("Mission conflict", "Editing the plan is blocked while a protected surveyed mission is resident.");
+    if (planLocked) {
+      Alert.alert("Mission active", "Editing the plan is blocked while a mission is active. Stop the mission first.");
       return;
     }
     const targetLine = lines.find((line) => line.id === selectedLineId);
@@ -1875,8 +1610,8 @@ function AppRoot() {
   };
 
   const deleteEntirePlan = () => {
-    if (protectedMissionResident) {
-      Alert.alert("Mission conflict", "Deleting the plan is blocked while a protected surveyed mission is resident.");
+    if (planLocked) {
+      Alert.alert("Mission active", "Deleting the plan is blocked while a mission is active. Stop the mission first.");
       return;
     }
     logAction("DELETE_PLAN");
@@ -1900,7 +1635,6 @@ function AppRoot() {
     setAlignedRefPoints([]);
     setVerifiedAlignmentRequest(null);
     setAlignmentResult(null);
-    setIsGeographicDxf(false);
     setGeoOriginDxf(null);
     setAutoOriginReference(null);
     setLayerVisibility({
@@ -2365,625 +2099,6 @@ function AppRoot() {
     };
   }, [page]);
 
-  const fetchBackendPaths = async () => {
-    if (!apiBaseUrl) return;
-    try {
-      console.log("[API GET] /api/paths - Polling paths list...");
-      const data = await pathApi.getPaths(apiBaseUrl);
-      console.log(`[API GET] /api/paths - Success, found ${data.length} paths`);
-      setBackendPaths(data);
-    } catch (err) {
-      console.log("[API GET] /api/paths - Error fetching paths:", err);
-    }
-  };
-
-  const fetchWithRetry = async (request: () => Promise<Response>, retries = 2) => {
-    for (let i = 0; i < retries; i++) {
-      try {
-        const res = await request();
-        if (res.ok) return res;
-        // If not ok, it might be a 404, which shouldn't be retried if the endpoint really doesn't exist
-        if (res.status === 404) return res;
-      } catch (err) {
-        if (i === retries - 1) throw err;
-        await new Promise(r => setTimeout(r, 1000));
-      }
-    }
-    return request(); // fallback final attempt
-  };
-
-  const previewSelectedPath = async (
-    pathName: string,
-    opts?: { ignoreExclusive?: boolean; reuseToken?: number }
-  ) => {
-    if (!apiBaseUrl) return;
-    if (!opts?.ignoreExclusive && pathPipelineRef.current.isExclusive()) {
-      const holder = pathPipelineRef.current.exclusiveKind();
-      showToast("Busy", holder ? exclusiveBusyMessage(holder) : "Wait — another path action is still in progress.", "info");
-      return;
-    }
-    const previewToken = opts?.reuseToken ?? pathPipelineRef.current.beginAsyncMapWrite();
-    setLoadedPathInspection(null);
-    // Backend path selection replaces any on-device CSV / local DXF preview.
-    setLocalCsvPreview(null);
-    localCsvParsesRef.current = [];
-    setLocalDxfMeta(null);
-    setMissionActionBusy(true);
-    try {
-      console.log(`[API GET] /api/path/${pathName}/preview - Fetching detailed preview...`);
-      setSelectedPathName(pathName);
-      let generatedLines: PlanLine[] = [];
-      try {
-        if (pathName.toLowerCase().endsWith(".dxf")) {
-          const res = await fetchWithRetry(() => pathApi.getPathEntities(apiBaseUrl, pathName));
-          if (res.ok) {
-            const body = await res.json();
-            const isEnabled = body.extension_config?.enabled ?? false;
-            setExtensionsEnabled(isEnabled);
-            if (body.extension_config) {
-              setExtPre(String(body.extension_config.pre_extension_m ?? "0.5"));
-              setExtAft(String(body.extension_config.aft_extension_m ?? "0.5"));
-            }
-            console.log(`[API GET] /api/path/${pathName}/entities - Success, loaded ${body.num_entities} entities`);
-            setIsGeographicDxf(!!body.is_geographic);
-            setGeoOriginDxf(body.geo_origin ?? null);
-            setWorkflowStep("entities", "verified");
-            const entities = body.entities || [];
-            // Mark entities only — extension PRE/AFT and inter-path transit are
-            // built on-device (same as CSV) so the map and Path Order stay purple
-            // and interleaved consistently.
-            entities.forEach((ent: any, i: number) => {
-              const layerUpper = String(ent.layer || "").toUpperCase();
-              let layerName: PlanLine["layer"] = "marking";
-              if (layerUpper.includes("BOUND")) layerName = "boundary";
-              else if (layerUpper.includes("CENTER")) layerName = "center";
-              else if (layerUpper.includes("MARK")) layerName = "marking";
-              // Transit-named layers from CAD stay transit (not painted).
-              if (
-                layerUpper.includes("TRANSIT") ||
-                layerUpper.includes("TRAVEL") ||
-                layerUpper.includes("MOVE") ||
-                layerUpper.includes("RAPID")
-              ) {
-                layerName = "transit";
-              }
-
-              const pts = ent.preview_points || [];
-              const fromPt = pts[0] || { north: 0, east: 0 };
-              const toPt = pts[pts.length - 1] || fromPt;
-
-              generatedLines.push({
-                id: ent.entity_id || `dxf-ent-${i}`,
-                label: `${ent.entity_type || "Entity"} ${ent.entity_id || i}`,
-                layer: layerName,
-                from: { id: i * 2 + 1, x: fromPt.north, y: fromPt.east },
-                to: { id: i * 2 + 2, x: toPt.north, y: toPt.east },
-                width: 0.1,
-                is_mark: ent.is_mark,
-                entity: normalizeDxfEntityGeometry(ent),
-              });
-            });
-
-            const markLines = selectMarkPlanLines(generatedLines);
-            if (markLines.length === 0 && generatedLines.length === 0) {
-              throw new Error("Preview entities did not contain valid geometries");
-            }
-            // Always chain free-ends (per_line=false) — matches rover default freeness.
-            const extCfg = {
-              enabled: isEnabled,
-              preM: Number(body.extension_config?.pre_extension_m ?? 0.5) || 0.5,
-              aftM: Number(body.extension_config?.aft_extension_m ?? 0.5) || 0.5,
-              perLine: false as const,
-            };
-            const order = defaultPathOrder(markLines.length > 0 ? markLines : generatedLines);
-            generatedLines = applyCsvOrderToPlanLines(
-              markLines.length > 0 ? markLines : generatedLines,
-              order,
-              extCfg
-            );
-            if (generatedLines.length === 0) {
-              throw new Error("Preview entities did not contain valid geometries");
-            }
-          } else {
-            throw new Error(`Entities endpoint failed with status ${res.status}`);
-          }
-        } else {
-          const res = await fetchWithRetry(() => pathApi.getPathPreview(apiBaseUrl, pathName));
-          if (res.ok) {
-            const body = await res.json();
-            console.log(`[API GET] /api/path/${pathName}/preview - Success, loaded ${body.num_points} points`);
-            const pts = Array.isArray(body?.waypoints) ? body.waypoints : [];
-            if (pts.length === 0) {
-              throw new Error("Preview returned no waypoints");
-            }
-            
-            // If only 1 point was drawn, create a zero-length segment so it can still be aligned and previewed
-            const effectivePts = pts.length === 1 ? [pts[0], pts[0]] : pts;
-
-            for (let i = 0; i < effectivePts.length - 1; i++) {
-              const fromPt = effectivePts[i];
-              const toPt = effectivePts[i + 1];
-              const fromNorth = coerceFiniteNumber(fromPt?.north);
-              const fromEast = coerceFiniteNumber(fromPt?.east);
-              const toNorth = coerceFiniteNumber(toPt?.north);
-              const toEast = coerceFiniteNumber(toPt?.east);
-
-              if (fromNorth == null || fromEast == null || toNorth == null || toEast == null) {
-                continue;
-              }
-
-              const sprayFlag = fromPt?.spray ?? true;
-              generatedLines.push({
-                id: `rpp-line-${i}`,
-                label: `Segment ${i + 1}`,
-                layer: sprayFlag ? "marking" : "center",
-                from: { id: i * 2 + 1, x: fromNorth, y: fromEast },
-                to: { id: i * 2 + 2, x: toNorth, y: toEast },
-                width: 0.1,
-              });
-            }
-            if (generatedLines.length === 0) {
-              throw new Error("Preview waypoints did not contain valid coordinates");
-            }
-          } else {
-            console.error(`[API GET] /api/path/${pathName}/preview - Failed with status ${res.status}`);
-            throw new Error("Preview not available");
-          }
-        }
-      } catch (err) {
-        console.log("[API GET] /api/path/entities/preview - Endpoint failed:", err);
-        throw err instanceof Error ? err : new Error("Preview not available");
-      }
-      if (!pathPipelineRef.current.isCurrent(previewToken)) {
-        console.log(`[API GET] /api/path/${pathName}/preview - dropped stale result`);
-        return;
-      }
-      // Keep backend/imported DXF coordinates canonical until a verified Fix Alignment
-      // rehydrate bakes them into NED. Viewport auto-fit must not mutate design coords
-      // (e.g. a 0..2 m line becoming -1..1 m would corrupt surveyed ref points).
-      if (generatedLines.length > 0) {
-        const existingVirtual = lines.filter((l: PlanLine) => l.layer === "virtual_boundary");
-        if (existingVirtual.length > 0) {
-          generatedLines.push(...existingVirtual);
-        }
-      }
-      const normalized = sanitizePlanLines(
-        normalizePlanLinesForCurves(normalizePlanLines(generatedLines))
-      );
-      // Backend /entities + /plan always return design-frame (raw DXF) geometry. After Fix
-      // Alignment, map projection uses origin_gps with local (0,0) and `lines` must stay in
-      // that NED frame. Extension toggle / path re-select re-fetch design-frame geometry —
-      // re-apply the stored Fix similarity transform here so pose never jumps. Unaligned
-      // previews pass through unchanged. Input is always design-frame (never re-bake NED).
-      const forMap = rehydrateAlignedPlanLines(normalized, alignmentResultRef.current);
-      if (alignmentResultRef.current && forMap !== normalized) {
-        console.log(
-          `[AlignDXF][Rehydrate] Applied verified Fix transform to ${normalized.length} design-frame line(s) after path preview refresh`
-        );
-      }
-      setLines(forMap);
-      // Keep the plan-editing/visual-alignment "sticker" (if one is active) in sync with
-      // freshly fetched geometry — e.g. toggling DXF extensions while a Move/Rotate Plan
-      // or Visual Alignment session is still open (not yet confirmed). The sticker only
-      // holds its own copy of `lines` for live rendering; without this it would keep
-      // showing the pre-refresh geometry until the user confirms/re-enters the mode. Its
-      // x/y/rotation/scale (the user's in-progress drag) are left untouched — only the
-      // underlying line geometry is refreshed (already NED-baked when alignment is verified).
-      setVisualAlignmentItem((prev) => (prev ? { ...prev, lines: forMap } : prev));
-      setImportedPlan({
-        fileName: pathName,
-        uri: "",
-        fileType: pathName.endsWith(".csv") ? "csv" : pathName.endsWith(".waypoints") ? "waypoints" : "dxf",
-        source: "builtin"
-      });
-      setSelectedLineId(normalized[0]?.id ?? null);
-      setMissionFileReady(true);
-      setMissionLoaded(false);
-    } catch (err) {
-      if (!pathPipelineRef.current.isCurrent(previewToken)) return;
-      console.log("Error loading path preview:", err);
-      Alert.alert("Preview failed", err instanceof Error ? err.message : String(err));
-    } finally {
-      if (pathPipelineRef.current.isCurrent(previewToken) && !pathPipelineRef.current.isExclusive()) {
-        setMissionActionBusy(false);
-      }
-    }
-  };
-
-  const parseDxfPlan = async () => {
-    if (!apiBaseUrl || !importedPlan) return;
-    if (pathPipelineRef.current.isExclusive()) {
-      const holder = pathPipelineRef.current.exclusiveKind();
-      showToast("Busy", holder ? exclusiveBusyMessage(holder) : "Wait — another path action is still in progress.", "info");
-      return;
-    }
-    if (protectedMissionResident) {
-      const message = "Reparse is blocked while a protected surveyed mission is resident.";
-      Alert.alert("Mission conflict", message);
-      showToast("Mission conflict", message, "error");
-      return;
-    }
-    setMissionActionBusy(true);
-    try {
-      showToast("Parse", "Sending modifications to backend...", "info");
-
-      // The user indicated that the parse-dxf payload is still UploadFile
-      // So we will reconstruct the DXF or rely on the backend to provide a way
-      // Wait, we can't easily generate a perfect DXF on the frontend and upload it
-      // if it still expects an UploadFile. BUT the user explicitly confirmed:
-      // "it's payload is the file itself will do they didn't changed"
-      // If we must send the file itself, we will trigger the upload flow or call plan.
-      // But wait! If the user unchecks a box, we need a way to tell the backend!
-      // I will send the current entities as JSON to /api/path/plan for actual planning,
-      // or simulate it here based on what they approved.
-      // For now, I will use /api/path/parse-dxf if it accepts the file, but since the
-      // prompt says "at bottom the abutton will appear to send to post for POST /api/path/parse-dxf endpoint"
-      // I will implement a POST request.
-
-      // Sending an empty file if the backend expects multipart/form-data for /parse-dxf
-      // But passing the modified entities in some way if possible.
-      const content = linesToDxf(lines, importedPlan.fileName);
-      let form: FormData;
-      if (Platform.OS === "web") {
-        // Browsers require a real Blob/File in a multipart body. The native
-        // {uri,name,type} descriptor serialises to "[object Object]" in the
-        // browser, so the backend received garbage and returned 422.
-        form = new FormData();
-        form.append("file", new Blob([content], { type: "application/dxf" }), importedPlan.fileName);
-      } else {
-        const tempFileName = `${Date.now()}-${importedPlan.fileName.replace(/[\\/:*?"<>|]/g, "_")}`;
-        const tempFileUri = `${FileSystem.cacheDirectory ?? ""}${tempFileName}`;
-        await FileSystem.writeAsStringAsync(tempFileUri, content, {
-          encoding: FileSystem.EncodingType.UTF8,
-        });
-        form = createUploadFormData(tempFileUri, importedPlan.fileName, "application/dxf");
-      }
-
-      const res = await pathApi.parseDxf(apiBaseUrl, form);
-      if (!res.ok) {
-        const errMsg = await parseFetchError(res, "Parse failed");
-        throw new Error(errMsg);
-      }
-      invalidateStagedWorkflowFrom("alignment");
-      setWorkflowStep("upload", "verified");
-
-      // Choice A: Refresh preview immediately!
-      await previewSelectedPath(importedPlan.fileName);
-      showToast("Parsed", "Plan updated successfully.", "success");
-    } catch (error) {
-      setWorkflowStep("upload", "failed");
-      logAction("PARSE_FAILED", { error: error instanceof Error ? error.message : String(error) });
-      Alert.alert("Parse failed", error instanceof Error ? error.message : "Could not parse.");
-      showToast("Parse failed", error instanceof Error ? error.message : "Parse failed.", "error");
-    } finally {
-      setMissionActionBusy(false);
-    }
-  };
-
-  useEffect(() => {
-    if (page !== "fields" || !apiBaseUrl || missionActionBusy) return;
-    void fetchBackendPaths();
-    const timer = setInterval(() => {
-      void fetchBackendPaths();
-    }, 5000);
-    return () => clearInterval(timer);
-  }, [page, apiBaseUrl, missionActionBusy]);
-
-  async function refreshTelemetryPanel(opts?: { quiet?: boolean }) {
-    if (!apiBaseUrl) return;
-    const quiet = opts?.quiet === true;
-    if (!quiet) { setTelemetryLoading(true); setTelemetryError(""); }
-    try {
-      const result = await recoverProductionTelemetry(getProdApiClient());
-      if (!result.accepted) return;
-    } catch (error) {
-      if (!quiet) setTelemetryError(error instanceof Error ? error.message : "Unable to load telemetry");
-    } finally {
-      if (!quiet) setTelemetryLoading(false);
-    }
-  }
-
-  async function refreshMissionIdentity() {
-    if (!apiBaseUrl || missionIdentityInFlightRef.current) return;
-    missionIdentityInFlightRef.current = true;
-    const generation = missionIdentityGenerationRef.current;
-    try {
-      await refreshTelemetryPanel({ quiet: true });
-      if (generation !== missionIdentityGenerationRef.current) return;
-      const status = missionApi.missionStatusFromTelemetry();
-      if (!status) return;
-      const loaded = await missionApi.getLoadedPath(apiBaseUrl);
-      if (generation !== missionIdentityGenerationRef.current) return;
-      const inspection = await loaded.json() as missionApi.LoadedPathResponse;
-      reconcileLoadedMission(inspection, missionApi.missionStatusFromTelemetry() ?? undefined);
-    } catch {
-      // Keep the existing inspection until current mission telemetry and geometry can be verified.
-    } finally {
-      missionIdentityInFlightRef.current = false;
-    }
-  }
-
-  async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
-    try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
-      if (!res.ok) {
-        throw new Error(`${res.status} ${res.statusText}`);
-      }
-      return (await res.json()) as T;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  async function fetchMissionStatus(apiBaseUrl: string): Promise<missionApi.MissionStatus> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
-    try {
-      return await missionApi.getMissionStatus(apiBaseUrl, { signal: controller.signal });
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-
-
-  async function parseFetchError(res: Response, fallbackPrefix: string): Promise<string> {
-    try {
-      const text = await res.text();
-      try {
-        const json = JSON.parse(text);
-        if (json && typeof json.detail === "string") {
-          return json.detail;
-        }
-        if (json && typeof json.message === "string") {
-          return json.message;
-        }
-      } catch {
-        if (text) return text;
-      }
-    } catch {
-      // ignore
-    }
-    return `${fallbackPrefix} (status ${res.status})`;
-  }
-
-  async function parseMissionResponseError(res: Response, fallbackPrefix: string) {
-    const detail = await parseFetchError(res, fallbackPrefix);
-    return classifyMissionError(res.status, detail);
-  }
-
-  async function loadMissionOnBackend(
-    requestedStagedMissionId?: string,
-    opts?: missionApi.LoadMissionOptions
-  ) {
-    const manageBusy = opts?.manageBusy !== false;
-    const requestedMissionId = requestedStagedMissionId?.trim() || stagedMissionId?.trim() || "";
-    const hasExplicitMissionId = Boolean(requestedStagedMissionId?.trim());
-    const isStagedLoad = requestedMissionId !== "";
-
-    if (stagedWorkflow.staged === "verified" && !requestedMissionId) {
-      setLoadedPathInspection(null);
-      setWorkflowStep("loaded", "failed");
-      Alert.alert("Load blocked", "Staged mission is verified but the mission ID is missing. Re-run Plan & Stage before loading.");
-      showToast("Load blocked", "Missing staged mission ID.", "error");
-      return false;
-    }
-
-    if (isStagedLoad) {
-      if (stagedWorkflow.staged !== "verified" && !hasExplicitMissionId) {
-        setLoadedPathInspection(null);
-        setWorkflowStep("loaded", "failed");
-        Alert.alert("Prerequisites Required", "Plan and stage the mission before loading to the controller.");
-        return false;
-      }
-      if (!apiBaseUrl) {
-        setLoadedPathInspection(null);
-        setWorkflowStep("loaded", "failed");
-        return false;
-      }
-    } else if (protectedMissionResident) {
-      const message = "A protected surveyed mission is resident. Legacy filename load is blocked.";
-      Alert.alert("Mission conflict", message);
-      showToast("Mission conflict", message, "error");
-      return false;
-    } else if (!apiBaseUrl || !importedPlan || lines.length === 0) {
-      return false;
-    }
-
-    logAction("LOAD_REQUEST", { apiBaseUrl, stagedMissionId: requestedMissionId || null, fileName: importedPlan?.fileName });
-    const ownLock = !pathPipelineRef.current.isExclusive();
-    if (ownLock) {
-      if (!beginPathExclusive("load")) return false;
-    } else if (manageBusy) {
-      setMissionActionBusy(true);
-    }
-    const loadMapToken = pathPipelineRef.current.currentGeneration();
-    // Invalidate any identity poll already in flight — its snapshot predates
-    // this load and must not be allowed to overwrite the result below.
-    missionIdentityGenerationRef.current += 1;
-    try {
-      if (manageBusy) showToast("Load", `Loading path...`, "info");
-
-      if (isStagedLoad) {
-        const missionId = requestedMissionId;
-        let loadRes = await missionApi.loadMissionToController(apiBaseUrl, { mission_id: missionId });
-        // Controller can be briefly busy after the mission upload (Send then Start).
-        if (!loadRes.ok && (loadRes.status === 503 || loadRes.status === 504)) {
-          await new Promise((r) => setTimeout(r, 600));
-          loadRes = await missionApi.loadMissionToController(apiBaseUrl, { mission_id: missionId });
-        }
-        if (!loadRes.ok) {
-          throw await parseMissionResponseError(loadRes, "Load to controller failed");
-        }
-
-        const confirmed = await confirmStagedMissionLoaded({
-          expectedMissionId: missionId,
-          fetchLoaded: async () => {
-            const loadedRes = await missionApi.getLoadedPath(apiBaseUrl);
-            if (!loadedRes.ok) return null;
-            return (await loadedRes.json()) as missionApi.LoadedPathResponse;
-          },
-        });
-        const loadedData = confirmed.loaded;
-        if (!confirmed.verified || !loadedData) {
-          if (loadedData) setLoadedPathInspection(loadedData);
-          throw classifyMissionError(
-            409,
-            confirmed.message ?? "Loaded staged mission verification failed."
-          );
-        }
-
-        let stagedArtifact: pathApi.StagedMissionResponse | null = null;
-        if (!opts?.skipMapHydration) {
-          const passedInspection = opts?.stagedInspection ?? null;
-          stagedArtifact =
-            stagedMissionMatchesId(passedInspection, missionId)
-              ? passedInspection
-              : stagedMissionMatchesId(stagedMissionInspection, missionId)
-                ? stagedMissionInspection
-                : null;
-          if (!stagedArtifact) {
-            const stagedRes = await pathApi.getStagedMission(apiBaseUrl, missionId);
-            if (!stagedRes.ok) {
-              const errMsg = await parseFetchError(stagedRes, "Staged mission geometry fetch failed");
-              throw new Error(errMsg);
-            }
-            stagedArtifact = (await stagedRes.json()) as pathApi.StagedMissionResponse;
-            if (!stagedMissionMatchesId(stagedArtifact, missionId)) {
-              throw new Error(`Staged mission ${missionId} could not be loaded for map preview.`);
-            }
-            setStagedMissionInspection(stagedArtifact);
-          } else if (passedInspection && stagedMissionMatchesId(passedInspection, missionId)) {
-            setStagedMissionInspection(passedInspection);
-          }
-
-          // Geometry + origin atomically from the staged artifact (same path as recovery + CSV panel).
-          const hydrated = hydrateStagedMissionForMap(stagedArtifact, {
-            hideRuntimeEntryLine: opts?.hideRuntimeEntryLine,
-            extensionLines: opts?.extensionLines,
-          });
-          if (!hydrated) {
-            throw new Error(`Staged mission ${missionId} has no drawable waypoints for map preview.`);
-          }
-
-          // Recover mission-layer identity lost when hydration strips file-prefixed
-          // ids, so M-Layers visibility toggles keep affecting the map post-Start —
-          // including each layer's extension run-ups/run-outs, not just its marks.
-          const layerCatalog = buildMissionLayerLegCatalog(
-            appPlannedStartSnapshot?.paintedLines ?? [],
-            uploadedFiles,
-            missionLayers,
-            appPlannedStartSnapshot?.extensionConfig
-          );
-          const missionLayerTaggedLines = tagLinesWithMissionLayer(hydrated.lines, layerCatalog);
-          // Recover corner class so Path Order + map still show corners after
-          // densified hydrate (same catalog pattern as mission layers).
-          const cornerTaggedLines = recoverCornersAfterHydration(
-            missionLayerTaggedLines,
-            appPlannedStartSnapshot?.paintedLines ?? []
-          );
-
-          const expectedMarks = selectMarkPlanLines(
-            opts?.expectedPaintedLines ?? appPlannedStartSnapshot?.paintedLines ?? lines
-          ).length;
-          const loadedMarks = selectMarkPlanLines(cornerTaggedLines).length;
-          const markCount = verifyHydratedMarkCount(expectedMarks, loadedMarks);
-          if (!markCount.ok) {
-            throw classifyMissionError(409, markCount.message ?? "Loaded path count mismatch.");
-          }
-
-          if (!pathPipelineRef.current.isCurrent(loadMapToken)) {
-            throw new Error("A newer path action replaced this load. The map was not overwritten.");
-          }
-
-          setAlignedRefPoints(hydrated.alignedRefPoints);
-          setLines(sanitizePlanLines(cornerTaggedLines));
-          setSelectedLineId(hydrated.selectedLineId);
-          setVisualAlignmentItem(null);
-          setIsVisualAlignmentMode(false);
-        }
-
-        setStagedMissionId(missionId);
-        setStagedPlanResult((prev) => prev?.missionId === missionId ? prev : {
-          missionId,
-          numWaypoints: loadedData.num_waypoints ?? null,
-          numSegments: stagedArtifact?.segment_runs?.length ?? null,
-          totalLengthM: null,
-          markLengthM: null,
-          transitLengthM: null,
-          estimatedPaintL: null,
-          estimatedRuntimeS: null,
-          rmseM: null,
-          warnings: [],
-        });
-        setLoadedPathInspection(loadedData);
-        setMissionLoaded(true);
-        setMissionPanelOpenToken((token) => token + 1);
-        setWorkflowStep("staged", "verified");
-        setWorkflowStep("loaded", "verified");
-        void refreshTelemetryPanel();
-        logAction("LOAD_SUCCESS", { stagedMissionId: missionId, fileName: importedPlan?.fileName });
-        if (!opts?.skipNavigate) {
-          setPage("home");
-        }
-        showToast("Mission loaded", "Staged mission loaded to controller and verified.", "success");
-        return true;
-      }
-
-      const res = await missionApi.loadMission(apiBaseUrl, {
-        path_name: importedPlan!.fileName,
-        mission_file: "",
-      });
-
-      if (!res.ok) {
-        throw await parseMissionResponseError(res, "Load failed");
-      }
-
-      setLoadedPathInspection(null);
-      setMissionLoaded(true);
-      setMissionPanelOpenToken((token) => token + 1);
-      setWorkflowStep("loaded", "verified");
-      void refreshTelemetryPanel();
-      logAction("LOAD_SUCCESS", { fileName: importedPlan?.fileName });
-      setPage("home");
-      showToast("File loaded", "Load succeeded. Start and Export are now available.", "success");
-      return true;
-    } catch (error) {
-      const missionError = error && typeof error === "object" && "kind" in error
-        ? error as ReturnType<typeof classifyMissionError>
-        : null;
-      if (isStagedLoad && !missionError) {
-        setLoadedPathInspection(null);
-      }
-      setWorkflowStep("loaded", "failed");
-      logAction("LOAD_FAILED", {
-        fileName: importedPlan?.fileName,
-        stagedMissionId: requestedMissionId || null,
-        status: missionError?.status ?? null,
-        error: missionError?.message ?? (error instanceof Error ? error.message : String(error)),
-      });
-      const message = missionError?.message ?? (error instanceof Error ? error.message : "Could not load the mission.");
-      const title = missionError?.title ?? "Load failed";
-      if (opts?.rethrow) {
-        if (error instanceof Error) throw error;
-        if (missionError) throw missionError;
-        throw new Error(message);
-      }
-      Alert.alert(title, message);
-      showToast(title, message, "error");
-      if (missionError?.status === 409) void refreshMissionIdentity();
-      return false;
-    } finally {
-      if (ownLock) {
-        endPathExclusive("load");
-      } else if (manageBusy && !pathPipelineRef.current.isExclusive()) {
-        setMissionActionBusy(false);
-      }
-    }
-  }
-
   /** Allocate a unique line-id prefix for a source file within the current batch. */
   function allocateLineIdPrefix(fileName: string, used: Set<string>): string {
     const stem = dxfFileStem(fileName).replace(/[^\w.-]+/g, "_") || "file";
@@ -3042,12 +2157,8 @@ function AppRoot() {
       loaded: "pending",
       started: "pending",
     }));
-    setMissionFileReady(false);
-    setMissionLoaded(false);
     setStagedPlanResult(null);
-    setStagedMissionInspection(null);
     setStagedMissionId(null);
-    setSegmentVerification(null);
   }
 
   /**
@@ -3069,7 +2180,6 @@ function AppRoot() {
     setLocalCsvPreview(null);
     localCsvParsesRef.current = [];
     setLocalDxfMeta(null);
-    setIsGeographicDxf(false);
     setGeoOriginDxf(null);
     setLines((prev) => prev.filter((l) => l.layer === "virtual_boundary"));
     setSelectedLineId(null);
@@ -3078,8 +2188,6 @@ function AppRoot() {
     setAlignmentResult(null);
     setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
-    previousSelectedPathRef.current = null;
-    setSelectedPathName(null);
     demoteWorkflowAfterBatchChange(true);
   }
 
@@ -3183,7 +2291,6 @@ function AppRoot() {
     if (!remaining.some((f) => f.kind === "dxf")) {
       setLocalDxfMeta(null);
     }
-    setIsGeographicDxf(remaining.some((f) => f.isGeographic));
 
     setSelectedLineId((prev) =>
       prev &&
@@ -3224,8 +2331,6 @@ function AppRoot() {
    * / load live in CsvStageAndLoadPanel.
    */
   function handleLocalCsvParsed(data: LocalPointCsvResult) {
-    previousSelectedPathRef.current = null;
-    setSelectedPathName(null);
     setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
     setVisualAlignmentAnchor(null);
@@ -3325,11 +2430,6 @@ function AppRoot() {
    * metric DXF is held in pendingDxfAlignment until Fix Alignment.
    */
   function handleLocalDxfParsed(data: LocalDxfResult) {
-    previousSelectedPathRef.current = null;
-    setSelectedPathName(null);
-    setMissionFileReady(false);
-    setMissionLoaded(false);
-    setExtensionsEnabled(false);
     setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
 
@@ -3365,7 +2465,6 @@ function AppRoot() {
     });
 
     if (data.isGeographic && data.geoOrigin) {
-      setIsGeographicDxf(true);
       const integrated = integrateAnchoredLines(
         withTransit,
         data.geoOrigin,
@@ -3405,7 +2504,6 @@ function AppRoot() {
     setSelectedLineId(withTransit[0]?.id ?? null);
 
     if (uploadedFilesRef.current.every((f) => !f.isGeographic)) {
-      setIsGeographicDxf(false);
     }
 
     const entry: UploadedFileEntry = {
@@ -3495,7 +2593,6 @@ function AppRoot() {
     setLocalCsvPreview(null);
     localCsvParsesRef.current = [];
     setLocalDxfMeta(null);
-    setIsGeographicDxf(false);
     setGeoOriginDxf(null);
     setUploadedFiles([]);
     uploadedFilesRef.current = [];
@@ -3514,7 +2611,6 @@ function AppRoot() {
     setVerifiedAlignmentRequest(null);
     setAlignmentResult(null);
     setStagedPlanResult(null);
-    setStagedMissionInspection(null);
     setStagedMissionId(null);
     setAppPlannedStartSnapshot(null);
     setPreOffsetSnapshot(null);
@@ -3555,8 +2651,8 @@ function AppRoot() {
   }
 
   function handleAnchorPress() {
-    if (protectedMissionResident) {
-      Alert.alert("Mission conflict", "Anchor selection is blocked while a protected surveyed mission is resident.");
+    if (planLocked) {
+      Alert.alert("Mission active", "Anchor selection is blocked while a mission is active. Stop the mission first.");
       return;
     }
     if (anchorSelectMode) {
@@ -3586,8 +2682,8 @@ function AppRoot() {
    */
   function handleConfirmAnchor() {
     if (!anchorTarget || !pendingAnchor) return;
-    if (protectedMissionResident) {
-      Alert.alert("Mission conflict", "Anchor selection is blocked while a protected surveyed mission is resident.");
+    if (planLocked) {
+      Alert.alert("Mission active", "Anchor selection is blocked while a mission is active. Stop the mission first.");
       resetAnchorSelection();
       return;
     }
@@ -3658,7 +2754,7 @@ function AppRoot() {
     if (offsetGhostRafRef.current !== null) return; // single-flight
     offsetGhostRafRef.current = requestAnimationFrame(() => {
       offsetGhostRafRef.current = null;
-      if (!isDraggingOffsetDialRef.current || protectedMissionResident) return;
+      if (!isDraggingOffsetDialRef.current || planLocked) return;
       const scopeTarget = offsetTarget ?? { kind: "universal" as const };
       const baseLines =
         alignContextRef.current.displayLines.length > 0 ? alignContextRef.current.displayLines : lines;
@@ -3673,7 +2769,7 @@ function AppRoot() {
       );
       setOffsetPreviewLines(result.ok ? result.lines : null);
     });
-  }, [offsetTarget, offsetDistanceM, uploadedFiles, missionLayers, lines, protectedMissionResident, offsetMode, offsetBufferDirection]);
+  }, [offsetTarget, offsetDistanceM, uploadedFiles, missionLayers, lines, planLocked, offsetMode, offsetBufferDirection]);
 
   const handleOffsetBearingChange = useCallback(
     (deg: number) => {
@@ -3708,7 +2804,7 @@ function AppRoot() {
 
   useEffect(() => {
     if (offsetMode !== "buffer") return;
-    if (protectedMissionResident || offsetDistanceM <= 0) {
+    if (planLocked || offsetDistanceM <= 0) {
       setOffsetPreviewLines(null);
       return;
     }
@@ -3733,7 +2829,7 @@ function AppRoot() {
     uploadedFiles,
     missionLayers,
     lines,
-    protectedMissionResident,
+    planLocked,
     offsetBearingDeg,
   ]);
 
@@ -3743,8 +2839,8 @@ function AppRoot() {
    * Captures a pre-offset baseline on the first Apply so Reset can undo.
    */
   function handleApplyOffset() {
-    if (protectedMissionResident) {
-      Alert.alert("Mission conflict", "Offset is blocked while a protected surveyed mission is resident.");
+    if (planLocked) {
+      Alert.alert("Mission active", "Offset is blocked while a mission is active. Stop the mission first.");
       return;
     }
 
@@ -3788,8 +2884,8 @@ function AppRoot() {
 
   /** Restore the plan to how it looked before the first Offset Apply this session. */
   function handleResetOffset() {
-    if (protectedMissionResident) {
-      Alert.alert("Mission conflict", "Offset reset is blocked while a protected surveyed mission is resident.");
+    if (planLocked) {
+      Alert.alert("Mission active", "Offset reset is blocked while a mission is active. Stop the mission first.");
       return;
     }
     if (!preOffsetSnapshot) return;
@@ -4155,43 +3251,6 @@ function AppRoot() {
   }, [apiBaseUrl, rtkConnecting]);
 
 
-  // ── Staged Mission persistence ──────────────────────────────────────
-  const STAGED_MISSION_KEY = "staged_mission_cache";
-  const stagedMissionLoadedRef = useRef(false);
-
-  // Load saved staged mission once on mount
-  useEffect(() => {
-    (async () => {
-      try {
-        const raw = await SecureStore.getItemAsync(STAGED_MISSION_KEY);
-        if (raw) {
-          const saved = JSON.parse(raw);
-          if (saved.missionId && !recoveryAttemptedRef.current) {
-            console.log(`[RECOVERY] Found staged mission ${saved.missionId} in SecureStore. Bypassing backend check.`);
-            recoveryAttemptedRef.current = true;
-            void recoverLoadedMissionContext(saved.sourceName, saved.missionId);
-          }
-        }
-      } catch (err) {
-        console.warn("[RECOVERY] Failed to load saved staged mission:", err);
-      } finally {
-        stagedMissionLoadedRef.current = true;
-      }
-    })();
-  }, []);
-
-  // Save staged mission whenever it successfully verifies
-  useEffect(() => {
-    if (!stagedMissionLoadedRef.current) return;
-    if (stagedWorkflow.staged === "verified" && stagedMissionId) {
-      const sourceName = selectedPathName || importedPlan?.fileName || null;
-      const data = JSON.stringify({ missionId: stagedMissionId, sourceName });
-      SecureStore.setItemAsync(STAGED_MISSION_KEY, data).catch((err) =>
-        console.warn("[RECOVERY] Failed to save staged mission:", err)
-      );
-    }
-  }, [stagedWorkflow.staged, stagedMissionId, selectedPathName, importedPlan]);
-
   /**
    * Stop = abort the active mission (reason: operator). Always allowed while a mission is active
    * or its state is unknown. The result arrives as an ABORTED `mission_state` event; the rover
@@ -4219,87 +3278,50 @@ function AppRoot() {
     }
   }
 
-  async function clearResidentMissionOnBackend() {
-    if (!apiBaseUrl) {
-      Alert.alert("No backend", "Connect to a backend before clearing a mission.");
+  /**
+   * Clear the plan on the tablet. The rover keeps its stored missions (content-addressed files), so
+   * there is nothing resident to unload and the rover is not called. Refused while a mission is active:
+   * the map would lose the path that is being driven.
+   */
+  function clearPlan() {
+    if (missionRunning) {
+      showToast("Clear blocked", "Stop the mission before clearing the plan.", "warning");
       return;
     }
-
-    logAction("CLEAR_REQUEST", {
-      apiBaseUrl,
-      selectedPathName,
-      missionRunning,
-      missionLoaded,
-      missionState: telemetrySnapshot?.mission_state ?? null,
-    });
-    if (!beginPathExclusive("clear")) return;
-    try {
-      showToast("Clear", "Clearing resident mission...", "warning");
-      SecureStore.deleteItemAsync(STAGED_MISSION_KEY).catch(() => {});
-      const res = await missionApi.clearMission(apiBaseUrl);
-      if (!res.ok) {
-        const errMsg = await parseFetchError(res, "Clear failed");
-        const error = new Error(errMsg) as Error & { status?: number };
-        error.status = res.status;
-        throw error;
-      }
-
-      setImportedPlan(null);
-      setLines([]);
-      setSelectedLineId(null);
-      setSelectedPathName(null);
-      setLocalCsvPreview(null);
-      localCsvParsesRef.current = [];
-      setLocalDxfMeta(null);
-      setUploadedFiles([]);
-      uploadedFilesRef.current = [];
-      setPlacedTemplates([]);
-      placedTemplatesRef.current = [];
-      setMissionLayers([]);
-      setControlModeActive(false);
-      setPendingLayerAssignment(null);
-      resetAnchorSelection();
-      setPendingDxfAlignment({});
-      setSharedOriginGps(null);
-      sharedOriginGpsRef.current = null;
-      setMissionFileReady(false);
-      setMissionLoaded(false);
-      setAutoOrigin(false);
-      setAutoOriginReference(null);
-      setExtractedCorners(null);
-      setAlignedRefPoints([]);
-      setAlignmentResult(null);
-      setVerifiedAlignmentRequest(null);
-      setIsGeographicDxf(false);
-      setGeoOriginDxf(null);
-      setVisualAlignmentItem(null);
-      setIsVisualAlignmentMode(false);
-      setSegmentVerification(null);
-      setStagedPlanResult(null);
-      setStagedMissionInspection(null);
-      setStagedMissionId(null);
-      setLoadedPathInspection(null);
-      setStagedWorkflow(INITIAL_STAGED_WORKFLOW_STATE);
-      missionIdentityGenerationRef.current += 1;
-
-      void refreshMissionIdentity();
-      void refreshTelemetryPanel();
-      logAction("CLEAR_SUCCESS");
-      Alert.alert("Cleared", "Resident mission unloaded successfully.");
-      showToast("Mission cleared", "Resident mission has been unloaded.", "success");
-    } catch (error) {
-      logAction("CLEAR_FAILED", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      const message = error instanceof Error ? error.message : "Could not clear the mission.";
-      Alert.alert("Clear failed", message);
-      showToast("Clear failed", message, "error");
-      if (typeof error === "object" && error && "status" in error && (error as { status?: number }).status === 409) {
-        void refreshMissionIdentity();
-      }
-    } finally {
-      endPathExclusive("clear");
-    }
+    logAction("CLEAR_PLAN", { selectedLines: lines.length });
+    setImportedPlan(null);
+    setLines([]);
+    setSelectedLineId(null);
+    setLocalCsvPreview(null);
+    localCsvParsesRef.current = [];
+    setLocalDxfMeta(null);
+    setUploadedFiles([]);
+    uploadedFilesRef.current = [];
+    setPlacedTemplates([]);
+    placedTemplatesRef.current = [];
+    setMissionLayers([]);
+    runningLayerIdsRef.current = [];
+    runningMissionIdRef.current = null;
+    setControlModeActive(false);
+    setPendingLayerAssignment(null);
+    resetAnchorSelection();
+    setPendingDxfAlignment({});
+    setSharedOriginGps(null);
+    sharedOriginGpsRef.current = null;
+    setAutoOrigin(false);
+    setAutoOriginReference(null);
+    setExtractedCorners(null);
+    setAlignedRefPoints([]);
+    setAlignmentResult(null);
+    setVerifiedAlignmentRequest(null);
+    setGeoOriginDxf(null);
+    setVisualAlignmentItem(null);
+    setIsVisualAlignmentMode(false);
+    setAppPlannedStartSnapshot(null);
+    setStagedPlanResult(null);
+    setStagedMissionId(null);
+    setStagedWorkflow(INITIAL_STAGED_WORKFLOW_STATE);
+    showToast("Plan cleared", "The plan was removed from the tablet. Stored missions stay on the rover.", "success");
   }
 
   /** Pause the running mission. The PAUSED state arrives as a `mission_state` event. */
@@ -4378,68 +3400,6 @@ function AppRoot() {
           },
         ]
       );
-    }
-  }
-
-  async function runTemplateOnBackend(name: string, generatedLines: PlanLine[]) {
-    if (!apiBaseUrl) {
-      Alert.alert("No backend", "Connect to a backend before running a template.");
-      return;
-    }
-    if (protectedMissionResident) {
-      const message = "Template load is blocked while a protected surveyed mission is resident.";
-      Alert.alert("Mission conflict", message);
-      showToast("Mission conflict", message, "error");
-      return;
-    }
-    const fileName = `${name.replace(/\s+/g, "_").toLowerCase()}_template.dxf`;
-    logAction("LOAD_TEMPLATE_REQUEST", { apiBaseUrl, fileName });
-    setMissionActionBusy(true);
-    try {
-      showToast("Load", `Loading template ${fileName}...`, "info");
-      const res = await missionApi.loadMission(apiBaseUrl, {
-        path_name: fileName,
-        mission_file: "",
-      });
-
-      if (!res.ok) {
-        throw await parseMissionResponseError(res, "Load failed");
-      }
-
-      setImportedPlan({
-        fileName,
-        uri: "",
-        fileType: "dxf",
-        source: "generated",
-      });
-      const safeGeneratedLines = sanitizePlanLines(normalizePlanLinesForCurves(generatedLines));
-      if (pathPipelineRef.current.isExclusive()) {
-        showToast("Busy", "Template map was not applied — another path action is in progress.", "info");
-        return;
-      }
-      pathPipelineRef.current.beginAsyncMapWrite();
-      setLines(safeGeneratedLines);
-      setSelectedLineId(safeGeneratedLines[0]?.id ?? null);
-      setMissionLoaded(true);
-      setMissionPanelOpenToken((token) => token + 1);
-      void refreshTelemetryPanel();
-      setPage("home");
-      showToast("Template loaded", "Template path loaded successfully.", "success");
-    } catch (error) {
-      const missionError = error && typeof error === "object" && "kind" in error
-        ? error as ReturnType<typeof classifyMissionError>
-        : null;
-      logAction("LOAD_TEMPLATE_FAILED", {
-        fileName,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      const message = missionError?.message ?? (error instanceof Error ? error.message : "Could not load template.");
-      const title = missionError?.title ?? "Load failed";
-      Alert.alert(title, message);
-      showToast(title, message, "error");
-      if (missionError?.status === 409) void refreshMissionIdentity();
-    } finally {
-      setMissionActionBusy(false);
     }
   }
 
@@ -4759,7 +3719,6 @@ function AppRoot() {
                   }
                   importedPlan={importedPlan}
                   setImportedPlan={setImportedPlan}
-                  onSelectPath={previewSelectedPath}
                   lines={displayedLines}
                   mapSourceLines={mapSourceLines}
                   missionVisibleLines={missionVisibleDisplayedLines}
@@ -4768,7 +3727,6 @@ function AppRoot() {
                   mapGeometryFrame={mapGeometryFrame}
                   autoOriginEnabled={autoOriginEligible}
                   geoOrigin={geoOriginDxf}
-                  extensionsEnabled={extensionsEnabled}
                   setLines={setLines}
                   selectedLineId={selectedLineId}
                   onSelectLine={handleSelectLine}
@@ -4802,37 +3760,27 @@ function AppRoot() {
                   }}
                   onToggleMissionLayerVisibility={handleToggleMissionLayerVisibility}
                   onStopPlan={stopMissionOnBackend}
-                  onClearMission={clearResidentMissionOnBackend}
+                  onClearMission={clearPlan}
                   onStartPlan={startMissionOnBackend}
                   onPausePlan={pauseMissionOnBackend}
                   onResumePlan={resumeMissionOnBackend}
                   onEstopVehicle={estopVehicle}
-                  virtualJoystick={virtualJoystick}
+                  onBeginLocalImportBatch={handleBeginLocalImportBatch}
+                  onLocalCsvParsed={handleLocalCsvParsed}
                   missionActionBusy={missionActionBusy}
-                  missionFileReady={missionFileReady}
-                  missionLoaded={missionLoaded}
                   missionPanelOpenToken={missionPanelOpenToken}
                   missionRunning={missionRunning}
                   systemHealth={systemHealth}
                   telemetrySnapshot={telemetrySnapshot}
                   activityFeed={activityFeed}
                   discoveryFeed={discoveryFeed}
-                  telemetryError={telemetryError}
-                  telemetryLoading={telemetryLoading}
                   isPaused={isPaused}
                   rtkConnecting={rtkConnecting}
                   rtkStatus={rtkStatus}
                   startLora={startLora}
-                  onParsePlan={parseDxfPlan}
                   apiBaseUrl={apiBaseUrl}
-                  selectedPathName={selectedPathName}
-                  onRefreshPaths={() => {
-                    const target = selectedPathName || importedPlan?.fileName;
-                    if (target) previewSelectedPath(target);
-                  }}
                   stagedWorkflow={stagedWorkflow}
                   stagedMissionId={stagedMissionId}
-                  loadedPathInspection={loadedPathInspection}
                   onInvalidateWorkflow={invalidateStagedWorkflowFrom}
                   alignedRefPoints={alignedRefPoints}
                   setAlignedRefPoints={setAlignedRefPoints}
@@ -4865,17 +3813,12 @@ function AppRoot() {
                             onToggleAutoOrigin={toggleAutoOrigin}
                             setLines={setLines}
                             selectedLineId={selectedLineId}
-                            backendPaths={backendPaths}
-                            selectedPathName={selectedPathName}
-                            onSelectPath={previewSelectedPath}
-                            onLoadSelectedPath={loadMissionOnBackend}
                             onMissionStored={handleMissionStored}
                             missionActionBusy={missionActionBusy}
                             onBeginPathExclusive={beginPathExclusive}
                             onEndPathExclusive={endPathExclusive}
-                            onClearMission={clearResidentMissionOnBackend}
+                            onClearMission={clearPlan}
                             apiBaseUrl={apiBaseUrl}
-                            onRefreshPaths={fetchBackendPaths}
                             showRefPointLabels={showRefPointLabels}
                             setShowRefPointLabels={setShowRefPointLabels}
                             activeRefPointLabelIndex={activeRefPointLabelIndex}
@@ -4904,32 +3847,9 @@ function AppRoot() {
                             onNav={(p) => setPage(p)}
                             onSelectLine={handleSelectLine}
                             highlightLineIds={highlightLineIds}
-                            onGenerateTemplate={(name, generatedLines) => {
-                              if (protectedMissionResident) {
-                                Alert.alert("Mission conflict", "Generating a new template is blocked while a protected surveyed mission is resident.");
-                                return;
-                              }
-                              const safeGeneratedLines = sanitizePlanLines(normalizePlanLinesForCurves(generatedLines));
-                              pathPipelineRef.current.beginAsyncMapWrite();
-                              setImportedPlan({ fileName: `${name}.dxf`, uri: "", fileType: "dxf", source: "generated" });
-                              setLines(safeGeneratedLines);
-                              setSelectedLineId(safeGeneratedLines[0]?.id ?? null);
-                              setMissionFileReady(false);
-                              setMissionLoaded(false);
-                              setPage("home");
-                              showToast("Template ready", `${name}.dxf is ready to upload.`, "success");
-                            }}
                             layerVisibility={layerVisibility}
                             setLayerVisibility={setLayerVisibility}
                             setImportedPlan={setImportedPlan}
-                            onRunTemplate={runTemplateOnBackend}
-                            extensionsEnabled={extensionsEnabled}
-                            setExtensionsEnabled={setExtensionsEnabled}
-                            extPre={extPre}
-                            setExtPre={setExtPre}
-                            extAft={extAft}
-                            setExtAft={setExtAft}
-                            missionFileReady={missionFileReady}
                             toggleA={toggleA}
                             toggleB={toggleB}
                             toggleC={toggleC}
@@ -4942,23 +3862,16 @@ function AppRoot() {
                             setToggleD={setToggleD}
                             setDelayA={setDelayA}
                             setDelayB={setDelayB}
-                            onParsePlan={parseDxfPlan}
                             onWorkflowStep={setWorkflowStep}
                             stagedWorkflow={stagedWorkflow}
                             alignmentResult={alignmentResult}
                             setAlignmentResult={setAlignmentResult}
                             verifiedAlignmentRequest={verifiedAlignmentRequest}
                             setVerifiedAlignmentRequest={setVerifiedAlignmentRequest}
-                            isGeographicDxf={isGeographicDxf}
-                            segmentVerification={segmentVerification}
-                            setSegmentVerification={setSegmentVerification}
                             stagedPlanResult={stagedPlanResult}
                             setStagedPlanResult={setStagedPlanResult}
-                            stagedMissionInspection={stagedMissionInspection}
-                            setStagedMissionInspection={setStagedMissionInspection}
                             stagedMissionId={stagedMissionId}
                             setStagedMissionId={setStagedMissionId}
-                            loadedPathInspection={loadedPathInspection}
                             onInvalidateWorkflow={invalidateStagedWorkflowFrom}
                             onAppPlannedStartSnapshot={setAppPlannedStartSnapshot}
                             dashPattern={dashPattern}
@@ -5200,7 +4113,6 @@ type HomeViewProps = {
   onFocusPlan?: () => void;
   recenterRoverCount?: number;
   recenterPlanCount?: number;
-  extensionsEnabled?: boolean;
   previewRoverPoint: { north: number; east: number } | null;
   originShiftKey?: string | null;
   mapSourceLines: PlanLine[];
@@ -5210,7 +4122,6 @@ type HomeViewProps = {
   geoOrigin?: [number, number] | null;
   importedPlan: ImportedPlan | null;
   setImportedPlan?: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
-  onSelectPath?: (name: string) => void;
   lines: PlanLine[];
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   selectedLineId: string | null;
@@ -5225,35 +4136,29 @@ type HomeViewProps = {
   layerVisibility: LayerVisibility;
   setLayerVisibility: React.Dispatch<React.SetStateAction<LayerVisibility>>;
   onStopPlan: () => Promise<void>;
-  onClearMission: () => Promise<void>;
+  onClearMission: () => void;
   onStartPlan: () => Promise<void>;
   onPausePlan: () => Promise<void>;
   onResumePlan: () => Promise<void>;
   onEstopVehicle: () => Promise<void>;
-  virtualJoystick: ReturnType<typeof useVirtualJoystick>;
+  /** Hand a plan drawn on the Home map to the same on-device import as a picked file. */
+  onBeginLocalImportBatch?: () => void;
+  onLocalCsvParsed?: (data: LocalPointCsvResult) => void;
   missionActionBusy: boolean;
-  missionFileReady: boolean;
-  missionLoaded: boolean;
   missionPanelOpenToken: number;
   missionRunning: boolean;
   systemHealth: SystemHealth | null;
   telemetrySnapshot: TelemetrySnapshot | null;
   activityFeed: ActivityEntry[];
   discoveryFeed: DiscoveredRover[];
-  telemetryError: string;
-  telemetryLoading: boolean;
   isPaused: boolean;
   rtkConnecting: boolean;
   rtkStatus: RTKStatus;
   startLora: () => Promise<void>;
-  onParsePlan: () => Promise<void>;
   apiBaseUrl?: string;
-  selectedPathName?: string | null;
-  onRefreshPaths?: () => void;
   stagedWorkflow: StagedWorkflowState;
   stagedMissionId: string | null;
-  loadedPathInspection: missionApi.LoadedPathResponse | null;
-  onInvalidateWorkflow?: (step: "alignment" | "spray" | "staged" | "loaded") => void;
+  onInvalidateWorkflow?: (step: StagedWorkflowStep) => void;
   alignedRefPoints?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
   setAlignedRefPoints?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>>;
   mapViewEnabled?: boolean;
@@ -5283,12 +4188,9 @@ type HomeViewProps = {
 function HomeView(props: HomeViewProps) {
   // Prefer App-provided live snapshot (single source of truth). Store is fallback only.
   const liveTelemetry = useTelemetrySnapshot();
-  const liveHealth = useSystemHealth();
   const {
     page = "home",
     renderSectionContent,
-    autoOrigin,
-    onToggleAutoOrigin,
     previewRoverPoint: previewRoverPointProp,
     originShiftKey,
     mapSourceLines,
@@ -5296,65 +4198,22 @@ function HomeView(props: HomeViewProps) {
     mapGeometryFrame,
     autoOriginEnabled,
     geoOrigin = null,
-    importedPlan,
     lines,
-    setLines,
     selectedLineId,
     onSelectLine,
-    onDeleteSelectedLine,
-    onConfirmDeletePlan,
-    menuOpen,
-    onToggleMenu,
-    onNav,
-    onDisconnect,
-    onOpenPasswordChange,
     layerVisibility,
-    setLayerVisibility,
-    onStopPlan,
-    onClearMission,
-    onStartPlan,
     onPausePlan,
-    onResumePlan,
-    onEstopVehicle,
-    virtualJoystick,
-    missionActionBusy,
-    missionFileReady,
-    missionLoaded,
     missionRunning,
-    systemHealth: systemHealthProp,
     telemetrySnapshot: telemetrySnapshotProp,
-    activityFeed,
-    discoveryFeed,
-    telemetryError,
-    telemetryLoading,
-    isPaused,
-    rtkConnecting,
-    rtkStatus,
-    startLora,
-    onParsePlan,
-    apiBaseUrl,
-    selectedPathName,
-    onRefreshPaths,
     stagedWorkflow,
-    stagedMissionId,
-    loadedPathInspection,
-    onInvalidateWorkflow,
     alignedRefPoints = [],
-    setAlignedRefPoints,
-    mapViewEnabled = true,
-    setMapViewEnabled,
     showRefPointLabels = false,
-    setShowRefPointLabels,
     activeRefPointLabelIndex = null,
     setActiveRefPointLabelIndex,
     isVisualAlignmentMode,
     visualAlignmentItem,
     setVisualAlignmentItem,
-    onStartVisualAlignment,
-    onConfirmVisualAlignment,
-    isPlanEditingMode,
     visualAlignmentAnchor,
-    setImportedPlan,
     onFocusRover,
     onFocusPlan,
     recenterRoverCount = 0,
@@ -5362,102 +4221,18 @@ function HomeView(props: HomeViewProps) {
   } = props;
 
   const telemetrySnapshot = liveTelemetry ?? telemetrySnapshotProp;
-  const systemHealth = liveHealth ?? systemHealthProp;
   const previewRoverPoint =
     previewRoverPointProp ??
     (telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
       ? { north: telemetrySnapshot.pos_n as number, east: telemetrySnapshot.pos_e as number }
       : null);
 
-  const [isSprayMasterEnabled, setIsSprayMasterEnabled] = useState(false);
-  const [isSprayMasterChanging, setIsSprayMasterChanging] = useState(false);
-
-  const handleSprayMasterToggle = async () => {
-    if (!apiBaseUrl) return;
-    const nextEnable = !isSprayMasterEnabled;
-    setIsSprayMasterChanging(true);
-    try {
-      const res = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/api/spray/${nextEnable ? "enable" : "disable"}`, {
-        method: "POST",
-        headers: { Accept: "application/json" },
-      });
-      if (!res.ok) {
-        const errText = await res.text();
-        Alert.alert("Error", errText || `Failed to ${nextEnable ? "enable" : "disable"} master spray.`);
-        return;
-      }
-      const data = await res.json();
-      if (data.enabled !== undefined) {
-        setIsSprayMasterEnabled(!!data.enabled);
-      } else {
-        setIsSprayMasterEnabled(nextEnable);
-      }
-    } catch (err: any) {
-      Alert.alert("Error", err.message || "Failed to connect to backend.");
-    } finally {
-      setIsSprayMasterChanging(false);
-    }
-  };
-
-  const stagedStartGate = useMemo(
-    () => evaluateStagedStartGate(stagedWorkflow, loadedPathInspection, stagedMissionId),
-    [stagedWorkflow, loadedPathInspection, stagedMissionId]
-  );
-  const startBlocked = !stagedStartGate.allowed;
-  const protectedResident = isProtectedMissionResident(loadedPathInspection);
-  const runningMismatch = runningMissionMismatch(
-    getLoadedMissionId(loadedPathInspection),
-    loadedPathInspection?.running_mission_id
-  );
-  const selectedLine = lines.find((line) => line.id === selectedLineId) ?? null;
-  const hasPlan = lines.length > 0;
-  const hasSelectedLine = Boolean(selectedLine);
-  const [safetyControlsEnabled, setSafetyControlsEnabled] = useState(false);
-  const [compassExpanded, setCompassExpanded] = useState(false);
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [deleteScope, setDeleteScope] = useState<"line" | "plan" | null>(null);
-  const [rightPanelMode, setRightPanelMode] = useState<"system" | "details">("system");
-  const [isSprayingSet, setIsSprayingSet] = useState(false);
-  const [exportDialogOpen, setExportDialogOpen] = useState(false);
-  const [exportFileName, setExportFileName] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [showPointsModal, setShowPointsModal] = useState(false);
-  const [joystickPanelOpen, setJoystickPanelOpen] = useState(false);
   const [crossTrackAlerted, setCrossTrackAlerted] = useState(false);
 
-  const isVehicleArmed = telemetrySnapshot?.armed ?? systemHealth?.armed ?? false;
-  const vehicleMode = (telemetrySnapshot?.mode ?? systemHealth?.mode ?? "MANUAL").toUpperCase();
-  const hasJoystickLease = Boolean(virtualJoystick.leaseId);
-  const stickEnabled =
-    hasJoystickLease &&
-    (virtualJoystick.state === "ACTIVE" || virtualJoystick.state === "HELD");
-  const canAcquireJoystick =
-    canAcquireJoystickForState({
-      missionRunning,
-      frontendState: virtualJoystick.state,
-      backendJoystickActive: telemetrySnapshot?.joystick_active,
-      controlOwner: telemetrySnapshot?.control_owner,
-    });
-
-  const handleOpenJoystickPanel = useCallback(() => {
-    if (missionRunning) {
-      Alert.alert("Mission Running", "Stop the mission before using manual drive.");
-      return;
-    }
-    if (!apiBaseUrl) {
-      Alert.alert("No backend", "Connect to a rover backend first.");
-      return;
-    }
-    setJoystickPanelOpen(true);
-  }, [apiBaseUrl, missionRunning]);
-
-  const handleCloseJoystickPanel = useCallback(() => {
-    virtualJoystick.release();
-    setJoystickPanelOpen(false);
-  }, [virtualJoystick]);
-
+  // Cross-track warning while the rover is driving (RUNNING, from mission_state events), with a one-tap Pause.
+  const driving = telemetrySnapshot?.mission_state === "running";
   useEffect(() => {
-    if (!missionRunning) {
+    if (!driving) {
       if (crossTrackAlerted) setCrossTrackAlerted(false);
       return;
     }
@@ -5485,115 +4260,7 @@ function HomeView(props: HomeViewProps) {
         }
       }
     }
-  }, [telemetrySnapshot?.xtrack_m, missionRunning, crossTrackAlerted, onPausePlan]);
-
-  const availableLayers = useMemo(() => {
-    return {
-      boundary: lines.some((l) => l.layer === "boundary"),
-      marking: lines.some((l) => l.layer === "marking"),
-      center: lines.some((l) => l.layer === "center"),
-      transit: lines.some((l) => l.layer === "transit"),
-      extension: lines.some((l) => l.layer === "extension"),
-    };
-  }, [lines]);
-
-  const handleSetSpray = async () => {
-    const targetPath = selectedPathName || importedPlan?.fileName;
-    if (!apiBaseUrl || !targetPath) {
-      Alert.alert("Error", "No path selected to save overrides to.");
-      return;
-    }
-    setIsSprayingSet(true);
-    try {
-      const overridesMap = new Map<string, boolean>();
-      lines
-        .filter(l => l.entity && l.entity.entity_id && l.layer !== "extension" && l.layer !== "transit")
-        .forEach(l => {
-          overridesMap.set(l.entity!.entity_id, !!l.entity!.is_mark);
-        });
-
-      const overrides = Array.from(overridesMap.entries()).map(([entity_id, is_mark]) => ({
-        entity_id,
-        is_mark
-      }));
-
-      const res = await pathApi.saveEntityOverrides(apiBaseUrl, targetPath, overrides);
-      if (res.ok) {
-        onInvalidateWorkflow?.("spray");
-        Alert.alert("Success", "Spray overrides saved.");
-      } else {
-        const errText = await res.text();
-        Alert.alert("Error", errText || "Failed to save spray overrides.");
-      }
-    } catch (err: any) {
-      Alert.alert("Error", err.message || "Network error.");
-    } finally {
-      setIsSprayingSet(false);
-    }
-  };
-
-  const pulse = (label: string, ok: boolean | undefined | null) => ({
-    label,
-    value: ok === undefined || ok === null ? "Unknown" : ok ? "OK" : "Alert",
-    tone: ok ? "#16a34a" : ok === false ? "#dc2626" : "#64748b",
-  });
-  const openExportDialog = () => {
-    if (!importedPlan || lines.length === 0) return;
-    const baseName = importedPlan.fileName.replace(/\.[^/.]+$/, "") || "generated_plan";
-    console.log(`[${new Date().toISOString()}] [UI] EXPORT_OPEN`, { fileName: baseName });
-    setExportFileName(baseName);
-    setExportDialogOpen(true);
-  };
-
-  const saveExportedPlan = async () => {
-    if (!importedPlan || lines.length === 0) return;
-    const cleanedName = exportFileName.trim().replace(/[\\/:*?"<>|]/g, "_") || "generated_plan";
-    const fileContent = linesToDxf(lines, cleanedName);
-
-    try {
-      if (Platform.OS === "android") {
-        console.log(`[${new Date().toISOString()}] [UI] EXPORT_SAVE_ANDROID`, { fileName: cleanedName });
-        const permissions = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
-        if (permissions.granted) {
-          const fileUri = await FileSystem.StorageAccessFramework.createFileAsync(
-            permissions.directoryUri,
-            cleanedName,
-            "application/dxf"
-          );
-          await FileSystem.writeAsStringAsync(fileUri, fileContent, {
-            encoding: FileSystem.EncodingType.UTF8,
-          });
-          setExportDialogOpen(false);
-          Alert.alert("Exported", "DXF file saved successfully to your selected folder!");
-        } else {
-          Alert.alert("Permission Denied", "Cannot export without folder selection permissions.");
-        }
-      } else {
-        const uri = `${FileSystem.documentDirectory ?? ""}${cleanedName}.dxf`;
-        console.log(`[${new Date().toISOString()}] [UI] EXPORT_SAVE_FALLBACK`, { fileName: cleanedName, uri });
-        await FileSystem.writeAsStringAsync(uri, fileContent, {
-          encoding: FileSystem.EncodingType.UTF8,
-        });
-        setExportDialogOpen(false);
-        Alert.alert("Exported", `DXF saved to app storage:\n${uri}`);
-      }
-    } catch (error: any) {
-      console.error("Export save error:", error);
-      Alert.alert("Export Failed", error.message || "An unknown error occurred during save.");
-    }
-  };
-
-  const missionActionButtonStyle = {
-    height: 34,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-    alignItems: "center" as const,
-    justifyContent: "center" as const,
-  };
-
-  const displayedSpeedMps =
-    telemetrySnapshot?.measured_speed_m_s ??
-    telemetrySnapshot?.speed_m_s;
+  }, [telemetrySnapshot?.xtrack_m, driving, crossTrackAlerted, onPausePlan]);
 
   const { page: _page, renderSectionContent: _rsc, setImportedPlan: _sip, ...modernHomeProps } = props;
 
@@ -6418,12 +5085,9 @@ function SectionPages(props: {
   onSelectLine: (id: string | null, options?: { highlightLineIds?: string[] | null }) => void;
   /** Multi-line highlight set from Path Order Extension group selection. */
   highlightLineIds?: string[] | null;
-  onGenerateTemplate: (name: string, lines: PlanLine[]) => void;
   layerVisibility: LayerVisibility;
   setLayerVisibility: React.Dispatch<React.SetStateAction<LayerVisibility>>;
   setImportedPlan: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
-  onRunTemplate: (name: string, lines: PlanLine[]) => Promise<void>;
-  missionFileReady: boolean;
   toggleA: boolean;
   toggleB: boolean;
   toggleC: boolean;
@@ -6436,48 +5100,27 @@ function SectionPages(props: {
   setToggleD: (v: boolean) => void;
   setDelayA: (v: number) => void;
   setDelayB: (v: number) => void;
-  backendPaths: any[];
-  selectedPathName: string | null;
-  onSelectPath: (name: string) => void;
-  onLoadSelectedPath: (
-    missionId?: string,
-    opts?: missionApi.LoadMissionOptions
-  ) => boolean | Promise<boolean>;
   /** Send stored the mission on the rover (verified). There is no load step. */
   onMissionStored: (missionId: string) => void;
   missionActionBusy: boolean;
   onBeginPathExclusive?: (kind: PathExclusiveKind) => boolean;
   onEndPathExclusive?: (kind: PathExclusiveKind) => void;
   apiBaseUrl: string;
-  onRefreshPaths: () => void;
-  onParsePlan?: () => Promise<void>;
   onWorkflowStep?: (step: StagedWorkflowStep, status: StagedWorkflowStatus) => void;
   stagedWorkflow: StagedWorkflowState;
   alignmentResult: AlignmentResultState | null;
   setAlignmentResult: React.Dispatch<React.SetStateAction<AlignmentResultState | null>>;
-  verifiedAlignmentRequest: pathApi.AlignPathRequest | null;
-  setVerifiedAlignmentRequest: React.Dispatch<React.SetStateAction<pathApi.AlignPathRequest | null>>;
-  isGeographicDxf?: boolean;
-  segmentVerification: pathApi.PathSegmentsResponse | null;
-  setSegmentVerification: React.Dispatch<React.SetStateAction<pathApi.PathSegmentsResponse | null>>;
+  verifiedAlignmentRequest: VerifiedAlignment | null;
+  setVerifiedAlignmentRequest: React.Dispatch<React.SetStateAction<VerifiedAlignment | null>>;
   stagedPlanResult: StagedPlanResultState | null;
   setStagedPlanResult: React.Dispatch<React.SetStateAction<StagedPlanResultState | null>>;
-  stagedMissionInspection: pathApi.StagedMissionResponse | null;
-  setStagedMissionInspection: React.Dispatch<React.SetStateAction<pathApi.StagedMissionResponse | null>>;
   stagedMissionId: string | null;
   setStagedMissionId: React.Dispatch<React.SetStateAction<string | null>>;
-  loadedPathInspection: missionApi.LoadedPathResponse | null;
-  onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
+  onInvalidateWorkflow: (step: StagedWorkflowStep) => void;
   onAppPlannedStartSnapshot?: (snapshot: AppPlannedStartSnapshot) => void;
   dashPattern?: DashPattern | null;
   onDashPatternChange?: (pattern: DashPattern | null) => void;
   onNav: (page: Page) => void;
-  extensionsEnabled?: boolean;
-  setExtensionsEnabled?: React.Dispatch<React.SetStateAction<boolean>>;
-  extPre?: string;
-  setExtPre?: React.Dispatch<React.SetStateAction<string>>;
-  extAft?: string;
-  setExtAft?: React.Dispatch<React.SetStateAction<string>>;
   alignedRefPoints?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
   setAlignedRefPoints?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>>;
   mapViewEnabled?: boolean;
@@ -6505,7 +5148,7 @@ function SectionPages(props: {
   setIsFloatingEStopEnabled: React.Dispatch<React.SetStateAction<boolean>>;
   rtkStatus: RTKStatus;
   stopRtk?: () => Promise<void>;
-  onClearMission: () => Promise<void>;
+  onClearMission: () => void;
   resetNorthCount?: number;
   recenterRoverCount?: number;
   recenterPlanCount?: number;

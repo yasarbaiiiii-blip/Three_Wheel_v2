@@ -17,6 +17,8 @@ The app therefore sends raw vertices with spray and must-hit flags. It does **no
 
 Scope: straight-line tracking and curve drawing.
 
+After upload there is no load step: the stored mission (its `sha256`) is started with `POST /api/missions/{sha}/start`; see `mission_run.md`.
+
 ## 2. Request
 
 `POST /api/missions/plan`, header `Authorization: Bearer <operator token>`, sent through the authenticated production client (`src/api/prodClient.ts`). Built by the one builder `src/utils/appPlannedMissionBuilder.ts`.
@@ -56,7 +58,7 @@ A dashed line is expressed in the app as alternating mark / travel runs: each ma
 
 `201 {ok, mission: {sha256, engine_id, num_points, num_spray_points, mark_length_m, transit_length_m, bbox_ne_m, source}, normalisation: {densified_steps, max_boundary_snap_m}}`.
 
-The app computes the expected stored mission from its own payload (R4 merge) and blocks Load unless:
+The app computes the expected stored mission from its own payload (R4 merge) and blocks Start unless:
 
 - `mission.sha256` is a 64-hex id;
 - `normalisation` is `0` and `0.0` (the app already densified and snapped);

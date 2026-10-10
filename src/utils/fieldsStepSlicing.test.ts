@@ -4,8 +4,6 @@ import { shouldRenderAlignCard, type FieldsStepSlice } from "./fieldsStepSlicing
 
 /** The passes FieldsPage makes for a local (CSV / app-planned DXF) flow. */
 const LOCAL_DXF_SLICES: FieldsStepSlice[] = ["localDxfTop", "csvPathOrder", "csvScroll"];
-/** The passes FieldsPage makes for the rover-planned DXF flow. */
-const ROVER_DXF_SLICES: FieldsStepSlice[] = ["dxfTop", "dxfPathOrder"];
 
 function countAlignCards(
   slices: FieldsStepSlice[],
@@ -47,15 +45,6 @@ describe("shouldRenderAlignCard", () => {
     expect(
       countAlignCards(LOCAL_DXF_SLICES, { isDxfPath: false, needsBatchAlignment: true })
     ).toBe(1);
-  });
-
-  it("renders once for the rover-planned DXF flow", () => {
-    expect(
-      countAlignCards(ROVER_DXF_SLICES, { isDxfPath: true, needsBatchAlignment: false })
-    ).toBe(1);
-    expect(
-      shouldRenderAlignCard({ slice: "dxfTop", isDxfPath: true, needsBatchAlignment: false })
-    ).toBe(true);
   });
 
   it("renders no Align card for a pure CSV flow", () => {

@@ -55,7 +55,7 @@ MapViewNative
   • closedRing forced off for road_marking
 ```
 
-**Backend (parse/preview):** Fields CSV Select File does **not** call parse-point / upload / path preview while previewing. Related `pathApi` helpers stay deprecated for this flow.
+**Backend (parse/preview):** Fields CSV Select File does **not** call the rover while previewing; `pathApi` no longer exists. Nothing is sent until Send.
 
 **Backend (send to rover):** everything above is a local *preview*. Committing it to the
 controller is a separate, explicit step — see §3.8.
@@ -317,25 +317,14 @@ are preview-only fixes and the rover receives exactly what it did before.
 Remaining scale assumptions (general thresholds, not file-specific): `JUMP_SPLIT_MIN_M = 5`
 and `WHOLE_LOOP_GAP_MIN_M = 0.15` assume a road/vehicle-scale ground survey.
 
-### 3.8 Send to Rover (`surveyCsvExport.ts`, `csvMissionStaging.ts`, `CsvStageAndLoadPanel.tsx`)
+### 3.8 Send to Rover (`SendMissionPanel` = `CsvStageAndLoadPanel.tsx`, `missionStaging.ts`)
 
-The rover plans a CSV mission from a file in its own missions dir; there is no endpoint that
-accepts a waypoint array for a line mission. So the handoff is: re-emit the parse as a
-canonical survey CSV, upload it, let the rover plan it, and redraw the map from the rover's
-answer before committing.
+**Superseded (2026-10-10).** The rover no longer plans a CSV: there is no upload of the survey CSV, no `plan-and-stage`, no
+staged read-back and no load-to-controller. The app is the single trajectory author. Send builds the trajectory on the
+device and stores it with `POST /api/missions/plan` (`docs/contracts/app_planned_mission.md`), verifies what the rover
+stored against what it sent, and opens the mission screen. Start (`docs/contracts/mission_run.md`) does everything else.
 
-```
-CsvStageAndLoadPanel  ("Send to Rover & Load")
-  • buildSurveyCsvExport(localCsvPreview)     → Name,Code,Latitude,Longitude
-  • POST /api/path/upload                     (cache file on native, Blob on web)
-  • POST /api/path/{name}/plan-and-stage      { optimize: true, include_waypoints: true,
-                                                line_spacing?: 0.1|0.15 for large surveys }
-  • GET  /api/path/staged/{mission_id}
-  • setLines(sprayRunsToPlanLines(plan.merged_waypoints, plan.spray_flags))   ← rover truth
-  • App.loadMissionOnBackend(mission_id)      → load-to-controller + verify
-      + re-hydrate map with sprayRunsToPlanLines (not collinear splitter)
-      + navigate Home
-```
+The "re-emit as survey CSV" rationale below and the survey-CSV export are historical.
 
 **Why re-emit instead of uploading the operator's file.** The rover's survey parser
 (`path_engine/parsers/survey_csv.py`) is stricter and differently spelled than ours:
@@ -397,15 +386,14 @@ stroke per path.
 | `src/utils/roadMarkingCsvPath.test.ts` | Geometry tests |
 | `src/utils/surveyCsvExport.ts` | Canonical survey CSV the rover's parser reads (§3.8) |
 | `src/utils/surveyCsvExport.test.ts` | Header / Code / Name / precision tests |
-| `src/utils/csvMissionStaging.ts` | upload → plan-and-stage → inspect chain |
-| `src/utils/csvMissionStaging.test.ts` | Step ordering and failure-surface tests |
+| `src/utils/missionStaging.ts` | build → `POST /api/missions/plan` → verify (replaces the CSV upload / plan-and-stage chain) |
 | `src/utils/stagedMissionHydration.ts` | `sprayRunsToPlanLines` — one stroke per spray run |
-| `src/components/fields/panels/CsvStageAndLoadPanel.tsx` | Step 3 "Send to Rover" UI |
+| `src/components/fields/panels/CsvStageAndLoadPanel.tsx` | Step 3 "Send to Rover" UI (no load step) |
 | `App.tsx` | `handleLocalCsvParsed`, state, Fields props |
 | `src/screens/FieldsPage.tsx` | Pins always on; local CSV UI |
 | `src/components/fields/panels/UploadAndPreviewStep.tsx` | Local file read + parse |
 | `src/components/MapViewNative.tsx` | No closed ring for road marking; no blue vertex flood |
-| `src/api/pathApi.ts` | Deprecated notes for server CSV path APIs |
+| `src/api/pathApi.ts` | Removed with the rover-side path flow |
 | `docs/csv-road-marking-workflow.md` | This document |
 
 DXF import / plan-import modules were **not** redesigned for this work.

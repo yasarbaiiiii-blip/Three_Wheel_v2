@@ -11,7 +11,7 @@ type FieldsStatusHeaderProps = {
   status: FieldsRailStatus;
   busy?: boolean;
   onCollapse: () => void;
-  onClear: () => Promise<void>;
+  onClear: () => void;
   onCta?: () => void;
 };
 

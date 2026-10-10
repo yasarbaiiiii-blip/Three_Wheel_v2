@@ -3,7 +3,6 @@ import { Alert, Platform, Pressable, Text, TextInput, View } from "react-native"
 import { Check, MapPin, Maximize2, Move, Plus, Upload, X } from "lucide-react-native";
 import * as DocumentPicker from "expo-document-picker";
 
-import * as pathApi from "../../../api/pathApi";
 import { assessAlignmentTrust, enforceAlignmentScale } from "../../../utils/designAlignmentPolicy";
 import {
   applyAlignmentToLines,
@@ -18,7 +17,13 @@ import {
   similarityTransform,
   transformPlanLinesGeometry,
 } from "../../../utils/planLineTransform";
-import type { AlignmentResultState, StagedWorkflowStatus } from "../../../types/fieldsWorkflow";
+import type {
+  AlignRefPoint,
+  AlignmentResultState,
+  StagedWorkflowStatus,
+  StagedWorkflowStep,
+  VerifiedAlignment,
+} from "../../../types/fieldsWorkflow";
 import type { PlanLine } from "../../../types/plan";
 import type { AutoOriginReference } from "../../../types/autoOrigin";
 import type { PlacedItem } from "../../BoundaryEditor";
@@ -29,17 +34,15 @@ import { parseGuidePointsCsv } from "../../../utils/refPointsCsv";
 type RefPoint = { dxf_x: number; dxf_y: number; lat: string; lon: string };
 
 type AlignDxfPanelProps = {
-  apiBaseUrl: string;
-  selectedPathName: string | null;
   lines: PlanLine[];
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   alignmentResult: AlignmentResultState | null;
   setAlignmentResult: React.Dispatch<React.SetStateAction<AlignmentResultState | null>>;
-  setVerifiedAlignmentRequest: React.Dispatch<React.SetStateAction<pathApi.AlignPathRequest | null>>;
+  setVerifiedAlignmentRequest: React.Dispatch<React.SetStateAction<VerifiedAlignment | null>>;
   setAlignedRefPoints?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>>;
   onWorkflowStep?: (step: "alignment", status: StagedWorkflowStatus) => void;
-  onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
-  blockProtectedWorkflowMutation: (action: string) => boolean;
+  onInvalidateWorkflow: (step: StagedWorkflowStep) => void;
+  blockPlanEdit: (action: string) => boolean;
   refPoints: RefPoint[];
   setRefPoints: React.Dispatch<React.SetStateAction<RefPoint[]>>;
   /** True while Multi-Point guide points came from CSV — disables map tap-to-pick. */
@@ -107,8 +110,6 @@ type AlignDxfPanelProps = {
 };
 
 export function AlignDxfPanel({
-  apiBaseUrl,
-  selectedPathName,
   lines,
   setLines,
   alignmentResult,
@@ -117,7 +118,7 @@ export function AlignDxfPanel({
   setAlignedRefPoints,
   onWorkflowStep,
   onInvalidateWorkflow,
-  blockProtectedWorkflowMutation,
+  blockPlanEdit,
   refPoints,
   setRefPoints,
   csvGuidePointsActive = false,
@@ -233,7 +234,7 @@ export function AlignDxfPanel({
   // computed fit: the user drags/scales/rotates the plan (Move Plan) using these dots as a
   // guide, then "Use This Position" captures wherever they actually placed it.
   const handleUploadRefPointsCsv = async () => {
-    if (blockProtectedWorkflowMutation("Importing reference points")) return;
+    if (blockPlanEdit("Importing reference points")) return;
 
     let assets: DocumentPicker.DocumentPickerAsset[] = [];
     try {
@@ -333,7 +334,7 @@ export function AlignDxfPanel({
 
   /** Parsed Multi-Point control points ready for /align (plan NE + GPS). */
   const validTypedRefPoints = useMemo(() => {
-    const out: pathApi.RefPoint[] = [];
+    const out: AlignRefPoint[] = [];
     for (const point of refPoints) {
       const lat = parseFloat(point.lat);
       const lon = parseFloat(point.lon);
@@ -363,16 +364,16 @@ export function AlignDxfPanel({
 
   const handleFixAlignment = async () => {
     console.log(
-      `[AlignDXF][Fix] Clicked. method=${alignmentMethod} selectedPathName=${selectedPathName} refPoints=`,
+      `[AlignDXF][Fix] Clicked. method=${alignmentMethod} refPoints=`,
       JSON.stringify(refPoints),
       `extractedCorners=${extractedCorners?.length ?? 0} typedRefs=${validTypedRefPoints.length}`
     );
-    if (blockProtectedWorkflowMutation("Changing GPS alignment")) return;
+    if (blockPlanEdit("Changing GPS alignment")) return;
 
     // Two Multi-Point paths:
     // 1) Captured plan placement (Move Plan / Visual) → extractedCorners
     // 2) Tapped plan points + typed lat/lon (no CSV) → validTypedRefPoints
-    let validPoints: pathApi.RefPoint[] | null = null;
+    let validPoints: AlignRefPoint[] | null = null;
     if (extractedCorners && extractedCorners.length > 0) {
       validPoints = extractedCorners.map((point) => ({
         dxf_x: point.dxf_x,
@@ -397,18 +398,16 @@ export function AlignDxfPanel({
       return;
     }
 
-    const localAppDxf = !selectedPathName;
-
     setIsFixing(true);
     try {
       console.log("[AlignDXF][Fix] validPoints (dxf_x=east, dxf_y=north):", JSON.stringify(validPoints));
 
-      const payload: pathApi.AlignPathRequest = { ref_points: validPoints };
+      const payload: VerifiedAlignment = { ref_points: validPoints };
 
       // Local DXF: solve similarity on device — no POST /align.
       // Bake R·scale into the real DXF path vertices; origin_gps is GPS of design (0,0).
       // the mission then receives those NED runs about origin_gps (no further affine).
-      if (localAppDxf) {
+      {
         const refs = validPoints.map((p) => ({
           designNorth: p.dxf_y,
           designEast: p.dxf_x,
@@ -485,151 +484,11 @@ export function AlignDxfPanel({
         );
         return;
       }
-
-      if (!selectedPathName || !apiBaseUrl) {
-        Alert.alert("Not connected", "Connect to the rover or use a local DXF file.");
-        onWorkflowStep?.("alignment", "failed");
-        return;
-      }
-
-      console.log(`[AlignDXF][Fix] POST /api/path/${selectedPathName}/align payload:`, JSON.stringify(payload));
-
-      const res = await pathApi.alignPath(apiBaseUrl, selectedPathName, payload);
-      console.log(`[AlignDXF][Fix] Response status: ${res.status} ok=${res.ok}`);
-      if (res.ok) {
-        const data = await res.json();
-        console.log("[AlignDXF][Fix] Response body:", JSON.stringify(data));
-        if (data.mission_summary) {
-          setMissionSummary(data.mission_summary);
-          if (data.merged_waypoints) {
-            const alignedLines: PlanLine[] = [];
-            const pts = Array.isArray(data.merged_waypoints) ? data.merged_waypoints : [];
-            const sprayFlags = Array.isArray(data.spray_flags) ? data.spray_flags : [];
-            for (let i = 0; i < pts.length - 1; i++) {
-              const sprayFlag = sprayFlags[i] ?? true;
-              const fromNorth = coerceFiniteNumber(pts[i]?.[0]);
-              const fromEast = coerceFiniteNumber(pts[i]?.[1]);
-              const toNorth = coerceFiniteNumber(pts[i + 1]?.[0]);
-              const toEast = coerceFiniteNumber(pts[i + 1]?.[1]);
-              if (fromNorth == null || fromEast == null || toNorth == null || toEast == null) continue;
-              alignedLines.push({
-                id: `aligned-line-${i}`,
-                label: `Segment ${i + 1}`,
-                layer: sprayFlag ? "marking" : "center",
-                from: { id: i * 2 + 1, x: fromNorth, y: fromEast },
-                to: { id: i * 2 + 2, x: toNorth, y: toEast },
-                width: 0.1,
-              });
-            }
-            setLines(sanitizePlanLines(alignedLines));
-          }
-          Alert.alert("Success", "Alignment applied. Mission is ready to be loaded!");
-        } else {
-          setMissionSummary(null);
-          setVerifiedAlignmentRequest({ ...payload });
-          setAlignmentResult({
-            method: data.method ?? null,
-            scale: enforceAlignmentScale(coerceFiniteNumber(data.scale) ?? 1.0),
-            rotation_deg: coerceFiniteNumber(data.rotation_deg),
-            offset_n: coerceFiniteNumber(data.offset_n),
-            offset_e: coerceFiniteNumber(data.offset_e),
-            origin_gps: data.origin_gps ?? null,
-            rmse_m: coerceFiniteNumber(data.rmse_m),
-            sample_coords: data.sample_coords ?? null,
-            residuals: data.residuals ?? null,
-            warnings: data.warnings ?? null,
-          });
-          onWorkflowStep?.("alignment", "verified");
-
-          const rotDeg = coerceFiniteNumber(data.rotation_deg);
-          const offsetE = coerceFiniteNumber(data.offset_e);
-          const offsetN = coerceFiniteNumber(data.offset_n);
-          // Same scale policy as setAlignmentResult above and rehydrateAlignedPlanLines —
-          // Fix bake, stored result, and post-refresh rehydrate must agree or extension
-          // toggle would reintroduce a small pose shift.
-          const alignScale = enforceAlignmentScale(coerceFiniteNumber(data.scale) ?? 1.0);
-          console.log(
-            `[AlignDXF][Fix] Transform params: rotDeg=${rotDeg} offsetN=${offsetN} offsetE=${offsetE} scale=${alignScale} data.origin_gps=${JSON.stringify(data.origin_gps)} merged_waypoints=${!!data.merged_waypoints}`
-          );
-          if (rotDeg != null && offsetE != null && offsetN != null && !data.merged_waypoints) {
-            // Mirror the backend's affine transform exactly: NED = scale * R(theta) * DXF + offset
-            // (see path_engine/ned.py apply_affine_transform). Routed through the shared bake
-            // helper so from/to, preview_points, AND entity.geometry.center (circles/arcs) all
-            // move together — baking only endpoints left getCurveGeometry() reading a stale
-            // center and the AlignDXF map jumped after Fix until Load rehydrated waypoints.
-            const applyOriginTransform = similarityTransform({
-              rotationDeg: rotDeg,
-              scale: alignScale,
-              offsetN,
-              offsetE,
-            });
-            setLines((prev) => {
-              console.log(`[AlignDXF][Fix] Transforming ${prev.length} line(s). Before -> After (north,east):`);
-              const next = transformPlanLinesGeometry(prev, applyOriginTransform);
-              for (let i = 0; i < Math.min(prev.length, next.length); i++) {
-                const line = prev[i];
-                const out = next[i];
-                console.log(
-                  `[AlignDXF][Fix]   ${line.id}: from (${line.from.x},${line.from.y}) -> (${out.from.x.toFixed(3)},${out.from.y.toFixed(3)}) | to (${line.to.x},${line.to.y}) -> (${out.to.x.toFixed(3)},${out.to.y.toFixed(3)})`
-                );
-              }
-              return next;
-            });
-          }
-          Alert.alert("Success", "Alignment verified.");
-        }
-
-        if (setAlignedRefPoints) {
-          // `lines` is now in local NED metres relative to `data.origin_gps` (either
-          // rebuilt from merged_waypoints, or rotated/scaled/translated above via
-          // applyOriginTransform) — NOT the raw pre-alignment DXF pick coordinates.
-          // The projection origin must match that frame: local (0,0) anchored at
-          // origin_gps, same convention as anchorToAlignedRefPoints() in
-          // stagedMissionHydration.ts for reloaded/staged alignments.
-          const originGps = Array.isArray(data.origin_gps) ? data.origin_gps : null;
-          const originLat = originGps ? coerceFiniteNumber(originGps[0]) : null;
-          const originLon = originGps ? coerceFiniteNumber(originGps[1]) : null;
-          console.log(
-            `[AlignDXF][Fix] origin_gps raw=${JSON.stringify(data.origin_gps)} -> parsed originLat=${originLat} originLon=${originLon}`
-          );
-          if (originLat != null && originLon != null) {
-            console.log(`[AlignDXF][Fix] setAlignedRefPoints -> [{dxf_x:0, dxf_y:0, lat:${originLat}, lon:${originLon}}]`);
-            setAlignedRefPoints([{ dxf_x: 0, dxf_y: 0, lat: originLat, lon: originLon }]);
-          } else {
-            const fallbackAligned = validPoints.map((point) => ({
-              dxf_x: point.dxf_x,
-              dxf_y: point.dxf_y,
-              lat: point.lat,
-              lon: point.lon,
-            }));
-            console.log("[AlignDXF][Fix] origin_gps missing/invalid, setAlignedRefPoints -> validPoints:", JSON.stringify(fallbackAligned));
-            setAlignedRefPoints(fallbackAligned);
-          }
-        }
-        // Atomic origin handoff (same React event turn as transform + alignedRefPoints):
-        // clear sticker + provisional projection anchor together so MapViewNative never
-        // paints transformed NED lines under visualAlignmentAnchor for one intermediate frame
-        // (the shift-then-settle bug). Do not rely on App's useEffect for this first paint.
-        setRefPoints([]);
-        onFocusedGuidePointIndexChange?.(null);
-        setCsvGuidePointsActive?.(false);
-        setGuideCsvFileNames?.([]);
-        setExtractedCorners?.(null);
-        setVisualAlignmentItem?.(null);
-        setVisualAlignmentAnchor?.(null);
-        console.log("[AlignDXF][Fix] Cleared visualAlignmentItem + visualAlignmentAnchor (atomic handoff)");
-      } else {
-        onWorkflowStep?.("alignment", "failed");
-        setVerifiedAlignmentRequest(null);
-        const errText = await res.text();
-        console.log(`[AlignDXF][Fix] Backend rejected alignment (status ${res.status}):`, errText);
-        Alert.alert("Alignment Failed", errText || "Unknown error occurred.");
-      }
     } catch (err) {
       onWorkflowStep?.("alignment", "failed");
       setVerifiedAlignmentRequest(null);
       console.log("[AlignDXF][Fix] Error aligning path:", err);
-      Alert.alert("Error", "Could not connect to the rover to apply alignment.");
+      Alert.alert("Error", "Could not apply the alignment.");
     } finally {
       setIsFixing(false);
     }

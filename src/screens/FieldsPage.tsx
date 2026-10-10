@@ -1,12 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Keyboard, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 
-import * as missionApi from "../api/missionApi";
-import * as pathApi from "../api/pathApi";
-import {
-  getLoadedMissionId,
-  isProtectedMissionResident,
-} from "../api/missionContract";
 import { type PlacedItem } from "../components/BoundaryEditor";
 import { FieldsStepCard } from "../components/fields/FieldsStepCard";
 import { FieldsMapChrome } from "../components/fields/FieldsMapChrome";
@@ -17,7 +11,6 @@ import { AlignDxfPanel } from "../components/fields/panels/AlignDxfPanel";
 import { AnchorPanel } from "../components/fields/panels/AnchorPanel";
 import { CsvPathOrderStep } from "../components/fields/panels/CsvPathOrderStep";
 import { CsvStageAndLoadPanel } from "../components/fields/panels/CsvStageAndLoadPanel";
-import { PathOrderAndSprayStep } from "../components/fields/panels/PathOrderAndSprayStep";
 import { TemplatePanel } from "../components/fields/panels/TemplatePanel";
 import { UploadAndPreviewStep } from "../components/fields/panels/UploadAndPreviewStep";
 import { useFieldsWorkflow } from "../hooks/useFieldsWorkflow";
@@ -58,6 +51,7 @@ import type {
   StagedWorkflowState,
   StagedWorkflowStatus,
   StagedWorkflowStep,
+  VerifiedAlignment,
 } from "../types/fieldsWorkflow";
 import type { ImportedPlan, LayerVisibility, PlanLine, TelemetrySnapshot } from "../types/plan";
 
@@ -79,50 +73,29 @@ export type FieldsPageProps = {
   selectedLineId: string | null;
   layerVisibility: LayerVisibility;
   setLayerVisibility?: React.Dispatch<React.SetStateAction<LayerVisibility>>;
-  backendPaths: any[];
-  selectedPathName: string | null;
-  onSelectPath: (name: string) => void;
-  onLoadSelectedPath: (
-    missionId?: string,
-    opts?: import("../api/missionApi").LoadMissionOptions
-  ) => boolean | Promise<boolean>;
   /** Send stored the mission on the rover (verified). There is no load step: Start does everything. */
   onMissionStored: (missionId: string) => void;
   missionActionBusy: boolean;
-  onBeginPathExclusive?: (kind: "send" | "load") => boolean;
-  onEndPathExclusive?: (kind: "send" | "load") => void;
+  onBeginPathExclusive?: (kind: "send") => boolean;
+  onEndPathExclusive?: (kind: "send") => void;
   onSelectLine: (id: string | null, options?: { highlightLineIds?: string[] | null }) => void;
   /**
    * Explicit multi-line highlight set from Path Order Extension group selection.
    * When set, the plan preview highlights every listed line (not only selectedLineId).
    */
   highlightLineIds?: string[] | null;
-  /** Global DXF extension config (enabled + pre/aft distance), already fetched by the
-   * parent — reused so Path Order builds purple PRE/AFT client-side like CSV. */
-  extPre?: string;
-  extAft?: string;
-  extensionsEnabled?: boolean;
   apiBaseUrl: string;
-  onRefreshPaths: () => void;
   onWorkflowStep?: (step: StagedWorkflowStep, status: StagedWorkflowStatus) => void;
   stagedWorkflow: StagedWorkflowState;
   alignmentResult: AlignmentResultState | null;
   setAlignmentResult: React.Dispatch<React.SetStateAction<AlignmentResultState | null>>;
-  verifiedAlignmentRequest: pathApi.AlignPathRequest | null;
-  setVerifiedAlignmentRequest: React.Dispatch<React.SetStateAction<pathApi.AlignPathRequest | null>>;
-  /** True when the selected DXF is georeferenced (carries WGS84 coords); the backend
-   * auto-places it, so manual ref-point alignment is not required. */
-  isGeographicDxf?: boolean;
-  segmentVerification: pathApi.PathSegmentsResponse | null;
-  setSegmentVerification: React.Dispatch<React.SetStateAction<pathApi.PathSegmentsResponse | null>>;
+  verifiedAlignmentRequest: VerifiedAlignment | null;
+  setVerifiedAlignmentRequest: React.Dispatch<React.SetStateAction<VerifiedAlignment | null>>;
   stagedPlanResult: StagedPlanResultState | null;
   setStagedPlanResult: React.Dispatch<React.SetStateAction<StagedPlanResultState | null>>;
-  stagedMissionInspection: pathApi.StagedMissionResponse | null;
-  setStagedMissionInspection: React.Dispatch<React.SetStateAction<pathApi.StagedMissionResponse | null>>;
   stagedMissionId: string | null;
   setStagedMissionId: React.Dispatch<React.SetStateAction<string | null>>;
-  loadedPathInspection: missionApi.LoadedPathResponse | null;
-  onInvalidateWorkflow: (step: "alignment" | "spray" | "staged" | "loaded") => void;
+  onInvalidateWorkflow: (step: StagedWorkflowStep) => void;
   /** Frozen painted geometry from successful Send — Start restages with live entry. */
   onAppPlannedStartSnapshot?: (snapshot: import("../utils/appPlannedStartSnapshot").AppPlannedStartSnapshot) => void;
   dashPattern?: import("../utils/appPlannedMissionBuilder").DashPattern | null;
@@ -155,7 +128,7 @@ export type FieldsPageProps = {
   onFitToReferencePoints?: (refs: Array<{ lat: number; lon: number }>) => void;
   extractedCorners?: { dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null;
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null>>;
-  onClearMission: () => Promise<void>;
+  onClearMission: () => void;
   onNavigateHome?: () => void;
   renderPlanPreview: (props: {
     lines: PlanLine[];
@@ -346,37 +319,23 @@ export function FieldsPage(props: FieldsPageProps) {
     selectedLineId,
     layerVisibility,
     setLayerVisibility,
-    backendPaths,
-    selectedPathName,
-    onSelectPath,
-    onLoadSelectedPath,
     onMissionStored,
     missionActionBusy,
     onBeginPathExclusive,
     onEndPathExclusive,
     onSelectLine,
     highlightLineIds = null,
-    extPre,
-    extAft,
-    extensionsEnabled = false,
     apiBaseUrl,
-    onRefreshPaths,
     onWorkflowStep,
     stagedWorkflow,
     alignmentResult,
     setAlignmentResult,
     verifiedAlignmentRequest,
     setVerifiedAlignmentRequest,
-    isGeographicDxf = false,
-    segmentVerification,
-    setSegmentVerification,
     stagedPlanResult,
     setStagedPlanResult,
-    stagedMissionInspection,
-    setStagedMissionInspection,
     stagedMissionId,
     setStagedMissionId,
-    loadedPathInspection,
     onInvalidateWorkflow,
     onAppPlannedStartSnapshot,
     dashPattern,
@@ -749,29 +708,25 @@ export function FieldsPage(props: FieldsPageProps) {
   const topSectionOpen =
     isSectionOpen("upload") || isSectionOpen("align") || isSectionOpen("templates");
 
-  const protectedResident = isProtectedMissionResident(loadedPathInspection);
-
-  const blockProtectedWorkflowMutation = useCallback(
+  /** A mission holds the vehicle: the plan on the map is the path being driven and is not edited meanwhile. */
+  const blockPlanEdit = useCallback(
     (action: string) => {
-      if (!protectedResident) return false;
-      Alert.alert(
-        "Mission conflict",
-        `${action} is blocked while protected mission ${getLoadedMissionId(loadedPathInspection) ?? "<unknown>"} is resident.`
-      );
+      if (!missionRunning) return false;
+      Alert.alert("Mission active", `${action} is blocked while a mission is active. Stop the mission first.`);
       return true;
     },
-    [loadedPathInspection, protectedResident]
+    [missionRunning]
   );
 
   /**
    * Update the placed template's position/rotation/scale from a map gesture.
    * Stable reference — only re-creates when the selected template or tool flags change.
-   * Placed AFTER blockProtectedWorkflowMutation so the dep is in scope.
+   * Placed AFTER blockPlanEdit so the dep is in scope.
    */
   const handleUpdateTemplateEditItem = useCallback(
     (updates: Partial<{ x: number; y: number; rotation: number; scale: number }>) => {
       if (!selectedTemplate) return;
-      if (blockProtectedWorkflowMutation("Editing a template")) return;
+      if (blockPlanEdit("Editing a template")) return;
       const patch: Partial<{ north: number; east: number; rotationDeg: number; scale: number }> = {};
       if (tplDrag) {
         if (typeof updates.y === "number") patch.north = updates.y;
@@ -782,7 +737,7 @@ export function FieldsPage(props: FieldsPageProps) {
       if (Object.keys(patch).length === 0) return;
       onUpdateTemplateInstance?.(selectedTemplate.id, patch);
     },
-    [selectedTemplate, tplDrag, tplRotate, tplScale, blockProtectedWorkflowMutation, onUpdateTemplateInstance]
+    [selectedTemplate, tplDrag, tplRotate, tplScale, blockPlanEdit, onUpdateTemplateInstance]
   );
 
   /**
@@ -884,14 +839,12 @@ export function FieldsPage(props: FieldsPageProps) {
   const batchHasCsv = uploadedFiles.some((f) => f.kind === "csv");
   // Determine step statuses
   const hasPath =
-    !!selectedPathName ||
     !!importedPlan ||
     activeCsvPreview != null ||
     hasLocalBatch;
   const uploadDone = hasPath;
   const isDxfPath =
     importedPlan?.fileType === "dxf" ||
-    selectedPathName?.toLowerCase().endsWith(".dxf") ||
     (hasLocalBatch && batchHasDxf && !batchHasCsv);
   const planLooksLikeCsv =
     importedPlan?.fileType === "csv" ||
@@ -904,23 +857,20 @@ export function FieldsPage(props: FieldsPageProps) {
   const isLocalDxfFlow =
     (hasLocalBatch && batchHasDxf) ||
     (isDxfPath &&
-      !selectedPathName &&
       importedPlan?.fileType === "dxf" &&
       !hasLocalBatch);
   const isLocalFlow = isLocalCsvFlow || isLocalDxfFlow || hasLocalBatch;
   /**
    * Local multi-file batch: `allFilesVerified` is authoritative (every local CSV/DXF import
-   * goes through `uploadedFiles` now, so `hasPendingAlignment` can't disagree with it). The
-   * remaining clauses only matter for the rover/backend DXF path, where `uploadedFiles` stays
-   * empty — kept verbatim from before the batch existed.
+   * goes through `uploadedFiles`, so `hasPendingAlignment` can't disagree with it). Without a
+   * batch the plan is aligned when it is not a DXF, or Auto Origin / a verified alignment says so.
    */
   const alignDone = hasLocalBatch
     ? allFilesVerified
     : !isDxfPath ||
       autoOrigin ||
       stagedWorkflow.alignment === "verified" ||
-      !!verifiedAlignmentRequest ||
-      isGeographicDxf;
+      !!verifiedAlignmentRequest;
 
   // Prefer explicit selection; otherwise the first file that still needs alignment.
   const effectiveAlignFileId = useMemo(() => {
@@ -1230,7 +1180,7 @@ export function FieldsPage(props: FieldsPageProps) {
 
   const handleConfirmPlace = useCallback(() => {
     if (!tplDraft || !tplGhostPose || !onPlaceTemplate) return;
-    if (blockProtectedWorkflowMutation("Placing a template")) return;
+    if (blockPlanEdit("Placing a template")) return;
     const placedId = onPlaceTemplate({
       kind: tplDraft.kind,
       fileName: tplDraft.fileName,
@@ -1251,7 +1201,7 @@ export function FieldsPage(props: FieldsPageProps) {
     tplDraft,
     tplGhostPose,
     onPlaceTemplate,
-    blockProtectedWorkflowMutation,
+    blockPlanEdit,
     setShowMapInteraction,
     expandRail,
     openOnlySection,
@@ -1259,11 +1209,10 @@ export function FieldsPage(props: FieldsPageProps) {
 
   const alignRequired = !isLocalCsvFlow || hasPendingAlignment;
   const pathOrderReady = uploadDone && (!alignRequired || alignDone);
-  const stagedOrLoaded =
-    stagedWorkflow.staged === "verified" || stagedWorkflow.loaded === "verified";
+  /** The mission is stored on the rover and verified (Send). */
+  const missionSent = stagedWorkflow.staged === "verified";
   const hasGpsOrigin = Boolean(
     sharedOriginGps ||
-      isGeographicDxf ||
       (Array.isArray(verifiedAlignmentRequest?.origin_gps) &&
         verifiedAlignmentRequest.origin_gps.length >= 2)
   );
@@ -1273,7 +1222,6 @@ export function FieldsPage(props: FieldsPageProps) {
       importedPlan?.fileName ??
       activeCsvPreview?.fileName ??
       localDxfMeta?.fileName ??
-      selectedPathName ??
       null,
     fileCount: uploadedFiles.length > 0 ? uploadedFiles.length : hasPath ? 1 : 0,
     uploadDone,
@@ -1281,7 +1229,7 @@ export function FieldsPage(props: FieldsPageProps) {
     alignDone,
     templatesVisible: hasPath,
     pathOrderReady,
-    stagedOrLoaded,
+    missionSent,
     autoOrigin: !!autoOrigin,
     hasGpsOrigin,
   });
@@ -1413,7 +1361,7 @@ export function FieldsPage(props: FieldsPageProps) {
             These containers size to their content (flexGrow:0) and shrink only when the
             column runs out of room. Never flexGrow:1 — a scroller that grows past its
             content pads the leftover space *inside* itself, which is what opened a dead gap
-            between Align DXF and Path Order & Load. The only element allowed to claim
+            between Align DXF and Path Order & Send. The only element allowed to claim
             leftover space is the open Path Order card, via `fillAvailable`.
           */}
           <ScrollView
@@ -1440,10 +1388,8 @@ export function FieldsPage(props: FieldsPageProps) {
             nestedScrollEnabled
             showsVerticalScrollIndicator={topSectionOpen}
           >
-            {renderFieldsSteps("dxfTop")}
+            {renderFieldsSteps("emptyTop")}
           </ScrollView>
-          {/* DXF Path Order DraggableFlatList — outside ScrollView (fixes VirtualizedList warning). */}
-          {renderFieldsSteps("dxfPathOrder")}
           </View>
         </View>
         )}
@@ -1452,18 +1398,12 @@ export function FieldsPage(props: FieldsPageProps) {
   );
 
   /**
-   * Templates body, shared by every flow's Templates step card — second card in the
-   * rover-planned DXF flow, trailing card in both local flows.
-   *
-   * `placementMode` is what keeps a local flow local — "csvLocal" adds strokes straight to
-   * `lines`, while "dxf" round-trips a generated DXF through POST /parse-dxf.
+   * Templates body, shared by every flow's Templates step card — second card while no file is
+   * imported, trailing card in both local flows.
    */
   function renderTemplatePanel() {
     return (
       <TemplatePanel
-        apiBaseUrl={apiBaseUrl}
-        onRefreshPaths={onRefreshPaths}
-        onSelectPath={onSelectPath}
         canPlace={canPlaceTemplates}
         placeBlockedReason={placeBlockedReason}
         session={tplSession}
@@ -1472,7 +1412,7 @@ export function FieldsPage(props: FieldsPageProps) {
         scaleEnabled={tplScale}
         rotateEnabled={tplRotate}
         onBeginPlace={(draft) => {
-          if (blockProtectedWorkflowMutation("Placing a template")) return;
+          if (blockPlanEdit("Placing a template")) return;
           if (!canPlaceTemplates) {
             Alert.alert("Cannot place yet", placeBlockedReason);
             return;
@@ -1489,21 +1429,21 @@ export function FieldsPage(props: FieldsPageProps) {
         onCancelPlace={handleCancelPlace}
         onConfirmPlace={handleConfirmPlace}
         onToggleDrag={() => {
-          if (blockProtectedWorkflowMutation("Editing a template")) return;
+          if (blockPlanEdit("Editing a template")) return;
           setTplDrag((v) => !v);
         }}
         onToggleScale={() => {
-          if (blockProtectedWorkflowMutation("Editing a template")) return;
+          if (blockPlanEdit("Editing a template")) return;
           setTplScale((v) => !v);
         }}
         onToggleRotate={() => {
-          if (blockProtectedWorkflowMutation("Editing a template")) return;
+          if (blockPlanEdit("Editing a template")) return;
           setTplRotate((v) => !v);
         }}
         onRemoveSelected={
           selectedTemplate && onRemoveTemplate
             ? () => {
-                if (blockProtectedWorkflowMutation("Removing a template")) return;
+                if (blockPlanEdit("Removing a template")) return;
                 onRemoveTemplate(selectedTemplate.id);
                 setSelectedTemplateId(null);
                 setTplDrag(false);
@@ -1523,12 +1463,12 @@ export function FieldsPage(props: FieldsPageProps) {
    * Slice the step tree so Path Order VirtualizedLists are never ScrollView children.
    * - csvUpload: Upload + Templates (local CSV)
    * - localDxfTop: Upload + Align + Templates (local / batch DXF)
-   * - csvPathOrder / dxfPathOrder: Path Order & Load (own list scroll)
-   * - dxfTop: Upload + Align + Templates (rover DXF)
+   * - csvPathOrder: Path Order & Send (own list scroll)
+   * - emptyTop: Upload + Templates while no file is imported
    */
   function renderFieldsSteps(slice: FieldsStepSlice) {
     const showUpload =
-      slice === "csvUpload" || slice === "dxfTop" || slice === "localDxfTop";
+      slice === "csvUpload" || slice === "emptyTop" || slice === "localDxfTop";
     const showCsvPathOrder = slice === "csvPathOrder";
     /**
      * Templates sits above Path Order in every flow. Align (when shown) stays above
@@ -1538,8 +1478,7 @@ export function FieldsPage(props: FieldsPageProps) {
       (slice === "csvUpload" && isLocalCsvFlow && !hasLocalBatch) ||
       (slice === "csvUpload" && hasLocalBatch && !isLocalDxfFlow) ||
       (slice === "localDxfTop" && (isLocalDxfFlow || hasLocalBatch)) ||
-      (slice === "dxfTop" && !isLocalFlow);
-    const showDxfPathOrder = slice === "dxfPathOrder" && !isLocalDxfFlow;
+      (slice === "emptyTop" && !isLocalFlow);
     const activeCsvForSend = activeCsvPreview;
     // Multi-file / local app batch: single Path Order card once every file is verified.
     const showLocalBatchPathOrder =
@@ -1567,10 +1506,9 @@ export function FieldsPage(props: FieldsPageProps) {
 
     /**
      * Card numbering per flow:
-     *   local CSV   1 Upload · 2 Templates · 3 Path Order & Load
-     *   local DXF   1 Upload · 2 Align · 3 Templates · 4 Path Order & Load
+     *   local CSV   1 Upload · 2 Templates · 3 Path Order & Send
+     *   local DXF   1 Upload · 2 Align · 3 Templates · 4 Path Order & Send
      *   multi batch 1 Upload · 2 Align (if needed) · 3 Templates · 4 Path Order
-     *   rover DXF   1 Upload · 2 Align · 3 Templates · 4 Path Order & Load
      */
     const stepNo = {
       upload: 1,
@@ -1595,26 +1533,11 @@ export function FieldsPage(props: FieldsPageProps) {
             bodyMaxHeight={400}
           >
             <UploadAndPreviewStep
-              apiBaseUrl={apiBaseUrl}
               importedPlan={importedPlan}
               setImportedPlan={setImportedPlan}
-              onRefreshPaths={onRefreshPaths}
-              onSelectPath={(name, refreshOnly) => {
-                onSelectPath(name);
-                // refreshOnly is set by the extension toggle/apply handlers, which call
-                // back in here purely to re-fetch `lines` after the backend recomputes
-                // extension geometry — they must NOT also flip on plan-editing mode or
-                // the map interaction overlay, or the Move/Rotate Plan button lights up
-                // uninvited and the live `lines` update gets masked by the frozen
-                // plan-editing sticker (see PlanPreview's isPlacedItemActive in App.tsx).
-                if (refreshOnly) return;
-                // Stay on Upload after import. Operator opens Align DXF
-                // (or Bounding Box) when ready — do not auto-jump the accordion.
-                setShowMapInteraction(true);
-              }}
               onInvalidateWorkflow={onInvalidateWorkflow}
-              blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
-              protectedResident={protectedResident}
+              blockPlanEdit={blockPlanEdit}
+              planLocked={missionRunning}
               localCsvPreview={activeCsvPreview}
               localDxfSnapshot={
                 (isLocalDxfFlow || hasLocalBatch) && localDxfMeta
@@ -1652,7 +1575,7 @@ export function FieldsPage(props: FieldsPageProps) {
               selectedUploadedFileId={selectedUploadedFileId}
               onSelectUploadedFile={handleSelectUploadedFile}
               onRemoveUploadedFile={(id) => {
-                if (blockProtectedWorkflowMutation("Removing a file")) return;
+                if (blockPlanEdit("Removing a file")) return;
                 onRemoveUploadedFile?.(id);
                 if (selectedUploadedFileId === id) setSelectedUploadedFileId(null);
                 if (selectedTemplateId === id) setSelectedTemplateId(null);
@@ -1756,7 +1679,7 @@ export function FieldsPage(props: FieldsPageProps) {
               stepNumber={stepNo.pathOrder}
               title="Path Order"
               status={
-                stagedWorkflow.loaded === "verified" || stagedWorkflow.staged === "verified"
+                stagedWorkflow.staged === "verified"
                   ? "done"
                   : "active"
               }
@@ -1927,8 +1850,6 @@ export function FieldsPage(props: FieldsPageProps) {
             bodyMaxHeight={420}
           >
             <AlignDxfPanel
-              apiBaseUrl={apiBaseUrl}
-              selectedPathName={selectedPending ? null : selectedPathName}
               lines={selectedPending ? selectedPending.rawLines : lines}
               setLines={selectedPending ? setPendingAlignLines : setLines}
               alignmentResult={alignmentResult}
@@ -1937,7 +1858,7 @@ export function FieldsPage(props: FieldsPageProps) {
               setAlignedRefPoints={setAlignedRefPoints}
               onWorkflowStep={onWorkflowStep}
               onInvalidateWorkflow={onInvalidateWorkflow}
-              blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
+              blockPlanEdit={blockPlanEdit}
               refPoints={refPoints}
               setRefPoints={setRefPoints}
               csvGuidePointsActive={csvGuidePointsActive}
@@ -2008,51 +1929,6 @@ export function FieldsPage(props: FieldsPageProps) {
           </FieldsStepCard>
           ) : null}
 
-          {/* Path Order & Load — DXF/waypoints; hosted outside page ScrollView */}
-          {showDxfPathOrder && (
-          <FieldsStepCard
-            stepNumber={stepNo.pathOrder}
-            title="Path Order"
-            status={stepStatus("orderAndSpray")}
-            expanded={isSectionOpen("orderAndSpray")}
-            onToggle={() => toggleSection("orderAndSpray", "orderAndSpray")}
-            disabled={!hasPath}
-            fillAvailable={isSectionOpen("orderAndSpray")}
-          >
-            <PathOrderAndSprayStep
-              apiBaseUrl={apiBaseUrl}
-              selectedPathName={selectedPathName}
-              importedPlan={importedPlan}
-              lines={lines}
-              setLines={setLines}
-              selectedLineId={selectedLineId}
-              onSelectLine={handleMapSelectLine}
-              onRefreshPaths={onRefreshPaths}
-              onSelectPath={onSelectPath}
-              onInvalidateWorkflow={onInvalidateWorkflow}
-              blockProtectedWorkflowMutation={blockProtectedWorkflowMutation}
-              protectedResident={protectedResident}
-              verifiedAlignmentRequest={verifiedAlignmentRequest}
-              isGeographicDxf={isGeographicDxf}
-              onWorkflowStep={onWorkflowStep}
-              setSegmentVerification={setSegmentVerification}
-              setStagedPlanResult={setStagedPlanResult}
-              setStagedMissionInspection={setStagedMissionInspection}
-              setStagedMissionId={setStagedMissionId}
-              onLoadSelectedPath={onLoadSelectedPath}
-              missionActionBusy={missionActionBusy}
-              onBeginPathExclusive={onBeginPathExclusive}
-              onEndPathExclusive={onEndPathExclusive}
-              onNavigateHome={handleNavigateHome}
-              extensionVisible={layerVisibility.extension !== false}
-              onToggleExtensionVisible={handleToggleExtensionVisible}
-              highlightLineIds={highlightLineIds}
-              extPre={extPre}
-              extAft={extAft}
-              extensionsEnabled={extensionsEnabled}
-            />
-          </FieldsStepCard>
-          )}
       </>
     );
   }
