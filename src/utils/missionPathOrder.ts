@@ -564,39 +564,79 @@ function routeCostM(model: OrderModel, route: RouteCode[]): number {
  * Nearest-endpoint walk. Seeded at `seedCode` when given, else at the start position (which
  * the caller guarantees exists). Ties favour the earlier mark, and the forward direction
  * over the backward one.
+ *
+ * `abortAtM` lets the multi-start search drop a seed that cannot win: the deadhead only ever
+ * grows along the walk, and a candidate replaces the incumbent only when strictly cheaper, so
+ * a walk whose running total has reached the incumbent's is returned as `null`. The running
+ * total is summed in the same order as {@link deadheadM}, so the comparison is exact.
  */
-function greedyRoute(model: OrderModel, seedCode: RouteCode | null): RouteCode[] {
+function greedyRoute(
+  model: OrderModel,
+  seedCode: RouteCode | null,
+  abortAtM: number = Infinity
+): RouteCode[] | null {
   const { n } = model;
-  const used = new Uint8Array(n);
+  // Flat coordinates and an ascending list of unused marks: same visiting order (so the same
+  // tie-breaks) as scanning every id, without the array-of-arrays lookups or the used checks.
+  const sN = new Float64Array(2 * n);
+  const sE = new Float64Array(2 * n);
+  for (let c = 0; c < 2 * n; c++) {
+    sN[c] = model.start[c][0];
+    sE[c] = model.start[c][1];
+  }
+  const remaining: number[] = [];
+  for (let id = 0; id < n; id++) remaining.push(id);
   const route: RouteCode[] = [];
   let cursor: Ned;
+  let deadhead = 0;
   if (seedCode !== null) {
     route.push(seedCode);
-    used[seedCode >> 1] = 1;
+    remaining.splice(seedCode >> 1, 1);
+    if (model.startPosition) deadhead += nedDist(model.startPosition, model.start[seedCode]);
     cursor = model.end[seedCode];
   } else {
     cursor = model.startPosition!;
   }
 
   while (route.length < n) {
+    if (deadhead >= abortAtM) return null;
     let bestCode = -1;
     let bestDist = Infinity;
-    for (let id = 0; id < n; id++) {
-      if (used[id]) continue;
-      const forward = nedDist(cursor, model.start[id * 2]);
-      if (forward < bestDist) {
-        bestDist = forward;
-        bestCode = id * 2;
+    // Squared distance is a cheap prefilter: Math.hypot is slow and this loop is O(n^2) per
+    // seed. A candidate is only measured exactly when it is within rounding of the best so
+    // far, so the exact comparison below (and its tie-breaking) is unchanged.
+    let bestSq = Infinity;
+    const cn = cursor[0];
+    const ce = cursor[1];
+    for (let r = 0; r < remaining.length; r++) {
+      const id = remaining[r];
+      const fdn = cn - sN[id * 2];
+      const fde = ce - sE[id * 2];
+      const fsq = fdn * fdn + fde * fde;
+      if (fsq <= bestSq * 1.000001) {
+        const forward = nedDist(cursor, model.start[id * 2]);
+        if (forward < bestDist) {
+          bestDist = forward;
+          bestSq = fsq;
+          bestCode = id * 2;
+        }
       }
       // A mark whose far end is nearer continues the walk when driven backwards.
-      const backward = nedDist(cursor, model.start[id * 2 + 1]);
-      if (backward < bestDist) {
-        bestDist = backward;
-        bestCode = id * 2 + 1;
+      const bdn = cn - sN[id * 2 + 1];
+      const bde = ce - sE[id * 2 + 1];
+      const bsq = bdn * bdn + bde * bde;
+      if (bsq <= bestSq * 1.000001) {
+        const backward = nedDist(cursor, model.start[id * 2 + 1]);
+        if (backward < bestDist) {
+          bestDist = backward;
+          bestSq = bsq;
+          bestCode = id * 2 + 1;
+        }
       }
     }
     route.push(bestCode);
-    used[bestCode >> 1] = 1;
+    remaining.splice(remaining.indexOf(bestCode >> 1), 1);
+    deadhead += bestDist;
     cursor = model.end[bestCode];
   }
   return route;
@@ -696,12 +736,13 @@ export const CHAIN_MULTI_START_MAX_MARKS = 200;
  * only when strictly cheaper, so ties keep the earliest-tried one.
  */
 function bestGreedyRoute(model: OrderModel): RouteCode[] {
-  let bestRoute = greedyRoute(model, model.startPosition ? null : 0);
+  let bestRoute = greedyRoute(model, model.startPosition ? null : 0)!;
   let bestTotal = deadheadM(model, bestRoute);
   if (model.n > CHAIN_MULTI_START_MAX_MARKS) return bestRoute;
 
   const consider = (seed: RouteCode) => {
-    const candidate = greedyRoute(model, seed);
+    const candidate = greedyRoute(model, seed, bestTotal);
+    if (!candidate) return; // already no cheaper than the incumbent
     const total = deadheadM(model, candidate);
     if (total < bestTotal) {
       bestTotal = total;
@@ -818,7 +859,7 @@ export function chainMarkLinesFromSeed(
   if (seedIdx < 0) return [...marks, ...others];
 
   const model = buildOrderModel(placeable, options);
-  let route = greedyRoute(model, seedIdx * 2 + (seedFromEnd ? 1 : 0));
+  let route = greedyRoute(model, seedIdx * 2 + (seedFromEnd ? 1 : 0))!;
   if (model.n <= CHAIN_OPTIMIZE_MAX_MARKS) route = improveRoute(model, route, 1);
 
   return [...route.map((code) => model.lineOf[code]), ...unplaceable, ...others];

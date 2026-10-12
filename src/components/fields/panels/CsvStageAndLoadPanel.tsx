@@ -161,6 +161,8 @@ export function CsvStageAndLoadPanel({
   const [staged, setStaged] = useState<AdmittedMission | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [startBlocked, setStartBlocked] = useState(false);
+  /** buildTrajectory warnings from the last Send (refused/skipped paths, suppressed extensions). */
+  const [trajectoryNotes, setTrajectoryNotes] = useState<string[]>([]);
   /** Operator accepted remaining non-paintable painted paths (they are still refused in buildTrajectory). */
   const [geometryAcknowledged, setGeometryAcknowledged] = useState(false);
   /** Operator confirmed critical parse-frame warnings. */
@@ -323,6 +325,7 @@ export function CsvStageAndLoadPanel({
     setError(null);
     setStep(null);
     setStartBlocked(false);
+    setTrajectoryNotes([]);
     await yieldToUi();
     try {
       // CSV: paintedLines are frontend-fitted from survey points.
@@ -335,6 +338,7 @@ export function CsvStageAndLoadPanel({
         extensions: extCfg,
         includeEntryTransit: false,
       });
+      setTrajectoryNotes(built.warnings);
       if (built.runs.length === 0) {
         const detail = built.warnings.slice(0, 3).join("\n") || "No mark runs produced.";
         setError(detail);
@@ -414,6 +418,14 @@ export function CsvStageAndLoadPanel({
                   : ""}
         </Text>
       )}
+
+      {/* Paths the trajectory builder refused or skipped must never vanish silently. */}
+      {trajectoryNotes.length > 0 && !busy ? (
+        <Text style={{ color: FIELDS_COLORS.warning, fontSize: 11, lineHeight: 15 }}>
+          {trajectoryNotes.slice(0, 4).join("\n")}
+          {trajectoryNotes.length > 4 ? `\n+${trajectoryNotes.length - 4} more` : ""}
+        </Text>
+      ) : null}
 
       {/* Single ack when needed - show what is being acknowledged (e.g. the assumed DXF unit scale). */}
       {readiness.needsAck.length > 0 && !busy ? (

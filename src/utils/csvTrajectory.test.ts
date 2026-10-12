@@ -348,3 +348,60 @@ describe("buildTrajectory", () => {
     expect(warnings.some((w) => /allowlist|Skipped/i.test(w))).toBe(true);
   });
 });
+
+describe("buildTrajectory robustness warnings", () => {
+  const EXT_ON = { enabled: true, preM: 0.5, aftM: 0.5, perLine: false };
+
+  it("refuses a path with a non-finite vertex instead of drawing a chord", () => {
+    const bad = markLine("bad", [
+      { north: 0, east: 0 },
+      { north: 5, east: 3 },
+      { north: 10, east: 0 },
+    ]);
+    bad.entity!.preview_points![1] = { north: Number.NaN, east: 3 };
+    const good = horizontalMark("good", 0, 10, 20);
+
+    const r = buildTrajectory([bad, good], SPEEDS);
+
+    expect(r.runs).toHaveLength(1);
+    expect(r.runs[0].label).toBe("good");
+    expect(r.warnings.some((w) => w.includes("Refused path") && w.includes("bad"))).toBe(true);
+  });
+
+  it("warns that extensions are suppressed for a closed (non-curve) loop, and really suppresses them", () => {
+    const square = markLine("sq", [
+      { north: 0, east: 0 },
+      { north: 0, east: 5 },
+      { north: 5, east: 5 },
+      { north: 5, east: 0 },
+      { north: 0, east: 0 },
+    ]);
+
+    const r = buildTrajectory([square], { ...SPEEDS, extensions: EXT_ON });
+
+    expect(r.warnings.some((w) => w.includes("Extensions suppressed"))).toBe(true);
+    expect(kinds(r.runs)).toEqual(["mark"]);
+  });
+
+  it("does not claim suppression for a closed circle, whose run-ups are kept", () => {
+    const pts = Array.from({ length: 37 }, (_, i) => ({
+      north: 3 * Math.sin((i * 10 * Math.PI) / 180),
+      east: 3 * Math.cos((i * 10 * Math.PI) / 180),
+    }));
+    const circle = markLine("c", pts);
+    circle.entity!.entity_type = "CIRCLE";
+    circle.entity!.geometry = {};
+
+    const r = buildTrajectory([circle], { ...SPEEDS, extensions: EXT_ON });
+
+    expect(kinds(r.runs)).toEqual(["travel", "mark", "travel"]);
+    expect(r.warnings.some((w) => w.includes("Extensions suppressed"))).toBe(false);
+  });
+
+  it("does not warn about suppression when extensions are off or the mission is open", () => {
+    const open = horizontalMark("o", 0, 10, 0);
+    expect(buildTrajectory([open], { ...SPEEDS, extensions: EXT_ON }).warnings).toEqual([]);
+    const off = buildTrajectory([open], SPEEDS);
+    expect(off.warnings.some((w) => w.includes("Extensions suppressed"))).toBe(false);
+  });
+});

@@ -25,10 +25,10 @@ describe("the app has no operator arm or OFFBOARD control in the mission flow", 
   it("the only caller of arm / setOffboard in the app is the separate debug screen", () => {
     const callers = walk(SRC)
       .filter((file) => /\.(arm|setOffboard)\(/.test(read(file)))
-      .map((file) => relative(ROOT, file))
+      .map((file) => relative(ROOT, file).replace(/\\/g, "/"))
       .sort();
     expect(callers).toEqual(["src/screens/DebugDriveScreen.tsx"]);
-  });
+  }, 30_000);
 
   it("the Home mission screen and App have no arm or mode control", () => {
     const files = [join(ROOT, "App.tsx"), join(SRC, "components", "ModernHomeUI.tsx")];

@@ -420,6 +420,21 @@ export function planLineToNedPolyline(line: PlanLine): NedPair[] | null {
   ];
 }
 
+/**
+ * Number of `preview_points` vertices with a non-finite coordinate. `planLineToNedPolyline`
+ * drops these, which would silently straighten a curve into a chord, so `buildTrajectory`
+ * refuses such a path instead of painting the shortcut.
+ */
+export function countInvalidPreviewPoints(line: PlanLine): number {
+  const preview = line.entity?.preview_points;
+  if (!preview || preview.length < 2) return 0;
+  let bad = 0;
+  for (const p of preview) {
+    if (p == null || !isFinitePair(p.north, p.east)) bad += 1;
+  }
+  return bad;
+}
+
 function polylineLengthM(points: NedPair[]): number {
   let len = 0;
   for (let i = 1; i < points.length; i++) {
@@ -677,6 +692,15 @@ export function buildTrajectory(
       continue;
     }
 
+    const invalidVertices = countInvalidPreviewPoints(line);
+    if (invalidVertices > 0) {
+      warnings.push(
+        `Refused path "${line.label ?? line.id}": ${invalidVertices} vertex(es) with non-finite coordinates ` +
+          `(painting it would draw a straight shortcut). Fix the source geometry or skip the path.`
+      );
+      continue;
+    }
+
     const points = planLineToNedPolyline(line);
     if (!points) {
       warnings.push(`Skipped line "${line.label ?? line.id}": fewer than 2 valid NED points.`);
@@ -701,12 +725,15 @@ export function buildTrajectory(
   // receives. Empty when extensions are off — we then fall through to the merged-group path.
   const chain = buildExtendedMarkChain(acceptedLines, extCfg);
 
+  // Enabled but empty chain means buildExtendedMarkChain suppressed the run-ups: chain-ends
+  // mode on a closed loop that is not all curves. (Curves keep theirs; per-line never suppresses.)
+  if (extCfg.enabled && chain.length === 0 && isMissionClosedLoop(acceptedLines)) {
+    warnings.push(
+      "Extensions suppressed: mission is a closed loop (first≈last within 0.01 m)."
+    );
+  }
+
   if (chain.length > 0) {
-    if (extCfg.enabled && !extCfg.perLine && isMissionClosedLoop(acceptedLines)) {
-      warnings.push(
-        "Extensions suppressed: mission is a closed loop (first≈last within 0.01 m)."
-      );
-    }
     // [PRE?, MARK, AFT?] per edge, plus a connector wherever consecutive edges do not
     // already touch. AFT + connector + PRE are emitted as ONE travel run so the rover never
     // sees two adjacent travel legs where it should see a single continuous drive.
