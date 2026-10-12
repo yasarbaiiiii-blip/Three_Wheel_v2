@@ -357,6 +357,7 @@ export function getAdaptedTelemetrySnapshot(now = telemetryNow()): TelemetrySnap
   const rtk = usableData(snap.rtk_status, now);
   const gnssFresh = usableData(snap.gnss_report, now);
   const gnss = gnssFresh?.valid === true ? gnssFresh : null;
+  const spray = usableData(snap.spray, now);
 
   const posOk = vs?.position_valid === true;
   const velOk = vs?.velocity_valid === true;
@@ -434,5 +435,100 @@ export function getAdaptedTelemetrySnapshot(now = telemetryNow()): TelemetrySnap
     battery_a: batteryOk ? finiteOrNull(vs!.battery_current_a) : null,
     along_track_speed_mps: forwardSpeed !== null ? finiteOrNull(forwardSpeed) : null,
     cross_track_speed_mps: lateralSpeed !== null ? finiteOrNull(lateralSpeed) : null,
+    spraying: spray ? spray.spraying : null,
+    spray_active: spray ? Boolean(spray.spraying || spray.manual_active || spray.desired) : null,
+    spray_manual_active: spray ? spray.manual_active : null,
+    spray_desired: spray ? spray.desired : null,
+    spray_safety_ok: spray ? spray.safety_ok : null,
+    spray_safety_reason: spray ? spray.safety_reason : null,
+    spray_fsm_state: spray ? spray.fsm_state : null,
   };
+}
+
+/** Derived spray status from telemetry snapshots */
+export interface SprayState {
+  known: boolean;
+  spraying: boolean;
+  manualActive: boolean;
+  desired: boolean;
+  safetyOk: boolean;
+  safetyReason: string;
+  fsmState: number | null;
+  xtrackTripped: boolean;
+  xtrackErrorM: number | null;
+  active: boolean;
+}
+
+export const UNKNOWN_SPRAY_STATE: SprayState = {
+  known: false,
+  spraying: false,
+  manualActive: false,
+  desired: false,
+  safetyOk: false,
+  safetyReason: "",
+  fsmState: null,
+  xtrackTripped: false,
+  xtrackErrorM: null,
+  active: false,
+};
+
+export function getDerivedSprayState(now = telemetryNow()): SprayState {
+  const sprayEntry = state.snapshot?.spray;
+  const d = usableData(sprayEntry, now);
+  if (!d) return UNKNOWN_SPRAY_STATE;
+  return {
+    known: true,
+    spraying: Boolean(d.spraying),
+    manualActive: Boolean(d.manual_active),
+    desired: Boolean(d.desired),
+    safetyOk: Boolean(d.safety_ok),
+    safetyReason: typeof d.safety_reason === "string" ? d.safety_reason : "",
+    fsmState: typeof d.fsm_state === "number" ? d.fsm_state : null,
+    xtrackTripped: Boolean(d.xtrack_tripped),
+    xtrackErrorM: finiteOrNull(d.xtrack_error_m),
+    active: Boolean(d.spraying || d.manual_active || d.desired),
+  };
+}
+
+/**
+ * Selector for spray state from a telemetry snapshot.
+ * When called with no argument, uses the current store state and checks full staleness.
+ */
+export function selectSprayState(
+  snapshot?: RoverTelemetrySnapshot | null,
+  now = telemetryNow()
+): SprayState {
+  if (snapshot === undefined) {
+    return getDerivedSprayState(now);
+  }
+  if (!snapshot || !snapshot.spray) {
+    return UNKNOWN_SPRAY_STATE;
+  }
+  const sprayEntry = snapshot.spray;
+  if (!sprayEntry || sprayEntry.fresh === false || sprayEntry.data == null) {
+    return UNKNOWN_SPRAY_STATE;
+  }
+  const age = finiteOrNull(sprayEntry.age_s);
+  if (age !== null && age * 1000 > STALE_THRESHOLD_MS) {
+    return UNKNOWN_SPRAY_STATE;
+  }
+  const d = sprayEntry.data;
+  return {
+    known: true,
+    spraying: Boolean(d.spraying),
+    manualActive: Boolean(d.manual_active),
+    desired: Boolean(d.desired),
+    safetyOk: Boolean(d.safety_ok),
+    safetyReason: typeof d.safety_reason === "string" ? d.safety_reason : "",
+    fsmState: typeof d.fsm_state === "number" ? d.fsm_state : null,
+    xtrackTripped: Boolean(d.xtrack_tripped),
+    xtrackErrorM: finiteOrNull(d.xtrack_error_m),
+    active: Boolean(d.spraying || d.manual_active || d.desired),
+  };
+}
+
+/** Hook returning live spray state with staleness updates */
+export function useSprayState(): SprayState {
+  useProdTelemetry();
+  return getDerivedSprayState();
 }

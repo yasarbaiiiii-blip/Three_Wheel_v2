@@ -193,6 +193,9 @@ const IMMEDIATE_KEYS: ReadonlyArray<string> = [
   "joystick_has_lease",
   "control_owner",
   "gps_fix",
+  "spraying",
+  "spray_active",
+  "spray_manual_active",
 ];
 
 let throttledSnapshot: TelemetrySnapshot | null = telemetrySnapshot;

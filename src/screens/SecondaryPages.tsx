@@ -13,6 +13,7 @@ import Slider from "@react-native-community/slider";
 import type { PlanLine } from "../types/plan";
 import type { RTKStatus } from "../types/appRuntime";
 import * as FileSystem from "expo-file-system/legacy";
+import { useSprayState } from "../features/telemetry/prodTelemetryStore";
 
 const TEAL = "#0f988f";
 
@@ -198,24 +199,19 @@ export function SwoziPage({
   const [manualHoldActive, setManualHoldActive] = useState(false);
   const manualHeartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Status polling
+  // Status via telemetry events (no polling)
+  const sprayState = useSprayState();
   useEffect(() => {
-    if (!apiBaseUrl) return;
-    const interval = setInterval(async () => {
-      try {
-        const res = await fetch(sprayApiUrl("/api/spray/status"));
-        if (res.ok) {
-          const data = await res.json();
-          const active = !!(data.spraying || data.manual_override || data.spray_active_desired);
-          setSprayStatus(active);
-          setIsSprayHoldActive(active);
-        }
-      } catch (err) {
-        // ignore network errors
-      }
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [apiBaseUrl, sprayApiUrl]);
+    if (!sprayState.known) {
+      setSprayStatus(false);
+      if (!isSprayHoldChanging) setIsSprayHoldActive(false);
+      return;
+    }
+    setSprayStatus(sprayState.active);
+    if (!isSprayHoldChanging) {
+      setIsSprayHoldActive(sprayState.manualActive);
+    }
+  }, [sprayState, isSprayHoldChanging]);
 
   // Fetch spray params on mount
   useEffect(() => {

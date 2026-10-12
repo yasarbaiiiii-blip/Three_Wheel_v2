@@ -33,6 +33,7 @@ import { useNtripProfiles } from "../hooks/useNtripProfiles";
 import type { NtripProfile, RTKStatus } from "../types/appRuntime";
 import { validateDashPattern, type DashPattern } from "../utils/appPlannedMissionBuilder";
 import { describeMissionPlanFailure } from "../utils/appPlannedMissionErrors";
+import { useSprayState } from "../features/telemetry/prodTelemetryStore";
 
 const COLORS = {
   bgBase: "#09090b",
@@ -397,28 +398,26 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
     [apiBaseUrl]
   );
 
+  const sprayState = useSprayState();
+
   useEffect(() => {
-    if (!apiBaseUrl) return;
-
-    const pollStatus = async () => {
-      try {
-        const res = await fetch(sprayApiUrl("/api/spray/status"));
-        if (!res.ok) return;
-        const data = await res.json();
-        if (data.enabled !== undefined) setIsSprayMasterEnabled(!!data.enabled);
-        const active = !!(data.spraying || data.manual_override || data.spray_active_desired);
-        setSprayLive(active);
-        setIsSprayOn(active);
-        if (!manualHoldActive) setManualHoldActive(!!data.manual_override);
-      } catch {
-        // ignore polling errors
-      }
-    };
-
-    pollStatus();
-    const interval = setInterval(pollStatus, 2000);
-    return () => clearInterval(interval);
-  }, [apiBaseUrl, sprayApiUrl, manualHoldActive]);
+    if (!sprayState.known) {
+      setSprayLive(false);
+      if (!isSprayOnChanging) setIsSprayOn(false);
+      if (!manualHeartbeatRef.current) setManualHoldActive(false);
+      return;
+    }
+    setSprayLive(sprayState.spraying);
+    if (!isSprayOnChanging) {
+      setIsSprayOn(sprayState.manualActive || sprayState.active);
+    }
+    if (!manualHeartbeatRef.current) {
+      setManualHoldActive(sprayState.manualActive);
+    }
+    if (sprayState.fsmState !== null && !isSprayMasterChanging) {
+      setIsSprayMasterEnabled(sprayState.fsmState !== 6);
+    }
+  }, [sprayState, isSprayOnChanging, isSprayMasterChanging]);
 
   useEffect(() => {
     return () => {

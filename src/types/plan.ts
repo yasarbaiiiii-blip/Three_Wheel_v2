@@ -194,5 +194,13 @@ export interface TelemetrySnapshot {
   projection_segment_index?: number | null;
   gps_safety_ok?: boolean | null;
   manual_resume_required?: boolean | null;
+  // Spray status from telemetry.snapshot.spray
+  spraying?: boolean | null;
+  spray_active?: boolean | null;
+  spray_manual_active?: boolean | null;
+  spray_desired?: boolean | null;
+  spray_safety_ok?: boolean | null;
+  spray_safety_reason?: string | null;
+  spray_fsm_state?: number | null;
 }
 
