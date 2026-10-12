@@ -33,7 +33,7 @@ import { useNtripProfiles } from "../hooks/useNtripProfiles";
 import type { NtripProfile, RTKStatus } from "../types/appRuntime";
 import { validateDashPattern, type DashPattern } from "../utils/appPlannedMissionBuilder";
 import { describeMissionPlanFailure } from "../utils/appPlannedMissionErrors";
-import { useSprayState } from "../features/telemetry/prodTelemetryStore";
+import { SPRAY_FSM_DISABLED, useSprayState } from "../features/telemetry/prodTelemetryStore";
 
 const COLORS = {
   bgBase: "#09090b",
@@ -415,7 +415,7 @@ export default function ModernSettingsPage(props: ModernSettingsPageProps) {
       setManualHoldActive(sprayState.manualActive);
     }
     if (sprayState.fsmState !== null && !isSprayMasterChanging) {
-      setIsSprayMasterEnabled(sprayState.fsmState !== 6);
+      setIsSprayMasterEnabled(sprayState.fsmState !== SPRAY_FSM_DISABLED);
     }
   }, [sprayState, isSprayOnChanging, isSprayMasterChanging]);
 

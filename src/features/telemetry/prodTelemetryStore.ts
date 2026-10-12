@@ -445,7 +445,13 @@ export function getAdaptedTelemetrySnapshot(now = telemetryNow()): TelemetrySnap
   };
 }
 
-/** Derived spray status from telemetry snapshots */
+/** SprayStatus.msg FSM_DISABLED: the spray master is off. */
+export const SPRAY_FSM_DISABLED = 6;
+
+/**
+ * Spray status for the UI, derived from telemetry.snapshot.spray (APP-05). Only what the screens show: a field that
+ * changes on every packet (the cross-track error) would re-render them at packet rate.
+ */
 export interface SprayState {
   known: boolean;
   spraying: boolean;
@@ -454,8 +460,6 @@ export interface SprayState {
   safetyOk: boolean;
   safetyReason: string;
   fsmState: number | null;
-  xtrackTripped: boolean;
-  xtrackErrorM: number | null;
   active: boolean;
 }
 
@@ -467,8 +471,6 @@ export const UNKNOWN_SPRAY_STATE: SprayState = {
   safetyOk: false,
   safetyReason: "",
   fsmState: null,
-  xtrackTripped: false,
-  xtrackErrorM: null,
   active: false,
 };
 
@@ -484,8 +486,6 @@ export function getDerivedSprayState(now = telemetryNow()): SprayState {
     safetyOk: Boolean(d.safety_ok),
     safetyReason: typeof d.safety_reason === "string" ? d.safety_reason : "",
     fsmState: typeof d.fsm_state === "number" ? d.fsm_state : null,
-    xtrackTripped: Boolean(d.xtrack_tripped),
-    xtrackErrorM: finiteOrNull(d.xtrack_error_m),
     active: Boolean(d.spraying || d.manual_active || d.desired),
   };
 }
@@ -521,14 +521,36 @@ export function selectSprayState(
     safetyOk: Boolean(d.safety_ok),
     safetyReason: typeof d.safety_reason === "string" ? d.safety_reason : "",
     fsmState: typeof d.fsm_state === "number" ? d.fsm_state : null,
-    xtrackTripped: Boolean(d.xtrack_tripped),
-    xtrackErrorM: finiteOrNull(d.xtrack_error_m),
     active: Boolean(d.spraying || d.manual_active || d.desired),
   };
 }
 
-/** Hook returning live spray state with staleness updates */
+export function sprayStatesEqual(a: SprayState, b: SprayState): boolean {
+  return (
+    a.known === b.known &&
+    a.spraying === b.spraying &&
+    a.manualActive === b.manualActive &&
+    a.desired === b.desired &&
+    a.safetyOk === b.safetyOk &&
+    a.safetyReason === b.safetyReason &&
+    a.fsmState === b.fsmState &&
+    a.active === b.active
+  );
+}
+
+// useSyncExternalStore compares getSnapshot results with Object.is: a new object per call would re-render on every
+// packet (10 Hz) the 1 900-line settings screens that use this. Keep one object until the spray state really changes.
+let sprayCache: SprayState = UNKNOWN_SPRAY_STATE;
+export function getSpraySnapshot(): SprayState {
+  const next = getDerivedSprayState();
+  if (!sprayStatesEqual(sprayCache, next)) sprayCache = next;
+  return sprayCache;
+}
+
+/**
+ * Live spray state. Re-renders only when it changes; the store's 250 ms freshness tick turns it unknown when packets
+ * stop, so a dead link never leaves the last state on screen.
+ */
 export function useSprayState(): SprayState {
-  useProdTelemetry();
-  return getDerivedSprayState();
+  return useSyncExternalStore(subscribeProdTelemetry, getSpraySnapshot, getSpraySnapshot);
 }

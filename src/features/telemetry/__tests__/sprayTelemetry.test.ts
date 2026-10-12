@@ -2,6 +2,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import * as store from "../prodTelemetryStore";
 import { getAdaptedTelemetrySnapshot } from "../prodTelemetryStore";
 import type { RoverTelemetrySnapshot, SnapshotEntry, SprayData } from "../../../contract/prod/realtime";
+import type { SprayState } from "../prodTelemetryStore";
 import { liveRover } from "../../../test/roverEvents";
 
 function sprayEntry(data: Partial<SprayData> = {}, over: Partial<SnapshotEntry<SprayData>> = {}): SnapshotEntry<SprayData> {
@@ -100,7 +101,6 @@ describe("APP-05: spray status by events, not REST polling", () => {
       expect(state.manualActive).toBe(false);
       expect(state.safetyOk).toBe(true);
       expect(state.fsmState).toBe(3);
-      expect(state.xtrackErrorM).toBeCloseTo(0.015);
 
       const adapted = getAdaptedTelemetrySnapshot();
       expect(adapted?.spraying).toBe(true);
@@ -224,6 +224,37 @@ describe("APP-05: spray status by events, not REST polling", () => {
       expect(store.selectSprayState().known).toBe(false);
       expect(store.selectSprayState().spraying).toBe(false);
       unsub();
+    });
+
+    it("the hook snapshot keeps one object while the spray state is unchanged (no re-render at packet rate)", () => {
+      // useSyncExternalStore re-renders when getSnapshot's result differs by Object.is (react.dev): 20 packets that
+      // only move the cross-track error and the vehicle must hand React the SAME object; a real change hands a new one.
+      let now = 1000;
+      vi.spyOn(performance, "now").mockImplementation(() => now);
+      const notified: SprayState[] = [];
+      const unsub = store.subscribeProdTelemetry(() => notified.push(store.getSpraySnapshot()));
+      ingest(baseSnapshot({ spray: sprayEntry({ spraying: true, desired: true }) }));
+      const first = store.getSpraySnapshot();
+      expect(first.known && first.spraying).toBe(true);
+      for (let i = 0; i < 20; i++) {
+        now += 100;
+        ingest(baseSnapshot({ spray: sprayEntry({ spraying: true, desired: true, xtrack_error_m: 0.001 * i }) }));
+      }
+      expect(notified.length).toBeGreaterThanOrEqual(20);
+      expect(notified.every((s) => s === first)).toBe(true);
+      ingest(baseSnapshot({ spray: sprayEntry({ spraying: false, desired: false }) }));
+      const changed = store.getSpraySnapshot();
+      expect(changed).not.toBe(first);
+      expect(changed.spraying).toBe(false);
+      // packets stop: the store's own 250 ms freshness tick turns it unknown, with no new packet
+      now += 1250;
+      vi.advanceTimersByTime(1250);
+      expect(store.getSpraySnapshot().known).toBe(false);
+      unsub();
+    });
+
+    it("the spray master reads FSM_DISABLED by name", () => {
+      expect(store.SPRAY_FSM_DISABLED).toBe(6); // SprayStatus.msg uint8 FSM_DISABLED=6
     });
 
     it("returns unknown when the socket disconnects", () => {
