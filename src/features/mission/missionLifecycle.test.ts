@@ -199,15 +199,15 @@ describe("describeMission: LOADING -> PLACING -> ARMING -> ENGAGING -> READY -> 
   });
 });
 
-describe("reason text covers 0..17", () => {
+describe("reason text covers 0..19", () => {
   it("has a sentence for every reason and flags numbers it does not know", () => {
     expect(reasonText(MissionReasonEnum.NONE)).toBeNull();
-    for (let code = 1; code <= 17; code++) {
+    for (let code = 1; code <= 19; code++) {
       const text = reasonText(code);
       expect(text, `reason ${code}`).toBeTruthy();
       expect(text).not.toMatch(/Unknown reason/);
     }
-    expect(reasonText(18)).toBe("Unknown reason (18)");
+    expect(reasonText(20)).toBe("Unknown reason (20)");
   });
 
   it("names the guard gate for SAFETY and RTK", () => {
@@ -215,6 +215,50 @@ describe("reason text covers 0..17", () => {
     expect(reasonText(MissionReasonEnum.RTK, 6)).toMatch(/RTK is not good enough/);
     expect(describeGate(10)).toMatch(/tablet link/);
     expect(describeGate(77)).toBe("guard gate 77");
+  });
+
+  it("explains reason 18 RPP_PIVOT_TIMEOUT (pivot watchdog expired)", () => {
+    expect(reasonText(MissionReasonEnum.RPP_PIVOT_TIMEOUT)).toBe(
+      "Paused: pivot watchdog expired. Check the rover heading, then Resume."
+    );
+    const d = describeMission(
+      viewFor({ state: S.PAUSED, reason_code: MissionReasonEnum.RPP_PIVOT_TIMEOUT })
+    );
+    expect(d.phase).toBe("paused");
+    expect(d.reasonText).toBe(
+      "Paused: pivot watchdog expired. Check the rover heading, then Resume."
+    );
+  });
+
+  it("explains reason 19 RPP_POSITION_JUMP (position jumped)", () => {
+    expect(reasonText(MissionReasonEnum.RPP_POSITION_JUMP)).toBe(
+      "Paused: position jumped. Check the rover is on the line, then Resume."
+    );
+    const d = describeMission(
+      viewFor({ state: S.PAUSED, reason_code: MissionReasonEnum.RPP_POSITION_JUMP })
+    );
+    expect(d.phase).toBe("paused");
+    expect(d.reasonText).toBe(
+      "Paused: position jumped. Check the rover is on the line, then Resume."
+    );
+  });
+
+  it("explains guard gate 14 ACTUATOR_STALL where safety reason is shown", () => {
+    expect(describeGate(14)).toBe("an actuator stalled");
+    expect(reasonText(MissionReasonEnum.SAFETY, 14)).toBe(
+      "A safety check failed: an actuator stalled"
+    );
+    const d = describeMission(
+      viewFor({ state: S.ERROR, reason_code: MissionReasonEnum.SAFETY, gate_reason_code: 14 })
+    );
+    expect(d.reasonText).toBe("A safety check failed: an actuator stalled");
+  });
+
+  it("shows unknown reason code as Unknown reason (N) and never crashes or returns blank", () => {
+    expect(reasonText(99)).toBe("Unknown reason (99)");
+    expect(reasonText(1234)).toBe("Unknown reason (1234)");
+    const d = describeMission(viewFor({ state: S.PAUSED, reason_code: 99 }));
+    expect(d.reasonText).toBe("Unknown reason (99)");
   });
 
   it("maps a failure to its lifecycle step only when unambiguous", () => {
@@ -225,6 +269,8 @@ describe("reason text covers 0..17", () => {
     expect(failedStepForReason(MissionReasonEnum.RPP_ACK_TIMEOUT)).toBe(S.READY);
     expect(failedStepForReason(MissionReasonEnum.SAFETY)).toBeNull();
     expect(failedStepForReason(MissionReasonEnum.EKF_RESET)).toBeNull();
+    expect(failedStepForReason(MissionReasonEnum.RPP_PIVOT_TIMEOUT)).toBeNull();
+    expect(failedStepForReason(MissionReasonEnum.RPP_POSITION_JUMP)).toBeNull();
   });
 });
 

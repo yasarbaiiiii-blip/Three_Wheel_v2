@@ -353,7 +353,7 @@ export const MISSION_STATE_NAMES: Record<number, string> = {
   [MissionStateEnum.ENGAGING]: "ENGAGING",
 };
 
-/** MissionState.msg REASON_* (0..17). */
+/** MissionState.msg REASON_* (0..19). */
 export enum MissionReasonEnum {
   NONE = 0,
   OPERATOR = 1,
@@ -373,7 +373,32 @@ export enum MissionReasonEnum {
   ESTOP = 15,
   RPP_ERROR = 16,
   RPP_STALE = 17,
+  RPP_PIVOT_TIMEOUT = 18,
+  RPP_POSITION_JUMP = 19,
 }
+
+export const MISSION_REASON_NAMES: Record<number, string> = {
+  [MissionReasonEnum.NONE]: "NONE",
+  [MissionReasonEnum.OPERATOR]: "OPERATOR",
+  [MissionReasonEnum.SAFETY]: "SAFETY",
+  [MissionReasonEnum.RTK]: "RTK",
+  [MissionReasonEnum.PATH_ERROR]: "PATH_ERROR",
+  [MissionReasonEnum.INTERNAL_ERROR]: "INTERNAL_ERROR",
+  [MissionReasonEnum.EKF_RESET]: "EKF_RESET",
+  [MissionReasonEnum.EKF_REFERENCE_INVALID]: "EKF_REFERENCE_INVALID",
+  [MissionReasonEnum.PLACEMENT_OUT_OF_BOUNDS]: "PLACEMENT_OUT_OF_BOUNDS",
+  [MissionReasonEnum.NO_PLACEMENT_FRAME]: "NO_PLACEMENT_FRAME",
+  [MissionReasonEnum.ARM_REFUSED]: "ARM_REFUSED",
+  [MissionReasonEnum.ARM_TIMEOUT]: "ARM_TIMEOUT",
+  [MissionReasonEnum.OFFBOARD_REFUSED]: "OFFBOARD_REFUSED",
+  [MissionReasonEnum.OFFBOARD_TIMEOUT]: "OFFBOARD_TIMEOUT",
+  [MissionReasonEnum.RPP_ACK_TIMEOUT]: "RPP_ACK_TIMEOUT",
+  [MissionReasonEnum.ESTOP]: "ESTOP",
+  [MissionReasonEnum.RPP_ERROR]: "RPP_ERROR",
+  [MissionReasonEnum.RPP_STALE]: "RPP_STALE",
+  [MissionReasonEnum.RPP_PIVOT_TIMEOUT]: "RPP_PIVOT_TIMEOUT",
+  [MissionReasonEnum.RPP_POSITION_JUMP]: "RPP_POSITION_JUMP",
+};
 
 /** MissionState.msg WAIT_*: the step the lifecycle is waiting on. */
 export enum MissionWaitingOnEnum {

@@ -168,6 +168,7 @@ const GATE_TEXT: Record<number, string> = {
   11: "the rover is not armed or in OFFBOARD",
   12: "the position estimate is unhealthy",
   13: "the rover has no valid GPS reference",
+  14: "an actuator stalled",
 };
 
 export function describeGate(code: number): string {
@@ -182,10 +183,9 @@ export function waitingOnText(code: number): string | null {
 
 /** Why the mission ended, paused or failed; null for NONE. */
 export function reasonText(code: number, gateReasonCode = 0): string | null {
+  if (code === MissionReasonEnum.NONE) return null;
   const gate = gateReasonCode > 0 ? `: ${describeGate(gateReasonCode)}` : "";
   switch (code) {
-    case MissionReasonEnum.NONE:
-      return null;
     case MissionReasonEnum.OPERATOR:
       return "Stopped by the operator";
     case MissionReasonEnum.SAFETY:
@@ -220,6 +220,10 @@ export function reasonText(code: number, gateReasonCode = 0): string | null {
       return "The path follower reported an error";
     case MissionReasonEnum.RPP_STALE:
       return "The path follower stopped reporting (automatic pause)";
+    case MissionReasonEnum.RPP_PIVOT_TIMEOUT:
+      return "Paused: pivot watchdog expired. Check the rover heading, then Resume.";
+    case MissionReasonEnum.RPP_POSITION_JUMP:
+      return "Paused: position jumped. Check the rover is on the line, then Resume.";
     default:
       return `Unknown reason (${code})`;
   }
