@@ -5,16 +5,12 @@ import {
   evaluateCsvSendReadiness,
   getLineFitMeta,
   isCriticalParseWarning,
-  isGeometryNonPaintable,
   partitionParseWarnings,
 } from "./csvGeometryReadiness";
 import { buildTrajectory } from "./missionTrajectory";
 
-function markLine(
-  id: string,
-  opts?: { paintable?: boolean; warnings?: string[]; paintPts?: boolean }
-): PlanLine {
-  const paintable = opts?.paintable !== false;
+/** A path with a sharp reversal corner, as an older fit would have flagged "undrivable". */
+function markLine(id: string, opts?: { warnings?: string[]; legacyUnpaintable?: boolean }): PlanLine {
   return {
     id,
     label: id,
@@ -33,9 +29,10 @@ function markLine(
       geometry: {
         closed: false,
         road_marking: true,
-        paintable,
-        fit_warnings: opts?.warnings ?? (paintable ? [] : ["undrivable corner"]),
-        fit_mode: paintable ? "waypoint-fillet" : "degraded-fillet",
+        ...(opts?.legacyUnpaintable ? { paintable: false } : {}),
+        fit_warnings: opts?.warnings ?? [],
+        fit_mode: "waypoint-fillet",
+        corners: opts?.legacyUnpaintable ? [{ atIndex: 1, turnDeg: 150, class: "reversal" }] : [],
       },
       preview_points: [
         { north: 0, east: 0 },
@@ -45,19 +42,13 @@ function markLine(
   };
 }
 
-describe("csvGeometryReadiness", () => {
-  it("reads paintable and fit_warnings from geometry", () => {
-    const line = markLine("a", { paintable: false, warnings: ["too tight"] });
-    const meta = getLineFitMeta(line);
-    expect(meta.paintable).toBe(false);
-    expect(meta.warnings).toEqual(["too tight"]);
-    expect(isGeometryNonPaintable(line)).toBe(true);
-  });
+const order = (...entries: Array<[string, boolean]>) =>
+  entries.map(([lineId, paint]) => ({ lineId, label: lineId, paint }));
 
-  it("treats missing paintable flag as paintable (legacy)", () => {
-    const line = markLine("a");
-    delete (line.entity!.geometry as { paintable?: boolean }).paintable;
-    expect(getLineFitMeta(line).paintable).toBe(true);
+describe("csvGeometryReadiness", () => {
+  it("reads fit_warnings from geometry", () => {
+    const meta = getLineFitMeta(markLine("a", { warnings: ["too tight"] }));
+    expect(meta.warnings).toEqual(["too tight"]);
   });
 
   it("classifies critical parse warnings", () => {
@@ -72,47 +63,32 @@ describe("csvGeometryReadiness", () => {
     expect(parts.advisory).toHaveLength(1);
   });
 
-  it("blocks Send when a painted path is non-paintable until acknowledged", () => {
-    const lines = [markLine("good"), markLine("bad", { paintable: false })];
-    const blocked = evaluateCsvSendReadiness({
-      lines,
-      pathOrder: [
-        { lineId: "good", label: "good", paint: true },
-        { lineId: "bad", label: "bad", paint: true },
-      ],
-      parseWarnings: [],
-      geometryAcknowledged: false,
-      parseAcknowledged: false,
-    });
-    expect(blocked.canSend).toBe(false);
-    expect(blocked.needsGeometryAck).toBe(true);
-    expect(blocked.nonPaintablePainted).toHaveLength(1);
-
-    const acked = evaluateCsvSendReadiness({
-      lines,
-      pathOrder: [
-        { lineId: "good", label: "good", paint: true },
-        { lineId: "bad", label: "bad", paint: true },
-      ],
-      geometryAcknowledged: true,
-      parseAcknowledged: true,
-    });
-    expect(acked.canSend).toBe(true);
-    expect(acked.needsGeometryAck).toBe(false);
-  });
-
-  it("allows Send after skipping non-paintable path without ack", () => {
-    const lines = [markLine("good"), markLine("bad", { paintable: false })];
+  it("never vetoes a painted path for its shape — the paint tick is the operator's choice", () => {
+    const lines = [markLine("good"), markLine("sharp", { legacyUnpaintable: true })];
     const r = evaluateCsvSendReadiness({
       lines,
-      pathOrder: [
-        { lineId: "good", label: "good", paint: true },
-        { lineId: "bad", label: "bad", paint: false },
-      ],
-      geometryAcknowledged: false,
+      pathOrder: order(["good", true], ["sharp", true]),
     });
     expect(r.canSend).toBe(true);
-    expect(r.nonPaintablePainted).toHaveLength(0);
+    expect(r.hardBlocks).toEqual([]);
+    expect(r.needsAck).toEqual([]);
+  });
+
+  it("a path that is the only painted one and has a sharp corner can still be sent", () => {
+    const r = evaluateCsvSendReadiness({
+      lines: [markLine("sharp", { legacyUnpaintable: true })],
+    });
+    expect(r.canSend).toBe(true);
+  });
+
+  it("skipping a path still removes it, and sending needs at least one painted path", () => {
+    const lines = [markLine("good"), markLine("other")];
+    expect(
+      evaluateCsvSendReadiness({ lines, pathOrder: order(["good", true], ["other", false]) }).canSend
+    ).toBe(true);
+    const none = evaluateCsvSendReadiness({ lines, pathOrder: order(["good", false], ["other", false]) });
+    expect(none.canSend).toBe(false);
+    expect(none.hardBlocks.join(" ")).toMatch(/Paint at least one path/);
   });
 
   it("blocks Send on critical parse warnings until acknowledged", () => {
@@ -132,39 +108,17 @@ describe("csvGeometryReadiness", () => {
     });
     expect(acked.canSend).toBe(true);
   });
-
-  it("hard-blocks when every painted path is non-paintable even after ack", () => {
-    const lines = [markLine("bad", { paintable: false })];
-    const r = evaluateCsvSendReadiness({
-      lines,
-      geometryAcknowledged: true,
-      parseAcknowledged: true,
-    });
-    expect(r.canSend).toBe(false);
-    expect(r.hardBlocks.length).toBeGreaterThan(0);
-  });
 });
 
-describe("buildTrajectory refuses non-paintable", () => {
-  it("excludes non-paintable marks and warns", () => {
+describe("buildTrajectory paints what the operator ticked", () => {
+  it("includes every painted path, including one with a sharp corner, with no refusal warning", () => {
     const good = markLine("good");
-    const bad = markLine("bad", { paintable: false });
-    const { runs, warnings } = buildTrajectory([good, bad], {
+    const sharp = markLine("sharp", { legacyUnpaintable: true });
+    const { runs, warnings } = buildTrajectory([good, sharp], {
       markSpeedMs: 0.35,
       travelSpeedMs: 0.5,
     });
-    expect(runs.some((r) => r.kind === "mark")).toBe(true);
-    expect(runs.filter((r) => r.kind === "mark")).toHaveLength(1);
-    expect(warnings.some((w) => /non-paintable/i.test(w))).toBe(true);
-  });
-
-  it("returns no marks when only non-paintable paths are provided", () => {
-    const bad = markLine("bad", { paintable: false });
-    const { runs, warnings } = buildTrajectory([bad], {
-      markSpeedMs: 0.35,
-      travelSpeedMs: 0.5,
-    });
-    expect(runs).toHaveLength(0);
-    expect(warnings.some((w) => /non-paintable/i.test(w))).toBe(true);
+    expect(runs.filter((r) => r.kind === "mark")).toHaveLength(2);
+    expect(warnings.some((w) => /non-paintable|refused/i.test(w))).toBe(false);
   });
 });

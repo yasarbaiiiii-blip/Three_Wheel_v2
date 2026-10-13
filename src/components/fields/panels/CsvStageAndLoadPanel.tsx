@@ -163,8 +163,6 @@ export function CsvStageAndLoadPanel({
   const [startBlocked, setStartBlocked] = useState(false);
   /** buildTrajectory warnings from the last Send (refused/skipped paths, suppressed extensions). */
   const [trajectoryNotes, setTrajectoryNotes] = useState<string[]>([]);
-  /** Operator accepted remaining non-paintable painted paths (they are still refused in buildTrajectory). */
-  const [geometryAcknowledged, setGeometryAcknowledged] = useState(false);
   /** Operator confirmed critical parse-frame warnings. */
   const [parseAcknowledged, setParseAcknowledged] = useState(false);
 
@@ -201,7 +199,6 @@ export function CsvStageAndLoadPanel({
 
   // New file / geometry → re-require acknowledgement.
   useEffect(() => {
-    setGeometryAcknowledged(false);
     setParseAcknowledged(false);
   }, [
     localCsvPreview?.fileName,
@@ -217,7 +214,6 @@ export function CsvStageAndLoadPanel({
         lines,
         pathOrder: order,
         parseWarnings: combinedWarnings,
-        geometryAcknowledged,
         parseAcknowledged,
         requireGpsAnchor: true,
         hasGpsAnchor: resolvedOriginGps != null,
@@ -227,7 +223,6 @@ export function CsvStageAndLoadPanel({
       lines,
       order,
       combinedWarnings,
-      geometryAcknowledged,
       parseAcknowledged,
       resolvedOriginGps,
       isDxfLocal,
@@ -435,7 +430,6 @@ export function CsvStageAndLoadPanel({
           </Text>
           <TouchableOpacity
             onPress={() => {
-              if (readiness.needsGeometryAck) setGeometryAcknowledged(true);
               if (readiness.needsParseAck) setParseAcknowledged(true);
             }}
             style={{

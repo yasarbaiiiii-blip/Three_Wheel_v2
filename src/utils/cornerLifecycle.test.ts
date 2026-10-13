@@ -146,7 +146,7 @@ describe("cornerLifecycle", () => {
     expect(transit.entity?.geometry?.corners ?? []).toEqual([]);
   });
 
-  it("marks a hydrated line non-paintable when a recovered corner is a reversal", () => {
+  it("recovers a reversal corner onto a hydrated line without vetoing it", () => {
     const reversalSource = markLine(
       "file__path-2",
       [
@@ -169,8 +169,6 @@ describe("cornerLifecycle", () => {
       ]
     );
 
-    // Hydrated (post-stage) geometry has no `paintable` field of its own — the
-    // backend round trip never carries one.
     const hydrated: PlanLine = {
       ...markLine("rover-path-9", [
         { north: 20, east: 0 },
@@ -195,8 +193,8 @@ describe("cornerLifecycle", () => {
 
     const tagged = recoverCornersAfterHydration([hydrated], [reversalSource]);
     const line = tagged.find((l) => l.id === "rover-path-9")!;
-    expect(line.entity?.geometry?.paintable).toBe(false);
-    expect(getLineFitMeta(line).paintable).toBe(false);
+    expect(line.entity?.geometry?.paintable).toBeUndefined();
+    expect(getLineFitMeta(line).cornerCounts?.reversal).toBe(1);
   });
 
   it("leaves lines unmatched when far from catalog", () => {

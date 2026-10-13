@@ -8,7 +8,6 @@ import DraggableFlatList, { RenderItemParams, ScaleDecorator } from "react-nativ
 import { ArrowDownUp, GripVertical } from "lucide-react-native";
 
 import type { PlanLine } from "../../../types/plan";
-import { getLineFitMeta } from "../../../utils/csvGeometryReadiness";
 import {
   buildCsvExtensionPreviews,
   csvExtensionLengthM,
@@ -460,8 +459,6 @@ export function CsvPathOrderStep({
             }
 
             const paint = item.entry.paint !== false;
-            const fitMeta = getLineFitMeta(item.line);
-            const blocked = !fitMeta.paintable;
             const lengthM = getLineLengthM(item.line);
             const selected = selectedLineId === item.line.id;
 
@@ -479,9 +476,7 @@ export function CsvPathOrderStep({
                       ? FIELDS_COLORS.accentMuted
                       : selected
                         ? FIELDS_COLORS.accentMuted
-                        : blocked
-                          ? FIELDS_COLORS.dangerMuted
-                          : FIELDS_COLORS.surfaceSolid,
+                        : FIELDS_COLORS.surfaceSolid,
                     borderBottomWidth: 1,
                     borderBottomColor: FIELDS_COLORS.panelBorder,
                     borderLeftWidth: 3,
@@ -545,7 +540,7 @@ export function CsvPathOrderStep({
                       style={{
                         flex: 1,
                         minWidth: 0,
-                        color: blocked ? FIELDS_COLORS.danger : FIELDS_COLORS.textMain,
+                        color: FIELDS_COLORS.textMain,
                         fontSize: 13,
                         fontWeight: "600",
                       }}

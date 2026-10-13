@@ -280,12 +280,6 @@ export function tagLinesWithCorners(
       ...cornerNotes.filter((w) => !w.startsWith("Corners:")),
     ];
 
-    // Hydrated lines carry no `paintable` flag of their own (the backend round trip
-    // has no such field) — without this, a reversal corner recovered post-hydrate
-    // would show as drivable again the moment a mission is re-inspected after Send.
-    const hasReversal = unique.some((c) => c.class === "reversal");
-    const paintable = hasReversal ? false : (prevGeom.paintable as boolean | undefined) !== false;
-
     const entity = line.entity
       ? {
           ...line.entity,
@@ -293,7 +287,6 @@ export function tagLinesWithCorners(
             ...prevGeom,
             corners: cornersPayload,
             fit_warnings,
-            paintable,
           },
         }
       : {
@@ -306,7 +299,6 @@ export function tagLinesWithCorners(
           geometry: {
             corners: cornersPayload,
             fit_warnings,
-            paintable,
             road_marking: true,
           },
           preview_points: samples,

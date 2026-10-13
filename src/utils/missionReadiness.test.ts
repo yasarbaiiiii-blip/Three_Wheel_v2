@@ -65,38 +65,23 @@ describe("reversal corners block Send (cornerLifecycle executionMode='blocked' w
     },
   ];
 
-  it("getLineFitMeta treats a reversal-classified corner as non-paintable", () => {
-    const line = markLine("file__a", reversalCorner, /* geom paintable */ true);
+  it("getLineFitMeta still reports a reversal corner count (information only)", () => {
+    const line = markLine("file__a", reversalCorner, true);
     const meta = getLineFitMeta(line);
-    expect(meta.paintable).toBe(false);
     expect(meta.cornerCounts?.reversal).toBe(1);
   });
 
-  it("an ordinary tight corner (not reversal) stays paintable", () => {
-    const line = markLine("file__b", tightCorner, true);
-    expect(getLineFitMeta(line).paintable).toBe(true);
-  });
-
-  it("evaluateCsvSendReadiness blocks Send until the reversal is skipped or acknowledged", () => {
+  it("a path with a reversal corner is not vetoed: Send needs no acknowledgement for it", () => {
     const line = markLine("file__a", reversalCorner, true);
-    const blocked = evaluateCsvSendReadiness({ lines: [line] });
-    expect(blocked.canSend).toBe(false);
-    expect(blocked.needsGeometryAck).toBe(true);
-    expect(blocked.nonPaintablePainted).toHaveLength(1);
-
-    const acknowledged = evaluateCsvSendReadiness({
-      lines: [line],
-      geometryAcknowledged: true,
-    });
-    // Same policy as any other non-paintable painted path: ack unblocks Send,
-    // buildTrajectory still refuses the actual reversal geometry downstream.
-    expect(acknowledged.canSend).toBe(true);
+    const readiness = evaluateCsvSendReadiness({ lines: [line] });
+    expect(readiness.canSend).toBe(true);
+    expect(readiness.needsAck).toEqual([]);
+    expect(readiness.hardBlocks).toEqual([]);
   });
 
   it("a mission with only ordinary corners sends without acknowledgement", () => {
     const line = markLine("file__b", tightCorner, true);
     const readiness = evaluateCsvSendReadiness({ lines: [line] });
     expect(readiness.canSend).toBe(true);
-    expect(readiness.needsGeometryAck).toBe(false);
   });
 });

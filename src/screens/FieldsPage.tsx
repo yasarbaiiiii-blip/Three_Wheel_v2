@@ -26,6 +26,7 @@ import {
   shouldRenderAlignCard,
   type FieldsStepSlice,
 } from "../utils/fieldsStepSlicing";
+import { previewPendingWithExtensions } from "../utils/pendingDxfPreview";
 import {
   applyCsvOrderToPlanLines,
   defaultPathOrder,
@@ -503,18 +504,33 @@ export function FieldsPage(props: FieldsPageProps) {
   );
 
   /**
+   * Metric DXFs that are uploaded but still waiting for Fix Alignment are held out of the mission
+   * lines, yet the operator expects to see their extensions as soon as the file is up. With
+   * Extension on, each held-out file is previewed with its own PRE/AFT runs (in the file's own
+   * metres); they are recomputed in the aligned frame once Fix Alignment commits the file.
+   */
+  const pendingWithExtensions = useMemo(
+    () => previewPendingWithExtensions(pendingDxfAlignment, csvExtensionConfig),
+    [pendingDxfAlignment, csvExtensionConfig]
+  );
+
+  /**
    * How many PRE/AFT runs the current config actually produces, and — when that is zero —
-   * why. Extensions are geometry-gated: a shape that closes on itself has no open end to run
-   * off, so `buildCsvExtensionLines` correctly returns nothing. Without this the operator
-   * flips Enable Extension on a 2 × 2 square, sees no purple, and reads it as broken.
+   * why. Extensions need an open end to run off, so a shape that closes on itself correctly gets
+   * none; without this note the operator flips Extension on a 2 × 2 square, sees no purple, and
+   * reads it as broken. Held-out (unaligned) DXFs count too — what was uploaded is what counts.
    */
   const extensionStatus = useMemo(() => {
     if (!csvExtensionConfig.enabled) return null;
-    const marks = selectMarkPlanLines(lines);
+    const marks = selectMarkPlanLines(mergePendingDxfLines(lines, pendingDxfAlignment));
     if (marks.length === 0) {
-      return { count: 0, hint: "No paintable paths yet." };
+      return { count: 0, hint: "Upload a file to see its extensions." };
     }
-    const order = csvPathOrder ?? defaultPathOrder(marks);
+    const known = new Set((csvPathOrder ?? []).map((e) => e.lineId));
+    const order = [
+      ...(csvPathOrder ?? []),
+      ...defaultPathOrder(marks.filter((l) => !known.has(l.id))),
+    ];
     const painted = resolveOrderedPaintedLines(marks, order);
     const built = buildCsvExtensionLines(painted, csvExtensionConfig);
     if (built.length > 0) return { count: built.length, hint: null };
@@ -528,7 +544,7 @@ export function FieldsPage(props: FieldsPageProps) {
       count: 0,
       hint: "No free path ends — every endpoint continues straight into another path, so a run-up would only retrace it.",
     };
-  }, [lines, csvPathOrder, csvExtensionConfig]);
+  }, [lines, pendingDxfAlignment, csvPathOrder, csvExtensionConfig]);
 
   /** True when the section living in the top scroller (Upload / Templates / Align) is open. */
   const topSectionOpen =
@@ -755,8 +771,8 @@ export function FieldsPage(props: FieldsPageProps) {
 
   /** Map shows committed mission lines + every pending metric DXF (not only the selected file). */
   const mapDisplayLines = useMemo(
-    () => mergePendingDxfLines(missionVisibleLines ?? lines, pendingDxfAlignment),
-    [lines, missionVisibleLines, pendingDxfAlignment]
+    () => mergePendingDxfLines(missionVisibleLines ?? lines, pendingWithExtensions),
+    [lines, missionVisibleLines, pendingWithExtensions]
   );
 
   const mapDisplayWithoutEditingTemplate = useMemo(() => {

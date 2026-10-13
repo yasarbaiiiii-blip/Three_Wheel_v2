@@ -940,6 +940,16 @@ function groupSurveyRmsM(points: LocalPointCsvPoint[]): number | null {
 const GPS_STAMP_SNAP_M = 0.02;
 
 /**
+ * Fit messages that were verdicts on whether the path may be painted ("fix the survey or skip",
+ * "marked non-paintable", the 120° interior-turn validation). Whether to paint a path is the
+ * operator's choice (the paint tick in Path Order), so these are not attached to the path.
+ */
+const PAINT_VERDICT_WARNING =
+  /reversal corner — fix the survey|Waypoint path validation|Fallback validation failed|Path marked non-paintable/i;
+const withoutPaintVerdicts = (warnings: string[]) =>
+  warnings.filter((w) => !PAINT_VERDICT_WARNING.test(w));
+
+/**
  * Stamp WGS84 onto preview samples so Mapbox draws the stroke on the same
  * lat/lon as the CSV pins (no rover-origin / −2 m NED round-trip).
  * Source vertices reuse the CSV row's lat/lon; in-between samples invert via `anchor`.
@@ -1023,12 +1033,11 @@ function buildPlanLineForGroup(
           road_marking: true,
           vertexCount: fallback.length,
           fit_mode: "degenerate",
-          paintable: false,
-          fit_warnings: [
+          fit_warnings: withoutPaintVerdicts([
             "Path degenerated to raw vertices after cleanup.",
             ...fitted.warnings,
             ...extraWarnings,
-          ],
+          ]),
           /** Raw survey rows for this group — Anchor candidate points (see roadMarkingCsvPath.ts). */
           source_points: rawNed.map((p) => ({ north: p.north, east: p.east })),
         },
@@ -1064,8 +1073,7 @@ function buildPlanLineForGroup(
         vertexCount: preview_points.length,
         source_vertex_count: sourcePointCount,
         fit_mode: fitted.mode,
-        paintable: fitted.paintable,
-        fit_warnings: [...fitted.warnings, ...extraWarnings],
+        fit_warnings: withoutPaintVerdicts([...fitted.warnings, ...extraWarnings]),
         max_joint_turn_deg: fitted.quality.maxJointTurnDeg,
         length_ratio: fitted.quality.lengthRatio,
         max_source_deviation_m: fitted.quality.maxSourceDeviationM,

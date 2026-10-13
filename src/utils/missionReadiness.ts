@@ -1,9 +1,9 @@
 /**
  * Geometry / parse readiness for Path Order and Send-to-Rover.
  *
- * Contract: non-paintable painted paths must never reach the rover unless the
- * operator explicitly skips them or acknowledges the risk. Parse-frame warnings
- * that can place a mission in the wrong place also require acknowledgement.
+ * Which paths are painted is the operator's choice (the paint tick in Path Order); the app does
+ * not veto a path for its shape. Parse-frame warnings that can place a mission in the wrong
+ * place still require acknowledgement.
  *
  * Renamed from csvGeometryReadiness.ts (DXF_APP_PLANNED_TRAJECTORY_PLAN Phase 0).
  */
@@ -20,8 +20,6 @@ import { resolveOrderedPaintedLines, selectMarkPlanLines } from "./missionPathOr
 export type LineFitMeta = {
   lineId: string;
   label: string;
-  /** False when geometry layer marked the path undrivable / invalid. Undefined treated as true (legacy). */
-  paintable: boolean;
   warnings: string[];
   mode?: string;
   maxJointTurnDeg?: number;
@@ -34,18 +32,14 @@ export type LineFitMeta = {
 export type CsvSendReadiness = {
   /** True when Send may proceed without further acknowledgement. */
   canSend: boolean;
-  /** Hard blockers (cannot override without changing order/paint). Empty when only ack needed. */
+  /** Hard blockers (cannot be overridden). Empty when only ack needed. */
   hardBlocks: string[];
   /** Soft blockers cleared by operator acknowledgement. */
   needsAck: string[];
   /** Non-blocking notices (always show, never stop Send alone). */
   advisory: string[];
-  /** Painted mark paths with paintable === false. */
-  nonPaintablePainted: LineFitMeta[];
   /** All mark lines that carry fit warnings. */
   linesWithWarnings: LineFitMeta[];
-  /** Still need geometry risk acknowledgement. */
-  needsGeometryAck: boolean;
   /** Still need parse/frame acknowledgement. */
   needsParseAck: boolean;
   /** Critical parse warnings (for UI). */
@@ -67,27 +61,15 @@ export function getLineFitMeta(line: PlanLine): LineFitMeta {
     typeof geom?.max_joint_turn_deg === "number" && Number.isFinite(geom.max_joint_turn_deg)
       ? geom.max_joint_turn_deg
       : undefined;
-  // A reversal corner (150°+) is classified "blocked" execution mode (cornerLifecycle.ts)
-  // but that tag was never consulted anywhere — fold it into `paintable` here so it rides
-  // the same, already-tested Send-readiness / Path Order blocking every other non-paintable
-  // path already goes through, instead of needing a second parallel gate.
-  const hasReversal = cornerCounts.reversal > 0;
-  const paintable = geom?.paintable === false || hasReversal ? false : true;
   return {
     lineId: line.id,
     label: line.label || line.id,
-    paintable,
     warnings,
     mode,
     maxJointTurnDeg,
     cornerCounts: cornerCounts.total > 0 ? cornerCounts : undefined,
     cornersSummary,
   };
-}
-
-/** True when this line must not be painted without operator action. */
-export function isGeometryNonPaintable(line: PlanLine): boolean {
-  return line.entity?.geometry?.paintable === false;
 }
 
 /**
@@ -117,14 +99,12 @@ export function partitionParseWarnings(warnings: string[]): {
 /**
  * Evaluate whether the current CSV mission may be sent to the rover.
  *
- * @param geometryAcknowledged operator accepted non-paintable painted paths (risk override)
  * @param parseAcknowledged operator confirmed critical parse-frame warnings
  */
 export function evaluateCsvSendReadiness(opts: {
   lines: PlanLine[];
   pathOrder?: CsvPathOrderEntry[] | null;
   parseWarnings?: string[];
-  geometryAcknowledged?: boolean;
   parseAcknowledged?: boolean;
   /** When true (app planner), missing GPS anchor is a hard block. */
   requireGpsAnchor?: boolean;
@@ -144,13 +124,7 @@ export function evaluateCsvSendReadiness(opts: {
     markLines.map((l) => ({ lineId: l.id, label: l.label, paint: true as boolean }));
   const painted = resolveOrderedPaintedLines(markLines, order);
 
-  const linesWithWarnings = markLines
-    .map(getLineFitMeta)
-    .filter((m) => m.warnings.length > 0 || !m.paintable);
-
-  const nonPaintablePainted = painted
-    .map(getLineFitMeta)
-    .filter((m) => !m.paintable);
+  const linesWithWarnings = markLines.map(getLineFitMeta).filter((m) => m.warnings.length > 0);
 
   const hardBlocks: string[] = [];
   const advisory: string[] = [];
@@ -177,11 +151,10 @@ export function evaluateCsvSendReadiness(opts: {
     );
   }
 
-  // Advisory geometry warnings on painted paths that are still paintable
+  // Advisory geometry notes on painted paths
   // (includes corner summary strings from the fitter / post-hydrate recovery).
   for (const line of painted) {
     const m = getLineFitMeta(line);
-    if (!m.paintable) continue;
     for (const w of m.warnings) {
       advisory.push(`${m.label}: ${w}`);
     }
@@ -203,46 +176,22 @@ export function evaluateCsvSendReadiness(opts: {
   const parse = partitionParseWarnings(opts.parseWarnings ?? []);
   for (const w of parse.advisory) advisory.push(w);
 
-  const geoAck = opts.geometryAcknowledged === true;
   const parseAck = opts.parseAcknowledged === true;
 
-  const needsGeometryAck = nonPaintablePainted.length > 0 && !geoAck;
   const needsParseAck = parse.critical.length > 0 && !parseAck;
 
-  const pendingGeo = needsGeometryAck
-    ? nonPaintablePainted.map(
-        (m) =>
-          `Non-paintable path still painted: "${m.label}". Skip it above, or acknowledge the risk.`
-      )
-    : [];
   const pendingParse = needsParseAck
     ? parse.critical.map((w) => `Parse warning needs confirmation: ${w}`)
     : [];
 
-  // Policy: acknowledgement means "I reviewed this; Send may proceed with paintable paths only
-  // (non-paintable painted paths are still refused by buildTrajectory)".
-  const effectiveHard = [...hardBlocks];
-  const hasPaintablePainted = painted.some((l) => !isGeometryNonPaintable(l));
-  if (painted.length > 0 && !hasPaintablePainted && (geoAck || nonPaintablePainted.length === 0)) {
-    effectiveHard.push(
-      "All painted paths are non-paintable. Skip them or fix the CSV — nothing left to send."
-    );
-  }
-
-  const canSend =
-    effectiveHard.length === 0 &&
-    !needsGeometryAck &&
-    !needsParseAck &&
-    hasPaintablePainted;
+  const canSend = hardBlocks.length === 0 && !needsParseAck && painted.length > 0;
 
   return {
     canSend,
-    hardBlocks: effectiveHard,
-    needsAck: [...pendingGeo, ...pendingParse],
+    hardBlocks,
+    needsAck: pendingParse,
     advisory: dedupeStrings(advisory).slice(0, 40),
-    nonPaintablePainted,
     linesWithWarnings,
-    needsGeometryAck,
     needsParseAck,
     criticalParseWarnings: parse.critical,
   };
