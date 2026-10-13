@@ -172,6 +172,18 @@ export function useRoverEvents(): RoverEventsState {
   return useSyncExternalStore(subscribeRoverEvents, getRoverEventsState, getRoverEventsState);
 }
 
+/**
+ * One derived value from the event state. The component re-renders only when that value changes
+ * (compared with Object.is), not on every event — return a primitive (boolean, number, string).
+ * Use this in large screens; `useRoverEvents` re-renders its component on every event.
+ */
+export function useRoverEventsValue<T extends string | number | boolean | null>(
+  select: (s: RoverEventsState) => T
+): T {
+  const get = () => select(getRoverEventsState());
+  return useSyncExternalStore(subscribeRoverEvents, get, get);
+}
+
 // ---- selectors (pure: take a state, so tests and components share them) --------------------
 
 export type GatewayLinkView =

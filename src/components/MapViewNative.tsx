@@ -107,6 +107,7 @@ import { getLineLengthM, formatFinite } from "../utils/pathWorkflow";
 import { getPlanStartPoint, isPrimaryEditableLine } from "../utils/planGeometry";
 import { MAPBOX_STYLE_URL } from "../config/mapbox";
 import { useTelemetrySnapshot } from "../features/telemetry/telemetryStore";
+import { warnThrottled } from "../utils/throttledLog";
 import { resolveRoverMarker, type RoverFix } from "../utils/roverFixHold";
 import { registerMapHandle, type MapHandle } from "./sharedMap/sharedMapStore";
 import type { MapViewProps } from "./mapViewTypes";
@@ -501,7 +502,7 @@ export function MapViewNative(props: MapViewProps) {
       const zoom = state?.properties?.zoom;
       if (typeof zoom === "number" && Number.isFinite(zoom)) cameraZoomRef.current = zoom;
     } catch (err) {
-      console.warn("[MapViewNative] onCameraChanged ignored:", err);
+      warnThrottled("map-camera-changed", 10_000, "[MapViewNative] onCameraChanged ignored:", err);
     }
   }, []);
   const safeSetCamera = useCallback((opts: Record<string, unknown>) => {

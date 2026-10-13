@@ -15,6 +15,7 @@
  */
 
 import { io, type Socket } from "socket.io-client";
+import { warnThrottled } from "../utils/throttledLog";
 import { AppState, type NativeEventSubscription } from "react-native";
 import { ROVER_EVENT, type TelemetryPacket } from "../contract/prod/realtime";
 import { ingestTelemetryPacket, setProdSocketConnected, invalidateTelemetrySession } from "../features/telemetry/prodTelemetryStore";
@@ -163,13 +164,13 @@ export class ProdSocketManager {
             const data: TelemetryPacket = typeof packet === "string" ? JSON.parse(packet) : packet;
             ingestTelemetryPacket(data, { source: "socket" });
           } catch (e) {
-            console.warn("[ProdSocket] Error parsing telemetry event:", e);
+            warnThrottled("socket-telemetry-parse", 10_000, "[ProdSocket] Error parsing telemetry event:", e);
           }
         });
 
         this.socket.on(ROVER_EVENT, (packet: unknown) => {
           const result = ingestRoverEvent(packet);
-          if (result === "invalid") console.warn("[ProdSocket] Ignored a malformed rover_event:", packet);
+          if (result === "invalid") warnThrottled("socket-rover-event", 10_000, "[ProdSocket] Ignored a malformed rover_event:", packet);
         });
       } catch (err) {
         this.setStatus("error", err instanceof Error ? err.message : String(err));

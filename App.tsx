@@ -135,7 +135,8 @@ import { getAppTransport } from "./src/services/appTransport";
 import { roverBeaconListener, type BeaconRover } from "./src/services/roverBeacon";
 import { loadLastRoverId } from "./src/api/prodStorage";
 import { MissionStateEnum } from "./src/contract/prod/realtime";
-import { getRoverEventsState, selectEstop, useRoverEvents } from "./src/features/telemetry/roverEventStore";
+import { getRoverEventsState, selectEstop, useRoverEventsValue } from "./src/features/telemetry/roverEventStore";
+import { rootTelemetryEqual } from "./src/features/telemetry/rootTelemetry";
 import { missionControls, missionIsActive, selectMission } from "./src/features/mission/missionLifecycle";
 import { beginStartTap } from "./src/features/mission/startTap";
 import {
@@ -160,7 +161,7 @@ import type {
   SystemHealth,
   ToastTone,
 } from "./src/types/appRuntime";
-import { EMPTY_RTK_STATUS, normalizeRtkStatus } from "./src/api/rtkStatus";
+import { EMPTY_RTK_STATUS, hasLiveCorrections, normalizeRtkStatus } from "./src/api/rtkStatus";
 const SwoziPage = lazyDefault(
   () => import("./src/screens/SecondaryPages").then((m) => ({ default: m.SwoziPage })),
   "SwoziPage"
@@ -279,16 +280,7 @@ const SUBNET_HOST_MAX = 254;
 // The HTTP sweep is only the fallback when no beacon is heard; keep it short so it never stalls the UI.
 const SUBNET_SCAN_CONCURRENCY = 64;
 const DEFAULT_ROVER_BACKEND = "";
-function rootTelemetryKey(s: TelemetrySnapshot | null): string {
-  if (!s) return "none";
-  const fix = Number.isFinite(s.lat) && Number.isFinite(s.lon);
-  const n = s.pos_n == null ? "x" : String(Math.round((s.pos_n as number) * 2));
-  const e = s.pos_e == null ? "x" : String(Math.round((s.pos_e as number) * 2));
-  return `${s.mission_state ?? ""}|${fix}|${n}|${e}`;
-}
 const selectRootTelemetry = (s: TelemetrySnapshot | null) => s;
-const rootTelemetryEqual = (a: TelemetrySnapshot | null, b: TelemetrySnapshot | null) =>
-  rootTelemetryKey(a) === rootTelemetryKey(b);
 
 export default function App() {
   // Outer boundary: a render crash in any screen must not force-kill the APK.
@@ -892,13 +884,14 @@ function AppRoot() {
   const [missionPanelOpenToken, setMissionPanelOpenToken] = useState(0);
   // Mission status comes from `mission_state` rover events only: never from a command's answer
   // and never from a poll. Unknown (gateway down, no socket, stale) is not "idle".
-  const roverEvents = useRoverEvents();
-  const missionView = useMemo(() => selectMission(roverEvents), [roverEvents]);
-  const missionViewRef = useRef(missionView);
-  missionViewRef.current = missionView;
+  // App renders the whole UI tree, so it follows only the two booleans it needs. Subscribing to the
+  // full event state re-rendered everything on every mission progress event, link blip and replay.
   /** An execution holds the vehicle: LOADING ... RUNNING ... PAUSED. */
-  const missionRunning = missionIsActive(missionView);
-  const isPaused = missionView.known && missionView.run.state === MissionStateEnum.PAUSED;
+  const missionRunning = useRoverEventsValue((s) => missionIsActive(selectMission(s)));
+  const isPaused = useRoverEventsValue((s) => {
+    const view = selectMission(s);
+    return view.known && view.run.state === MissionStateEnum.PAUSED;
+  });
   const [toast, setToast] = useState<AppToast | null>(null);
   const [rtkConnecting, setRtkConnecting] = useState(false);
   const [rtkStatus, setRtkStatus] = useState<RTKStatus>(EMPTY_RTK_STATUS);
@@ -2733,7 +2726,7 @@ function AppRoot() {
 
     // The buttons are enabled from the lifecycle; the same rule is checked here so a start is
     // only sent when the rover reports no active execution and a mission is stored.
-    const controls = missionControls(missionViewRef.current, {
+    const controls = missionControls(selectMission(getRoverEventsState()), {
       busy: false,
       hasMission: Boolean(stagedMissionId) && stagedWorkflow.staged === "verified",
     });
@@ -3069,7 +3062,8 @@ function AppRoot() {
             last_error: typeof ntrip.last_error === "string" && ntrip.last_error ? ntrip.last_error : null,
           }
         : { ...EMPTY_RTK_STATUS, source_state: snap ? "unavailable" : "idle" };
-      const key = `${next.mode}|${next.running}|${next.healthy}|${next.source_state}|${next.last_error}|${Math.round((next.last_frame_age_s ?? -1) * 2)}`;
+      // The chip shows corrections live / not live, not their age: key on that, not on a ticking age.
+      const key = `${next.mode}|${next.running}|${next.healthy}|${next.source_state}|${next.last_error}|${hasLiveCorrections(next)}`;
       if (key === lastKey) return; // re-render only when what the chip shows changes
       lastKey = key;
       setRtkStatus((current) => ({ ...next, active_profile_id: current.active_profile_id, active_profile_revision: current.active_profile_revision }));

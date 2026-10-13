@@ -385,11 +385,13 @@ describe("mark cap", () => {
     expect(CHAIN_OPTIMIZE_MAX_MARKS).toBe(80);
   });
 
+  // Runs the optimizer at its full 80-mark cap: ~2 s alone, but CPU-bound, so it needs headroom when
+  // the whole suite runs in parallel on a loaded machine.
   it("improves at the cap", () => {
     const lines = withFiller(CHAIN_OPTIMIZE_MAX_MARKS);
     const greedy = evaluateMarkOrder(baselineGreedy(lines)).totalM;
     expect(evaluateMarkOrder(chainMarkLinesByGeometry(lines)).totalM).toBeLessThan(greedy - 0.1);
-  });
+  }, 30_000);
 
   it("returns the plain greedy result one mark above the cap", () => {
     const lines = withFiller(CHAIN_OPTIMIZE_MAX_MARKS + 1);

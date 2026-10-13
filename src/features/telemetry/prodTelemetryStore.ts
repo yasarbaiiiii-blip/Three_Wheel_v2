@@ -12,6 +12,7 @@
  */
 
 import { px4LocalToGps } from "../../utils/geoProjection";
+import { warnThrottled } from "../../utils/throttledLog";
 import { useSyncExternalStore } from "react";
 import type {
   RoverTelemetrySnapshot,
@@ -151,7 +152,9 @@ export function ingestTelemetryPacket(packet: TelemetryPacket, options: {source:
   const snapshot = packet?.snapshot ?? null;
   const schema = snapshot?.gateway?.schema;
   const schemaCompatible = schema === 1;
-  if (snapshot && !schemaCompatible) console.warn("[Telemetry] gateway schema mismatch: expected numeric schema 1; Start disabled", schema);
+  if (snapshot && !schemaCompatible) {
+    warnThrottled("telemetry-schema", 30_000, "[Telemetry] gateway schema mismatch: expected numeric schema 1; Start disabled", schema);
+  }
   const age = finiteOrNull(packet?.age_s);
   state = { ...state, snapshot, lastReceivedAt: now, envelopeAgeMs: age !== null && age >= 0 ? age * 1000 : Infinity,
     source: options.source, schemaCompatible, awaitingPacket: false,
