@@ -1,9 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator,
-  Dimensions,
   PanResponder,
-  Platform,
   Pressable,
   Text,
   View,
@@ -12,7 +9,7 @@ import Svg, { Circle, G, Line, Path, Polygon, Text as SvgText } from "react-nati
 import { Tractor } from "lucide-react-native";
 
 import type { PlanLine, LayerVisibility } from "../types/plan";
-import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
+import type { MapGeometryFrame } from "../types/mapGeometry";
 import type { MultiPointPlacementPhase } from "../types/fieldsWorkflow";
 import type { PlacedItem } from "./BoundaryEditor";
 import type { AnchorCandidatePoint } from "./mapViewTypes";
@@ -24,68 +21,45 @@ import {
   getPlanLineRenderPoints,
   getPreviewCircleElements,
   isCircleLikeLine,
-  isCurveEntity,
   isSegmentKindVisible,
-  normalizePlanLinesForCurves,
-  computePlanBoundingBoxLegacy,
-  buildPlanLineSvgPath,
 } from "../utils/curveGeometry";
 import {
   coerceFiniteNumber,
   formatFinite,
   getLineLengthM,
-  isPrimaryEditableLine,
   sanitizePlanLines,
 } from "../utils/pathWorkflow";
 import { projectGpsToLocalMeters } from "../utils/geoProjection";
 import { getPlanStartPoint } from "../utils/planStartPoint";
 import {
-  PREVIEW_ARROWHEAD_HALF_WIDTH_PX,
-  PREVIEW_ARROWHEAD_LENGTH_PX,
   PREVIEW_RENDERED_LAYERS,
   MAX_PREVIEW_CORNERS,
-  PATH_SEGMENT_CHUNK_SIZE,
   type PreviewRenderedLayer,
   type PreviewViewport,
-  type LocalPoint,
   buildPreviewArrowheadPoints,
   buildSvgPathChunks,
   buildSvgPathForLine,
-  clamp,
   computeAutoFitViewport,
-  computePlanBounds,
-  distancePointToSegment,
   getCornerPoints,
-  getLineAnchorPoint,
   getPreviewArrowSegment,
   getPreviewRenderedLayer,
-  isFiniteNumber,
-  isRenderableLine,
-  mapPreviewPointToScreen,
   normalizeDegrees,
   pickNearestLineId,
   pickNearestPoint,
   rotatePoint,
   shortestAngleDelta,
-  toScreenPoint,
-  touchAngle,
-  touchDistance,
 } from "../utils/planPreviewGeometry";
 
 export function PlanPreview({
   lines,
   ghostLines = null,
-  mapSourceLines,
-  autoOriginReference = null,
   mapGeometryFrame = "NONE",
-  autoOriginEnabled = false,
   geoOrigin = null,
   stagedVerified = false,
   visibility,
   selectedLineId,
   onSelectLine,
   highlightLineIds = null,
-  originShiftKey = null,
   roverPosN,
   roverPosE,
   roverHeadingDeg,
@@ -138,10 +112,7 @@ export function PlanPreview({
 }: {
   lines: PlanLine[];
   ghostLines?: PlanLine[] | null;
-  mapSourceLines?: PlanLine[];
-  autoOriginReference?: AutoOriginReference | null;
   mapGeometryFrame?: MapGeometryFrame;
-  autoOriginEnabled?: boolean;
   geoOrigin?: [number, number] | null;
   stagedVerified?: boolean;
   visibility: LayerVisibility;
@@ -152,7 +123,6 @@ export function PlanPreview({
    * Pre/Aft group). When null/empty, only `selectedLineId` is highlighted.
    */
   highlightLineIds?: string[] | null;
-  originShiftKey?: string | null;
   roverPosN?: number | null;
   roverPosE?: number | null;
   roverHeadingDeg?: number | null;
@@ -262,16 +232,6 @@ export function PlanPreview({
 
   const filtered = useMemo(() => applyLayerVisibility(lines), [lines, applyLayerVisibility]);
 
-  // The Mapbox <MapView> below uses raw `mapSourceLines` instead of `filtered`
-  // whenever autoOriginEnabled (it needs pre-origin-shift coordinates for its own
-  // GPS georeferencing) — that swap must not also bypass layer-visibility
-  // filtering, or unchecking a Layers toggle (e.g. Extension) has no effect
-  // whenever auto-origin is active, which is the common connected-rover case.
-  const filteredMapSourceLines = useMemo(
-    () => applyLayerVisibility(mapSourceLines ?? []),
-    [mapSourceLines, applyLayerVisibility]
-  );
-
   /**
    * Static geometry the map draws underneath an active sticker.
    *
@@ -288,18 +248,10 @@ export function PlanPreview({
   }, [isPlacedItemActive, visualAlignmentItem]);
 
   const staticMapLines = useMemo(() => {
-    const base = autoOriginEnabled && mapSourceLines ? filteredMapSourceLines : filtered;
-    if (!isPlacedItemActive) return base;
+    if (!isPlacedItemActive) return filtered;
     if (!placedItemLineIds) return [];
-    return base.filter((l) => !placedItemLineIds.has(l.id));
-  }, [
-    autoOriginEnabled,
-    mapSourceLines,
-    filteredMapSourceLines,
-    filtered,
-    isPlacedItemActive,
-    placedItemLineIds,
-  ]);
+    return filtered.filter((l) => !placedItemLineIds.has(l.id));
+  }, [filtered, isPlacedItemActive, placedItemLineIds]);
 
   const filteredPlanSignature = useMemo(() => {
     const len = filtered.length;
@@ -376,10 +328,6 @@ export function PlanPreview({
     });
   }, [filtered]);
 
-  const primarySequenceLines = useMemo(
-    () => filtered.filter(isPrimaryEditableLine),
-    [filtered]
-  );
   // Deliberately derived from the UNFILTERED `lines` prop (not `filtered`) so a clicked
   // Transit/Extension row from the Fields "Path Order & Load" list still highlights on
   // demand even while that layer's ambient visibility is off (e.g. transit is force-hidden
@@ -574,26 +522,6 @@ export function PlanPreview({
     rotationRef.current = rotation;
   }, [rotation]);
 
-  const gestureRef = React.useRef<{
-    lastTouch: LocalPoint | null;
-    startTouch: LocalPoint | null;
-    pinchDistance: number | null;
-    pinchAngle: number | null;
-    pinchViewport: PreviewViewport | null;
-    pinchRotation: number;
-    isTap: boolean;
-    lastFocal: LocalPoint | null;
-  }>({
-    lastTouch: null,
-    startTouch: null,
-    pinchDistance: null,
-    pinchAngle: null,
-    pinchViewport: null,
-    pinchRotation: 0,
-    isTap: false,
-    lastFocal: null,
-  });
-
   useEffect(() => {
     linesRef.current = filtered;
   }, [filtered]);
@@ -653,10 +581,10 @@ export function PlanPreview({
     viewportRef.current = viewport;
   }, [viewport]);
 
-  // Reset manual pan state when plan or origin alignment changes
+  // Reset manual pan state when the plan changes
   useEffect(() => {
     userPannedRef.current = false;
-  }, [filteredPlanSignature, originShiftKey]);
+  }, [filteredPlanSignature]);
 
   // Auto-fit when plan lines change (only triggers when plan or layout changes)
   useEffect(() => {
@@ -677,7 +605,7 @@ export function PlanPreview({
     viewportRef.current = fitted;
     setViewport(fitted);
     setRotation(0);
-  }, [filteredPlanSignature, originShiftKey, hasRover, roverE, roverN, layoutSize.width, layoutSize.height]);
+  }, [filteredPlanSignature, hasRover, roverE, roverN, layoutSize.width, layoutSize.height]);
 
   // Re-fit whenever the selected alignment ref points GROW (a tap-add or a bulk CSV
   // import) — CSV-imported points in particular may sit outside the plan's own line
@@ -1073,9 +1001,7 @@ export function PlanPreview({
             anchorCandidates={anchorCandidates}
             onAnchorCandidateSelect={onAnchorCandidateSelect}
             alignedRefPoints={alignedRefPoints}
-            autoOriginReference={autoOriginReference}
             mapGeometryFrame={mapGeometryFrame}
-            autoOriginEnabled={autoOriginEnabled}
             geoOrigin={geoOrigin}
             stagedVerified={stagedVerified}
             visualAlignmentAnchor={visualAlignmentAnchor}

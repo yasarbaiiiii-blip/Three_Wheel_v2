@@ -1,7 +1,5 @@
 import type { RTKBackendMode, RTKSourceState, RTKStatus } from "../types/appRuntime";
 
-export const RTK_STATUS_TIMEOUT_MS = 5000;
-
 export const EMPTY_RTK_STATUS: RTKStatus = {
   mode: "idle",
   desired_mode: "idle",

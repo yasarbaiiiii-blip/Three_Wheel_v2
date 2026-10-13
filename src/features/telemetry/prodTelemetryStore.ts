@@ -261,11 +261,6 @@ export function clearProdTelemetry() {
   emit();
 }
 
-/** Hook to consume production telemetry with automatic staleness updates */
-export function useProdTelemetry() {
-  return useSyncExternalStore(subscribeProdTelemetry, getProdTelemetryState, getProdTelemetryState);
-}
-
 /** Evaluates overall telemetry freshness */
 export function getOverallStaleness(now = telemetryNow()): StalenessInfo {
   return evaluateAgeStaleness(state.awaitingPacket || !state.snapshot ? Infinity : packetAgeMs(now));
@@ -283,47 +278,6 @@ export interface DerivedVehiclePose {
   navState: number | null;
   failsafe: boolean;
   staleness: StalenessInfo;
-}
-
-export function getDerivedVehiclePose(now = telemetryNow()): DerivedVehiclePose {
-  const vs = state.snapshot?.vehicle_state;
-  if (!vs || !vs.data) {
-    return {
-      northM: null,
-      eastM: null,
-      downM: null,
-      headingDeg: null,
-      yawRateDegps: null,
-      speedMps: null,
-      armingState: null,
-      navState: null,
-      failsafe: false,
-      staleness: evaluateAgeStaleness(Infinity),
-    };
-  }
-
-  const d = usableData(vs, now);
-  const adapted = getAdaptedTelemetrySnapshot(now);
-  const speed = adapted?.speed_m_s ?? null;
-  const headingDeg = adapted?.heading_ned_deg ?? null;
-  const rate = d?.attitude_valid === true ? finiteOrNull(d.yaw_rate_radps) : null;
-  const yawRateDegps = rate === null ? null : finiteOrNull(radToDeg(rate));
-
-  // Use subsystem receive stamp if available, or fall back to snapshot stamp
-  const staleness = evaluateAgeStaleness(getTelemetrySourceAgeMs(vs, now) ?? Infinity);
-
-  return {
-    northM: adapted?.pos_n ?? null,
-    eastM: adapted?.pos_e ?? null,
-    downM: d?.position_valid === true ? finiteOrNull(d.down_m) : null,
-    headingDeg,
-    yawRateDegps,
-    speedMps: speed,
-    armingState: d?.arming_state ?? null,
-    navState: d?.nav_state ?? null,
-    failsafe: d?.failsafe ?? false,
-    staleness,
-  };
 }
 
 /** Lower-case mission state from `mission_state` events; null while unknown (never a stale value). */

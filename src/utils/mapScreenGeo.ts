@@ -19,7 +19,7 @@
  */
 import type { MapView } from "@rnmapbox/maps";
 
-import { fromMapboxCoord, toMapboxCoord } from "./mapboxCoords";
+import { fromMapboxCoord } from "./mapboxCoords";
 import { projectGpsToLocalMeters } from "./geoProjection";
 
 // ─────────────────────────────────────────────────────────────────
@@ -59,26 +59,6 @@ export async function screenToGeo(
 // ─────────────────────────────────────────────────────────────────
 // geo → screen
 // ─────────────────────────────────────────────────────────────────
-
-/**
- * Convert a geographic coordinate to a screen pixel position.
- *
- * @param mapRef - ref to the Mapbox MapView instance
- * @param geo - { lat, lon } in degrees
- * @returns { x, y } in pixels, or null on failure
- */
-export async function geoToScreen(
-  mapRef: MapView,
-  geo: GeoPoint
-): Promise<ScreenPoint | null> {
-  try {
-    // getPointInView accepts [lon, lat] and returns [x, y]
-    const result = await mapRef.getPointInView(toMapboxCoord(geo.lat, geo.lon));
-    return { x: result[0], y: result[1] };
-  } catch {
-    return null;
-  }
-}
 
 // ─────────────────────────────────────────────────────────────────
 // metersPerPixel (for synchronous hot-path use)

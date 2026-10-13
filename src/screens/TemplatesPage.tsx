@@ -1,6 +1,5 @@
 import React, { useCallback, useMemo, useState, useEffect, useRef } from "react";
-import { Alert, Modal, Pressable, ScrollView, Switch, Text, TextInput, View } from "react-native";
-import { X } from "lucide-react-native";
+import { Alert, Pressable, ScrollView, Switch, Text, TextInput, View } from "react-native";
 import Slider from "@react-native-community/slider";
 
 import { MapView } from "../components/MapView";
@@ -10,10 +9,9 @@ import { generateRoadSignLines, RoadSignType, ROAD_SIGN_LABELS } from "../utils/
 import { generateTemplateLines, ShapeType, ArcType } from "../utils/shapeTemplates";
 import { linesToDxf } from "../utils/dxfGenerator";
 import { parseLocalDxf, type LocalDxfResult } from "../utils/dxfLocalImport";
-import { DesignDocument, DesignNode, isDesignInstance, isDesignEntity, createDesignDocument, createDesignInstance, createDesignEntity, createDesignVertex, DesignPreviewAnchor } from "../types/designDocument";
+import { DesignDocument, isDesignInstance, isDesignEntity, createDesignDocument, createDesignInstance, createDesignEntity, DesignPreviewAnchor } from "../types/designDocument";
 import { TemplateRegistry, createTemplateDefinition, snapshotTemplateId } from "../utils/designTemplateRegistry";
 import { flattenDesignDocument, flattenDesignNode } from "../utils/designTransform";
-import { migratePlacedItemsToDesignDocument, verifyMigrationParity } from "../utils/designMigration";
 import { applyDesignCommand } from "../utils/designHistory";
 import type { PlanLine, LayerVisibility, Page, TelemetrySnapshot, DxfEntity } from "../types/plan";
 export type BoundarySide = 'top' | 'right' | 'bottom' | 'left';
@@ -48,12 +46,6 @@ interface TemplatesPageProps {
     roverHeadingDeg?: number | null;
   }) => React.ReactNode;
   mapViewEnabled?: boolean;
-}
-
-interface WordGroup {
-  id: string;
-  label: string;
-  itemIds: string[];
 }
 
 export function TemplatesPage(props: TemplatesPageProps) {
@@ -278,8 +270,6 @@ export function TemplatesPage(props: TemplatesPageProps) {
   const [lineLengthStr, setLineLengthStr] = useState("0.0");
   const [lineAngleStr, setLineAngleStr] = useState("0.0");
   
-  const [wordGroups, setWordGroups] = useState<WordGroup[]>([]);
-  const [arrangeMode, setArrangeMode] = useState<"none" | "horizontal" | "vertical">("none");
   const [multiTouchMode, setMultiTouchMode] = useState<"both" | "scale" | "rotate">("both");
   const [lockPanDrag, setLockPanDrag] = useState(false);
   const [lockZoom, setLockZoom] = useState(false);

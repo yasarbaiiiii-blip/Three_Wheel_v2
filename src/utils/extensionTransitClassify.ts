@@ -6,7 +6,7 @@
  * and match segment endpoints so Path Order never lists extension under Transit.
  */
 
-import type { DxfPoint, PlanLine, PlanSegmentRole } from "../types/plan";
+import type { DxfPoint, PlanLine } from "../types/plan";
 import { coerceFiniteNumber } from "./pathWorkflow";
 
 export type ExtensionSegmentRole = "pre" | "aft";
@@ -143,11 +143,6 @@ export function matchNonSprayToExtensionRole(
     if (reverse) return leg.role;
   }
   return null;
-}
-
-export function toPlanSegmentRole(role: ExtensionSegmentRole | null | undefined): PlanSegmentRole {
-  if (role === "pre" || role === "aft") return role;
-  return "none";
 }
 
 export type RuntimeTransitOverlayResult = {

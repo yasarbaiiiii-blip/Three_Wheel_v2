@@ -103,39 +103,12 @@ export function setTelemetrySnapshot(
   emit(telemetryListeners);
 }
 
-export function setSystemHealth(
-  next: SystemHealth | null | ((prev: SystemHealth | null) => SystemHealth | null)
-) {
-  const value = typeof next === "function" ? next(systemHealth) : next;
-  if (value === systemHealth) return;
-  systemHealth = value;
-  emit(healthListeners);
-}
-
 /**
  * Legacy prototype telemetry ingestion is disabled.
  * The production rover telemetry store is the sole authority.
  */
 export function applyTelemetryPacket(_data: TelemetrySnapshot) {
   // Ignored in production: telemetry exclusively sourced from ProdTelemetryStore
-}
-
-export function patchTelemetryMissionState(state: string) {
-  setTelemetrySnapshot((prev) => {
-    if (prev && prev.mission_state === state) return prev;
-    return prev ? { ...prev, mission_state: state } : ({ mission_state: state } as TelemetrySnapshot);
-  });
-  setSystemHealth((prev) => {
-    if (prev?.mission_state === state) return prev;
-    return {
-      ros_node: prev?.ros_node ?? true,
-      fcu_connected: prev?.fcu_connected ?? false,
-      armed: prev?.armed ?? false,
-      mode: prev?.mode ?? "UNKNOWN",
-      rpp_state: prev?.rpp_state ?? null,
-      mission_state: state,
-    };
-  });
 }
 
 export function clearTelemetryRuntime() {

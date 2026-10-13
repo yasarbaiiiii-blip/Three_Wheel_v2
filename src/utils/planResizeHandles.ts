@@ -517,14 +517,6 @@ export function rotateAboutDesignCenter(
   };
 }
 
-/** World angle (deg, atan2 east/north) from design centre to a world point. */
-export function angleFromDesignCenterDeg(pose: PlanStickerPose, world: WorldPoint): number {
-  const cN = Number.isFinite(pose.designCenterNorth) ? (pose.designCenterNorth as number) : 0;
-  const cE = Number.isFinite(pose.designCenterEast) ? (pose.designCenterEast as number) : 0;
-  const center = designOffsetToWorld(cN, cE, pose);
-  return (Math.atan2(world.east - center.east, world.north - center.north) * 180) / Math.PI;
-}
-
 /**
  * Rotate-affordance points just outside each corner (idle-selected only).
  * `outset` is a fraction of half-diagonal past the corner (e.g. 0.22).

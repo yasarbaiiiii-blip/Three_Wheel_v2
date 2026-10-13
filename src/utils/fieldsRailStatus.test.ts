@@ -15,7 +15,6 @@ const empty = {
   templatesVisible: false,
   pathOrderReady: false,
   missionSent: false,
-  autoOrigin: false,
   hasGpsOrigin: false,
 };
 
@@ -95,15 +94,6 @@ describe("deriveFieldsRailStatus", () => {
     expect(s.origin).toBe("gps");
   });
 
-  it("Auto Origin wins only when there is no GPS origin", () => {
-    expect(
-      deriveFieldsRailStatus({ ...empty, autoOrigin: true }).origin
-    ).toBe("auto");
-    expect(
-      deriveFieldsRailStatus({ ...empty, autoOrigin: true, hasGpsOrigin: true }).origin
-    ).toBe("gps");
-  });
-
   it("trims blank file names and floors fileCount", () => {
     const s = deriveFieldsRailStatus({
       ...empty,
@@ -118,7 +108,6 @@ describe("deriveFieldsRailStatus", () => {
 describe("chip labels", () => {
   it("renders origin and ready copy", () => {
     expect(originChipLabel("gps")).toBe("Origin GPS");
-    expect(originChipLabel("auto")).toBe("Origin Auto");
     expect(originChipLabel("unanchored")).toBe("Origin unanchored");
     expect(readyChipLabel(1, 4)).toBe("1 of 4 ready");
     expect(readyChipLabel(4, 4)).toBe("4 of 4 ready");

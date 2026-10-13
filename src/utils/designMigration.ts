@@ -9,10 +9,6 @@
 import type { PlacedItem } from '../components/BoundaryEditor';
 import {
   DesignDocument,
-  DesignNode,
-  DesignEntity,
-  DesignInstance,
-  DesignVertex,
   createDesignDocument,
   createDesignVertex,
   createDesignInstance,
@@ -24,8 +20,7 @@ import {
   snapshotTemplateId,
 } from './designTemplateRegistry';
 import { flattenDesignDocument } from './designTransform';
-import { validateDesignDocument } from './designValidation';
-import type { PlanLine, PlanPoint } from '../types/plan';
+import type { PlanLine } from '../types/plan';
 
 export interface MigrationWarning {
   code: 'LEGACY_AMBIGUOUS_SCALE';

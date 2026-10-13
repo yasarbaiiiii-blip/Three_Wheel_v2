@@ -125,7 +125,7 @@ export interface LayerVisibility {
   segmentTypes?: Record<string, boolean>;
 }
 
-export type Page = "connection" | "home" | "fields" | "templates" | "swozi" | "status" | "positioning" | "settings" | "howto" | "about" | "debug";
+export type Page = "connection" | "home" | "fields" | "templates" | "swozi" | "status" | "positioning" | "settings" | "howto" | "about";
 
 export interface TelemetrySnapshot {
   pos_n?: number | null;

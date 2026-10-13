@@ -43,7 +43,7 @@ import {
   localCsvToMapPins,
   type LocalPointCsvResult,
 } from "../utils/localPointCsv";
-import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
+import type { MapGeometryFrame } from "../types/mapGeometry";
 import type {
   AlignmentResultState,
   FieldsStepId,
@@ -60,13 +60,8 @@ export type FieldsPageProps = {
   importedPlan: ImportedPlan | null;
   setImportedPlan: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
   lines: PlanLine[];
-  mapSourceLines?: PlanLine[];
-  autoOriginReference?: AutoOriginReference | null;
   mapGeometryFrame?: MapGeometryFrame;
-  autoOriginEnabled?: boolean;
   geoOrigin?: [number, number] | null;
-  autoOrigin?: boolean;
-  onToggleAutoOrigin?: () => void;
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   previewRoverPoint: { north: number; east: number } | null;
   missionRunning: boolean;
@@ -133,7 +128,6 @@ export type FieldsPageProps = {
   onNavigateHome?: () => void;
   renderPlanPreview: (props: {
     lines: PlanLine[];
-    mapSourceLines?: PlanLine[];
     /** Live drag-time Offset preview overlay — null unless actively dragging the compass dial. */
     ghostLines?: PlanLine[] | null;
     onMapPlacePoint?: (pt: { x: number; y: number }) => void;
@@ -142,9 +136,7 @@ export type FieldsPageProps = {
     templateToolMode?: "both" | "scale" | "rotate";
     templateGestureTools?: { drag?: boolean; scale?: boolean; rotate?: boolean };
     onTemplateEditDeselect?: () => void;
-    autoOriginReference?: AutoOriginReference | null;
     mapGeometryFrame?: MapGeometryFrame;
-    autoOriginEnabled?: boolean;
     geoOrigin?: [number, number] | null;
     visibility: LayerVisibility;
     selectedLineId: string | null;
@@ -249,7 +241,6 @@ export type FieldsPageProps = {
   onUnassignFileFromLayer?: (fileEntryId: string) => void;
   /** Map-only filtered geometry (mission-layer visibility). */
   missionVisibleLines?: PlanLine[];
-  missionVisibleMapSourceLines?: PlanLine[];
   /** Anchor point selection (re-anchor a CSV/DXF plan's start) — before Send. */
   anchorAvailable?: boolean;
   anchorSelectMode?: boolean;
@@ -302,120 +293,7 @@ function mergePendingDxfLines(
 }
 
 export function FieldsPage(props: FieldsPageProps) {
-  const {
-    importedPlan,
-    setImportedPlan,
-    lines,
-    mapSourceLines,
-    autoOriginReference = null,
-    mapGeometryFrame = "NONE",
-    autoOriginEnabled = false,
-    geoOrigin = null,
-    autoOrigin = false,
-    onToggleAutoOrigin,
-    setLines,
-    previewRoverPoint,
-    missionRunning,
-    telemetrySnapshot,
-    selectedLineId,
-    layerVisibility,
-    setLayerVisibility,
-    onMissionStored,
-    missionActionBusy,
-    onBeginPathExclusive,
-    onEndPathExclusive,
-    onSelectLine,
-    highlightLineIds = null,
-    apiBaseUrl,
-    onWorkflowStep,
-    stagedWorkflow,
-    alignmentResult,
-    setAlignmentResult,
-    verifiedAlignmentRequest,
-    setVerifiedAlignmentRequest,
-    stagedPlanResult,
-    setStagedPlanResult,
-    stagedMissionId,
-    setStagedMissionId,
-    onInvalidateWorkflow,
-    onAppPlannedStartSnapshot,
-    dashPattern,
-    alignedRefPoints = [],
-    setAlignedRefPoints,
-    mapViewEnabled = true,
-    showRefPointLabels = false,
-    activeRefPointLabelIndex = null,
-    setActiveRefPointLabelIndex,
-    isVisualAlignmentMode,
-    visualAlignmentItem,
-    setVisualAlignmentItem,
-    setVisualAlignmentAnchor,
-    onStartVisualAlignment,
-    onConfirmVisualAlignment,
-    isPlanEditingMode,
-    onStartPlanEditing,
-    onStopPlanEditing,
-    multiPointPlacementPhase = "idle",
-    onPlanAttached,
-    onPlanEditResize,
-    onPlanResizeDone,
-    onFitToReferencePoints,
-    extractedCorners,
-    setExtractedCorners,
-    onClearMission,
-    onNavigateHome,
-    renderPlanPreview,
-    localCsvPreview = null,
-    localDxfMeta = null,
-    uploadedFiles = [],
-    placedTemplates = [],
-    onPlaceTemplate,
-    onUpdateTemplateInstance,
-    onRemoveTemplate,
-    onRemoveUploadedFile,
-    pendingDxfAlignment = {},
-    setPendingDxfAlignment,
-    sharedOriginGps = null,
-    onBeginLocalImportBatch,
-    onAlignContextChange,
-    onCommitDxfFileAlignment,
-    onLocalCsvParsed,
-    onLocalDxfParsed,
-    onClearLocalCsv,
-    missionLayers = [],
-    controlModeActive = false,
-    canUseMissionControl = false,
-    pendingLayerAssignment = null,
-    onPendingLayerAssignment,
-    onAssignFileToNewLayer,
-    onAssignFileToLayer,
-    onUnassignFileFromLayer,
-    missionVisibleLines,
-    missionVisibleMapSourceLines,
-    anchorAvailable = false,
-    anchorSelectMode = false,
-    anchorTargetOptions = [],
-    anchorTarget = null,
-    pendingAnchor = null,
-    anchorCandidates = [],
-    anchorIsolatedLines = [],
-    onAnchorPress,
-    onSelectAnchorTarget,
-    onAnchorCandidateSelect,
-    onConfirmAnchor,
-    offsetDistanceM = 0,
-    offsetBearingDeg = 0,
-    onOffsetDistanceChange,
-    onOffsetBearingChange,
-    onApplyOffset,
-    offsetTargetOptions = [],
-    offsetTarget = null,
-    onOffsetTargetChange,
-    offsetResetAvailable = false,
-    onResetOffset,
-    onOffsetDragStateChange,
-    offsetPreviewLines = null,
-  } = props;
+  const { importedPlan, setImportedPlan, lines, mapGeometryFrame = "NONE", geoOrigin = null, setLines, previewRoverPoint, missionRunning, telemetrySnapshot, selectedLineId, layerVisibility, onMissionStored, missionActionBusy, onBeginPathExclusive, onEndPathExclusive, onSelectLine, highlightLineIds = null, apiBaseUrl, onWorkflowStep, stagedWorkflow, alignmentResult, setAlignmentResult, verifiedAlignmentRequest, setVerifiedAlignmentRequest, setStagedPlanResult, setStagedMissionId, onInvalidateWorkflow, onAppPlannedStartSnapshot, dashPattern, alignedRefPoints = [], setAlignedRefPoints, mapViewEnabled = true, showRefPointLabels = false, activeRefPointLabelIndex = null, setActiveRefPointLabelIndex, isVisualAlignmentMode, visualAlignmentItem, setVisualAlignmentItem, setVisualAlignmentAnchor, onStartVisualAlignment, onConfirmVisualAlignment, isPlanEditingMode, onStartPlanEditing, onStopPlanEditing, multiPointPlacementPhase = "idle", onPlanAttached, onPlanResizeDone, onFitToReferencePoints, extractedCorners, setExtractedCorners, onClearMission, renderPlanPreview, localCsvPreview = null, localDxfMeta = null, uploadedFiles = [], placedTemplates = [], onPlaceTemplate, onUpdateTemplateInstance, onRemoveTemplate, onRemoveUploadedFile, pendingDxfAlignment = {}, setPendingDxfAlignment, sharedOriginGps = null, onBeginLocalImportBatch, onAlignContextChange, onCommitDxfFileAlignment, onLocalCsvParsed, onLocalDxfParsed, onClearLocalCsv, missionLayers = [], controlModeActive = false, canUseMissionControl = false, pendingLayerAssignment = null, onPendingLayerAssignment, onAssignFileToNewLayer, onAssignFileToLayer, onUnassignFileFromLayer, missionVisibleLines, anchorAvailable = false, anchorSelectMode = false, anchorTargetOptions = [], anchorTarget = null, pendingAnchor = null, anchorCandidates = [], anchorIsolatedLines = [], onAnchorPress, onSelectAnchorTarget, onAnchorCandidateSelect, onConfirmAnchor, offsetDistanceM = 0, offsetBearingDeg = 0, onOffsetDistanceChange, onOffsetBearingChange, onApplyOffset, offsetTargetOptions = [], offsetTarget = null, onOffsetTargetChange, offsetResetAvailable = false, onResetOffset, onOffsetDragStateChange, offsetPreviewLines = null } = props;
 
   const [selectedUploadedFileId, setSelectedUploadedFileId] = useState<string | null>(null);
 
@@ -430,8 +308,8 @@ export function FieldsPage(props: FieldsPageProps) {
   const [csvGuidePointsActive, setCsvGuidePointsActive] = useState(false);
   /** Imported guide CSV file names for Upload/Align button labels (supports multiple files). */
   const [guideCsvFileNames, setGuideCsvFileNames] = useState<string[]>([]);
-  const [missionSummary, setMissionSummary] = useState<any | null>(null);
-  /** Align DXF methods: Multi-Point Fit | Visual (1-Point Fit removed). Auto Origin is a separate toggle peer. */
+  const [, setMissionSummary] = useState<any | null>(null);
+  /** Align DXF methods: Multi-Point Fit | Visual (1-Point Fit removed). */
   const [alignmentMethod, setAlignmentMethod] = useState<"least_squares" | "visual_alignment">("least_squares");
 
   /** CSV path order / paint flags from CsvPathOrderStep (Phase 3). */
@@ -440,65 +318,10 @@ export function FieldsPage(props: FieldsPageProps) {
   const [csvExtensionConfig, setCsvExtensionConfig] = useState<CsvExtensionConfig>(
     DEFAULT_CSV_EXTENSION_CONFIG
   );
-  const [boundaryMode, setBoundaryMode] = useState(false);
-  const [boundaryWidthStr, setBoundaryWidthStr] = useState("4.0");
-  const [boundaryHeightStr, setBoundaryHeightStr] = useState("3.0");
   const [boundaryPosition, setBoundaryPosition] = useState<{ x: number; y: number } | null>(null);
   const [boundaryRotation, setBoundaryRotation] = useState<number>(0);
 
-  const handleToggleBoundaryMode = useCallback((enabled: boolean) => {
-    setBoundaryMode(enabled);
-    if (!enabled) {
-      setBoundaryRotation(0);
-    }
-  }, []);
-
-  const handleApplyBoundary = useCallback((w: number, h: number) => {
-    setLines((prev) => {
-      const nonVirtual = prev.filter((l) => l.layer !== "virtual_boundary");
-      const bMinN = -h / 2;
-      const bMaxN = h / 2;
-      const bMinE = -w / 2;
-      const bMaxE = w / 2;
-      const corners = [
-        { n: bMinN, e: bMinE }, // 0: Bottom-Left
-        { n: bMinN, e: bMaxE }, // 1: Bottom-Right
-        { n: bMaxN, e: bMaxE }, // 2: Top-Right
-        { n: bMaxN, e: bMinE }, // 3: Top-Left
-      ];
-      const virtualLines: any[] = [];
-      for (let i = 0; i < 4; i++) {
-        const from = corners[i];
-        const to = corners[(i + 1) % 4];
-        virtualLines.push({
-          id: `vbox-edge-${i}`,
-          label: `Virtual Box Edge ${i + 1}`,
-          layer: "virtual_boundary",
-          from: { id: 800000 + i * 2, x: from.n, y: from.e },
-          to: { id: 800000 + i * 2 + 1, x: to.n, y: to.e },
-          width: 0.1,
-        });
-      }
-      return [...nonVirtual, ...virtualLines];
-    });
-  }, [setLines]);
-
-  const {
-    activeStep,
-    setActiveStep,
-    isTransformConfirmed,
-    setIsTransformConfirmed,
-    isAlignmentComplete,
-    setIsAlignmentComplete,
-    manipulationMode,
-    setManipulationMode,
-    transformData,
-    setTransformData,
-    showMapInteraction,
-    setShowMapInteraction,
-    resetTransform,
-    effectiveLayerVisibility,
-  } = useFieldsWorkflow(layerVisibility);
+  const { activeStep, setActiveStep, setIsTransformConfirmed, setManipulationMode, setShowMapInteraction, effectiveLayerVisibility } = useFieldsWorkflow(layerVisibility);
 
   /**
    * Independent click-to-expand state for each step card (true dropdowns).
@@ -744,14 +567,13 @@ export function FieldsPage(props: FieldsPageProps) {
   /**
    * Map tap → yellow guide points. Enabled ONLY for Multi-Point Fit when:
    * - Align step is active
-   * - not Visual Alignment / Auto Origin
+   * - not Visual Alignment
    * - not mid Move-Plan sticker drag
    * - no CSV guide file is loaded
    */
   const canTapGuidePoints =
     isSectionOpen("align") &&
     alignmentMethod === "least_squares" &&
-    !autoOrigin &&
     !isVisualAlignmentMode &&
     !isPlanEditingMode &&
     !csvGuidePointsActive;
@@ -761,13 +583,12 @@ export function FieldsPage(props: FieldsPageProps) {
       if (
         !isSectionOpen("align") ||
         alignmentMethod !== "least_squares" ||
-        autoOrigin ||
         isVisualAlignmentMode ||
         isPlanEditingMode ||
         csvGuidePointsActive
       ) {
         console.log(
-          `[AlignDXF][Tap] Ignored (gated): alignOpen=${isSectionOpen("align")} method=${alignmentMethod} autoOrigin=${!!autoOrigin} visual=${!!isVisualAlignmentMode} editing=${!!isPlanEditingMode} csv=${csvGuidePointsActive}`
+          `[AlignDXF][Tap] Ignored (gated): alignOpen=${isSectionOpen("align")} method=${alignmentMethod} visual=${!!isVisualAlignmentMode} editing=${!!isPlanEditingMode} csv=${csvGuidePointsActive}`
         );
         return;
       }
@@ -801,7 +622,6 @@ export function FieldsPage(props: FieldsPageProps) {
     [
       isSectionOpen,
       alignmentMethod,
-      autoOrigin,
       isVisualAlignmentMode,
       isPlanEditingMode,
       csvGuidePointsActive,
@@ -864,12 +684,11 @@ export function FieldsPage(props: FieldsPageProps) {
   /**
    * Local multi-file batch: `allFilesVerified` is authoritative (every local CSV/DXF import
    * goes through `uploadedFiles`, so `hasPendingAlignment` can't disagree with it). Without a
-   * batch the plan is aligned when it is not a DXF, or Auto Origin / a verified alignment says so.
+   * batch the plan is aligned when it is not a DXF, or a verified alignment says so.
    */
   const alignDone = hasLocalBatch
     ? allFilesVerified
     : !isDxfPath ||
-      autoOrigin ||
       stagedWorkflow.alignment === "verified" ||
       !!verifiedAlignmentRequest;
 
@@ -938,27 +757,11 @@ export function FieldsPage(props: FieldsPageProps) {
     [lines, missionVisibleLines, pendingDxfAlignment]
   );
 
-  /** Raw (pre-auto-origin-shift) copy so Mapbox still sees sibling plans while aligning. */
-  const mapSourceWithPending = useMemo(
-    () =>
-      mergePendingDxfLines(
-        missionVisibleMapSourceLines ?? mapSourceLines ?? [],
-        pendingDxfAlignment
-      ),
-    [missionVisibleMapSourceLines, mapSourceLines, pendingDxfAlignment]
-  );
-
   const mapDisplayWithoutEditingTemplate = useMemo(() => {
     if (!selectedTemplate || !templateToolsOn) return mapDisplayLines;
     const token = `${selectedTemplate.lineIdPrefix}__`;
     return mapDisplayLines.filter((line) => !line.id.startsWith(token));
   }, [mapDisplayLines, selectedTemplate, templateToolsOn]);
-
-  const mapSourceWithoutEditingTemplate = useMemo(() => {
-    if (!selectedTemplate || !templateToolsOn) return mapSourceWithPending;
-    const token = `${selectedTemplate.lineIdPrefix}__`;
-    return mapSourceWithPending.filter((line) => !line.id.startsWith(token));
-  }, [mapSourceWithPending, selectedTemplate, templateToolsOn]);
 
   /**
    * Keep App's plan-manipulation handlers pointed at the geometry actually on screen.
@@ -1031,17 +834,6 @@ export function FieldsPage(props: FieldsPageProps) {
       default:
         return "pending";
     }
-  };
-
-  /** Legacy helper — prefer toggleSection for card headers (true expand/collapse). */
-  const toggleStep = (id: FieldsStepId) => {
-    const key: PanelSectionKey =
-      id === "align"
-        ? "align"
-        : id === "orderAndSpray"
-        ? "orderAndSpray"
-        : "upload";
-    toggleSection(key, id);
   };
 
   // Confirm transform handler — bakes the plan's current drag/scale/rotate into `lines`
@@ -1120,16 +912,6 @@ export function FieldsPage(props: FieldsPageProps) {
     setShowMapInteraction,
     setManipulationMode,
   ]);
-
-  // Navigate home handler
-  const handleNavigateHome = useCallback(() => {
-    onNavigateHome?.();
-  }, [onNavigateHome]);
-
-  // Toggles whether the extension (run-up/run-out) layer draws on the plan preview.
-  const handleToggleExtensionVisible = useCallback(() => {
-    setLayerVisibility?.((prev) => ({ ...prev, extension: prev.extension === false }));
-  }, [setLayerVisibility]);
 
   // Build mapLLA from visualAlignmentItem or telemetry
   const mapLLA = visualAlignmentItem
@@ -1233,7 +1015,6 @@ export function FieldsPage(props: FieldsPageProps) {
     templatesVisible: hasPath,
     pathOrderReady,
     missionSent,
-    autoOrigin: !!autoOrigin,
     hasGpsOrigin,
   });
 
@@ -1294,15 +1075,9 @@ export function FieldsPage(props: FieldsPageProps) {
           templateGestureTools,
           onTemplateEditDeselect: handleTemplateEditDeselect,
           onUpdateTemplateEditItem: selectedTemplate ? handleUpdateTemplateEditItem : undefined,
-          mapSourceLines:
-            anchorSelectMode && anchorTarget
-              ? anchorIsolatedLines
-              : mapSourceWithoutEditingTemplate,
           anchorCandidates: anchorSelectMode ? anchorCandidates : undefined,
           onAnchorCandidateSelect,
-          autoOriginReference,
           mapGeometryFrame,
-          autoOriginEnabled,
           geoOrigin,
           visibility: effectiveLayerVisibility,
           selectedLineId,
@@ -1891,10 +1666,6 @@ export function FieldsPage(props: FieldsPageProps) {
               extractedCorners={extractedCorners}
               setExtractedCorners={setExtractedCorners}
               mapLLA={mapLLA}
-              autoOrigin={autoOrigin}
-              onToggleAutoOrigin={onToggleAutoOrigin}
-              autoOriginReference={autoOriginReference}
-              autoOriginEnabled={autoOriginEnabled}
               stagedVerified={stagedWorkflow.staged === "verified"}
               missionRunning={missionRunning}
               isPlanEditingMode={isPlanEditingMode}

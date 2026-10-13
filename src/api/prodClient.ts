@@ -8,7 +8,6 @@
  * 4. NEVER retry state-mutating requests (POST, PUT, DELETE, PATCH).
  */
 
-import { Platform } from "react-native";
 import type {
   PingResponse,
   HealthResponse,

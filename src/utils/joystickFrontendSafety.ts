@@ -27,24 +27,6 @@ export function telemetryInactiveClearsLocalLease(state: FrontendJoystickState):
   return state === "ACTIVE" || state === "HELD" || state === "RELEASING";
 }
 
-export function backgroundJoystickState(): FrontendJoystickState {
-  return "SUSPENDED";
-}
-
-export function canAcquireJoystick(args: {
-  missionRunning: boolean;
-  frontendState: FrontendJoystickState;
-  backendJoystickActive?: boolean | null;
-  controlOwner?: string | null;
-}): boolean {
-  return (
-    !args.missionRunning &&
-    !args.backendJoystickActive &&
-    args.controlOwner !== "mission" &&
-    (args.frontendState === "AVAILABLE" || args.frontendState === "ERROR")
-  );
-}
-
 export function joystickIntentIsCentered(intent: JoystickIntent): boolean {
   return intent.throttle === 0 && intent.steering === 0;
 }

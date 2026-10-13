@@ -8,7 +8,6 @@
  */
 
 import type { PlanLine } from "../types/plan";
-import { enforceAlignmentScale } from "./designAlignmentPolicy";
 import { projectGpsToLocalMeters, projectLocalMetersToGps } from "./geoProjection";
 import {
   similarityTransform,
@@ -16,7 +15,7 @@ import {
 } from "./planLineTransform";
 
 export type DxfAlignment = {
-  method: "geographic" | "visual" | "multi_point" | "auto_origin";
+  method: "geographic" | "visual" | "multi_point";
   originGps: [number, number];
   rotationDeg: number;
   scale: number;
@@ -56,22 +55,6 @@ export function alignmentFromGeographic(geoOrigin: {
     rotationDeg: 0,
     scale: 1,
     rmseM: 0,
-    residualsM: [],
-    warnings: [],
-    originOffsetM: 0,
-  };
-}
-
-/**
- * Auto-origin: rover live position is the plan origin.
- */
-export function alignmentFromAutoOrigin(lat: number, lon: number): DxfAlignment {
-  return {
-    method: "auto_origin",
-    originGps: [lat, lon],
-    rotationDeg: 0,
-    scale: 1,
-    rmseM: null,
     residualsM: [],
     warnings: [],
     originOffsetM: 0,
@@ -200,37 +183,6 @@ export function solveMultiPointAlignment(refs: AlignmentRefPoint[]): DxfAlignmen
     residualsM: residuals,
     warnings: [],
     originOffsetM: Math.hypot(oN, oE),
-  };
-}
-
-/**
- * Visual single-origin placement: origin_gps is the GPS of design (0,0)
- * after the visual sticker transform.
- */
-export function alignmentFromVisualOrigin(opts: {
-  originLat: number;
-  originLon: number;
-  /** Sticker translation: item.y = north, item.x = east (visualAlignment contract) */
-  offsetNorth: number;
-  offsetEast: number;
-  rotationDeg: number;
-  scale?: number;
-}): DxfAlignment {
-  const scale = enforceAlignmentScale(opts.scale ?? 1);
-
-  // The mission anchor is the GPS of NED (0,0). Visual sticker places
-  // design (0,0) at (offsetNorth, offsetEast) relative to latched GPS origin.
-  // So plan origin_gps = latched origin (design is already in that frame after bake).
-  // When baking, we apply rotation/scale/offset so NED matches rover frame about origin_gps.
-  return {
-    method: "visual",
-    originGps: [opts.originLat, opts.originLon],
-    rotationDeg: opts.rotationDeg,
-    scale,
-    rmseM: null,
-    residualsM: [],
-    warnings: [],
-    originOffsetM: 0,
   };
 }
 

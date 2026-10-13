@@ -71,34 +71,6 @@ export function buildSvgPathForLine(line: PlanLine) {
   return buildSvgPathChunks([line]).join(" ");
 }
 
-export function getLineAnchorPoint(line: PlanLine) {
-  const pts = line.entity?.preview_points;
-  if (pts && pts.length > 0) {
-    const midIndex = Math.floor(pts.length / 2);
-    const mid = pts[midIndex];
-    if (mid && isFiniteNumber(mid.north) && isFiniteNumber(mid.east)) {
-      return { x: mid.north, y: mid.east };
-    }
-    const sum = pts.reduce(
-      (acc, pt) => {
-        acc.north += Number(pt.north) || 0;
-        acc.east += Number(pt.east) || 0;
-        return acc;
-      },
-      { north: 0, east: 0 }
-    );
-    return {
-      x: sum.north / pts.length,
-      y: sum.east / pts.length,
-    };
-  }
-
-  return {
-    x: (line.from.x + line.to.x) / 2,
-    y: (line.from.y + line.to.y) / 2,
-  };
-}
-
 export type PreviewViewport = {
   panX: number;
   panY: number;
@@ -106,18 +78,6 @@ export type PreviewViewport = {
 };
 
 export type LocalPoint = { x: number; y: number };
-
-export function touchDistance(t1: { locationX: number; locationY: number }, t2: { locationX: number; locationY: number }) {
-  const dx = t1.locationX - t2.locationX;
-  const dy = t1.locationY - t2.locationY;
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
-export function touchAngle(t1: { locationX: number; locationY: number }, t2: { locationX: number; locationY: number }) {
-  const dx = t1.locationX - t2.locationX;
-  const dy = t1.locationY - t2.locationY;
-  return Math.atan2(dy, dx);
-}
 
 export function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -130,22 +90,6 @@ export function normalizeDegrees(value: number) {
 
 export function shortestAngleDelta(fromDeg: number, toDeg: number) {
   return ((toDeg - fromDeg + 540) % 360) - 180;
-}
-
-export function computePlanBounds(lines: PlanLine[]) {
-  let minX = Number.POSITIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
-
-  for (const line of lines) {
-    minX = Math.min(minX, line.from.x, line.to.x);
-    minY = Math.min(minY, line.from.y, line.to.y);
-    maxX = Math.max(maxX, line.from.x, line.to.x);
-    maxY = Math.max(maxY, line.from.y, line.to.y);
-  }
-
-  return { minX, minY, maxX, maxY };
 }
 
 export function computeAutoFitViewport(

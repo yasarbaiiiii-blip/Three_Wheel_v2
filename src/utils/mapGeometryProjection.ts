@@ -1,6 +1,6 @@
 import type { DesignPreviewAnchor } from "../types/designDocument";
 import type { PlanLine } from "../types/plan";
-import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
+import type { MapGeometryFrame } from "../types/mapGeometry";
 import {
   getCurveGeometry,
   getPlanLineRenderPoints,
@@ -26,8 +26,6 @@ export type ResolveMapGeometryFrameInput = {
   previewAnchor?: DesignPreviewAnchor | null;
   alignedRefPoints: { dxf_x: number; dxf_y: number; lat: number; lon: number }[];
   stagedVerified: boolean;
-  autoOriginReference: AutoOriginReference | null;
-  autoOriginEnabled: boolean;
   geoOrigin?: [number, number] | null; // [lat, lon] from a georeferenced DXF
 };
 
@@ -53,15 +51,6 @@ export function resolveMapGeometryFrame(input: ResolveMapGeometryFrameInput): Ma
 
   if (isValidAlignedRefPoint(input.alignedRefPoints[0])) {
     return input.stagedVerified ? "SURVEYED_LOCAL" : "ALIGNED_DESIGN";
-  }
-
-  if (
-    input.autoOriginEnabled &&
-    input.autoOriginReference &&
-    Number.isFinite(input.autoOriginReference.latitude) &&
-    Number.isFinite(input.autoOriginReference.longitude)
-  ) {
-    return "AUTO_ORIGIN_RAW";
   }
 
   if (input.geoOrigin && isValidGps(input.geoOrigin[0], input.geoOrigin[1])) {
@@ -103,17 +92,6 @@ export function resolveMapProjectionOrigin(
     return { frame, originLat: input.geoOrigin[0], originLon: input.geoOrigin[1], originDxfNorth: 0, originDxfEast: 0 };
   }
 
-  if (frame === "AUTO_ORIGIN_RAW" && input.autoOriginReference) {
-    const ref = input.autoOriginReference;
-    return {
-      frame,
-      originLat: ref.latitude,
-      originLon: ref.longitude,
-      originDxfNorth: ref.planStartNorth,
-      originDxfEast: ref.planStartEast,
-    };
-  }
-
   return null;
 }
 
@@ -143,7 +121,7 @@ export type ResolvePreviewProjectionOriginInput = ResolveMapGeometryFrameInput &
   templatesFloatingOrigin?: { lat: number; lon: number } | null;
   /**
    * Plan lines used only for the fields/manipulation fallback originDxf
-   * (`firstLine.from − 2 m`). Prefer raw design lines (mapSourceLines), not auto-origin-shifted.
+   * (`firstLine.from − 2 m`). Prefer raw design lines (mapSourceLines).
    */
   lines?: PlanLine[] | null;
   /** When lines are empty during sticker mode, fall back to the sticker's lines. */
@@ -157,7 +135,7 @@ export type ResolvePreviewProjectionOriginInput = ResolveMapGeometryFrameInput &
  *
  * Priority (matches historical MapViewNative behaviour):
  * 1. visualAlignmentAnchor (sticky)
- * 2. resolveMapProjectionOrigin(frame) — aligned refs, auto-origin, preview anchor
+ * 2. resolveMapProjectionOrigin(frame) — aligned refs, preview anchor
  * 3. templates floating origin (templates mode only, non-manipulation)
  * 4. fields / plan-manipulation fallback: latched GPS + firstLine − 2 m
  */
@@ -343,5 +321,3 @@ export function projectPlanLineToGpsSegments(
   return coords;
 }
 
-/** Default map tile centre when no mission geometry origin is available. */
-export const DEFAULT_MAP_CENTER = { lat: 0, lon: 0 };

@@ -106,9 +106,6 @@ export const STARTABLE_STATES: readonly number[] = [
 ];
 
 export const isActiveState = (state: number) => ACTIVE_STATES.includes(state);
-export const isTerminalState = (state: number) =>
-  state === MissionStateEnum.COMPLETED || state === MissionStateEnum.ABORTED || state === MissionStateEnum.ERROR;
-
 /** The steps the operator watches go by, in order. */
 export const LIFECYCLE_STEPS: readonly number[] = [
   MissionStateEnum.LOADING,

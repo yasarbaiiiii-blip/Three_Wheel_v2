@@ -152,16 +152,6 @@ export function offsetLabelFromPathCenter(
   };
 }
 
-/** Polyline length in world metres after sticker transform. */
-export function measureTransformedLineLengthM(
-  line: PlanLine,
-  pose: StickerPose
-): number | null {
-  const world = transformedWorldPolyline(line, pose);
-  const m = measurePathLengthAndCenter(world);
-  return m?.lengthM ?? null;
-}
-
 /**
  * Arc-length centre (with readable offset) + world length.
  * Includes marking + extension when present; skips transit/virtual boundary.

@@ -1,7 +1,6 @@
 import "react-native-gesture-handler";
 import "./global.css";
 
-import { SMOKE_TEST_MAPBOX, SMOKE_TEST_CENTER } from "./src/config/featureFlags";
 import { installRuntimeGuards, yieldToUi } from "./src/utils/runtimeGuards";
 import {
   createPathPipelineGuard,
@@ -12,7 +11,7 @@ import { AppErrorBoundary } from "./src/components/AppErrorBoundary";
 import { LoopProbe } from "./src/components/LoopProbe";
 import { loadMapPrefs, useSharedMapEnabled } from "./src/components/sharedMap/mapPrefs";
 
-// Mapbox token is applied on first map mount (MapViewNative / MapboxHelloMap),
+// Mapbox token is applied on first map mount (MapViewNative),
 // not at app entry — keeps the connection screen off the Mapbox native JS path.
 
 // Process-level guards: log fatals + unhandled rejections (common "app closed" cause).
@@ -56,78 +55,26 @@ function lazyDefault<T extends React.ComponentType<any>>(
   return Component;
 }
 
-const MapboxHelloMap = lazyDefault(() => import("./src/components/MapboxHelloMap"), "MapboxHelloMap");
 const ModernHomeUI = lazyDefault(() => import("./src/components/ModernHomeUI"), "ModernHomeUI");
-const ModernSettingsPage = lazyDefault(
-  () => import("./src/components/ModernSettingsPage"),
-  "ModernSettingsPage"
-);
-const DebugDriveScreen = lazyDefault(
-  () => import("./src/screens/DebugDriveScreen"),
-  "DebugDriveScreen"
-);
 import {
   ActivityIndicator,
   Alert,
-  Animated,
-  Dimensions,
-  FlatList,
   Modal,
-  PanResponder,
-  Platform,
   Pressable,
-  ScrollView,
-  Switch,
   Text,
   TextInput,
-  TouchableOpacity,
   View,
 } from "react-native";
 
-import Slider from "@react-native-community/slider";
-import * as DocumentPicker from "expo-document-picker";
 import * as Network from "expo-network";
 import { SafeAreaInsetsContext, SafeAreaProvider } from "react-native-safe-area-context";
-import { GestureHandlerRootView, TouchableOpacity as RNGHTouchableOpacity, GestureDetector, Gesture } from "react-native-gesture-handler";
-import AnimatedReanimated, { runOnJS, useAnimatedStyle, useSharedValue, withSpring } from "react-native-reanimated";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 
-import Svg, { Circle, G, Line, Path, Polygon, Text as SvgText } from "react-native-svg";
 import type { Socket } from "socket.io-client";
-import {
-  Battery,
-  CircleHelp,
-  LayoutTemplate,
-  ListChecks,
-  File,
-  FilePenLine,
-  FileUp,
-  FileText,
-  Info,
-  LocateFixed,
-  LogOut,
-  List,
-  Menu,
-  RadioTower,
-  Settings,
-  Signal,
-  Tractor,
-  Trash2,
-  ChevronRight,
-  Waves,
-  X,
-  RotateCcw,
-  RotateCw,
-  Eye,
-  EyeOff,
-  Map as MapIcon,
-  Check as CheckIcon,
-  Gamepad2,
-} from "lucide-react-native";
 
-import { BoundaryEditor, PlacedItem } from "./src/components/BoundaryEditor";
+import { PlacedItem } from "./src/components/BoundaryEditor";
 import { useImmersiveMode } from "./src/hooks/useImmersiveMode";
 import { useVirtualJoystick } from "./src/hooks/useVirtualJoystick";
-import { readImportedPlanFile, normalizePlanLines } from "./src/utils/planImport";
 import type { ImportedPlan, PlanLine } from "./src/types/plan";
 import * as authApi from "./src/api/authApi";
 import {
@@ -138,7 +85,6 @@ import {
 import { stagedPlanResultFromAdmitted } from "./src/utils/missionStaging";
 import type { DashPattern } from "./src/utils/appPlannedMissionBuilder";
 import {
-  LIVE_ENTRY_CACHE_MAX_AGE_MS,
   canSkipLiveEntryRestage,
   entryPoseDrifted,
   pickRoverPoseForEntry,
@@ -147,14 +93,12 @@ import {
   buildTrajectory,
   resolveRoverNedInMissionFrame,
 } from "./src/utils/missionTrajectory";
-import { buildCsvExtensionLines } from "./src/utils/missionExtensions";
 import type { MissionLayer } from "./src/types/missionLayers";
 import {
   applyMissionTerminalOutcome,
   createLayerForFile,
   assignFileToLayer,
   markLayersStarted,
-  nonEmptyMissionLayers,
   outcomeFromMissionStateTransition,
   pruneMissingFiles,
   resolveVisibleStartLayerIds,
@@ -183,20 +127,14 @@ import { FloatingEStop } from "./src/components/FloatingEStop";
 import { PlanPreview } from "./src/components/PlanPreview";
 import { ConnectionView } from "./src/features/connection/ConnectionView";
 import {
-  applyTelemetryPacket,
   clearTelemetryRuntime,
-  setSystemHealth,
-  getTelemetrySnapshot,
-  setTelemetrySnapshot,
   useSystemHealth,
   useTelemetrySelector,
-  useTelemetrySnapshot,
   useThrottledTelemetrySnapshot,
 } from "./src/features/telemetry/telemetryStore";
 import { getAppTransport } from "./src/services/appTransport";
 import { roverBeaconListener, type BeaconRover } from "./src/services/roverBeacon";
 import { loadLastRoverId } from "./src/api/prodStorage";
-import { getProdApiClient, ProdApiError } from "./src/api/prodClient";
 import { MissionStateEnum } from "./src/contract/prod/realtime";
 import { getRoverEventsState, selectEstop, useRoverEvents } from "./src/features/telemetry/roverEventStore";
 import { missionControls, missionIsActive, selectMission } from "./src/features/mission/missionLifecycle";
@@ -209,8 +147,6 @@ import {
   stopMissionCommand,
 } from "./src/features/mission/missionCommands";
 import {
-  clearProdTelemetry,
-  getAdaptedTelemetrySnapshot,
   subscribeProdTelemetry,
   getProdTelemetryState,
   telemetryNow,
@@ -225,11 +161,6 @@ import type {
   SystemHealth,
   ToastTone,
 } from "./src/types/appRuntime";
-import {
-  formatSocketConnectError,
-  SOCKET_CONNECT_TIMEOUT_MS,
-  waitForSocketConnect,
-} from "./src/utils/socketConnect";
 import { EMPTY_RTK_STATUS, normalizeRtkStatus } from "./src/api/rtkStatus";
 const SwoziPage = lazyDefault(
   () => import("./src/screens/SecondaryPages").then((m) => ({ default: m.SwoziPage })),
@@ -255,7 +186,6 @@ const AboutPage = lazyDefault(
   () => import("./src/screens/SecondaryPages").then((m) => ({ default: m.AboutPage })),
   "AboutPage"
 );
-import { getLineAnchorPoint, isFiniteNumber } from "./src/utils/planPreviewGeometry";
 import { getPlanStartPoint } from "./src/utils/planStartPoint";
 
 const TemplatesPage = lazyDefault(
@@ -267,19 +197,8 @@ const FieldsPage = lazyDefault(
   "FieldsPage"
 );
 import {
-  coerceFiniteNumber,
-  formatFinite,
-  getLineLengthM,
-  isPrimaryEditableLine,
-  normalizeEntityType,
   sanitizePlanLines,
 } from "./src/utils/pathWorkflow";
-import {
-  appendExtensionLegsFromPlanLines,
-  buildExtensionLegCatalogFromEntitiesBody,
-  buildRuntimeTransitOverlayFromPlan,
-  matchNonSprayToExtensionRole,
-} from "./src/utils/extensionTransitClassify";
 import type {
   AlignmentResultState,
   MultiPointPlacementPhase,
@@ -291,17 +210,7 @@ import type {
 } from "./src/types/fieldsWorkflow";
 import { INITIAL_STAGED_WORKFLOW_STATE, invalidateWorkflowFrom } from "./src/types/fieldsWorkflow";
 import {
-  buildPlanLineSvgPath,
   computePlanBoundingBoxLegacy,
-  getCurveGeometry,
-  getPlanLineRenderPoints,
-  getPlanLineSegmentKind,
-  getPreviewCircleElements,
-  isCircleLikeLine,
-  isCurveEntity,
-  isSegmentKindVisible,
-  normalizeDxfEntityGeometry,
-  normalizePlanLinesForCurves,
 } from "./src/utils/curveGeometry";
 import {
   buildVisualAlignmentRefPoints,
@@ -329,7 +238,6 @@ import {
   prefixDxfLineIds,
   type LocalDxfResult,
 } from "./src/utils/dxfLocalImport";
-import { alignmentFromGeographic } from "./src/utils/dxfAlignment";
 import { rebasePlanLinesToOrigin } from "./src/utils/planOriginRebase";
 import {
   bakeTemplateInstance,
@@ -353,26 +261,13 @@ import {
 import { normalizeBearingDeg } from "./src/utils/planOffset";
 import { computeOffsetResultLines } from "./src/utils/planOffsetApply";
 import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
-import type { AutoOriginReference, MapGeometryFrame } from "./src/types/autoOrigin";
-import {
-  applyAutoOriginShift,
-  buildAutoOriginReference,
-  planStartMatchesReference,
-} from "./src/utils/autoOrigin";
+import type { MapGeometryFrame } from "./src/types/mapGeometry";
 import {
   buildPlanManipulationAnchor,
   resolveMapGeometryFrame,
 } from "./src/utils/mapGeometryProjection";
 
-function lineAngleDeg(line: PlanLine): number {
-  return (Math.atan2(line.to.y - line.from.y, line.to.x - line.from.x) * 180) / Math.PI;
-}
-
 const BG = "#d9d9dc";
-const TOP = "#ececee";
-const GREEN = "#eef2f7";
-const GREEN_DARK = "#f8fafc";
-const TEAL = "#0f988f";
 // No fixed rover addresses: rovers announce themselves by UDP beacon (src/services/roverBeacon.ts);
 // the HTTP sweep below is only a fallback over the tablet's own subnet.
 const LOCAL_WS_CANDIDATES: string[] = [];
@@ -385,17 +280,6 @@ const SUBNET_HOST_MAX = 254;
 // The HTTP sweep is only the fallback when no beacon is heard; keep it short so it never stalls the UI.
 const SUBNET_SCAN_CONCURRENCY = 64;
 const DEFAULT_ROVER_BACKEND = "";
-const MENU_ITEMS: Array<{ key: Page; label: string; icon: React.ReactNode }> = [
-  { key: "fields", label: "Fields", icon: <File size={22} color="#fff" /> },
-  { key: "templates", label: "Templates", icon: <LayoutTemplate size={22} color="#fff" /> },
-  { key: "swozi", label: "Swozi", icon: <Tractor size={22} color="#fff" /> },
-  { key: "status", label: "Status", icon: <Waves size={22} color="#fff" /> },
-  { key: "positioning", label: "Positioning", icon: <LocateFixed size={22} color="#fff" /> },
-  { key: "settings", label: "Settings", icon: <Settings size={22} color="#fff" /> },
-  { key: "howto", label: "How To", icon: <CircleHelp size={22} color="#fff" /> },
-  { key: "about", label: "About", icon: <Info size={22} color="#fff" /> },
-];
-
 function rootTelemetryKey(s: TelemetrySnapshot | null): string {
   if (!s) return "none";
   const fix = Number.isFinite(s.lat) && Number.isFinite(s.lon);
@@ -417,18 +301,6 @@ export default function App() {
 }
 
 function AppRoot() {
-  // TEMPORARY (Phase 0.1) on-device basemap smoke test. Flip SMOKE_TEST_MAPBOX
-  // in src/config/featureFlags.ts to true, rebuild, and confirm satellite tiles
-  // render. This early return is gated by a build-time constant so hook order
-  // stays stable. Remove this block once the smoke test is confirmed.
-  if (SMOKE_TEST_MAPBOX) {
-    return (
-      <Suspense fallback={<ActivityIndicator />}>
-        <MapboxHelloMap center={SMOKE_TEST_CENTER} zoomLevel={16} />
-      </Suspense>
-    );
-  }
-
   useImmersiveMode();
 
   const [page, setPage] = useState<Page>("connection");
@@ -462,7 +334,6 @@ function AppRoot() {
   const userDisconnectedRef = useRef(false);
   const autoConnectTriedRef = useRef<Set<string>>(new Set());
   const [backendPinned, setBackendPinned] = useState(false);
-  const [fieldGeneratorOpen, setFieldGeneratorOpen] = useState(false);
   const [importedPlan, setImportedPlan] = useState<ImportedPlan | null>(null);
   const [lines, setLines] = useState<PlanLine[]>([]);
   const [selectedLineId, setSelectedLineId] = useState<string | null>(null);
@@ -553,17 +424,10 @@ function AppRoot() {
    * component body; only reads those bindings when invoked on user action.
    */
   function buildManipulationAnchorFromPreview() {
-    // Mirror autoOriginEligible (declared later) so Move/Rotate uses the same frame as the map.
-    const originEligible =
-      autoOrigin &&
-      stagedWorkflow.staged !== "verified" &&
-      alignedRefPoints.length === 0;
     return buildPlanManipulationAnchor({
       previewAnchor: null,
       alignedRefPoints,
       stagedVerified: stagedWorkflow.staged === "verified",
-      autoOriginReference,
-      autoOriginEnabled: originEligible,
       geoOrigin: geoOriginDxf,
       existingAnchor: visualAlignmentAnchor,
       stableFallbackOrigin:
@@ -571,7 +435,7 @@ function AppRoot() {
         (Number.isFinite(telemetrySnapshot?.lat) && Number.isFinite(telemetrySnapshot?.lon)
           ? { lat: telemetrySnapshot!.lat as number, lon: telemetrySnapshot!.lon as number }
           : null),
-      // Raw design lines — same coords the map projects under AUTO_ORIGIN_RAW / fallback.
+      // Raw design lines — same coords the map projects under its fallback frame.
       // Must be the SAME list the map resolved its origin from, or the plan jumps the
       // instant the sticker appears: with a pending metric DXF the map draws FieldsPage's
       // composed set (boundary + committed + pending), while `lines` alone is still empty.
@@ -1019,10 +883,8 @@ function AppRoot() {
     }
   }, [telemetrySnapshot?.lat, telemetrySnapshot?.lon, latchedPreviewGps]);
 
-  const [activityFeed, setActivityFeed] = useState<ActivityEntry[]>([]);
-  const [discoveryFeed, setDiscoveryFeed] = useState<DiscoveredRover[]>([]);
-  const [telemetryError, setTelemetryError] = useState<string>("");
-  const [telemetryLoading, setTelemetryLoading] = useState(false);
+  const [activityFeed] = useState<ActivityEntry[]>([]);
+  const [discoveryFeed] = useState<DiscoveredRover[]>([]);
   const [missionActionBusy, setMissionActionBusy] = useState(false);
   /** Prevents double-tap Start / re-entrant restage while a previous Start is in flight. */
   const startInFlightRef = useRef(false);
@@ -1132,8 +994,6 @@ function AppRoot() {
 
   const prevMissionStateRef = useRef<string | null>(null);
 
-  const [autoOrigin, setAutoOrigin] = useState(false);
-  const [autoOriginReference, setAutoOriginReference] = useState<AutoOriginReference | null>(null);
   const [alignedRefPoints, setAlignedRefPoints] = useState<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[]>([]);
 
   // Deliberately does NOT clear on every `visualAlignmentItem` -> null (i.e. every
@@ -1156,10 +1016,6 @@ function AppRoot() {
 
   /** A mission holds the vehicle: the plan on the map is the path being driven and is not edited meanwhile. */
   const planLocked = missionRunning;
-  const autoOriginEligible =
-    autoOrigin &&
-    stagedWorkflow.staged !== "verified" &&
-    alignedRefPoints.length === 0;
   const [mapViewEnabled, setMapViewEnabled] = useState(true);
   const [resetNorthCount, setResetNorthCount] = useState(0);
   // Shared across every page (Home, Fields, Templates) so the top toolbar's
@@ -1168,41 +1024,7 @@ function AppRoot() {
   const [recenterRoverCount, setRecenterRoverCount] = useState(0);
   const [recenterPlanCount, setRecenterPlanCount] = useState(0);
 
-  const toggleAutoOrigin = useCallback(() => {
-    setAutoOrigin((prev) => {
-      const next = !prev;
-      if (!next) {
-        setAutoOriginReference(null);
-      } else {
-        setPage("home");
-        setMissionPanelOpenToken((token) => token + 1);
-      }
-      return next;
-    });
-  }, [setPage]);
-
-  useEffect(() => {
-    if (!autoOriginEligible) {
-      setAutoOriginReference(null);
-    }
-  }, [autoOriginEligible]);
-
-  useEffect(() => {
-    if (!autoOriginEligible || autoOriginReference) return;
-    const captured = buildAutoOriginReference(sanitizePlanLines(lines), getTelemetrySnapshot());
-    if (captured) {
-      setAutoOriginReference(captured);
-    }
-  }, [autoOriginEligible, autoOriginReference, lines, telemetrySnapshot]);
-
-  useEffect(() => {
-    if (!autoOriginReference) return;
-    if (!planStartMatchesReference(lines, autoOriginReference)) {
-      setAutoOriginReference(null);
-    }
-  }, [lines, autoOriginReference]);
-
-  const mapSourceLines = useMemo(() => sanitizePlanLines(lines), [lines]);
+  const displayedLines = useMemo(() => sanitizePlanLines(lines), [lines]);
 
   /** Drop stale file ids from mission layers when the upload batch shrinks. */
   useEffect(() => {
@@ -1235,12 +1057,6 @@ function AppRoot() {
       uploadedFiles.length > 0 && uploadedFiles.every((f) => f.status === "verified"),
     [uploadedFiles]
   );
-
-  const displayedLines = useMemo(() => {
-    const base = mapSourceLines;
-    if (!autoOriginEligible || !autoOriginReference) return base;
-    return applyAutoOriginShift(base, autoOriginReference);
-  }, [mapSourceLines, autoOriginEligible, autoOriginReference]);
 
   const csvMapPins = useMemo(
     () => (localCsvPreview ? localCsvToMapPins(localCsvPreview) : null),
@@ -1275,15 +1091,6 @@ function AppRoot() {
         missionLayers
       ),
     [displayedLines, uploadedFiles, missionLayers, missionLayerLegCatalog]
-  );
-  const missionVisibleMapSourceLines = useMemo(
-    () =>
-      filterCanvasLinesByMissionVisibility(
-        tagLinesWithMissionLayer(mapSourceLines, missionLayerLegCatalog),
-        uploadedFiles,
-        missionLayers
-      ),
-    [mapSourceLines, uploadedFiles, missionLayers, missionLayerLegCatalog]
   );
 
   // ── Anchor point selection (re-anchor a CSV/DXF plan's start) — Home page only ──
@@ -1336,11 +1143,9 @@ function AppRoot() {
         mode: "fields",
         alignedRefPoints,
         stagedVerified: stagedWorkflow.staged === "verified",
-        autoOriginReference,
-        autoOriginEnabled: autoOriginEligible,
         geoOrigin: geoOriginDxf,
       }),
-    [alignedRefPoints, stagedWorkflow.staged, autoOriginReference, autoOriginEligible, geoOriginDxf]
+    [alignedRefPoints, stagedWorkflow.staged, geoOriginDxf]
   );
 
   const previewRoverPoint = useMemo(() => {
@@ -1364,17 +1169,11 @@ function AppRoot() {
   // so late setWsStatus("ready") / setSelectedWs cannot clobber "connected".
   const discoveryScanGenerationRef = useRef(0);
   const connectInFlightRef = useRef(false);
-  const pendingSocketRef = useRef<Socket | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const invalidSessionLockRef = useRef(false);
   const wsStatusRef = useRef(wsStatus);
   socketRef.current = socket;
 
-  const activeMenu = useMemo(() => MENU_ITEMS.find((x) => x.key === page), [page]);
-  const sectionTitle =
-    page === "fields"
-      ? "Fields"
-      : activeMenu?.label ?? "Section";
   const isOffline = wsError.startsWith("Offline");
   const apiBaseUrl = selectedWs || manualHost;
 
@@ -1640,7 +1439,6 @@ function AppRoot() {
     setVerifiedAlignmentRequest(null);
     setAlignmentResult(null);
     setGeoOriginDxf(null);
-    setAutoOriginReference(null);
     setLayerVisibility({
       boundary: true,
       marking: true,
@@ -2365,7 +2163,7 @@ function AppRoot() {
         );
         return;
       }
-      // Standalone NED: replace-style single file (legacy Auto Origin path).
+      // Standalone NED: replace-style single file.
       localCsvParsesRef.current = [data];
       setLocalCsvPreview(data);
       setLocalDxfMeta(null);
@@ -3351,8 +3149,6 @@ function AppRoot() {
     setPendingDxfAlignment({});
     setSharedOriginGps(null);
     sharedOriginGpsRef.current = null;
-    setAutoOrigin(false);
-    setAutoOriginReference(null);
     setExtractedCorners(null);
     setAlignedRefPoints([]);
     setAlignmentResult(null);
@@ -3729,27 +3525,12 @@ function AppRoot() {
                     void connectSelectedWebsocket();
                   }}
                   onOfflinePreview={enterOfflinePreview}
-                  onOpenDebug={() => setPage("debug")}
                 />
-              ) : page === "debug" ? (
-                <Suspense fallback={<ActivityIndicator />}>
-                  <DebugDriveScreen
-                    onBack={() => setPage("home")}
-                    currentPlanLines={lines}
-                    originGps={
-                      alignedRefPoints[0]
-                        ? [alignedRefPoints[0].lat, alignedRefPoints[0].lon]
-                        : appPlannedStartSnapshot?.originGps ?? null
-                    }
-                  />
-                </Suspense>
               ) : (
                 <AppErrorBoundary name="Home">
                 <LoopProbe id="HomeView">
                 <HomeView
                   page={page}
-                  autoOrigin={autoOrigin}
-                  onToggleAutoOrigin={toggleAutoOrigin}
                   onResetNorth={() => setResetNorthCount((c) => c + 1)}
                   resetNorthCount={resetNorthCount}
                   onFocusRover={() => setRecenterRoverCount((c) => c + 1)}
@@ -3757,22 +3538,11 @@ function AppRoot() {
                   recenterRoverCount={recenterRoverCount}
                   recenterPlanCount={recenterPlanCount}
                   previewRoverPoint={previewRoverPoint}
-                  originShiftKey={
-                    autoOriginReference
-                      ? `${autoOriginReference.roverNorth.toFixed(3)}:${autoOriginReference.roverEast.toFixed(3)}`
-                      : autoOrigin
-                        ? "pending"
-                        : null
-                  }
                   importedPlan={importedPlan}
                   setImportedPlan={setImportedPlan}
                   lines={displayedLines}
-                  mapSourceLines={mapSourceLines}
                   missionVisibleLines={missionVisibleDisplayedLines}
-                  missionVisibleMapSourceLines={missionVisibleMapSourceLines}
-                  autoOriginReference={autoOriginReference}
                   mapGeometryFrame={mapGeometryFrame}
-                  autoOriginEnabled={autoOriginEligible}
                   geoOrigin={geoOriginDxf}
                   setLines={setLines}
                   selectedLineId={selectedLineId}
@@ -3851,13 +3621,8 @@ function AppRoot() {
                             page={page}
                             importedPlan={importedPlan}
                             lines={displayedLines}
-                            mapSourceLines={mapSourceLines}
-                            autoOriginReference={autoOriginReference}
                             mapGeometryFrame={mapGeometryFrame}
-                            autoOriginEnabled={autoOriginEligible}
                             geoOrigin={geoOriginDxf}
-                            autoOrigin={autoOrigin}
-                            onToggleAutoOrigin={toggleAutoOrigin}
                             setLines={setLines}
                             selectedLineId={selectedLineId}
                             onMissionStored={handleMissionStored}
@@ -3957,7 +3722,6 @@ function AppRoot() {
                             onAssignFileToLayer={handleAssignFileToLayer}
                             onUnassignFileFromLayer={handleUnassignFileFromLayer}
                             missionVisibleLines={missionVisibleDisplayedLines}
-                            missionVisibleMapSourceLines={missionVisibleMapSourceLines}
                             anchorAvailable={anchorAvailable}
                             anchorSelectMode={anchorSelectMode}
                             anchorTargetOptions={anchorTargetOptions}
@@ -4056,105 +3820,9 @@ function AppRoot() {
   );
 }
 
-function TopBar({
-  title,
-  onBack,
-  onMorePress,
-  mapViewEnabled,
-  setMapViewEnabled,
-}: {
-  title: string;
-  onBack?: () => void;
-  onMorePress?: () => void;
-  mapViewEnabled?: boolean;
-  setMapViewEnabled?: React.Dispatch<React.SetStateAction<boolean>>;
-}) {
-  return (
-    <View
-      style={{
-        height: 76,
-        backgroundColor: "#f8fafc",
-        borderBottomWidth: 1,
-        borderBottomColor: "#d7dee8",
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "space-between",
-        paddingHorizontal: 14,
-      }}
-    >
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
-        {onBack ? (
-          <Pressable
-            onPress={onBack}
-            hitSlop={14}
-            style={{
-              width: 38,
-              height: 38,
-              borderRadius: 12,
-              backgroundColor: "#eef2f7",
-              alignItems: "center",
-              justifyContent: "center",
-              borderWidth: 1,
-              borderColor: "#d7dee8",
-            }}
-          >
-            <Text style={{ fontSize: 24, color: "#0f172a", lineHeight: 24 }}>‹</Text>
-          </Pressable>
-        ) : null}
-        <Text style={{ fontSize: 18, color: "#0f172a", fontWeight: "700" }}>{title}</Text>
-      </View>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-        {setMapViewEnabled && (
-          <Pressable
-            onPress={() => setMapViewEnabled((v) => !v)}
-            style={{
-              height: 38,
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 6,
-              paddingHorizontal: 12,
-              borderRadius: 12,
-              backgroundColor: mapViewEnabled ? "#3b82f6" : "#ffffff",
-              borderWidth: 1,
-              borderColor: mapViewEnabled ? "#2563eb" : "#d7dee8",
-            }}
-          >
-            <MapIcon size={14} color={mapViewEnabled ? "#ffffff" : "#0f172a"} />
-            <Text style={{ color: mapViewEnabled ? "#ffffff" : "#0f172a", fontSize: 11, fontWeight: "800" }}>
-              {mapViewEnabled ? "Map On" : "Map"}
-            </Text>
-          </Pressable>
-        )}
-        {onMorePress ? (
-          <Pressable
-            onPress={onMorePress}
-            hitSlop={14}
-            style={{
-              width: 38,
-              height: 38,
-              borderRadius: 12,
-              backgroundColor: "#eef2f7",
-              alignItems: "center",
-              justifyContent: "center",
-              borderWidth: 1,
-              borderColor: "#d7dee8",
-            }}
-          >
-            <Text style={{ fontSize: 20, color: "#0f172a", lineHeight: 20 }}>⋮</Text>
-          </Pressable>
-        ) : (
-          !setMapViewEnabled && <View style={{ width: 38, height: 38 }} />
-        )}
-      </View>
-    </View>
-  );
-}
-
 type HomeViewProps = {
   page?: Page;
   renderSectionContent?: () => React.ReactNode;
-  autoOrigin: boolean;
-  onToggleAutoOrigin: () => void;
   onResetNorth?: () => void;
   resetNorthCount?: number;
   onFocusRover?: () => void;
@@ -4162,11 +3830,7 @@ type HomeViewProps = {
   recenterRoverCount?: number;
   recenterPlanCount?: number;
   previewRoverPoint: { north: number; east: number } | null;
-  originShiftKey?: string | null;
-  mapSourceLines: PlanLine[];
-  autoOriginReference: AutoOriginReference | null;
   mapGeometryFrame: MapGeometryFrame;
-  autoOriginEnabled: boolean;
   geoOrigin?: [number, number] | null;
   importedPlan: ImportedPlan | null;
   setImportedPlan?: React.Dispatch<React.SetStateAction<ImportedPlan | null>>;
@@ -4230,22 +3894,16 @@ type HomeViewProps = {
   onToggleControlMode?: () => void;
   onToggleMissionLayerVisibility?: (layerId: string) => void;
   missionVisibleLines?: PlanLine[];
-  missionVisibleMapSourceLines?: PlanLine[];
 };
 
 function HomeView(props: HomeViewProps) {
   // Prefer App-provided live snapshot (single source of truth). Store is fallback only.
   const liveTelemetry = useThrottledTelemetrySnapshot();
-  const liveHealth = useSystemHealth();
   const {
     page = "home",
     renderSectionContent,
     previewRoverPoint: previewRoverPointProp,
-    originShiftKey,
-    mapSourceLines,
-    autoOriginReference,
     mapGeometryFrame,
-    autoOriginEnabled,
     geoOrigin = null,
     lines,
     selectedLineId,
@@ -4329,16 +3987,12 @@ function HomeView(props: HomeViewProps) {
       renderPlanPreview={page === "home" ? () => (
         <PlanPreview
           lines={props.missionVisibleLines ?? lines}
-          mapSourceLines={props.missionVisibleMapSourceLines ?? mapSourceLines}
-          autoOriginReference={autoOriginReference}
           mapGeometryFrame={mapGeometryFrame}
-          autoOriginEnabled={autoOriginEnabled}
           geoOrigin={geoOrigin}
           stagedVerified={stagedWorkflow.staged === "verified"}
           visibility={layerVisibility}
           selectedLineId={selectedLineId}
           onSelectLine={onSelectLine}
-          originShiftKey={originShiftKey}
           roverPosN={previewRoverPoint?.north ?? null}
           roverPosE={previewRoverPoint?.east ?? null}
           roverHeadingDeg={telemetrySnapshot?.heading_ned_deg ?? null}
@@ -4368,751 +4022,6 @@ function HomeView(props: HomeViewProps) {
   );
 }
 
-function HeaderTelemetryPill({
-  icon,
-  label,
-  value,
-  tone,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  tone: string;
-}) {
-  return (
-    <View style={headerTelemetryStyles.pill}>
-      <View style={headerTelemetryStyles.iconWrap}>{icon}</View>
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={headerTelemetryStyles.label}>{label}</Text>
-        <Text style={[headerTelemetryStyles.value, { color: tone }]} numberOfLines={1}>
-          {value}
-        </Text>
-      </View>
-
-    </View>
-  );
-}
-
-function CompassOverlay({
-  telemetrySnapshot,
-  expanded,
-  onToggleExpanded,
-}: {
-  telemetrySnapshot: TelemetrySnapshot | null;
-  expanded: boolean;
-  onToggleExpanded: () => void;
-}) {
-  const hasPosition = telemetrySnapshot?.pos_n != null || telemetrySnapshot?.pos_e != null;
-
-  return (
-    <Pressable style={compassStyles.wrap} hitSlop={10} onPress={onToggleExpanded}>
-      <View style={compassStyles.header}>
-        <View style={compassStyles.dot} />
-        <Text style={compassStyles.title}>{hasPosition ? "Position" : "Compass"}</Text>
-      </View>
-      <View style={compassStyles.body}>
-        <View style={compassStyles.northTick} />
-        <View style={compassStyles.centerRing}>
-          <Text style={compassStyles.centerText}>
-            {expanded ? "N/E" : hasPosition ? "Tap map" : "Tap"}
-          </Text>
-        </View>
-      </View>
-      <View style={compassStyles.values}>
-        {expanded ? (
-          <>
-            <Text style={compassStyles.valueText}>
-              North {telemetrySnapshot?.pos_n == null ? "--" : telemetrySnapshot.pos_n.toFixed(2)}
-            </Text>
-            <Text style={compassStyles.valueText}>
-              East {telemetrySnapshot?.pos_e == null ? "--" : telemetrySnapshot.pos_e.toFixed(2)}
-            </Text>
-          </>
-        ) : (
-          <>
-            <Text style={compassStyles.valueText}>
-              N {telemetrySnapshot?.pos_n == null ? "--" : telemetrySnapshot.pos_n.toFixed(2)}
-            </Text>
-            <Text style={compassStyles.valueText}>
-              E {telemetrySnapshot?.pos_e == null ? "--" : telemetrySnapshot.pos_e.toFixed(2)}
-            </Text>
-          </>
-        )}
-      </View>
-    </Pressable>
-  );
-}
-
-function TelemetryStat({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone: string;
-}) {
-  return (
-    <View style={telemetryStatStyles.card}>
-      <Text style={telemetryStatStyles.label}>{label}</Text>
-      <Text style={[telemetryStatStyles.value, { color: tone }]}>{value}</Text>
-    </View>
-  );
-}
-
-function boolText(value: boolean | null | undefined) {
-  if (value == null) return "n/a";
-  return value ? "YES" : "NO";
-}
-
-function boolTone(value: boolean | null | undefined) {
-  if (value == null) return "#94a3b8";
-  return value ? "#22c55e" : "#ef4444";
-}
-
-function telemetryTone(value: number | null | undefined, lowGood: number, highGood: number) {
-  if (value == null) return "#94a3b8";
-  if (value >= highGood) return "#22c55e";
-  if (value >= lowGood) return "#d97706";
-  return "#ef4444";
-}
-
-const compassStyles = {
-  wrap: {
-    position: "absolute" as const,
-    left: 12,
-    bottom: 12,
-    width: 160,
-    borderRadius: 18,
-    backgroundColor: "rgba(15,23,42,0.9)",
-    borderWidth: 1,
-    borderColor: "rgba(148,163,184,0.24)",
-    padding: 12,
-  },
-  header: {
-    flexDirection: "row" as const,
-    alignItems: "center" as const,
-    gap: 8,
-  },
-  dot: {
-    width: 8,
-    height: 8,
-    borderRadius: 99,
-    backgroundColor: "#22c55e",
-  },
-  title: {
-    color: "#fff",
-    fontSize: 12,
-    fontWeight: "800" as const,
-    letterSpacing: 0.8,
-    textTransform: "uppercase" as const,
-  },
-  body: {
-    marginTop: 10,
-    height: 58,
-    borderRadius: 16,
-    backgroundColor: "rgba(255,255,255,0.05)",
-    alignItems: "center" as const,
-    justifyContent: "center" as const,
-    position: "relative" as const,
-  },
-  northTick: {
-    position: "absolute" as const,
-    top: 7,
-    width: 2,
-    height: 12,
-    borderRadius: 99,
-    backgroundColor: "#38bdf8",
-  },
-  centerRing: {
-    width: 36,
-    height: 36,
-    borderRadius: 99,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.24)",
-    alignItems: "center" as const,
-    justifyContent: "center" as const,
-  },
-  centerText: {
-    color: "#cbd5e1",
-    fontSize: 10,
-    fontWeight: "700" as const,
-  },
-  values: {
-    marginTop: 10,
-    gap: 2,
-  },
-  valueText: {
-    color: "#e2e8f0",
-    fontSize: 11,
-    fontWeight: "700" as const,
-  },
-} as const;
-
-const telemetryStatStyles = {
-  card: {
-    minWidth: 92,
-    flexGrow: 1,
-    flexBasis: "30%" as const,
-    borderRadius: 14,
-    backgroundColor: "rgba(255,255,255,0.06)",
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  label: {
-    color: "#94a3b8",
-    fontSize: 10,
-    fontWeight: "800" as const,
-    letterSpacing: 0.5,
-    textTransform: "uppercase" as const,
-  },
-  value: {
-    color: "#fff",
-    fontSize: 13,
-    fontWeight: "800" as const,
-    marginTop: 4,
-  },
-} as const;
-
-const headerTelemetryStyles = {
-  pill: {
-    minWidth: 94,
-    flex: 1,
-    flexBasis: "48%" as const,
-    flexDirection: "row" as const,
-    alignItems: "center" as const,
-    gap: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 12,
-    backgroundColor: "#f8fafc",
-    borderWidth: 1,
-    borderColor: "#cbd5e1",
-  },
-  iconWrap: {
-    width: 28,
-    height: 28,
-    borderRadius: 10,
-    backgroundColor: "#e2e8f0",
-    alignItems: "center" as const,
-    justifyContent: "center" as const,
-  },
-  label: {
-    color: "#64748b",
-    fontSize: 9,
-    fontWeight: "800" as const,
-    letterSpacing: 0.7,
-    textTransform: "uppercase" as const,
-  },
-  value: {
-    color: "#0f172a",
-    fontSize: 11,
-    fontWeight: "800" as const,
-    marginTop: 2,
-  },
-} as const;
-
-const telemetryCtaStyles = {
-  outer: {
-    width: "100%",
-    minHeight: 84,
-    borderRadius: 18,
-    backgroundColor: "#f8fafc",
-    borderWidth: 1,
-    borderColor: "#d7e0ea",
-    overflow: "hidden" as const,
-    shadowColor: "#000",
-    shadowOpacity: 0.06,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
-  },
-  inner: {
-    flex: 1,
-    flexDirection: "row" as const,
-    alignItems: "center" as const,
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
-  leftRail: {
-    width: 18,
-    alignItems: "center" as const,
-    justifyContent: "center" as const,
-    gap: 6,
-  },
-  dot: {
-    width: 10,
-    height: 10,
-    borderRadius: 99,
-    backgroundColor: "#0f172a",
-  },
-  line: {
-    width: 2,
-    height: 30,
-    borderRadius: 999,
-    backgroundColor: "#cbd5e1",
-  },
-  title: {
-    color: "#0f172a",
-    fontSize: 17,
-    fontWeight: "900" as const,
-  },
-  subtitle: {
-    color: "#64748b",
-    fontSize: 12,
-    lineHeight: 16,
-    marginTop: 1,
-  },
-  chevronWrap: {
-    width: 34,
-    height: 34,
-    borderRadius: 12,
-    alignItems: "center" as const,
-    justifyContent: "center" as const,
-    backgroundColor: "#e2e8f0",
-    borderWidth: 1,
-    borderColor: "#cbd5e1",
-  },
-} as const;
-
-function LineDetailsDrawer({
-  visible,
-  onClose,
-  selectedLine,
-  hasPlan,
-  layerVisibility,
-  setLayerVisibility,
-  showRefPointLabels,
-  setShowRefPointLabels,
-}: {
-  visible: boolean;
-  onClose: () => void;
-  selectedLine: PlanLine | null;
-  hasPlan: boolean;
-  layerVisibility: LayerVisibility;
-  setLayerVisibility: React.Dispatch<React.SetStateAction<LayerVisibility>>;
-  showRefPointLabels: boolean;
-  setShowRefPointLabels: React.Dispatch<React.SetStateAction<boolean>>;
-}) {
-  return (
-    <Modal transparent visible={visible} animationType="slide" onRequestClose={onClose}>
-      <Pressable style={{ flex: 1, backgroundColor: "rgba(15,23,42,0.2)" }} onPress={onClose}>
-        <View style={drawerStyles.sheet}>
-          <Pressable style={drawerStyles.close} onPress={onClose}>
-            <Text style={drawerStyles.closeText}>×</Text>
-          </Pressable>
-          <View style={{ marginTop: 4 }}>
-            <Text style={{ color: "#64748b", fontSize: 9.5, fontWeight: "800", letterSpacing: 1.4, textTransform: "uppercase" }}>
-              Rover Ops
-            </Text>
-            <Text style={{ color: "#fff", fontSize: 22, fontWeight: "900", marginTop: 2 }}>
-              Line Details
-            </Text>
-          </View>
-          <Text style={{ color: "#94a3b8", fontSize: 12, lineHeight: 17, marginTop: 6, marginBottom: 4 }}>
-                      Tap a line on the canvas, then inspect geometry and spray overrides here.
-          </Text>
-
-          <View style={drawerStyles.grid}>
-            <StatCard
-              label="Selection"
-              value={{
-                label: "Current line",
-                value: selectedLine ? selectedLine.label : "No line selected",
-                tone: selectedLine ? "#ffffff" : "#64748b",
-              }}
-            />
-            <StatCard
-              label="Status"
-              value={{
-                label: "Drawer state",
-                value: selectedLine ? "Loaded" : "Empty",
-                tone: selectedLine ? "#16a34a" : "#d97706",
-              }}
-            />
-            <StatCard
-              label="Layer"
-              value={{
-                label: "Visible layers",
-                value: hasPlan ? "Available" : "No plan",
-                tone: hasPlan ? "#ffffff" : "#64748b",
-              }}
-            />
-            <StatCard
-              label="Info"
-              value={{
-                label: "Line geometry",
-                value: selectedLine ? `${(getLineLengthM(selectedLine) ?? 0).toFixed(2)} m` : "n/a",
-                tone: "#ffffff",
-              }}
-            />
-          </View>
-
-          {selectedLine ? (
-            <>
-              <View style={drawerStyles.stripRow}>
-                <StripMetric label="Length" value={`${(getLineLengthM(selectedLine) ?? 0).toFixed(2)} m`} tone="#ffffff" />
-                <StripMetric label="Angle" value={`${lineAngleDeg(selectedLine).toFixed(2)}°`} tone="#ffffff" />
-                <StripMetric label="Width" value={`${selectedLine.width.toFixed(2)} m`} tone="#ffffff" />
-              </View>
-
-              <View style={drawerStyles.section}>
-                <SectionTitle title="Geometry" />
-                <View style={{ borderRadius: 16, padding: 12, backgroundColor: "#111827", borderWidth: 1, borderColor: "rgba(148,163,184,0.16)", gap: 10 }}>
-                  <ListRow left="Line label" right={selectedLine.label} tone="#fff" />
-                  <ListRow left="Layer" right={selectedLine.layer} tone="#fff" />
-                  <ListRow left="From" right={`(${selectedLine.from.x.toFixed(2)}, ${selectedLine.from.y.toFixed(2)})`} tone="#fff" />
-                  <ListRow left="To" right={`(${selectedLine.to.x.toFixed(2)}, ${selectedLine.to.y.toFixed(2)})`} tone="#fff" />
-                  <ListRow left="Point IDs" right={`${selectedLine.from.id} -> ${selectedLine.to.id}`} tone="#fff" />
-                  <ListRow left="Line ID" right={selectedLine.id} tone="#fff" />
-                </View>
-              </View>
-
-              <View style={drawerStyles.section}>
-                <SectionTitle title="Visible layers" />
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                  <CompactLayerToggle
-                    label="Boundary"
-                    value={layerVisibility.boundary}
-                    onToggle={() => setLayerVisibility((prev) => ({ ...prev, boundary: !prev.boundary }))}
-                  />
-                  <CompactLayerToggle
-                    label="Marking"
-                    value={layerVisibility.marking}
-                    onToggle={() => setLayerVisibility((prev) => ({ ...prev, marking: !prev.marking }))}
-                  />
-                  <CompactLayerToggle
-                    label="Center"
-                    value={layerVisibility.center}
-                    onToggle={() => setLayerVisibility((prev) => ({ ...prev, center: !prev.center }))}
-                  />
-                  <CompactLayerToggle
-                    label="Transit"
-                    value={layerVisibility.transit}
-                    onToggle={() => setLayerVisibility((prev) => ({ ...prev, transit: !prev.transit }))}
-                  />
-                  <CompactLayerToggle
-                    label="Extension"
-                    value={layerVisibility.extension}
-                    onToggle={() => setLayerVisibility((prev) => ({ ...prev, extension: !prev.extension }))}
-                  />
-                </View>
-                <View style={{ marginTop: 12 }}>
-                  <CompactLayerToggle
-                    label="Show Reference Point Labels"
-                    value={showRefPointLabels}
-                    onToggle={() => setShowRefPointLabels(prev => !prev)}
-                  />
-                </View>
-              </View>
-            </>
-          ) : (
-            <View style={[drawerStyles.section, { marginTop: 18 }]}>
-              <EmptyLine text="Tap a highlighted line in the canvas to see its details here." />
-            </View>
-          )}
-        </View>
-      </Pressable>
-    </Modal>
-  );
-}
-
-function StatCard({ label, value, fullWidth, light }: { label: string; value: { label: string; value: string; tone: string }; fullWidth?: boolean; light?: boolean }) {
-  const accentColor = (value.tone === "#ffffff" || value.tone === "#fff" || value.tone === "#0f172a") ? "#3b82f6" : value.tone || "#475569";
-
-  let cardBg = undefined;
-  if (light) {
-    if (value.tone === "#16a34a") {
-      cardBg = "#f0fdf4"; // Very soft green tint
-    } else if (value.tone === "#dc2626") {
-      cardBg = "#fef2f2"; // Very soft red tint
-    } else if (value.tone === "#d97706") {
-      cardBg = "#fffbeb"; // Very soft amber tint
-    }
-  }
-
-  return (
-    <View style={[
-      light ? drawerStyles.lightCard : drawerStyles.card,
-      cardBg && { backgroundColor: cardBg },
-      fullWidth && { width: "100%", flexBasis: "100%" },
-      { borderLeftWidth: 3, borderLeftColor: accentColor }
-    ]}>
-      <Text style={light ? drawerStyles.lightCardLabel : drawerStyles.cardLabel}>{label}</Text>
-      <Text style={[light ? drawerStyles.lightCardValue : drawerStyles.cardValue, { color: light ? "#0f172a" : "#ffffff" }]}>{value.value}</Text>
-      <Text style={light ? drawerStyles.lightCardMeta : drawerStyles.cardMeta}>{value.label}</Text>
-    </View>
-  );
-}
-
-function StripMetric({ label, value, tone, icon, progressPct, light }: { label: string; value: string; tone: string; icon?: React.ReactNode; progressPct?: number; light?: boolean }) {
-  const isLightText = tone === "#ffffff" || tone === "#fff";
-  const displayTone = light && isLightText ? "#0f172a" : tone;
-  return (
-    <View style={[light ? drawerStyles.lightStrip : drawerStyles.strip, { position: "relative", overflow: "hidden" }]}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
-        {icon}
-        <Text style={light ? drawerStyles.lightStripLabel : drawerStyles.stripLabel}>{label}</Text>
-      </View>
-      <Text style={[light ? drawerStyles.lightStripValue : drawerStyles.stripValue, { color: displayTone }]}>{value}</Text>
-      {progressPct !== undefined && (
-        <View style={{
-          position: "absolute",
-          left: 0,
-          right: 0,
-          bottom: 0,
-          height: 4,
-          backgroundColor: light ? "#e2e8f0" : "rgba(255,255,255,0.06)",
-        }}>
-          <View style={{
-            width: `${Math.min(100, Math.max(0, progressPct))}%`,
-            height: "100%",
-            backgroundColor: displayTone,
-          }} />
-        </View>
-      )}
-    </View>
-  );
-}
-
-function SectionTitle({ title, light }: { title: string; light?: boolean }) {
-  return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8, marginTop: 12 }}>
-      <View style={{ width: 3, height: 10, backgroundColor: "#3b82f6", borderRadius: 1.5 }} />
-      <Text style={light ? drawerStyles.lightSectionTitle : drawerStyles.sectionTitle}>{title}</Text>
-      {light && (
-        <View style={{ flex: 1, height: 1, backgroundColor: "#e2e8f0", marginLeft: 4 }} />
-      )}
-    </View>
-  );
-}
-
-function MiniGrid({ items, light }: { items: Array<[string, string]>; light?: boolean }) {
-  return (
-    <View style={{
-      borderRadius: 12,
-      backgroundColor: light ? "#f8fafc" : "#111827",
-      borderWidth: 1,
-      borderColor: light ? "#e2e8f0" : "rgba(255, 255, 255, 0.05)",
-      overflow: "hidden",
-      marginTop: 4,
-    }}>
-      <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
-        {items.map(([label, value], index) => {
-          const isRightColumn = index % 2 === 1;
-          const isBottomRow = index >= items.length - 2;
-          return (
-            <View
-              key={label}
-              style={{
-                width: "50%",
-                paddingVertical: 8,
-                paddingHorizontal: 12,
-                borderRightWidth: isRightColumn ? 0 : 1,
-                borderRightColor: light ? "#e2e8f0" : "rgba(255, 255, 255, 0.05)",
-                borderBottomWidth: isBottomRow ? 0 : 1,
-                borderBottomColor: light ? "#e2e8f0" : "rgba(255, 255, 255, 0.05)",
-              }}
-            >
-              <Text style={{ color: "#64748b", fontSize: 8.5, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.5 }}>
-                {label}
-              </Text>
-              <Text style={{ color: light ? "#0f172a" : "#ffffff", fontSize: 12, fontWeight: "800", marginTop: 2 }}>
-                {value}
-              </Text>
-            </View>
-          );
-        })}
-      </View>
-    </View>
-  );
-}
-
-function ListRow({ left, right, tone }: { left: string; right: string; tone: string }) {
-  return (
-    <View style={drawerStyles.row}>
-      <Text style={drawerStyles.rowLeft} numberOfLines={1}>{left}</Text>
-      <Text style={[drawerStyles.rowRight, { color: tone }]} numberOfLines={1}>{right}</Text>
-    </View>
-  );
-}
-
-function EmptyLine({ text }: { text: string }) {
-  return <Text style={drawerStyles.empty}>{text}</Text>;
-}
-
-const drawerStyles = {
-  sheet: {
-    position: "absolute" as const,
-    right: 0,
-    top: 0,
-    bottom: 0,
-    width: "42%",
-    minWidth: 340,
-    maxWidth: 520,
-    backgroundColor: "#070c17",
-    padding: 14,
-    borderLeftWidth: 1,
-    borderLeftColor: "rgba(255,255,255,0.08)",
-    shadowColor: "#000",
-    shadowOpacity: 0.2,
-    shadowRadius: 18,
-    shadowOffset: { width: -8, height: 0 },
-    elevation: 8,
-  },
-  close: {
-    alignSelf: "flex-end" as const,
-    width: 34,
-    height: 34,
-    borderRadius: 999,
-    backgroundColor: "rgba(148,163,184,0.12)",
-    alignItems: "center" as const,
-    justifyContent: "center" as const,
-    marginBottom: 8,
-  },
-  closeText: { color: "#fff", fontSize: 22, lineHeight: 22, marginTop: -2 },
-  kicker: { color: "#94a3b8", fontSize: 11, fontWeight: "800", letterSpacing: 1.6, textTransform: "uppercase" as const },
-  title: { color: "#fff", fontSize: 28, fontWeight: "900", marginTop: 6 },
-  subtitle: { color: "#cbd5e1", fontSize: 13, lineHeight: 19, marginTop: 8, maxWidth: 380 },
-  error: { color: "#fecaca", marginTop: 10, fontWeight: "700" as const },
-  loading: { color: "#bfdbfe", marginTop: 10, fontWeight: "700" as const },
-  grid: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8, marginTop: 10 },
-  card: { flexGrow: 1, width: "48%", minWidth: 120, borderRadius: 12, backgroundColor: "#111827", borderWidth: 1, borderColor: "rgba(255,255,255,0.06)", paddingVertical: 10, paddingHorizontal: 12, flexDirection: "column" as const, overflow: "hidden" as const },
-  cardLabel: { color: "#64748b", fontSize: 9, fontWeight: "800" as const, letterSpacing: 0.8, textTransform: "uppercase" as const },
-  cardValue: { color: "#fff", fontSize: 15, fontWeight: "800" as const, marginTop: 4 },
-  cardMeta: { color: "#94a3b8", fontSize: 9.5, marginTop: 2 },
-  lightCard: { flexGrow: 1, width: "48%", minWidth: 120, borderRadius: 12, backgroundColor: "#f8fafc", borderWidth: 1, borderColor: "#e2e8f0", paddingVertical: 10, paddingHorizontal: 12, flexDirection: "column" as const, overflow: "hidden" as const },
-  lightCardLabel: { color: "#64748b", fontSize: 9, fontWeight: "800" as const, letterSpacing: 0.8, textTransform: "uppercase" as const },
-  lightCardValue: { color: "#0f172a", fontSize: 15, fontWeight: "800" as const, marginTop: 4 },
-  lightCardMeta: { color: "#475569", fontSize: 9.5, marginTop: 2 },
-  stripRow: { flexDirection: "row" as const, gap: 8, marginTop: 8 },
-  strip: { flex: 1, borderRadius: 10, backgroundColor: "#111827", paddingVertical: 8, paddingHorizontal: 10, borderWidth: 1, borderColor: "rgba(255,255,255,0.05)" },
-  stripLabel: { color: "#64748b", fontSize: 8.5, fontWeight: "800" as const, textTransform: "uppercase" as const },
-  stripValue: { color: "#fff", fontSize: 12.5, fontWeight: "800" as const, marginTop: 3 },
-  lightStrip: { flex: 1, borderRadius: 10, backgroundColor: "#f8fafc", paddingVertical: 8, paddingHorizontal: 10, borderWidth: 1, borderColor: "#e2e8f0" },
-  lightStripLabel: { color: "#64748b", fontSize: 8.5, fontWeight: "800" as const, textTransform: "uppercase" as const },
-  lightStripValue: { color: "#0f172a", fontSize: 12.5, fontWeight: "800" as const, marginTop: 3 },
-  section: { marginTop: 12 },
-  sectionTitle: { color: "#94a3b8", fontSize: 10.5, fontWeight: "800" as const, letterSpacing: 1, textTransform: "uppercase" as const, marginBottom: 0 },
-  lightSectionTitle: { color: "#0f172a", fontSize: 10.5, fontWeight: "800" as const, letterSpacing: 1, textTransform: "uppercase" as const, marginBottom: 0 },
-  miniGrid: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8 },
-  miniCell: { width: "31.5%", minWidth: 88, borderRadius: 10, backgroundColor: "#111827", padding: 8, borderWidth: 1, borderColor: "rgba(255,255,255,0.05)" },
-  miniLabel: { color: "#64748b", fontSize: 9, fontWeight: "800" as const, textTransform: "uppercase" as const },
-  miniValue: { color: "#fff", fontSize: 12, fontWeight: "800" as const, marginTop: 4 },
-  list: { gap: 6 },
-  row: { flexDirection: "row" as const, justifyContent: "space-between", gap: 10, borderRadius: 8, backgroundColor: "#111827", paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1, borderColor: "rgba(255,255,255,0.05)" },
-  rowLeft: { color: "#e2e8f0", fontSize: 11.5, flexShrink: 1, paddingRight: 8 },
-  rowRight: { color: "#fff", fontSize: 11, fontWeight: "800" as const },
-  empty: { color: "#94a3b8", fontSize: 12, paddingVertical: 8 },
-} as const;
-
-function CompactLayerToggle({
-  label,
-  value,
-  onToggle,
-}: {
-  label: string;
-  value: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <Pressable
-      onPress={onToggle}
-      style={{
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 8,
-        paddingHorizontal: 12,
-        paddingVertical: 10,
-        borderRadius: 12,
-        borderWidth: 1,
-        borderColor: value ? "#0f172a" : "#cbd5e1",
-        backgroundColor: value ? "#e2e8f0" : "#f8fafc",
-      }}
-    >
-      <View
-        style={{
-          width: 18,
-          height: 18,
-          borderRadius: 5,
-          borderWidth: 1.5,
-          borderColor: value ? "#0f172a" : "#94a3b8",
-          backgroundColor: value ? "#0f172a" : "#fff",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        {value ? <Text style={{ color: "#fff", fontSize: 11, fontWeight: "800" }}>✓</Text> : null}
-      </View>
-      <Text style={{ color: "#0f172a", fontSize: 13, fontWeight: "600" }}>{label}</Text>
-    </Pressable>
-  );
-}
-
-function DetailStatCard({ label, value }: { label: string; value: string }) {
-  return (
-    <View
-      style={{
-        flexBasis: "48%",
-        flexGrow: 1,
-        minWidth: 120,
-        borderRadius: 16,
-        borderWidth: 1,
-        borderColor: "#d8e1eb",
-        backgroundColor: "#ffffff",
-        paddingHorizontal: 12,
-        paddingVertical: 12,
-        gap: 6,
-      }}
-    >
-      <Text style={{ color: "#64748b", fontSize: 10, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.8 }}>
-        {label}
-      </Text>
-      <Text style={{ color: "#0f172a", fontSize: 15, fontWeight: "800" }}>
-        {value}
-      </Text>
-    </View>
-  );
-}
-
-function DetailLine({ label, value }: { label: string; value: string }) {
-  return (
-    <View
-      style={{
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 16,
-      }}
-    >
-      <Text
-        style={{
-          color: "#64748b",
-          fontSize: 12,
-          fontWeight: "800",
-          textTransform: "uppercase",
-          letterSpacing: 0.5,
-          width: 92,
-          flexShrink: 0,
-        }}
-      >
-        {label}
-      </Text>
-      <Text
-        style={{
-          color: "#0f172a",
-          fontSize: 13,
-          fontWeight: "700",
-          flex: 1,
-          textAlign: "right",
-        }}
-      >
-        {value}
-      </Text>
-    </View>
-  );
-}
 function SectionPages(props: {
   title: string;
   page: Page;
@@ -5121,13 +4030,8 @@ function SectionPages(props: {
   previewRoverPoint: { north: number; east: number } | null;
   importedPlan: ImportedPlan | null;
   lines: PlanLine[];
-  mapSourceLines?: PlanLine[];
-  autoOriginReference?: AutoOriginReference | null;
   mapGeometryFrame?: MapGeometryFrame;
-  autoOriginEnabled?: boolean;
   geoOrigin?: [number, number] | null;
-  autoOrigin?: boolean;
-  onToggleAutoOrigin?: () => void;
   setLines: React.Dispatch<React.SetStateAction<PlanLine[]>>;
   selectedLineId: string | null;
   onBack: () => void;
@@ -5259,7 +4163,6 @@ function SectionPages(props: {
   onAssignFileToLayer?: (fileEntryId: string, layerId: string) => void;
   onUnassignFileFromLayer?: (fileEntryId: string) => void;
   missionVisibleLines?: PlanLine[];
-  missionVisibleMapSourceLines?: PlanLine[];
   /** Anchor point selection (re-anchor a CSV/DXF plan's start) — Fields only, before Send. */
   anchorAvailable?: boolean;
   anchorSelectMode?: boolean;
@@ -5290,7 +4193,7 @@ function SectionPages(props: {
   onOffsetDragStateChange?: (dragging: boolean) => void;
   offsetPreviewLines?: PlanLine[] | null;
 }) {
-  const { page, mapViewEnabled, setMapViewEnabled } = props;
+  const { page, mapViewEnabled } = props;
   const sharedMapEnabled = useSharedMapEnabled();
   // Prefer App props; store fallback if a screen mounts without a parent snapshot.
   const liveTelemetry = useThrottledTelemetrySnapshot();
@@ -5425,141 +4328,3 @@ function SectionPages(props: {
   );
 }
 
-function LayerRow({ label, value, onToggle }: { label: string; value: boolean; onToggle: () => void }) {
-  return (
-    <Pressable onPress={onToggle} style={{ flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 10 }}>
-      <View
-        style={{
-          width: 22,
-          height: 22,
-          borderRadius: 6,
-          borderWidth: 2,
-          borderColor: "#555",
-          alignItems: "center",
-          justifyContent: "center",
-          backgroundColor: value ? "#111" : "#fff",
-        }}
-      >
-        {value ? <Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>✓</Text> : null}
-      </View>
-      <Text style={{ color: "#333", fontSize: 16 }}>{label}</Text>
-    </Pressable>
-  );
-}
-
-function ActionBar({
-  title,
-  subtitle,
-  icon,
-  onPress,
-  tone,
-}: {
-  title: string;
-  subtitle: string;
-  icon: React.ReactNode;
-  onPress: () => void;
-  tone: "light" | "dark" | "teal";
-}) {
-  const palette =
-    tone === "light"
-      ? { bg: "#e2e8f0", fg: "#0f172a", sub: "#475569" }
-      : tone === "teal"
-        ? { bg: "#0b6b68", fg: "#fff", sub: "#cdeeed" }
-        : { bg: "#0f172a", fg: "#fff", sub: "#cbd5e1" };
-  return (
-    <Pressable
-      onPress={onPress}
-      style={{
-        flex: 1,
-        minWidth: 110,
-        borderRadius: 14,
-        paddingHorizontal: 12,
-        paddingVertical: 12,
-        minHeight: 86,
-        backgroundColor: palette.bg,
-        justifyContent: "space-between",
-        borderWidth: 1,
-        borderColor: tone === "light" ? "#cbd5e1" : "rgba(255,255,255,0.12)",
-      }}
-    >
-      <View style={{ width: 28, height: 28, borderRadius: 10, alignItems: "center", justifyContent: "center", backgroundColor: tone === "light" ? "#fff" : "rgba(255,255,255,0.12)" }}>
-        {icon}
-      </View>
-      <View style={{ marginTop: 8 }}>
-        <Text style={{ color: palette.fg, fontSize: 13, fontWeight: "800" }} numberOfLines={1}>
-          {title}
-        </Text>
-        <Text style={{ color: palette.sub, fontSize: 11, lineHeight: 15, marginTop: 3 }} numberOfLines={2}>
-          {subtitle}
-        </Text>
-      </View>
-    </Pressable>
-  );
-}
-
-function InfoRow({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-      <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.6 }}>
-        {label}
-      </Text>
-      <Text style={{ color: "#0f172a", fontSize: 13, fontWeight: "700", flex: 1, textAlign: "right" }}>
-        {value}
-      </Text>
-    </View>
-  );
-}
-
-function ActionTile({
-  title,
-  subtitle,
-  icon,
-  onPress,
-  accent,
-  foreground,
-}: {
-  title: string;
-  subtitle: string;
-  icon: React.ReactNode;
-  onPress: () => void;
-  accent: string;
-  foreground: string;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      style={{
-        flex: 1,
-        minWidth: 110,
-        padding: 14,
-        borderRadius: 18,
-        backgroundColor: accent,
-        borderWidth: 1,
-        borderColor: "rgba(148,163,184,0.16)",
-        justifyContent: "space-between",
-        minHeight: 112,
-      }}
-    >
-      <View
-        style={{
-          width: 34,
-          height: 34,
-          borderRadius: 12,
-          backgroundColor: foreground === "#fff" ? "rgba(255,255,255,0.16)" : "rgba(15,23,42,0.08)",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        {icon}
-      </View>
-      <View style={{ marginTop: 12 }}>
-        <Text style={{ color: foreground, fontSize: 14, fontWeight: "800" }} numberOfLines={1}>
-          {title}
-        </Text>
-        <Text style={{ color: foreground === "#fff" ? "#cbd5e1" : "#64748b", fontSize: 11, lineHeight: 15, marginTop: 4 }}>
-          {subtitle}
-        </Text>
-      </View>
-    </Pressable>
-  );
-}

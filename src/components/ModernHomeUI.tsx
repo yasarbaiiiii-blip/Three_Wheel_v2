@@ -1,16 +1,16 @@
 // @ts-nocheck
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { View, Text, Pressable, StyleSheet, ScrollView, Animated, Platform, Modal, TextInput, Dimensions, Alert, useWindowDimensions } from "react-native";
+import { View, Text, Pressable, StyleSheet, ScrollView, Platform, Dimensions, Alert, useWindowDimensions } from "react-native";
 import { GestureDetector, Gesture } from "react-native-gesture-handler";
-import AnimatedReanimated, { useSharedValue, useAnimatedStyle, useAnimatedProps, withSpring, withTiming, cancelAnimation, Easing, runOnJS, Keyframe } from "react-native-reanimated";
-import Svg, { Circle as SvgCircle, Line, Polygon, G, Text as SvgText, Path, Polyline } from "react-native-svg";
-import { Battery, Crosshair, Navigation, LocateFixed, Route, Wifi, Hexagon, Circle, ShieldAlert, X, Menu, Play, Square, Pause, SkipForward, Download, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Gamepad2, Target, Zap, Map as MapIcon, Tractor, Maximize2, LayoutGrid, RadioTower, LogOut, Check, Pencil, Undo2, Layers, ChevronRight, Ruler, Spline, LayoutList } from "lucide-react-native";
+import AnimatedReanimated, { useSharedValue, useAnimatedStyle, withTiming, Easing, runOnJS } from "react-native-reanimated";
+import Svg, { Polyline } from "react-native-svg";
+import { Battery, Crosshair, Navigation, Route, ShieldAlert, X, Play, Square, Pause, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Target, Zap, Map as MapIcon, Tractor, RadioTower, Check, Pencil, Undo2, Layers, ChevronRight, Ruler, Spline, LayoutList } from "lucide-react-native";
 import { Compass } from "./Compass";
 import { Navbar } from "./Navbar";
 import { selectEstop, useRoverEvents } from "../features/telemetry/roverEventStore";
 import { useTelemetrySelector } from "../features/telemetry/telemetryStore";
-import { describeRoverLinks, linkUnknownNote } from "../features/telemetry/roverLinkStatus";
-import { describeMission, missionControls, selectMission } from "../features/mission/missionLifecycle";
+import { describeRoverLinks } from "../features/telemetry/roverLinkStatus";
+import { describeMission, missionControls, missionIsActive, selectMission } from "../features/mission/missionLifecycle";
 import { MapView } from "./MapView";
 import { SharedMapHost } from "./sharedMap/SharedMapHost";
 import { useSharedMapEnabled } from "./sharedMap/mapPrefs";
@@ -286,87 +286,10 @@ const CoordRow = ({ label, value }) => (
   </View>
 );
 
-const QuickChip = ({ icon: Icon, label, value, tone = COLORS.textMain }) => (
-  <View style={styles.quickChip}>
-    <Icon color={tone} size={12} strokeWidth={2.2} />
-    <Text style={styles.quickChipLabel}>{label}</Text>
-    <Text style={[styles.quickChipValue, { color: tone }]} numberOfLines={1}>{value}</Text>
-  </View>
-);
-
-const TopBarTogglePill = ({ icon: Icon, label, active, onPress, iconFill }) => (
-  <Pressable
-    style={[styles.pillButton, active ? styles.pillActiveBrand : styles.pillInactive]}
-    onPress={onPress}
-  >
-    <Icon
-      color={active ? COLORS.accentText : COLORS.textMuted}
-      size={16}
-      strokeWidth={2.2}
-      fill={active ? iconFill : "transparent"}
-    />
-    <Text style={[styles.pillText, active ? styles.pillTextActive : styles.pillTextIdle]}>
-      {label}
-    </Text>
-    {active ? (
-      <View style={styles.pillOnBadge}>
-        <Text style={styles.pillOnBadgeText}>ON</Text>
-      </View>
-    ) : null}
-  </Pressable>
-);
-
-const RtkStreamPill = ({ mode, streaming, healthy, onPress }) => {
-  const tone = streaming ? (healthy ? COLORS.success : COLORS.warning) : COLORS.textMuted;
-  const barLevels = streaming ? (healthy ? [1, 1, 1, 1] : [1, 1, 0.35, 0.2]) : [0.2, 0.2, 0.2, 0.2];
-  const barHeights = [4, 7, 10, 12];
-  const statusLine = streaming
-    ? (healthy ? "Live corrections" : "Weak stream")
-    : "Tap to connect";
-
-  return (
-    <Pressable
-      style={[styles.rtkPill, streaming && styles.rtkPillActive, streaming && !healthy && styles.rtkPillWarn]}
-      onPress={onPress}
-    >
-      <View style={styles.rtkBars}>
-        {barHeights.map((h, i) => (
-          <View
-            key={i}
-            style={[
-              styles.rtkBar,
-              {
-                height: h,
-                backgroundColor: tone,
-                opacity: barLevels[i],
-              },
-            ]}
-          />
-        ))}
-      </View>
-      <View style={styles.rtkPillCopy}>
-        <Text style={[styles.rtkPillMode, streaming && { color: COLORS.textMain }]}>
-          RTK {mode}
-        </Text>
-        <View style={styles.rtkPillStatusRow}>
-          {streaming ? <View style={[styles.rtkLiveDot, { backgroundColor: tone }]} /> : null}
-          <Text style={[styles.rtkPillStatus, { color: streaming ? tone : COLORS.textDim }]}>
-            {statusLine}
-          </Text>
-        </View>
-      </View>
-    </Pressable>
-  );
-};
-
 const NAV_ICON_SIZE = 44;
 const NAV_PAD_H = 14;
 const NAV_WIDTH_COLLAPSED = NAV_PAD_H * 2 + NAV_ICON_SIZE;
 const NAV_WIDTH_EXPANDED = 252;
-const NAV_WIDTH_COMPACT = 56;
-
-const NAV_HEIGHT_COMPACT = 56;
-const DOUBLE_TAP_MS = 320;
 const HUD_PAD = 20;
 const TOP_BAR_ITEM_HEIGHT = 40;
 const RIGHT_PANEL_WIDTH = 340;
@@ -379,26 +302,17 @@ const SCREEN_WIDTH = Dimensions.get("window").width;
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 const QUICK_ACCESS_SUBNAV_OFFSET = -20;
 const QUICK_ACCESS_ANCHOR_FALLBACK = { top: HUD_PAD + 72, height: 44 };
-const PANEL_SLIDE_IN = new Keyframe({
-  0: { opacity: 1, transform: [{ translateX: 44 }] },
-  100: { opacity: 1, transform: [{ translateX: 0 }] },
-}).duration(PANEL_TIMING.duration);
 const NAV_HEIGHT_FULL = SCREEN_HEIGHT - HUD_PAD * 2 - 55;
 const ESTOP_SIZE = 96;
 const ESTOP_RING_GAP = 4;
 const ESTOP_RING_STROKE = 5;
 const ESTOP_RING_RADIUS = ESTOP_SIZE / 2 + ESTOP_RING_GAP + ESTOP_RING_STROKE / 2;
 const ESTOP_RING_SIZE = (ESTOP_RING_RADIUS + ESTOP_RING_STROKE / 2) * 2;
-const ESTOP_RING_CIRC = 2 * Math.PI * ESTOP_RING_RADIUS;
-const ESTOP_HOLD_MS = 1500;
 const ESTOP_DRAG_THRESHOLD = 14;
 const ESTOP_HUD_W = SCREEN_WIDTH - HUD_PAD * 2;
 const ESTOP_HUD_H = SCREEN_HEIGHT - HUD_PAD * 2;
 const ESTOP_INIT_X = (ESTOP_HUD_W - ESTOP_RING_SIZE) / 2;
 const ESTOP_INIT_Y = ESTOP_HUD_H - ESTOP_RING_SIZE - 36;
-
-const AnimatedSvgCircle = AnimatedReanimated.createAnimatedComponent(SvgCircle);
-
 
 const MissionActionBtn = ({
   icon: Icon,
@@ -614,7 +528,7 @@ export default function ModernHomeUI(props) {
     onNav, onToggleMenu, onEstopVehicle,
     onStartPlan, onStopPlan, onClearMission, rtkStatus: rtkStatusProp = EMPTY_RTK_STATUS,
     rtkConnecting = false, startLora, selectedLineId, onSelectLine,
-    autoOriginEnabled, mapSourceLines, alignedRefPoints, autoOriginReference,
+    alignedRefPoints,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
     isPlanEditingMode,
     layerVisibility, setLayerVisibility, extensionsEnabled,
@@ -625,7 +539,7 @@ export default function ModernHomeUI(props) {
     csvMapPins = null, showRefPointLabels = false,
     onFocusRover, onFocusPlan,
     recenterRoverCount, recenterPlanCount,
-    onResetNorth, resetNorthCount, autoOrigin, onToggleAutoOrigin,
+    onResetNorth, resetNorthCount,
     currentPage = "home",
     renderSectionContent,
     missionLayers = [],
@@ -634,7 +548,6 @@ export default function ModernHomeUI(props) {
     onToggleControlMode,
     onToggleMissionLayerVisibility,
     missionVisibleLines,
-    missionVisibleMapSourceLines,
   } = props;
 
   const isHomePage = currentPage === "home";
@@ -728,12 +641,7 @@ export default function ModernHomeUI(props) {
   }, [lines]);
   // Prefer mission-layer-filtered geometry for the Mapbox map when provided.
   const mapLinesForDisplay = missionVisibleLines ?? lines;
-  const mapSourceForDisplay = missionVisibleMapSourceLines ?? mapSourceLines;
-  const mapSourceLinesRaw = visualAlignmentItem
-    ? []
-    : autoOriginEnabled && mapSourceForDisplay
-      ? mapSourceForDisplay
-      : mapLinesForDisplay;
+  const mapSourceLinesRaw = visualAlignmentItem ? [] : mapLinesForDisplay;
   const visibleMapLines = useMemo(
     () =>
       mapSourceLinesRaw.filter((line) => {
@@ -775,8 +683,9 @@ export default function ModernHomeUI(props) {
     () => missionControls(missionView, { busy: missionActionBusy, hasMission: Boolean(stagedMissionId) }),
     [missionView, missionActionBusy, stagedMissionId]
   );
+  // The single Start/Stop button shows Stop while a mission is active or the rover state is unknown.
+  const stopMode = !missionView.known || missionIsActive(missionView);
   const linkChips = useMemo(() => describeRoverLinks(roverEvents), [roverEvents]);
-  const linkNote = linkUnknownNote(roverEvents);
 
   // Null means the rover does not report battery: show N/A, never a fake 0% / CRIT.
   const batteryPctRaw = telemetrySnapshot?.battery_pct ?? null;
@@ -1468,6 +1377,14 @@ export default function ModernHomeUI(props) {
 
         <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.telemetryScroll} showsVerticalScrollIndicator={false}>
           <TelemetryBlock title="Position" icon={MapPin}>
+            {/* RTK status: GNSS fix quality (RTK Fixed / Float / ...) plus the corrections link state. */}
+            <View style={styles.telemetryMissionRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.telemetryMissionLabel}>RTK status</Text>
+                <Text style={styles.telemetryMissionHint} numberOfLines={1}>{rtkLifecycleLabel}</Text>
+              </View>
+              <StatusPill label={gpsFix.toUpperCase()} tone={gpsFixTone} />
+            </View>
             <View style={styles.coordCard}>
               <LiveCoordRow label="LAT" format={LIVE.lat} />
               <View style={styles.coordDivider} />
@@ -1546,24 +1463,6 @@ export default function ModernHomeUI(props) {
     );
   };
 
-  const stepStyleFor = (status) => ({
-    backgroundColor:
-      status === "done" ? COLORS.successMuted
-      : status === "active" ? COLORS.accentMuted
-      : status === "failed" ? COLORS.dangerMuted
-      : COLORS.surfaceSolid,
-    borderColor:
-      status === "done" ? COLORS.successBorder
-      : status === "active" ? COLORS.accentBorder
-      : status === "failed" ? COLORS.dangerBorder
-      : COLORS.panelBorder,
-  });
-  const stepTextColorFor = (status) =>
-    status === "done" ? COLORS.success
-    : status === "active" ? COLORS.accentBrand
-    : status === "failed" ? COLORS.danger
-    : COLORS.textDim;
-
   const renderMissionControl = () => {
     if (!showMissionControl) return null;
 
@@ -1586,52 +1485,9 @@ export default function ModernHomeUI(props) {
         />
 
         <ScrollView style={styles.panelScroll} contentContainerStyle={styles.panelScrollContent} showsVerticalScrollIndicator={false}>
-          <View style={styles.lifecycleCard}>
-            <View style={styles.lifecycleTopRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.lifecycleHeadline} numberOfLines={2}>{lifecycle.headline}</Text>
-                {lifecycle.missionId ? <Text style={styles.lifecycleMeta}>Run #{lifecycle.missionId}</Text> : null}
-              </View>
-              <StatusPill
-                label={lifecycle.stateName ?? "UNKNOWN"}
-                tone={missionStateTone}
-                pulse={lifecycle.phase === "starting" || lifecycle.phase === "running"}
-              />
-            </View>
-
-            {lifecycle.unknownText ? (
-              <Text style={styles.lifecycleUnknown}>
-                {lifecycle.unknownText}. Nothing is shown as live until the rover reports again.
-              </Text>
-            ) : null}
-
-            {lifecycle.steps.length > 0 ? (
-              <View style={styles.lifecycleSteps}>
-                {lifecycle.steps.map((step) => (
-                  <View key={step.state} style={[styles.lifecycleStep, stepStyleFor(step.status)]}>
-                    <Text style={[styles.lifecycleStepText, { color: stepTextColorFor(step.status) }]} numberOfLines={1}>
-                      {step.label}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-            ) : null}
-
-            {lifecycle.waitingText ? <Text style={styles.lifecycleWaiting}>{lifecycle.waitingText}…</Text> : null}
-            {lifecycle.reasonText ? (
-              <Text style={[styles.lifecycleReason, { color: missionStateTone }]}>{lifecycle.reasonText}</Text>
-            ) : null}
-            {lifecycle.detail ? <Text style={styles.lifecycleDetail}>{lifecycle.detail}</Text> : null}
-          </View>
-
-          {linkNote ? (
-            <Text style={styles.lifecycleUnknown}>{linkNote}: link status below is unknown, not live.</Text>
+          {lifecycle.reasonText ? (
+            <Text style={[styles.lifecycleReason, { color: missionStateTone }]}>{lifecycle.reasonText}</Text>
           ) : null}
-          <View style={styles.linkChipRow}>
-            {linkChips.map((chip) => (
-              <QuickChip key={chip.key} icon={Radio} label={chip.label} value={chip.value} tone={toneColor(chip.tone)} />
-            ))}
-          </View>
 
           <View style={styles.progressCard}>
             <View style={styles.progressMetaRow}>
@@ -1648,38 +1504,18 @@ export default function ModernHomeUI(props) {
           </View>
 
           <View style={styles.missionActionsGrid}>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 10, width: "100%" }}>
-              <View style={{ flex: 1 }}>
-                <MissionActionBtn
-                  icon={Play}
-                  label={missionActionBusy ? "Working…" : "Start Mission"}
-                  variant="primary"
-                  fullWidth
-                  big
-                  disabled={!controls.canStart}
-                  onPress={onStartPlan}
-                />
-              </View>
-              {!missionRunning ? (
-                <Pressable
-                  onPress={onToggleAutoOrigin}
-                  accessibilityLabel="Auto Origin Checkbox"
-                  style={{
-                    width: 48,
-                    height: 48,
-                    borderRadius: 12,
-                    backgroundColor: autoOrigin ? "rgba(16, 185, 129, 0.15)" : COLORS.surfaceSolid,
-                    borderWidth: 1.5,
-                    borderColor: autoOrigin ? "#10b981" : COLORS.panelBorder,
-                    justifyContent: "center",
-                    alignItems: "center",
-                  }}
-                >
-                  {autoOrigin ? <Check color="#10b981" size={22} strokeWidth={3} /> : null}
-                </Pressable>
-              ) : null}
-            </View>
-            {!controls.canStart && controls.startBlockedReason ? (
+            {/* One button: Start when nothing is running, Stop while a mission is active. An unknown
+                rover state also shows Stop, because stopping is always safe to try. */}
+            <MissionActionBtn
+              icon={stopMode ? Square : Play}
+              label={missionActionBusy ? "Working…" : stopMode ? "Stop Mission" : "Start Mission"}
+              variant={stopMode ? "danger" : "primary"}
+              fullWidth
+              big
+              disabled={stopMode ? !controls.canStop : !controls.canStart}
+              onPress={stopMode ? onStopPlan : onStartPlan}
+            />
+            {!stopMode && !controls.canStart && controls.startBlockedReason ? (
               <Text style={styles.lifecycleHint}>{controls.startBlockedReason}</Text>
             ) : null}
             <View style={{ flexDirection: "row", gap: 10, width: "100%" }}>
@@ -1706,15 +1542,6 @@ export default function ModernHomeUI(props) {
                 />
               </View>
             </View>
-            <MissionActionBtn
-              icon={Square}
-              label="Stop"
-              variant="danger"
-              fullWidth
-              big
-              disabled={!controls.canStop}
-              onPress={onStopPlan}
-            />
           </View>
         </ScrollView>
       </View>
@@ -1759,9 +1586,7 @@ export default function ModernHomeUI(props) {
               showRover={showRoverMarker}
               showLengths={showLengthLabels}
               alignedRefPoints={alignedRefPoints}
-              autoOriginReference={autoOriginReference}
               mapGeometryFrame={mapGeometryFrame}
-              autoOriginEnabled={autoOriginEnabled}
               stagedVerified={false}
               // Keep plan projection stable after Fix Alignment / plan-edit (same anchor as Fields).
               visualAlignmentAnchor={props.visualAlignmentAnchor ?? null}
@@ -2895,32 +2720,9 @@ const styles = StyleSheet.create({
   panelScroll: { flexGrow: 0 },
   panelScrollContent: { paddingBottom: 10, gap: 12 },
 
-  // Mission lifecycle (mission_state events): headline, step chips, waiting-on, reason.
-  lifecycleCard: {
-    backgroundColor: COLORS.cardSolid,
-    borderWidth: 1,
-    borderColor: COLORS.panelBorder,
-    borderRadius: 16,
-    padding: 14,
-    gap: 10,
-  },
-  lifecycleTopRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
-  lifecycleHeadline: { color: COLORS.textMain, fontSize: 14, fontWeight: "800" },
-  lifecycleMeta: { color: COLORS.textDim, fontSize: 10, fontWeight: "600", marginTop: 2 },
-  lifecycleSteps: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
-  lifecycleStep: {
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-  },
-  lifecycleStepText: { fontSize: 10, fontWeight: "800", letterSpacing: 0.4 },
-  lifecycleWaiting: { color: COLORS.textMuted, fontSize: 11, fontWeight: "600" },
+  // Mission Control: the rover's pause / failure reason, and why Start is blocked.
   lifecycleReason: { fontSize: 12, fontWeight: "700", lineHeight: 17 },
-  lifecycleDetail: { color: COLORS.textMuted, fontSize: 11, lineHeight: 15 },
-  lifecycleUnknown: { color: COLORS.textMuted, fontSize: 11, lineHeight: 15 },
   lifecycleHint: { color: COLORS.textDim, fontSize: 11, fontWeight: "600" },
-  linkChipRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
 
   panelHeader: {
     flexDirection: "row",

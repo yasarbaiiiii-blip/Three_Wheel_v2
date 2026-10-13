@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { PlanLine } from "../types/plan";
-import type { AutoOriginReference } from "../types/autoOrigin";
 import { projectLocalMetersToGps } from "./geoProjection";
 import {
   buildPlanManipulationAnchor,
   projectPlanLineToGpsSegments,
   projectPlanNorthEastToGps,
+  resolveMapGeometryFrame,
+  resolveMapProjectionOrigin,
   resolvePreviewProjectionOrigin,
 } from "./mapGeometryProjection";
 
@@ -210,46 +211,20 @@ describe("buildPlanManipulationAnchor / no-jump Move-Rotate enter", () => {
       width: 0.1,
     },
   ];
+  const latched = { lat: 12.97, lon: 77.59 };
 
-  const autoOriginRef: AutoOriginReference = {
-    planStartNorth: 10,
-    planStartEast: 5,
-    roverNorth: 100,
-    roverEast: 200,
-    latitude: 12.97,
-    longitude: 77.59,
-    capturedAtMs: 1,
-  };
-
-  it("uses auto-origin capture GPS + planStart (not live telemetry / firstLine-2)", () => {
-    const anchor = buildPlanManipulationAnchor({
-      alignedRefPoints: [],
-      stagedVerified: false,
-      autoOriginReference: autoOriginRef,
-      autoOriginEnabled: true,
-      stableFallbackOrigin: { lat: 1, lon: 2 },
-      lines: baseLines,
-    });
-    expect(anchor.originLat).toBeCloseTo(12.97, 8);
-    expect(anchor.originLon).toBeCloseTo(77.59, 8);
-    expect(anchor.originDxfNorth).toBe(10);
-    expect(anchor.originDxfEast).toBe(5);
-  });
-
-  it("identity sticker keeps plan GPS identical to fields preview under auto-origin", () => {
+  it("identity sticker keeps plan GPS identical to the fields preview", () => {
     const fieldsOrigin = resolvePreviewProjectionOrigin({
       mode: "fields",
       alignedRefPoints: [],
       stagedVerified: false,
-      autoOriginReference: autoOriginRef,
-      autoOriginEnabled: true,
+      stableFallbackOrigin: latched,
       lines: baseLines,
     })!;
     const anchor = buildPlanManipulationAnchor({
       alignedRefPoints: [],
       stagedVerified: false,
-      autoOriginReference: autoOriginRef,
-      autoOriginEnabled: true,
+      stableFallbackOrigin: latched,
       lines: baseLines,
     });
     // Enter Move/Rotate: sticky anchor + identity transform
@@ -257,8 +232,6 @@ describe("buildPlanManipulationAnchor / no-jump Move-Rotate enter", () => {
       mode: "templates",
       alignedRefPoints: [],
       stagedVerified: false,
-      autoOriginReference: autoOriginRef,
-      autoOriginEnabled: true,
       visualAlignmentAnchor: anchor,
       lines: [],
       placedItemLines: baseLines,
@@ -272,12 +245,11 @@ describe("buildPlanManipulationAnchor / no-jump Move-Rotate enter", () => {
     expect(after.lon).toBeCloseTo(before.lon, 10);
   });
 
-  it("prefers aligned ref over auto-origin (same as map frame priority)", () => {
+  it("prefers the aligned reference over the fallback origin (same as map frame priority)", () => {
     const anchor = buildPlanManipulationAnchor({
       alignedRefPoints: [{ dxf_x: 30, dxf_y: 40, lat: 13.1, lon: 77.7 }],
       stagedVerified: false,
-      autoOriginReference: autoOriginRef,
-      autoOriginEnabled: true,
+      stableFallbackOrigin: latched,
       lines: baseLines,
     });
     expect(anchor.originLat).toBeCloseTo(13.1, 8);
@@ -290,8 +262,6 @@ describe("buildPlanManipulationAnchor / no-jump Move-Rotate enter", () => {
     const anchor = buildPlanManipulationAnchor({
       alignedRefPoints: [],
       stagedVerified: false,
-      autoOriginReference: null,
-      autoOriginEnabled: false,
       stableFallbackOrigin: { lat: 28.6, lon: 77.2 },
       lines: baseLines,
     });
@@ -311,12 +281,58 @@ describe("buildPlanManipulationAnchor / no-jump Move-Rotate enter", () => {
     const anchor = buildPlanManipulationAnchor({
       alignedRefPoints: [],
       stagedVerified: false,
-      autoOriginReference: autoOriginRef,
-      autoOriginEnabled: true,
       existingAnchor: existing,
       lines: baseLines,
     });
     expect(anchor).toEqual(existing);
+  });
+});
+
+describe("resolveMapGeometryFrame / resolveMapProjectionOrigin", () => {
+  const base = { mode: "fields" as const, alignedRefPoints: [], stagedVerified: false };
+
+  it("aligned reference takes authority when aligned geometry is active", () => {
+    const input = { ...base, alignedRefPoints: [{ dxf_x: 5, dxf_y: 10, lat: 12.97, lon: 77.59 }] };
+    expect(resolveMapGeometryFrame(input)).toBe("ALIGNED_DESIGN");
+  });
+
+  it("staged anchor takes authority for staged geometry", () => {
+    const input = {
+      ...base,
+      stagedVerified: true,
+      alignedRefPoints: [{ dxf_x: 0, dxf_y: 0, lat: 12.97, lon: 77.59 }],
+    };
+    expect(resolveMapGeometryFrame(input)).toBe("SURVEYED_LOCAL");
+  });
+
+  it("no mission lines are projected using the Delhi fallback", () => {
+    const frame = resolveMapGeometryFrame(base);
+    expect(frame).toBe("NONE");
+    expect(resolveMapProjectionOrigin(frame, base)).toBeNull();
+  });
+
+  it("georeferenced DXF resolves to GEOGRAPHIC frame at geo_origin with zero DXF offset", () => {
+    const geoInput = { ...base, geoOrigin: [12.9716, 77.5946] as [number, number] };
+    const frame = resolveMapGeometryFrame(geoInput);
+    expect(frame).toBe("GEOGRAPHIC");
+    const origin = resolveMapProjectionOrigin(frame, geoInput)!;
+    expect(origin.originLat).toBe(12.9716);
+    expect(origin.originLon).toBe(77.5946);
+    expect(origin.originDxfNorth).toBe(0);
+    expect(origin.originDxfEast).toBe(0);
+    // Backend centers local ENU on geo_origin, so local (0,0) maps to geo_origin.
+    const gps = projectPlanNorthEastToGps(0, 0, origin);
+    expect(gps.lat).toBeCloseTo(12.9716, 8);
+    expect(gps.lon).toBeCloseTo(77.5946, 8);
+  });
+
+  it("aligned reference still wins over a georeferenced DXF geo_origin", () => {
+    const input = {
+      ...base,
+      alignedRefPoints: [{ dxf_x: 5, dxf_y: 10, lat: 12.97, lon: 77.59 }],
+      geoOrigin: [12.9716, 77.5946] as [number, number],
+    };
+    expect(resolveMapGeometryFrame(input)).toBe("ALIGNED_DESIGN");
   });
 });
 

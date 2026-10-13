@@ -6,7 +6,7 @@
  * the dispatcher lazy-load implementations without creating import cycles.
  */
 import type { TelemetrySnapshot, PlanLine } from "../types/plan";
-import type { AutoOriginReference, MapGeometryFrame } from "../types/autoOrigin";
+import type { MapGeometryFrame } from "../types/mapGeometry";
 import type { MultiPointPlacementPhase } from "../types/fieldsWorkflow";
 import type { PlacedItem } from "./BoundaryEditor";
 import type { DesignPreviewAnchor } from "../types/designDocument";
@@ -112,10 +112,8 @@ export interface MapViewProps {
    */
   gestureTools?: { drag?: boolean; scale?: boolean; rotate?: boolean };
   previewAnchor?: DesignPreviewAnchor;
-  autoOriginReference?: AutoOriginReference | null;
   mapGeometryFrame?: MapGeometryFrame;
   stagedVerified?: boolean;
-  autoOriginEnabled?: boolean;
   /** [lat, lon] origin of a georeferenced DXF; drives the GEOGRAPHIC projection frame. */
   geoOrigin?: [number, number] | null;
   visualAlignmentAnchor?: {

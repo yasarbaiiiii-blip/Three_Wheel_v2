@@ -208,63 +208,6 @@ export function instanceForLineId(
   return instances.find((item) => lineId.startsWith(`${item.lineIdPrefix}-`)) ?? null;
 }
 
-export function hitTestTemplateInstance(
-  instances: PlacedTemplateInstance[],
-  bakedByPrefix: Map<string, PlanLine[]>,
-  north: number,
-  east: number,
-  radiusM: number
-): PlacedTemplateInstance | null {
-  let best: PlacedTemplateInstance | null = null;
-  let bestDist = radiusM;
-  for (const instance of instances) {
-    const baked = bakedByPrefix.get(instance.lineIdPrefix) ?? [];
-    for (const line of baked) {
-      const pts = line.entity?.preview_points;
-      if (pts && pts.length >= 2) {
-        for (let i = 0; i < pts.length - 1; i++) {
-          const d = distToSegment(
-            north,
-            east,
-            pts[i].north,
-            pts[i].east,
-            pts[i + 1].north,
-            pts[i + 1].east
-          );
-          if (d < bestDist) {
-            bestDist = d;
-            best = instance;
-          }
-        }
-      } else if (line.from && line.to) {
-        const d = distToSegment(north, east, line.from.x, line.from.y, line.to.x, line.to.y);
-        if (d < bestDist) {
-          bestDist = d;
-          best = instance;
-        }
-      }
-    }
-  }
-  return best;
-}
-
-function distToSegment(
-  px: number,
-  py: number,
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number
-): number {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const len2 = dx * dx + dy * dy;
-  if (!(len2 > 0)) return Math.hypot(px - ax, py - ay);
-  let t = ((px - ax) * dx + (py - ay) * dy) / len2;
-  t = Math.max(0, Math.min(1, t));
-  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
-}
-
 export function buildTemplateFileEntry(
   instance: PlacedTemplateInstance
 ): UploadedFileEntry {

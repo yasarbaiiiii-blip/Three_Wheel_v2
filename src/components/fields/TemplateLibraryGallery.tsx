@@ -26,7 +26,7 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
-import { AlertTriangle, Lock, Minus, Plus, RotateCcw, RotateCw, X } from "lucide-react-native";
+import { AlertTriangle, Minus, Plus, RotateCcw, RotateCw, X } from "lucide-react-native";
 
 import type { PlanLine } from "../../types/plan";
 import { generateTextLines, type FontStyle } from "../../utils/characterTemplates";
@@ -58,8 +58,6 @@ const SIZE_MIN = 0.5;
 const SIZE_MAX = 12;
 const SIZE_STEP = 0.5;
 const GOLD = FIELDS_COLORS.accentBrand;
-const GRID_GAP = 10;
-
 function clampSize(n: number) {
   const snapped = Math.round(n / SIZE_STEP) * SIZE_STEP;
   return Math.min(SIZE_MAX, Math.max(SIZE_MIN, Number(snapped.toFixed(1))));
@@ -220,8 +218,6 @@ function LibraryBody({
   const pan0y = useSharedValue(0);
   const rot0 = useSharedValue(0);
   const tabSv = useSharedValue(0);
-  const [listW, setListW] = useState(0);
-
   const characterSource = (customText.trim() || glyph || "A").toUpperCase();
 
   const previewLines = useMemo(() => {

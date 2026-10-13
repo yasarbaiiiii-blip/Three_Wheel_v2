@@ -310,24 +310,6 @@ export function turningAngleDeg(
   return (Math.atan2(cross, dot) * 180) / Math.PI;
 }
 
-/** Deduplicate consecutive near-identical points. */
-/**
- * Closest point on segment a→b to p (clamped).
- */
-export function closestPointOnSegment(
-  a: RoadMarkingNedPoint,
-  b: RoadMarkingNedPoint,
-  p: RoadMarkingNedPoint
-): RoadMarkingNedPoint {
-  const abn = b.north - a.north;
-  const abe = b.east - a.east;
-  const len2 = abn * abn + abe * abe;
-  if (len2 < 1e-18) return { north: a.north, east: a.east };
-  let t = ((p.north - a.north) * abn + (p.east - a.east) * abe) / len2;
-  t = Math.max(0, Math.min(1, t));
-  return { north: a.north + t * abn, east: a.east + t * abe };
-}
-
 /**
  * Force the painted polyline to start and end on the surveyed termini.
  * Fillet/arc sampling + consecutive-point dedupe can leave the first/last sample
@@ -688,33 +670,6 @@ export function rejectPathSpikes(
 }
 
 /**
- * Remove vertices that lie within `eps` of the chord of their neighbors.
- * Preserves curves (non-collinear) and real corners.
- */
-export function simplifyCollinear(
-  points: RoadMarkingNedPoint[],
-  eps: number
-): RoadMarkingNedPoint[] {
-  if (points.length < 3) return points.slice();
-  let pts = points.slice();
-  let changed = true;
-  while (changed && pts.length >= 3) {
-    changed = false;
-    const next: RoadMarkingNedPoint[] = [pts[0]];
-    for (let i = 1; i < pts.length - 1; i++) {
-      if (pointLineResidual(pts[i], next[next.length - 1], pts[i + 1]) <= eps) {
-        changed = true;
-        continue;
-      }
-      next.push(pts[i]);
-    }
-    next.push(pts[pts.length - 1]);
-    pts = next;
-  }
-  return pts;
-}
-
-/**
  * Collapse short opposite-sign turn pairs (S-jogs / GPS weave) by dropping the
  * kinkier interior vertex. Leaves long single corners (L-turns) intact.
  *
@@ -931,13 +886,6 @@ const WHOLE_LOOP_GAP_FRACTION = 0.05;
  */
 const WHOLE_LOOP_GAP_SPACING_MULTIPLE = 1.5;
 
-/**
- * Output-integrity check (see `coversSourceExtent`). A refined path must keep at least this
- * fraction of the surveyed extent on every axis longer than the floor. Deliberately loose:
- * legitimate refinement trims a few centimetres at the termini, catastrophic failure loses
- * most of the path, and there is nothing in between worth flagging here.
- */
-const EXTENT_CHECK_MIN_RATIO = 0.9;
 /** Axes shorter than this are ignored — a straight run has no extent across its width. */
 const EXTENT_CHECK_MIN_AXIS_M = 0.5;
 

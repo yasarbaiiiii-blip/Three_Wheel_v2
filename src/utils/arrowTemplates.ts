@@ -14,8 +14,6 @@ export const ARROW_LABELS: Record<ArrowType, string> = {
   right: "Arrow E",
 };
 
-export const ARROW_TYPES: ArrowType[] = ["up", "down", "left", "right"];
-
 type Pt = [number, number];
 
 /** Unit arrow pointing +Y (drawing up / map north after placement). */

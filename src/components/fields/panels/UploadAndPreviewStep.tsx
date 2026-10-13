@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Alert, Platform, Pressable, TouchableOpacity, ScrollView, Switch, Text, TextInput, View } from "react-native";
+import { Alert, Platform, Pressable, TouchableOpacity, Switch, Text, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { Plus, RefreshCw, Trash2, Upload, X } from "lucide-react-native";
@@ -7,7 +7,7 @@ import { Plus, RefreshCw, Trash2, Upload, X } from "lucide-react-native";
 import type { MissionLayer } from "../../../types/missionLayers";
 import type { ImportedPlan } from "../../../types/plan";
 import type { StagedWorkflowStep } from "../../../types/fieldsWorkflow";
-import { layerForFile, nonEmptyMissionLayers, sortedMissionLayers } from "../../../utils/missionLayerAssignment";
+import { layerForFile, sortedMissionLayers } from "../../../utils/missionLayerAssignment";
 import {
   CSV_EXT_AFT_FLOOR_M,
   CSV_EXT_MAX_M,
@@ -215,7 +215,7 @@ export function UploadAndPreviewStep({
   const [isUploading, setIsUploading] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   /** Source file names when multi-file import was merged into one plan. */
-  const [loadedSourceFiles, setLoadedSourceFiles] = useState<string[]>(() =>
+  const [, setLoadedSourceFiles] = useState<string[]>(() =>
     localCsvPreview?.fileName ? [localCsvPreview.fileName] : []
   );
   /**

@@ -26,8 +26,6 @@ export const SIMILARITY_SOFT_RADIUS_M = 0.75;
 export const SIMILARITY_SOFT_ALPHA_MAX = 0.28;
 /** Drag this far past the pin (free pose) to release any lock (metres). */
 export const SIMILARITY_RELEASE_RADIUS_M = 0.85;
-/** Soft angular magnet for dual-fit consideration (degrees). */
-export const SIMILARITY_ANGLE_MAGNET_DEG = 12;
 /** Reject absurd scales (CAD vs survey unit mismatch). */
 export const MIN_SIMILARITY_SCALE = 0.01;
 export const MAX_SIMILARITY_SCALE = 100;

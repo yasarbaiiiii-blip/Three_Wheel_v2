@@ -35,8 +35,6 @@ import { FIELDS_COLORS } from "../fieldsTheme";
 
 const DEFAULT_SPEEDS = { markSpeedMs: 0.35, travelSpeedMs: 0.5 };
 
-const PATH_ROW_HEIGHT = 48;
-const TRANSIT_ROW_HEIGHT = 28;
 /** Keep a couple of rows visible even when the card is squeezed, so drag still works. */
 const MIN_LIST_HEIGHT = 120;
 

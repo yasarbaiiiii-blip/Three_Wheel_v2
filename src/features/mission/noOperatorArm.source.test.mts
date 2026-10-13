@@ -1,6 +1,6 @@
 /**
  * Source pin for mission contract v2: the operator never arms and never changes mode for a mission.
- * The only caller of `arm` / `setOffboard` is the separate debug screen.
+ * Nothing in the app calls `arm` / `setOffboard`.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
@@ -22,12 +22,12 @@ function walk(dir: string, out: string[] = []): string[] {
 const read = (file: string) => readFileSync(file, "utf8");
 
 describe("the app has no operator arm or OFFBOARD control in the mission flow", () => {
-  it("the only caller of arm / setOffboard in the app is the separate debug screen", () => {
+  it("nothing in the app calls arm / setOffboard", () => {
     const callers = walk(SRC)
       .filter((file) => /\.(arm|setOffboard)\(/.test(read(file)))
       .map((file) => relative(ROOT, file).replace(/\\/g, "/"))
       .sort();
-    expect(callers).toEqual(["src/screens/DebugDriveScreen.tsx"]);
+    expect(callers).toEqual([]);
   }, 30_000);
 
   it("the Home mission screen and App have no arm or mode control", () => {
@@ -49,11 +49,5 @@ describe("the app has no operator arm or OFFBOARD control in the mission flow", 
         expect(pattern.test(text), `${relative(ROOT, file)} matches ${pattern}`).toBe(false);
       }
     }
-  });
-
-  it("the debug screen is a separate tool: its own connection panel, not part of the mission flow", () => {
-    const text = read(join(SRC, "screens", "DebugDriveScreen.tsx"));
-    expect(text).toMatch(/SEPARATE engineering tool/);
-    expect(text).toMatch(/handleConnect/);
   });
 });

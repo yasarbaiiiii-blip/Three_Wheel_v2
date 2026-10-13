@@ -1,5 +1,5 @@
 /**
- * Native Mapbox implementation of the map, behind the USE_NATIVE_MAPBOX flag.
+ * Native Mapbox implementation of the map (the only map renderer).
  *
  * Goal: full backward compatibility with the legacy Leaflet `MapView` — it
  * accepts the exact same `MapViewProps` so `App.tsx` / `TemplatesPage.tsx` need
@@ -96,7 +96,6 @@ import {
   getEdgeHandleWorldPoints,
   getObbResizeHandles,
   handleGrabRadiusM,
-  handleHitRadiusM,
   isEdgeHandleId,
   isWorldPointInPlanObb,
   type PlanStickerPose,
@@ -111,7 +110,7 @@ import { useTelemetrySnapshot } from "../features/telemetry/telemetryStore";
 import { resolveRoverMarker, type RoverFix } from "../utils/roverFixHold";
 import { registerMapHandle, type MapHandle } from "./sharedMap/sharedMapStore";
 import type { MapViewProps } from "./mapViewTypes";
-import { pixelDeltaToMetres, clampToIndent, gateTemplateGestureDeltas, type BoundingRect } from "../utils/mapGestureUtils";
+import { gateTemplateGestureDeltas } from "../utils/mapGestureUtils";
 import { deriveMetersPerPixel, screenToGeo } from "../utils/mapScreenGeo";
 import type { MultiPointPlacementPhase } from "../types/fieldsWorkflow";
 
@@ -422,10 +421,8 @@ export function MapViewNative(props: MapViewProps) {
     activeSnapPointId,
     onSelectionChange,
     previewAnchor,
-    autoOriginReference,
     mapGeometryFrame,
     stagedVerified = false,
-    autoOriginEnabled = false,
     geoOrigin = null,
     visualAlignmentAnchor,
     previewFallbackGps = null,
@@ -760,8 +757,6 @@ export function MapViewNative(props: MapViewProps) {
       previewAnchor,
       alignedRefPoints: alignedRefPoints ?? [],
       stagedVerified,
-      autoOriginReference: autoOriginReference ?? null,
-      autoOriginEnabled,
       geoOrigin,
       // Parent fields-frame wins so switching MapView mode to "templates" for stickers
       // does not re-pick a different projection family mid-session.
@@ -777,8 +772,6 @@ export function MapViewNative(props: MapViewProps) {
     previewAnchor,
     alignedRefPoints,
     stagedVerified,
-    autoOriginReference,
-    autoOriginEnabled,
     geoOrigin,
     mapGeometryFrame,
     templatesFloatingOrigin,
@@ -1705,23 +1698,6 @@ export function MapViewNative(props: MapViewProps) {
   // ── Drag helpers (JS thread — called from worklet via runOnJS) ──
 
   /**
-   * Build the indent BoundingRect for clampToIndent, matching the legacy
-   * "leftIndent / rightIndent / topIndent / bottomIndent" calculation.
-   */
-  const buildIndentRect = useCallback((): BoundingRect | null => {
-    if (!boundaryWidth || !boundaryHeight) return null;
-    const bpX = boundaryPosition?.x ?? 0;
-    const bpY = boundaryPosition?.y ?? 0;
-    const indent = indentSpacing ?? 0;
-    return {
-      leftEast:    bpX - boundaryWidth / 2 + indent,
-      rightEast:   bpX + boundaryWidth / 2 - indent,
-      bottomNorth: bpY - boundaryHeight / 2 + indent,
-      topNorth:    bpY + boundaryHeight / 2 - indent,
-    };
-  }, [boundaryWidth, boundaryHeight, indentSpacing, boundaryPosition]);
-
-  /**
    * Decimate dense tessellation for live drag previews only — full quality returns on commit
    * via placedItemsGeo. Keeps snap math independent (uses shape candidates, not this geo).
    */
@@ -1970,13 +1946,6 @@ export function MapViewNative(props: MapViewProps) {
     [projectionOrigin, poseFromPlanItem]
   );
 
-  /** Rotate rings intentionally disabled — resize mode is edge-axis only. */
-  const buildRotateHandlesFC = useCallback(
-    (_items: PlacedItem[], _hideWhileDragging: boolean): GeoJSON.FeatureCollection =>
-      featureCollection([]),
-    []
-  );
-
   // Steady-state path lengths — every state (idle fields, move, attach, resize).
   // Live drag/resize overrides via dragPreview.lengthLabelsFC.
   const steadyLengthLabelsFC = useMemo(() => {
@@ -2014,15 +1983,6 @@ export function MapViewNative(props: MapViewProps) {
     return buildHandlesFC(placedItems);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [placedItemsSig, planPlacementPhase, projectionOrigin, buildHandlesFC, selectedItemIds]);
-
-  // Rotate affordances only while idle-selected (hidden during any active handle drag).
-  const steadyRotateHandlesFC = useMemo(() => {
-    if (!placedItems || planPlacementPhase !== "resizing" || !projectionOrigin || dragPreview) {
-      return featureCollection([]);
-    }
-    return buildRotateHandlesFC(placedItems, false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [placedItemsSig, planPlacementPhase, projectionOrigin, buildRotateHandlesFC, dragPreview]);
 
   /**
    * Multi-Point Fit ref-point magnet for drag / rotate. Pure math; MapView applies the result.

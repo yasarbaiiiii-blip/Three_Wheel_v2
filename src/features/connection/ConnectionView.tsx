@@ -1,7 +1,6 @@
 import React from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { Waves } from "lucide-react-native";
-import type { DiscoveredRover } from "../../types/appRuntime";
 
 export function ConnectionView({
   selectedWs,
@@ -19,7 +18,6 @@ export function ConnectionView({
   onManualHostChange,
   onConnect,
   onOfflinePreview,
-  onOpenDebug,
 }: {
   selectedWs: string;
   manualHost: string;
@@ -36,7 +34,6 @@ export function ConnectionView({
   onManualHostChange: (value: string) => void;
   onConnect: () => void;
   onOfflinePreview: () => void;
-  onOpenDebug?: () => void;
 }) {
   const selectedTarget = selectedWs || manualHost;
   const pingState =
@@ -436,42 +433,6 @@ export function ConnectionView({
                   <Text style={{ color: "#0f172a", fontSize: 11, fontWeight: "800" }}>Local</Text>
                 </View>
               </Pressable>
-
-              {onOpenDebug && (
-                <Pressable
-                  onPress={onOpenDebug}
-                  style={{
-                    padding: 14,
-                    borderRadius: 18,
-                    borderWidth: 2,
-                    borderColor: "#3b82f6",
-                    backgroundColor: "#eff6ff",
-                    flexDirection: "row",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    gap: 12,
-                  }}
-                >
-                  <View style={{ flex: 1, paddingRight: 4 }}>
-                    <Text style={{ color: "#1d4ed8", fontWeight: "900", fontSize: 15.5 }}>
-                      Engineering Debug Client
-                    </Text>
-                    <Text style={{ color: "#3b82f6", fontSize: 12, marginTop: 2, lineHeight: 16 }}>
-                      Production contract (Port 8000) · Driving & telemetry
-                    </Text>
-                  </View>
-                  <View
-                    style={{
-                      paddingHorizontal: 10,
-                      paddingVertical: 6,
-                      borderRadius: 999,
-                      backgroundColor: "#1d4ed8",
-                    }}
-                  >
-                    <Text style={{ color: "#ffffff", fontSize: 11, fontWeight: "800" }}>PROD 8000</Text>
-                  </View>
-                </Pressable>
-              )}
 
               <Text style={{ color: "#64748b", fontSize: 12, lineHeight: 18 }}>
                 Production backend runs on <Text style={{ color: "#334155", fontWeight: "700" }}>dyx3_backend</Text> on port <Text style={{ color: "#334155", fontWeight: "700" }}>8000</Text>.

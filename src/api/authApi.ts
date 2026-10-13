@@ -174,10 +174,6 @@ export async function login(
   }
 }
 
-export async function logout(baseUrl: string) {
-  await fetch(`${normalizeBase(baseUrl)}/api/auth/logout`, { method: "POST" }).catch(() => {});
-}
-
 export async function changePassword(
   baseUrl: string,
   currentPassword: string,

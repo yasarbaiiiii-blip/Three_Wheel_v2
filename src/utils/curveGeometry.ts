@@ -7,15 +7,12 @@ import type { DxfEntity, DxfPoint, PlanLine } from "../types/plan";
 // work every drag frame, worsening drag/rotate lag) while large circles still show visible
 // polygon facets once their fixed-256-point chord length exceeds a pixel or two on screen.
 export const MAP_CIRCLE_STEPS = 256;
-export const MAP_ARC_STEPS = 256;
 // Below this, planShapeSnapPoints.ts's MIN_POINTS_FOR_ELLIPSE_FIT (32) can no longer tell a real
 // tessellated circle apart from a many-sided hand-drawn polygon — keep a safe margin above it.
 const MAP_CIRCLE_MIN_STEPS = 48;
 // Target chord length between adjacent samples, in real-world metres — small enough to stay
 // visually smooth at any practical editing zoom without over-sampling small circles.
 const MAP_CIRCLE_TARGET_CHORD_M = 0.1;
-export const SVG_CIRCLE_STEPS = 256;
-
 /** Segment count for map-mode circle/arc tessellation: scales with real-world radius so the
  *  chord length (and therefore on-screen faceting) stays roughly constant regardless of size,
  *  instead of a fixed count that's excessive for small circles and too coarse for large ones. */
@@ -54,10 +51,6 @@ export function normalizeCurveEntityType(entityType: string | undefined): string
 
 export function isCircleEntity(line: PlanLine): boolean {
   return normalizeCurveEntityType(line.entity?.entity_type) === "circle";
-}
-
-export function isArcEntity(line: PlanLine): boolean {
-  return normalizeCurveEntityType(line.entity?.entity_type) === "arc";
 }
 
 export function isCurveEntity(line: PlanLine): boolean {
@@ -240,17 +233,6 @@ export function normalizeDxfEntityGeometry(entity: DxfEntity): DxfEntity {
     ...entity,
     geometry: inferred,
   };
-}
-
-export function normalizePlanLineEntity(line: PlanLine): PlanLine {
-  if (!line.entity) return line;
-  const entity = normalizeDxfEntityGeometry(line.entity);
-  if (entity === line.entity) return line;
-  return { ...line, entity };
-}
-
-export function normalizePlanLinesForCurves(lines: PlanLine[]): PlanLine[] {
-  return lines.map(normalizePlanLineEntity);
 }
 
 /** Read curve geometry stored in NED: centerNorth/centerEast or legacy cx/cy after axis fix. */

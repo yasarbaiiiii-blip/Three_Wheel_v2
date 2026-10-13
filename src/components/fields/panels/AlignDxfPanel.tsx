@@ -3,7 +3,7 @@ import { Alert, Platform, Pressable, Text, TextInput, View } from "react-native"
 import { Check, MapPin, Maximize2, Move, Plus, Upload, X } from "lucide-react-native";
 import * as DocumentPicker from "expo-document-picker";
 
-import { assessAlignmentTrust, enforceAlignmentScale } from "../../../utils/designAlignmentPolicy";
+import { assessAlignmentTrust } from "../../../utils/designAlignmentPolicy";
 import {
   applyAlignmentToLines,
   solveMultiPointAlignment,
@@ -13,10 +13,6 @@ import {
   formatFinite,
   sanitizePlanLines,
 } from "../../../utils/pathWorkflow";
-import {
-  similarityTransform,
-  transformPlanLinesGeometry,
-} from "../../../utils/planLineTransform";
 import type {
   AlignRefPoint,
   AlignmentResultState,
@@ -25,7 +21,6 @@ import type {
   VerifiedAlignment,
 } from "../../../types/fieldsWorkflow";
 import type { PlanLine } from "../../../types/plan";
-import type { AutoOriginReference } from "../../../types/autoOrigin";
 import type { PlacedItem } from "../../BoundaryEditor";
 import { FieldsSegmented } from "../FieldsButtons";
 import { FIELDS_COLORS } from "../fieldsTheme";
@@ -77,13 +72,7 @@ type AlignDxfPanelProps = {
   setExtractedCorners?: React.Dispatch<React.SetStateAction<{ dxf_x: number; dxf_y: number; lat: number; lon: number }[] | null>>;
   /** Current plan LLA coordinates read from the map (for visual alignment) */
   mapLLA?: { lat: number; lon: number } | null;
-  /** Auto Origin: skips formal GPS alignment, shifts the plan to the rover's live position instead. */
-  autoOrigin?: boolean;
-  onToggleAutoOrigin?: () => void;
-  autoOriginReference?: AutoOriginReference | null;
-  /** Whether Auto Origin is currently eligible (no verified alignment yet). */
-  autoOriginEnabled?: boolean;
-  /** True once a formal GPS alignment has been staged & verified — Auto Origin is force-disabled at mission start in this state. */
+  /** True once a formal GPS alignment has been staged & verified. */
   stagedVerified?: boolean;
   missionRunning?: boolean;
   /** True while the whole plan is a draggable/rotatable "sticker" on the map (tap-to-pick-point is disabled meanwhile). */
@@ -137,10 +126,6 @@ export function AlignDxfPanel({
   extractedCorners,
   setExtractedCorners,
   mapLLA,
-  autoOrigin = false,
-  onToggleAutoOrigin,
-  autoOriginReference = null,
-  autoOriginEnabled = false,
   stagedVerified = false,
   missionRunning = false,
   isPlanEditingMode = false,
@@ -164,18 +149,10 @@ export function AlignDxfPanel({
     return () => clearTimeout(t);
   }, [focusedGuidePointIndex, refPoints.length]);
 
-  type AlignUiMethod = "least_squares" | "visual_alignment" | "auto_origin";
+  type AlignUiMethod = "least_squares" | "visual_alignment";
 
-  const selectedUiMethod: AlignUiMethod = autoOrigin
-    ? "auto_origin"
-    : alignmentMethod === "visual_alignment"
-    ? "visual_alignment"
-    : "least_squares";
-
-  const setAutoOriginEnabled = (enabled: boolean) => {
-    if (enabled === autoOrigin) return;
-    onToggleAutoOrigin?.();
-  };
+  const selectedUiMethod: AlignUiMethod =
+    alignmentMethod === "visual_alignment" ? "visual_alignment" : "least_squares";
 
   const selectAlignMethod = (id: AlignUiMethod) => {
     if (id === selectedUiMethod) return;
@@ -192,12 +169,6 @@ export function AlignDxfPanel({
     setVisualAlignmentItem?.(null);
     setVisualAlignmentAnchor?.(null);
 
-    if (id === "auto_origin") {
-      setAutoOriginEnabled(true);
-      return;
-    }
-
-    setAutoOriginEnabled(false);
     setAlignmentMethod(id);
   };
 
@@ -508,9 +479,6 @@ export function AlignDxfPanel({
     setVisualAlignmentAnchor?.(null);
   };
 
-  // True once Auto Origin is both requested and actually eligible (no verified/staged alignment blocking it).
-  const autoOriginActive = autoOrigin && autoOriginEnabled;
-
   return (
     <View style={{ gap: 12 }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -519,57 +487,18 @@ export function AlignDxfPanel({
             options={[
               { id: "least_squares", label: "Guides" },
               { id: "visual_alignment", label: "Move on map" },
-              { id: "auto_origin", label: "Auto" },
             ]}
             value={selectedUiMethod}
             onChange={selectAlignMethod}
           />
         </View>
-        {refPoints.length > 0 && selectedUiMethod !== "auto_origin" ? (
+        {refPoints.length > 0 ? (
           <Pressable onPress={resetAlignment} hitSlop={6}>
             <Text style={{ color: FIELDS_COLORS.danger, fontSize: 11, fontWeight: "800" }}>Clear</Text>
           </Pressable>
         ) : null}
       </View>
 
-      {/* Auto Origin status (selected via dropdown) */}
-      {selectedUiMethod === "auto_origin" && !missionRunning ? (
-        <View
-          style={{
-            borderRadius: 12,
-            borderWidth: 1,
-            borderColor: autoOriginActive ? FIELDS_COLORS.successBorder : FIELDS_COLORS.panelBorder,
-            backgroundColor: autoOriginActive
-              ? "rgba(16, 185, 129, 0.08)"
-              : FIELDS_COLORS.surfaceSolid,
-            padding: 12,
-          }}
-        >
-          <Text
-            style={{
-              color:
-                stagedVerified || !autoOriginEnabled
-                  ? FIELDS_COLORS.danger
-                  : autoOriginReference
-                  ? FIELDS_COLORS.success
-                  : FIELDS_COLORS.textMuted,
-              fontSize: 11,
-              lineHeight: 15,
-            }}
-          >
-            {stagedVerified
-              ? "GPS alignment is already set."
-              : !autoOriginEnabled
-              ? "Clear the current alignment first."
-              : autoOriginReference
-              ? `Rover N ${autoOriginReference.roverNorth.toFixed(2)}, E ${autoOriginReference.roverEast.toFixed(2)}`
-              : "Waiting for GPS…"}
-          </Text>
-        </View>
-      ) : null}
-
-      {/* Formal alignment controls — not shown while Auto Origin is selected */}
-      {selectedUiMethod !== "auto_origin" ? (
       <View style={{ gap: 12 }}>
       {alignmentMethod !== "visual_alignment" &&
       !(alignmentMethod === "least_squares" && extractedCorners) ? (
@@ -1148,7 +1077,6 @@ export function AlignDxfPanel({
         </View>
       )}
       </View>
-      ) : null}
     </View>
   );
 }

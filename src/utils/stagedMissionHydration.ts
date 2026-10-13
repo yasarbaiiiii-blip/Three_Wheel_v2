@@ -100,15 +100,6 @@ export function isStagedHydrationLineId(id: string): boolean {
   return /^(staged-line-|rover-path-|rover-transit-|rover-ext-|pt-)/.test(id);
 }
 
-export function stagedMissionMatchesId(
-  artifact: StagedMissionArtifact | null | undefined,
-  missionId: string
-): boolean {
-  const expected = missionId.trim();
-  const actual = typeof artifact?.mission_id === "string" ? artifact.mission_id.trim() : "";
-  return expected !== "" && actual === expected;
-}
-
 /** Staged waypoints are surveyed/local NED metres; MapView origin uses anchor GPS at local (0,0). */
 export function anchorToAlignedRefPoints(
   anchor: Record<string, unknown> | null | undefined

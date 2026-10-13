@@ -1,9 +1,9 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback, memo } from "react";
-import { View, Text, Pressable, PanResponder, Switch, LayoutChangeEvent } from "react-native";
+import { View, Text, PanResponder, Switch } from "react-native";
 import Svg, { Path, G, Line, Rect, Circle, Polygon, Polyline, Text as SvgText } from "react-native-svg";
 import type { PlanLine } from "../types/plan";
 import { getPlanLineRenderPoints } from "../utils/curveGeometry";
-import { screenToDesignMeters, designToSvg, simplifyPath } from "../utils/designTransform";
+import { screenToDesignMeters, simplifyPath } from "../utils/designTransform";
 import type { DesignVertex, DesignEntity } from "../types/designDocument";
 import { createDesignEntity } from "../types/designDocument";
 import { snapToGrid, findSnapCandidate } from "../utils/designSnap";
@@ -253,7 +253,6 @@ export const BoundaryEditor = memo(function BoundaryEditor({
   const drawingLineStart = useRef<DesignVertex | null>(null);
 
   /* ── RAF throttle refs (Step 3) ── */
-  const rafPendingRef = useRef(false);
   const rafIdRef = useRef<number | null>(null);
   const rafCameraRef = useRef<{ x: number; y: number; zoom: number } | null>(null);
   const rafItemsFnRef = useRef<((prev: PlacedItem[]) => PlacedItem[]) | null>(null);
@@ -318,8 +317,6 @@ export const BoundaryEditor = memo(function BoundaryEditor({
     // Keep track of candidates
     let bestLineId: string | null = null;
     let bestLineArea = Infinity;
-    let bestLineDistSq = toleranceLineSvgSq;
-
     const distToSegmentSquared = (px: number, py: number, vx: number, vy: number, wx: number, wy: number) => {
       const l2 = (vx - wx) ** 2 + (vy - wy) ** 2;
       if (l2 === 0) return (px - vx) ** 2 + (py - vy) ** 2;
@@ -365,7 +362,6 @@ export const BoundaryEditor = memo(function BoundaryEditor({
          if (itemArea < bestLineArea) {
             bestLineArea = itemArea;
             bestLineId = item.id;
-            bestLineDistSq = minItemLineDistSq;
          }
       }
 

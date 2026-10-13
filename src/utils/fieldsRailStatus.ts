@@ -3,7 +3,7 @@
  * Pure: same inputs always yield the same chips / CTA. Workflow gating stays in FieldsPage.
  */
 
-export type FieldsOriginKind = "gps" | "auto" | "unanchored";
+export type FieldsOriginKind = "gps" | "unanchored";
 export type FieldsCtaId = "align" | "pathOrder" | "none";
 
 export type FieldsRailStatus = {
@@ -27,7 +27,6 @@ export type FieldsRailStatusInput = {
   /** Upload (+ align) complete — Path Order can send. */
   pathOrderReady: boolean;
   missionSent: boolean;
-  autoOrigin: boolean;
   hasGpsOrigin: boolean;
 };
 
@@ -55,11 +54,7 @@ export function deriveFieldsRailStatus(input: FieldsRailStatusInput): FieldsRail
 
   readyDone = Math.min(readyDone, readyTotal);
 
-  const origin: FieldsOriginKind = input.hasGpsOrigin
-    ? "gps"
-    : input.autoOrigin
-      ? "auto"
-      : "unanchored";
+  const origin: FieldsOriginKind = input.hasGpsOrigin ? "gps" : "unanchored";
 
   let ctaId: FieldsCtaId = "none";
   let ctaLabel = "";
@@ -76,7 +71,6 @@ export function deriveFieldsRailStatus(input: FieldsRailStatusInput): FieldsRail
 
 export function originChipLabel(origin: FieldsOriginKind): string {
   if (origin === "gps") return "Origin GPS";
-  if (origin === "auto") return "Origin Auto";
   return "Origin unanchored";
 }
 
