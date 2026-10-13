@@ -19,6 +19,7 @@ import {
   buildCsvTransitPreviews,
   buildOrderedTrajectory,
   defaultPathOrder,
+  reseedPathOrder,
   detectCurveDirectionWarnings,
   detectDegenerateEntityWarnings,
   detectReversalWarnings,
@@ -84,6 +85,11 @@ type ListRow = PathRow | TransitRow | ExtensionRow;
 
 type CsvPathOrderStepProps = {
   lines: PlanLine[];
+  /**
+   * Bumped when the plan's path sequence was re-chained from outside (anchor confirmed): the saved
+   * order is rebuilt from `lines` so the sent mission follows the new anchor, not the old order.
+   */
+  reseedToken?: number;
   onOrderChange?: (orderedPaintedLines: PlanLine[], fullOrder: CsvPathOrderEntry[]) => void;
   /** Shared with the map — tap a row to highlight that path on the plan. */
   selectedLineId?: string | null;
@@ -163,6 +169,7 @@ function buildInterleavedRows(
 
 export function CsvPathOrderStep({
   lines,
+  reseedToken = 0,
   onOrderChange,
   selectedLineId = null,
   onSelectLine,
@@ -216,6 +223,14 @@ export function CsvPathOrderStep({
       return next;
     });
   }, [markKey]); // markKey only — not markLines reference (avoids thrash when parent rebuilds transit)
+
+  // Declared after the sync effect above so, in the same commit, the reseed wins over it.
+  const lastReseedTokenRef = useRef(reseedToken);
+  useEffect(() => {
+    if (reseedToken === lastReseedTokenRef.current) return;
+    lastReseedTokenRef.current = reseedToken;
+    setOrder((prev) => reseedPathOrder(prev, markLines));
+  }, [reseedToken]); // eslint-disable-line react-hooks/exhaustive-deps -- reads the markLines of this render on purpose
 
   const painted = useMemo(() => resolveOrderedPaintedLines(markLines, order), [markLines, order]);
   const trajectory = useMemo(

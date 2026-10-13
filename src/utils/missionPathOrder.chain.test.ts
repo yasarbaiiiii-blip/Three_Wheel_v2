@@ -13,8 +13,12 @@ import { describe, expect, it } from "vitest";
 import type { PlanLine } from "../types/plan";
 import { buildCsvExtensionLines, buildExtensionTransitLines } from "./missionExtensions";
 import {
+  anchorSeedFromEnd,
   chainMarkLinesByGeometry,
   chainMarkLinesFromSeed,
+  defaultPathOrder,
+  reseedPathOrder,
+  resolveOrderedPaintedLines,
   reversePlanLineDirection,
 } from "./missionPathOrder";
 
@@ -210,6 +214,58 @@ describe("chainMarkLinesByGeometry", () => {
     const placedArc = chained.find((l) => l.id === "arc")!;
     expect(placedArc.from).toMatchObject({ x: p1[0], y: p1[1] });
     expect(placedArc.to).toMatchObject({ x: p3[0], y: p3[1] });
+  });
+});
+
+describe("anchor re-chain -> path order", () => {
+  const square = [
+    seg("bottom", BL, BR),
+    seg("right", BR, TR),
+    seg("top", TR, TL),
+    seg("left", TL, BL),
+  ];
+  const ids = (ls: PlanLine[]) => ls.map((l) => l.id);
+
+  it("a stale order ignores the new anchor; reseeding follows the re-chained lines", () => {
+    const staleOrder = defaultPathOrder(square); // what the Path Order step still holds
+    const chained = chainMarkLinesFromSeed(square, "top", false);
+    // Without reseeding, the painted sequence is still the old one.
+    expect(ids(resolveOrderedPaintedLines(chained, staleOrder))).toEqual(["bottom", "right", "top", "left"]);
+    // Reseeded: the path starts at the anchored line and walks the perimeter from there.
+    const reseeded = reseedPathOrder(staleOrder, chained);
+    expect(ids(resolveOrderedPaintedLines(chained, reseeded))).toEqual(["top", "left", "bottom", "right"]);
+  });
+
+  it("keeps each path's paint on/off choice and adds split pieces with paint on", () => {
+    const prev = defaultPathOrder(square).map((e) => (e.lineId === "right" ? { ...e, paint: false } : e));
+    const split = [seg("top-a", TR, [2, 1]), seg("top-b", [2, 1], TL), square[0], square[1], square[3]];
+    const next = reseedPathOrder(prev, split);
+    expect(next.map((e) => e.lineId)).toEqual(["top-a", "top-b", "bottom", "right", "left"]);
+    expect(next.find((e) => e.lineId === "right")!.paint).toBe(false);
+    expect(next.find((e) => e.lineId === "top-a")!.paint).toBe(true);
+  });
+});
+
+describe("anchorSeedFromEnd", () => {
+  const top = seg("top", TR, TL);
+
+  it("is false for the from end and true for the to end", () => {
+    expect(anchorSeedFromEnd(top, TR[0], TR[1])).toBe(false);
+    expect(anchorSeedFromEnd(top, TL[0], TL[1])).toBe(true);
+  });
+
+  it("picks the nearer end for a slightly-off tap", () => {
+    expect(anchorSeedFromEnd(top, 2.01, 1.9)).toBe(false);
+    expect(anchorSeedFromEnd(top, 2.01, 0.1)).toBe(true);
+  });
+
+  it("tapping the far end starts the chain there, the near end does not", () => {
+    const square = [seg("bottom", BL, BR), seg("right", BR, TR), top, seg("left", TL, BL)];
+    const fromNear = chainMarkLinesFromSeed(square, "top", anchorSeedFromEnd(top, TR[0], TR[1]));
+    const fromFar = chainMarkLinesFromSeed(square, "top", anchorSeedFromEnd(top, TL[0], TL[1]));
+    expect(fromNear[0].from).toMatchObject({ x: TR[0], y: TR[1] });
+    expect(fromFar[0].from).toMatchObject({ x: TL[0], y: TL[1] });
+    expect(fromFar[0].to).toMatchObject({ x: TR[0], y: TR[1] });
   });
 });
 

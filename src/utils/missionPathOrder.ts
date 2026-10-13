@@ -255,6 +255,20 @@ export function defaultPathOrder(markLines: PlanLine[]): CsvPathOrderEntry[] {
   }));
 }
 
+/**
+ * Rebuild the order from `markLines` as they now stand (e.g. after an anchor re-chained them),
+ * keeping each path's paint on/off choice. `defaultPathOrder` alone would reset those choices.
+ */
+export function reseedPathOrder(
+  prev: CsvPathOrderEntry[],
+  markLines: PlanLine[]
+): CsvPathOrderEntry[] {
+  const paintById = new Map(prev.map((e) => [e.lineId, e.paint]));
+  return defaultPathOrder(markLines).map((e) =>
+    paintById.has(e.lineId) ? { ...e, paint: paintById.get(e.lineId)! } : e
+  );
+}
+
 // ── Geometric chaining (seeds the default order for CAD imports) ──────────────
 
 type Ned = [number, number];
@@ -863,6 +877,18 @@ export function chainMarkLinesFromSeed(
   if (model.n <= CHAIN_OPTIMIZE_MAX_MARKS) route = improveRoute(model, route, 1);
 
   return [...route.map((code) => model.lineOf[code]), ...unplaceable, ...others];
+}
+
+/**
+ * True when an anchor tap on a DXF line landed on its `to` end rather than its `from` end, so the
+ * chain must start from that end. Both ends are offered as anchor dots; ignoring which one was
+ * tapped makes the far-end dot behave exactly like the near-end one.
+ */
+export function anchorSeedFromEnd(line: PlanLine, north: number, east: number): boolean {
+  if (!line.from || !line.to) return false;
+  const dFrom = Math.hypot(north - line.from.x, east - line.from.y);
+  const dTo = Math.hypot(north - line.to.x, east - line.to.y);
+  return dTo < dFrom;
 }
 
 export type MarkOrderCost = {

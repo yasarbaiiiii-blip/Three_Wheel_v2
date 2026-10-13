@@ -117,7 +117,6 @@ import {
   type AnchorTarget,
   type AnchorTargetOption,
 } from "./src/utils/missionLayerLines";
-import { splitRoadMarkingPathAtAnchor } from "./src/utils/roadMarkingCsvPath";
 import type { AnchorCandidatePoint } from "./src/components/mapViewTypes";
 // Template generators live only in lazy TemplatesPage (not on the connection entry graph).
 
@@ -254,11 +253,11 @@ import type {
 import {
   applyCsvOrderToPlanLines,
   chainMarkLinesByGeometry,
-  chainMarkLinesFromSeed,
   defaultPathOrder,
   selectMarkPlanLines,
 } from "./src/utils/missionPathOrder";
 import { normalizeBearingDeg } from "./src/utils/planOffset";
+import { reanchorTargetLines } from "./src/utils/anchorReorder";
 import { computeOffsetResultLines } from "./src/utils/planOffsetApply";
 import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
 import type { MapGeometryFrame } from "./src/types/mapGeometry";
@@ -969,6 +968,8 @@ function AppRoot() {
   const [anchorSelectMode, setAnchorSelectMode] = useState(false);
   const [anchorTarget, setAnchorTarget] = useState<AnchorTarget | null>(null);
   const [pendingAnchor, setPendingAnchor] = useState<AnchorCandidatePoint | null>(null);
+  /** Bumped when an anchor is confirmed so the Path Order step re-seeds its order from the re-chained plan. */
+  const [anchorAppliedToken, setAnchorAppliedToken] = useState(0);
   /** Offset plan: compass shift, or inner/outer buffer of the marks. */
   const [offsetMode, setOffsetMode] = useState<"shift" | "buffer">("shift");
   const [offsetBufferDirection, setOffsetBufferDirection] = useState<"out" | "in">("out");
@@ -2509,37 +2510,23 @@ function AppRoot() {
 
     const targetLines = isolateLinesForAnchorTarget(lines, uploadedFiles, missionLayers, anchorTarget);
     const targetIds = new Set(targetLines.map((l) => l.id));
-    const seedLine = targetLines.find((l) => l.id === pendingAnchor.lineId);
-    if (!seedLine) {
-      resetAnchorSelection();
-      return;
-    }
-
-    let reordered = targetLines;
-    let seedId = pendingAnchor.lineId;
-
-    if (pendingAnchor.kind === "csv") {
-      const split = splitRoadMarkingPathAtAnchor(seedLine, pendingAnchor.north, pendingAnchor.east);
-      if (!split) {
-        showToast("Anchor failed", "That path has no usable geometry to re-anchor.", "error");
+    const reanchored = reanchorTargetLines(targetLines, pendingAnchor);
+    if (!reanchored.ok) {
+      if (reanchored.reason === "seed-missing") {
+        resetAnchorSelection();
         return;
       }
-      // near === null: anchor was the path's own current start or end — `far` alone
-      // covers the whole path (unchanged, or fully reversed), no split/transit needed.
-      const seedArm = split.near ?? split.far;
-      reordered = targetLines.flatMap((l) => {
-        if (l.id !== seedLine.id) return [l];
-        return split.near ? [split.near, split.far] : [split.far];
-      });
-      seedId = seedArm.id;
+      showToast("Anchor failed", "That path has no usable geometry to re-anchor.", "error");
+      return;
     }
-
-    const chained = chainMarkLinesFromSeed(reordered, seedId, false);
+    const chained = reanchored.chained;
 
     setLines((prev) => {
       const untouched = prev.filter((l) => !targetIds.has(l.id));
       return sanitizePlanLines([...chained, ...untouched]);
     });
+    // Path Order keeps its own saved order; without this it keeps painting the pre-anchor sequence.
+    setAnchorAppliedToken((t) => t + 1);
 
     // Anchor mutates geometry after any prior Send — staged mission / app-planned
     // snapshot no longer match what's on the map. Same "plan changed, demote and
@@ -3733,6 +3720,7 @@ function AppRoot() {
                             onSelectAnchorTarget={handleSelectAnchorTarget}
                             onAnchorCandidateSelect={handleAnchorCandidateSelect}
                             onConfirmAnchor={handleConfirmAnchor}
+                            anchorAppliedToken={anchorAppliedToken}
                             offsetDistanceM={offsetDistanceM}
                             offsetBearingDeg={offsetBearingDeg}
                             offsetMode={offsetMode}
@@ -4175,6 +4163,7 @@ function SectionPages(props: {
   onSelectAnchorTarget?: (target: AnchorTarget) => void;
   onAnchorCandidateSelect?: (candidate: AnchorCandidatePoint) => void;
   onConfirmAnchor?: () => void;
+  anchorAppliedToken?: number;
   /** Offset plan (whole-plan rigid shift toward an absolute compass bearing) — Fields Upload step. */
   offsetDistanceM?: number;
   offsetBearingDeg?: number;
