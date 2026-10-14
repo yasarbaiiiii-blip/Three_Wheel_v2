@@ -4259,9 +4259,9 @@ function SectionPages(props: {
 }) {
   const { page, mapViewEnabled } = props;
   const sharedMapEnabled = useSharedMapEnabled();
-  // Prefer App props; store fallback if a screen mounts without a parent snapshot.
-  const liveTelemetry = useThrottledTelemetrySnapshot();
-  const telemetrySnapshot = liveTelemetry ?? props.telemetrySnapshot;
+  // App already owns the selective telemetry subscription. A second subscription here made
+  // the entire Fields/Templates subtree render independently for the same snapshot.
+  const telemetrySnapshot = props.telemetrySnapshot;
   const previewRoverPoint =
     props.previewRoverPoint ??
     (telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null

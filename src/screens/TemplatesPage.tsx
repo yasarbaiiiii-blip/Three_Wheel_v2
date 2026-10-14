@@ -13,8 +13,10 @@ import { DesignDocument, isDesignInstance, isDesignEntity, createDesignDocument,
 import { TemplateRegistry, createTemplateDefinition, snapshotTemplateId } from "../utils/designTemplateRegistry";
 import { flattenDesignDocument, flattenDesignNode } from "../utils/designTransform";
 import { applyDesignCommand } from "../utils/designHistory";
+import { getTelemetrySnapshot } from "../features/telemetry/telemetryStore";
 import type { PlanLine, LayerVisibility, Page, TelemetrySnapshot, DxfEntity } from "../types/plan";
 export type BoundarySide = 'top' | 'right' | 'bottom' | 'left';
+const HISTORY_LIMIT = 100;
 
 export interface BoundaryEdgeInfo {
   side: BoundarySide;
@@ -55,7 +57,13 @@ export function TemplatesPage(props: TemplatesPageProps) {
   const [indentSpacingStr, setIndentSpacingStr] = useState("0.25");
   const [letterSpacingStr, setLetterSpacingStr] = useState("10");
   const [charSpacingStr, setCharSpacingStr] = useState("10");
-  const [designDocument, setDesignDocument] = useState<DesignDocument>(createDesignDocument());
+  const [designDocument, setDesignDocumentState] = useState<DesignDocument>(createDesignDocument());
+  const designDocumentRef = useRef(designDocument);
+  const setDesignDocument = useCallback((updater: DesignDocument | ((prev: DesignDocument) => DesignDocument)) => {
+    const next = typeof updater === "function" ? updater(designDocumentRef.current) : updater;
+    designDocumentRef.current = next;
+    setDesignDocumentState(next);
+  }, []);
   const templateRegistryRef = useRef<TemplateRegistry>(new TemplateRegistry());
 
   const placedItems = useMemo(() => {
@@ -241,7 +249,14 @@ export function TemplatesPage(props: TemplatesPageProps) {
   }, []);
   const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
   const [activeTool, setActiveTool] = useState<"SELECT" | "LINE" | "FREEHAND">("SELECT");
-  const [history, setHistory] = useState<{ past: import('../types/designDocument').DesignCommand[]; future: import('../types/designDocument').DesignCommand[] }>({ past: [], future: [] });
+  type HistoryState = { past: import('../types/designDocument').DesignCommand[]; future: import('../types/designDocument').DesignCommand[] };
+  const [history, setHistoryState] = useState<HistoryState>({ past: [], future: [] });
+  const historyRef = useRef(history);
+  const setHistory = useCallback((updater: HistoryState | ((prev: HistoryState) => HistoryState)) => {
+    const next = typeof updater === "function" ? updater(historyRef.current) : updater;
+    historyRef.current = next;
+    setHistoryState(next);
+  }, []);
   const dragStartDocRef = useRef<DesignDocument | null>(null);
 
   const [previewAnchor, setPreviewAnchor] = useState<DesignPreviewAnchor>({
@@ -389,21 +404,13 @@ export function TemplatesPage(props: TemplatesPageProps) {
   }, [boundaryControlPointsLocal, boundaryPosition.x, boundaryPosition.y, props.telemetrySnapshot?.pos_e, props.telemetrySnapshot?.pos_n, showBoundaryPoints]);
 
   const executeCommand = useCallback((cmd: import('../types/designDocument').DesignCommand) => {
-    let inverseCmd: import('../types/designDocument').DesignCommand | null = null;
-    setDesignDocument(prevDoc => {
-      const { doc: nextDoc, inverse } = applyDesignCommand(prevDoc, cmd);
-      inverseCmd = inverse;
-      return nextDoc;
-    });
-    setTimeout(() => {
-      if (inverseCmd) {
-        setHistory(prev => ({
-          past: [...prev.past, inverseCmd!],
-          future: []
-        }));
-      }
-    }, 0);
-  }, []);
+    const { doc: nextDoc, inverse } = applyDesignCommand(designDocumentRef.current, cmd);
+    setDesignDocument(nextDoc);
+    setHistory(prev => ({
+      past: [...prev.past, inverse].slice(-HISTORY_LIMIT),
+      future: []
+    }));
+  }, [setDesignDocument, setHistory]);
 
   const handleDragStart = useCallback(() => {
     dragStartDocRef.current = designDocument;
@@ -462,51 +469,29 @@ export function TemplatesPage(props: TemplatesPageProps) {
       const batchCmd: import('../types/designDocument').DesignCommand = commands.length === 1 ? commands[0] : { type: "Batch", commands };
       const { inverse } = applyDesignCommand(startDoc, batchCmd);
       setHistory(prev => ({
-        past: [...prev.past, inverse],
+        past: [...prev.past, inverse].slice(-HISTORY_LIMIT),
         future: []
       }));
     }
-  }, [designDocument]);
+  }, [designDocument, setHistory]);
 
   const handleUndo = useCallback(() => {
-    setHistory(prev => {
-      if (prev.past.length === 0) return prev;
-      const cmd = prev.past[prev.past.length - 1];
-      const newPast = prev.past.slice(0, -1);
-      
-      let invOfInv: import('../types/designDocument').DesignCommand | null = null;
-      setDesignDocument(prevDoc => {
-        const { doc: nextDoc, inverse } = applyDesignCommand(prevDoc, cmd);
-        invOfInv = inverse;
-        return nextDoc;
-      });
-      
-      return {
-        past: newPast,
-        future: invOfInv ? [...prev.future, invOfInv] : prev.future
-      };
-    });
-  }, []);
+    const prev = historyRef.current;
+    if (prev.past.length === 0) return;
+    const cmd = prev.past[prev.past.length - 1];
+    const { doc, inverse } = applyDesignCommand(designDocumentRef.current, cmd);
+    setDesignDocument(doc);
+    setHistory({ past: prev.past.slice(0, -1), future: [...prev.future, inverse].slice(-HISTORY_LIMIT) });
+  }, [setDesignDocument, setHistory]);
 
   const handleRedo = useCallback(() => {
-    setHistory(prev => {
-      if (prev.future.length === 0) return prev;
-      const cmd = prev.future[prev.future.length - 1];
-      const newFuture = prev.future.slice(0, -1);
-      
-      let invOfInv: import('../types/designDocument').DesignCommand | null = null;
-      setDesignDocument(prevDoc => {
-        const { doc: nextDoc, inverse } = applyDesignCommand(prevDoc, cmd);
-        invOfInv = inverse;
-        return nextDoc;
-      });
-      
-      return {
-        past: invOfInv ? [...prev.past, invOfInv] : prev.past,
-        future: newFuture
-      };
-    });
-  }, []);
+    const prev = historyRef.current;
+    if (prev.future.length === 0) return;
+    const cmd = prev.future[prev.future.length - 1];
+    const { doc, inverse } = applyDesignCommand(designDocumentRef.current, cmd);
+    setDesignDocument(doc);
+    setHistory({ past: [...prev.past, inverse].slice(-HISTORY_LIMIT), future: prev.future.slice(0, -1) });
+  }, [setDesignDocument, setHistory]);
 
   // Check if pending values differ from active
   const hasBoundaryChanges =
@@ -566,8 +551,9 @@ export function TemplatesPage(props: TemplatesPageProps) {
         }
       }
     } else {
-      const roverN = props.telemetrySnapshot?.pos_n ?? 0;
-      const roverE = props.telemetrySnapshot?.pos_e ?? 0;
+      const telemetry = getTelemetrySnapshot() ?? props.telemetrySnapshot;
+      const roverN = telemetry?.pos_n ?? 0;
+      const roverE = telemetry?.pos_e ?? 0;
       if (placedItems.length === 0) {
         newX = roverE + 2.0;
         newY = roverN;

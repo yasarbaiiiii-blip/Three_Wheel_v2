@@ -538,7 +538,7 @@ export function useCsvPointEdit(params: UseCsvPointEditParams): CsvPointEditApi 
     setSelection(EMPTY_SELECTION);
   }, [params.planLocked, setSelection]);
 
-  return {
+  return useMemo(() => ({
     editMode,
     setEditMode,
     rangeMode,
@@ -574,5 +574,11 @@ export function useCsvPointEdit(params: UseCsvPointEditParams): CsvPointEditApi 
     markFilesTouched,
     markAllFilesTouched,
     getEffectiveParses,
-  };
+  }), [
+    editMode, setEditMode, rangeMode, toggleRangeMode, points, selection, onPointPress,
+    clearSelection, deleteSelected, undo, redo, restoreAll, reversePlan, summaries, edit,
+    exportCsv, params.planLocked, busy, remainingTotal, planRevision, getPlanRevision,
+    pathOrderResetToken, pathOrderReverseToken, registerParse, removeFile, reset,
+    markFilesTouched, markAllFilesTouched, getEffectiveParses,
+  ]);
 }

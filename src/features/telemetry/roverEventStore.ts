@@ -20,7 +20,7 @@
  * Nothing here polls. REST is for commands only.
  */
 
-import { useSyncExternalStore } from "react";
+import { useCallback, useRef, useSyncExternalStore } from "react";
 import {
   ROVER_EVENT_KINDS,
   type RoverEvent,
@@ -182,6 +182,33 @@ export function useRoverEventsValue<T extends string | number | boolean | null>(
 ): T {
   const get = () => select(getRoverEventsState());
   return useSyncExternalStore(subscribeRoverEvents, get, get);
+}
+
+/** Subscribe to a semantic slice without forcing callers to encode it into a lossy string key. */
+export function useRoverEventsSelector<T>(
+  selector: (s: RoverEventsState) => T,
+  isEqual: (a: T, b: T) => boolean = Object.is
+): T {
+  const selectorRef = useRef(selector);
+  selectorRef.current = selector;
+  const equalRef = useRef(isEqual);
+  equalRef.current = isEqual;
+  const cacheRef = useRef<T>(selector(state));
+
+  const subscribe = useCallback((onStoreChange: () => void) => subscribeRoverEvents(() => {
+    const next = selectorRef.current(state);
+    if (!equalRef.current(cacheRef.current, next)) {
+      cacheRef.current = next;
+      onStoreChange();
+    }
+  }), []);
+  const getSnapshot = useCallback(() => {
+    const next = selectorRef.current(state);
+    if (!equalRef.current(cacheRef.current, next)) cacheRef.current = next;
+    return cacheRef.current;
+  }, []);
+
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 // ---- selectors (pure: take a state, so tests and components share them) --------------------

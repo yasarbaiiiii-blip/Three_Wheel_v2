@@ -7,7 +7,7 @@ import Svg, { Polyline } from "react-native-svg";
 import { Battery, Crosshair, Navigation, Route, ShieldAlert, X, Play, Square, Pause, MonitorPlay, MapPin, Satellite, Gauge, Activity, Radio, Target, Zap, Map as MapIcon, Tractor, RadioTower, Check, Pencil, Undo2, Layers, ChevronRight, Ruler, Spline, LayoutList } from "lucide-react-native";
 import { Compass } from "./Compass";
 import { Navbar } from "./Navbar";
-import { selectEstop, useRoverEvents } from "../features/telemetry/roverEventStore";
+import { selectEstop, useRoverEventsSelector } from "../features/telemetry/roverEventStore";
 import { useTelemetrySelector } from "../features/telemetry/telemetryStore";
 import { describeRoverLinks } from "../features/telemetry/roverLinkStatus";
 import { describeMission, missionControls, missionIsActive, selectMission } from "../features/mission/missionLifecycle";
@@ -56,6 +56,25 @@ const COLORS = {
   iconMuted: "#2e2e34",
   pillSecondary: "#35353c",
 };
+
+const viewEqual = (a, b) => {
+  if (a.known !== b.known) return false;
+  if (!a.known || !b.known) return a.reason === b.reason;
+  if ("asserted" in a || "asserted" in b) return a.asserted === b.asserted && a.source === b.source;
+  const ar = a.run;
+  const br = b.run;
+  return ar.state === br.state && ar.missionId === br.missionId && ar.runIndex === br.runIndex
+    && ar.pointIndex === br.pointIndex && ar.reasonCode === br.reasonCode
+    && ar.gateReasonCode === br.gateReasonCode && ar.waitingOn === br.waitingOn
+    && ar.reasonDetail === br.reasonDetail && ar.requestId === br.requestId
+    && ar.sourceSha === br.sourceSha && ar.executionSha === br.executionSha;
+};
+
+const linkChipsEqual = (a, b) => a.length === b.length && a.every((chip, index) => {
+  const other = b[index];
+  return chip.key === other.key && chip.label === other.label
+    && chip.value === other.value && chip.tone === other.tone;
+});
 
 // Map tool dropdown metrics — popovers get an explicit width so their tile rows
 // never wrap (an absolutely positioned popover has no parent width to size against).
@@ -675,9 +694,8 @@ export default function ModernHomeUI(props) {
 
   // Mission status comes from `rover_event`s only. The rover arms and switches to OFFBOARD itself:
   // nothing on this screen arms or changes the mode.
-  const roverEvents = useRoverEvents();
-  const estopView = selectEstop(roverEvents);
-  const missionView = useMemo(() => selectMission(roverEvents), [roverEvents]);
+  const estopView = useRoverEventsSelector(selectEstop, viewEqual);
+  const missionView = useRoverEventsSelector(selectMission, viewEqual);
   const lifecycle = useMemo(() => describeMission(missionView), [missionView]);
   const controls = useMemo(
     () => missionControls(missionView, { busy: missionActionBusy, hasMission: Boolean(stagedMissionId) }),
@@ -685,7 +703,7 @@ export default function ModernHomeUI(props) {
   );
   // The single Start/Stop button shows Stop while a mission is active or the rover state is unknown.
   const stopMode = !missionView.known || missionIsActive(missionView);
-  const linkChips = useMemo(() => describeRoverLinks(roverEvents), [roverEvents]);
+  const linkChips = useRoverEventsSelector(describeRoverLinks, linkChipsEqual);
 
   // Null means the rover does not report battery: show N/A, never a fake 0% / CRIT.
   const batteryPctRaw = telemetrySnapshot?.battery_pct ?? null;
