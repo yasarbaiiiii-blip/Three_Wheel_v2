@@ -9,7 +9,7 @@
  * Eager import (not React.lazy): under Expo/Metro HMR, lazy chunks frequently desync after
  * large edits (`Requiring unknown module "N"`).
  */
-import React, { useId, useLayoutEffect, useMemo, useRef } from "react";
+import React, { useId, useLayoutEffect, useRef } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import type { MapViewProps } from "./mapViewTypes";
@@ -17,6 +17,7 @@ import { MapViewNative } from "./MapViewNative";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { useSharedMapEnabled } from "./sharedMap/mapPrefs";
 import { publishMapSlot, releaseMapSlot } from "./sharedMap/sharedMapStore";
+import { stabilizeMapProps, useStableMapCallbacks } from "./sharedMap/stableMapProps";
 
 // Re-export the shared props type so existing `import { MapViewProps } from
 // "./MapView"` style usages (if any) keep working.
@@ -38,38 +39,11 @@ export function MapFailedFallback() {
 function SharedMapSlot(props: MapViewProps) {
   const owner = useId();
   const hidden = props.visible === false;
-  const propsRef = useRef(props);
-  const proxies = useMemo(() => {
-    const call = (key: keyof MapViewProps, ...args: unknown[]) => {
-      const handler = propsRef.current[key];
-      if (typeof handler === "function") return (handler as (...values: unknown[]) => unknown)(...args);
-    };
-    return {
-      onSelectPoint: (pt: { x: number; y: number }) => call("onSelectPoint", pt),
-      onMapPlacePoint: (pt: { x: number; y: number }) => call("onMapPlacePoint", pt),
-      onGuidePointFocus: (index: number) => call("onGuidePointFocus", index),
-      onSelectLine: (id: string | null) => call("onSelectLine", id),
-      onMoveBoundary: (x: number, y: number) => call("onMoveBoundary", x, y),
-      onRotateBoundary: (rotation: number) => call("onRotateBoundary", rotation),
-      onPlaceRoverAtPoint: (id: string, x: number, y: number) => call("onPlaceRoverAtPoint", id, x, y),
-      onUpdatePlacedItem: (id: string, updates: unknown) => call("onUpdatePlacedItem", id, updates),
-      onUpdatePlacedItems: (items: unknown) => call("onUpdatePlacedItems", items),
-      onSelectionChange: (ids: string[]) => call("onSelectionChange", ids),
-      onMapClickToMark: (coord: { lat: number; lon: number }) => call("onMapClickToMark", coord),
-      onMapFreehandDrawUpdate: (coords: { lat: number; lon: number }[]) => call("onMapFreehandDrawUpdate", coords),
-      onPlanAttached: (info: unknown) => call("onPlanAttached", info),
-      onAnchorCandidateSelect: (candidate: unknown) => call("onAnchorCandidateSelect", candidate),
-      onCsvEditPointPress: (pointId: string) => call("onCsvEditPointPress", pointId),
-    } as Record<string, (...args: never[]) => unknown>;
-  }, []);
+  const stableProps = useStableMapCallbacks(props);
 
-  const stableProps = { ...props } as MapViewProps & Record<string, unknown>;
-  for (const [key, proxy] of Object.entries(proxies)) {
-    stableProps[key] = typeof (props as unknown as Record<string, unknown>)[key] === "function" ? proxy : undefined;
-  }
-
+  // Every render publishes, but the store keeps references for unchanged values and only
+  // re-renders the map when something it draws changed.
   useLayoutEffect(() => {
-    propsRef.current = props;
     if (hidden) releaseMapSlot(owner);
     else publishMapSlot(owner, stableProps);
   });
@@ -78,14 +52,21 @@ function SharedMapSlot(props: MapViewProps) {
   return null;
 }
 
+/** Skips a render when every prop is the same reference (see stabilizeMapProps). */
+const MemoMapViewNative = React.memo(MapViewNative);
+
 /** Legacy path: this screen owns a private native map. */
 function StandaloneMap(props: MapViewProps) {
+  const withProxies = useStableMapCallbacks(props);
+  const stableRef = useRef<MapViewProps | null>(null);
+  const stableProps = stabilizeMapProps(stableRef.current, withProxies);
+  stableRef.current = stableProps;
   // If the host sets visible={false}, stay unmounted (Home Map Off path).
   if (props.visible === false) return null;
   return (
     <View style={styles.fill} collapsable={false}>
       <AppErrorBoundary name="MapView" fallback={<MapFailedFallback />}>
-        <MapViewNative {...props} visible />
+        <MemoMapViewNative {...stableProps} visible />
       </AppErrorBoundary>
     </View>
   );

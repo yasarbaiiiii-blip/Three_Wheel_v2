@@ -15,6 +15,7 @@ import { useSyncExternalStore } from "react";
 
 import type { MapViewProps } from "../mapViewTypes";
 import { perfCount } from "../../utils/perfCounters";
+import { mapValueEqual, stabilizeMapProps } from "./stableMapProps";
 
 type Slot = { order: number; props: MapViewProps };
 
@@ -25,7 +26,11 @@ let claimCounter = 0;
 let hostProps: MapViewProps | null = null;
 let hostOwner: string | null = null;
 
-/** Functions are stable event proxies; only their presence is data that the map renders. */
+/**
+ * Functions are stable event proxies, so only their presence is data the map renders. Other
+ * values compare by content (see mapValueEqual): an inline `[]` or `[item]` with the same items
+ * is not a change.
+ */
 export function mapPropsDataEqual(a: MapViewProps | null, b: MapViewProps | null): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
@@ -37,7 +42,7 @@ export function mapPropsDataEqual(a: MapViewProps | null, b: MapViewProps | null
       if ((typeof av === "function") !== (typeof bv === "function")) return false;
       continue;
     }
-    if (!Object.is(av, bv)) return false;
+    if (!mapValueEqual(av, bv)) return false;
   }
   return true;
 }
@@ -53,7 +58,11 @@ function recompute() {
     listeners.forEach((listener) => listener());
     return;
   }
-  if (hostOwner === best.owner && mapPropsDataEqual(hostProps, best.props)) return;
+  if (hostOwner === best.owner && mapPropsDataEqual(hostProps, best.props)) {
+    // Nothing the map draws changed; keep the newest object for the next real render.
+    hostProps = best.props;
+    return;
+  }
   hostOwner = best.owner;
   hostProps = best.props;
   perfCount("sharedMap.notify");
@@ -63,7 +72,13 @@ function recompute() {
 /** Claim (first call) or update (later calls) the shared map for `owner`. */
 export function publishMapSlot(owner: string, props: MapViewProps): void {
   const existing = slots.get(owner);
-  slots.set(owner, { order: existing?.order ?? ++claimCounter, props });
+  // Unchanged values keep their previous references, so the map's own memos stay warm. A new
+  // owner is compared against what the map shows now: Home -> Fields with the same plan lines
+  // must not rebuild every layer.
+  slots.set(owner, {
+    order: existing?.order ?? ++claimCounter,
+    props: stabilizeMapProps(existing?.props ?? hostProps, props),
+  });
   perfCount("sharedMap.publish");
   recompute();
 }

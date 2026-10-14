@@ -1601,7 +1601,9 @@ export default function ModernHomeUI(props) {
                   });
                 }
               }}
-              telemetrySnapshot={telemetrySnapshot}
+              // The map reads rover telemetry from the store itself (RoverLayer); passing the
+              // live snapshot here re-rendered the whole map on every update.
+              telemetrySnapshot={null}
               lines={visibleMapLines}
               showRover={showRoverMarker}
               showLengths={showLengthLabels}

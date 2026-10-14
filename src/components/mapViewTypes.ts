@@ -13,6 +13,10 @@ import type { DesignPreviewAnchor } from "../types/designDocument";
 
 export interface MapViewProps {
   styleURL?: string;
+  /**
+   * Fallback only, used while the telemetry store is empty. The rover reads live telemetry from
+   * the store (RoverLayer); screens pass null so telemetry never re-renders the whole map.
+   */
   telemetrySnapshot: TelemetrySnapshot | null;
   lines: PlanLine[];
   /**

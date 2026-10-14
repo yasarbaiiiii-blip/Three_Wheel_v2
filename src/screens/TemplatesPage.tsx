@@ -1014,7 +1014,7 @@ export function TemplatesPage(props: TemplatesPageProps) {
               standalone
               mode="templates"
               visible={true}
-              telemetrySnapshot={props.telemetrySnapshot}
+              telemetrySnapshot={null}
               lines={[]}
               alignedRefPoints={[]}
               placedItems={placedItems}

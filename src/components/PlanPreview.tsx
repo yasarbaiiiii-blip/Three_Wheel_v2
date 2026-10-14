@@ -994,14 +994,9 @@ export function PlanPreview({
                 return { ...prev, ...updates };
               });
             }}
-            telemetrySnapshot={{
-              lat: telemetryPosLat,
-              lon: telemetryPosLon,
-              alt: telemetryPosAlt,
-              heading_ned_deg: roverHeadingDeg,
-              pos_n: telemetryPosN,
-              pos_e: telemetryPosE,
-            } as any}
+            // The map reads rover telemetry from the store itself (RoverLayer); a new snapshot
+            // object here re-rendered the whole map on every update.
+            telemetrySnapshot={null}
             lines={staticMapLines}
             ghostLines={ghostLines}
             anchorCandidates={anchorCandidates}
