@@ -17,6 +17,16 @@ function emit(set: Set<Listener>) {
   set.forEach((l) => l());
 }
 
+function healthEquivalent(a: SystemHealth | null, b: SystemHealth | null): boolean {
+  return a === b || Boolean(a && b
+    && a.ros_node === b.ros_node
+    && a.fcu_connected === b.fcu_connected
+    && a.armed === b.armed
+    && a.mode === b.mode
+    && a.rpp_state === b.rpp_state
+    && a.mission_state === b.mission_state);
+}
+
 /** pose_age_ms ticks every frame; only a half-second change is worth a re-render. */
 const POSE_AGE_BUCKET_MS = 500;
 
@@ -66,7 +76,7 @@ subscribeProdTelemetry(() => {
         mission_state: adapted.mission_state ?? "idle",
       }
     : null;
-  if (JSON.stringify(nextHealth) !== JSON.stringify(systemHealth)) {
+  if (!healthEquivalent(nextHealth, systemHealth)) {
     systemHealth = nextHealth;
     emit(healthListeners);
   }

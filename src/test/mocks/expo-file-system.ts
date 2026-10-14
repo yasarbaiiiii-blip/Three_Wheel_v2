@@ -5,3 +5,5 @@ export const EncodingType = {
 export async function readAsStringAsync() {
   return "";
 }
+
+export async function deleteAsync() {}

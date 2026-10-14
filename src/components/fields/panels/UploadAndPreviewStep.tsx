@@ -124,46 +124,56 @@ function mimeForUpload(fileName: string, mimeType?: string | null): string {
  */
 async function resolveStableUploadAsset(
   file: DocumentPicker.DocumentPickerAsset
-): Promise<{ uri: string; name: string; mimeType: string }> {
+): Promise<{ uri: string; name: string; mimeType: string; temporary: boolean }> {
   const name = file.name || "upload.bin";
   const mimeType = mimeForUpload(name, file.mimeType);
   if (Platform.OS === "web") {
-    return { uri: file.uri, name, mimeType };
+    return { uri: file.uri, name, mimeType, temporary: false };
   }
 
   const safeName = name.replace(/[^a-zA-Z0-9._-]/g, "_");
   const dest = `${FileSystem.cacheDirectory ?? ""}import_${Date.now()}_${safeName}`;
   if (!dest || !FileSystem.cacheDirectory) {
-    return { uri: file.uri, name, mimeType };
+    return { uri: file.uri, name, mimeType, temporary: false };
   }
 
   try {
     const info = await FileSystem.getInfoAsync(file.uri);
     if (info.exists) {
       await FileSystem.copyAsync({ from: file.uri, to: dest });
-      return { uri: dest, name, mimeType };
+      return { uri: dest, name, mimeType, temporary: true };
     }
   } catch (e) {
     console.warn("[import] stable cache copy failed; using picker uri", e);
   }
-  return { uri: file.uri, name, mimeType };
+  return { uri: file.uri, name, mimeType, temporary: false };
 }
 
 /** Read picked file text via stable cache copy (native) or blob (web). */
 async function readPickedFileText(
   file: DocumentPicker.DocumentPickerAsset
-): Promise<{ text: string; stableUri: string }> {
+): Promise<{ text: string; sourceUri: string }> {
   const stable = await resolveStableUploadAsset(file);
-  let text = "";
-  if (Platform.OS === "web") {
-    const webFile = (file as any).file ?? (await (await fetch(file.uri)).blob());
-    text = await webFile.text();
-  } else {
-    text = await FileSystem.readAsStringAsync(stable.uri, {
-      encoding: FileSystem.EncodingType.UTF8,
-    });
+  try {
+    let text = "";
+    if (Platform.OS === "web") {
+      const webFile = (file as any).file ?? (await (await fetch(file.uri)).blob());
+      text = await webFile.text();
+    } else {
+      text = await FileSystem.readAsStringAsync(stable.uri, {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+    }
+    return { text, sourceUri: file.uri };
+  } finally {
+    if (stable.temporary) {
+      try {
+        await FileSystem.deleteAsync(stable.uri, { idempotent: true });
+      } catch (error) {
+        console.warn("[import] temporary cache cleanup failed", error);
+      }
+    }
   }
-  return { text, stableUri: stable.uri };
 }
 
 export function UploadAndPreviewStep({
@@ -388,14 +398,13 @@ export function UploadAndPreviewStep({
       }
       // Append validity is enforced in importAndPreviewFiles (batch already loaded).
 
-      let firstStableUri = files[0]?.uri ?? "";
+      const firstSourceUri = files[0]?.uri ?? "";
       let lastParsed: LocalPointCsvResult | null = null;
       const allWarnings: string[] = [];
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        const { text, stableUri } = await readPickedFileText(file);
-        if (i === 0) firstStableUri = stableUri;
+        const { text } = await readPickedFileText(file);
         const parsed = parseLocalPointCsv(text, file.name);
         lastParsed = parsed;
         allWarnings.push(...parsed.warnings.map((w) => `${file.name}: ${w}`));
@@ -415,7 +424,7 @@ export function UploadAndPreviewStep({
           files.length === 1
             ? files[0].name
             : `${files[0]?.name?.replace(/\.[^.]+$/, "") ?? "batch"}_x${files.length}.csv`,
-        uri: firstStableUri,
+        uri: firstSourceUri,
         fileType: "csv",
         source: "imported",
       });
@@ -461,14 +470,13 @@ export function UploadAndPreviewStep({
       }
       // Append validity is enforced in importAndPreviewFiles (batch already loaded).
 
-      let firstStableUri = files[0]?.uri ?? "";
+      const firstSourceUri = files[0]?.uri ?? "";
       let lastParsed: LocalDxfResult | null = null;
       const allWarnings: string[] = [];
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        const { text, stableUri } = await readPickedFileText(file);
-        if (i === 0) firstStableUri = stableUri;
+        const { text } = await readPickedFileText(file);
         const parsed = parseLocalDxf(text, file.name);
         lastParsed = parsed;
         allWarnings.push(...parsed.warnings.map((w) => `${file.name}: ${w}`));
@@ -483,7 +491,7 @@ export function UploadAndPreviewStep({
           files.length === 1
             ? files[0].name
             : `${files[0]?.name?.replace(/\.[^.]+$/, "") ?? "batch"}_x${files.length}.dxf`,
-        uri: firstStableUri,
+        uri: firstSourceUri,
         fileType: "dxf",
         source: "imported",
       });
@@ -561,10 +569,9 @@ export function UploadAndPreviewStep({
       // (no "mixed" fileType exists on ImportedPlan; this is only a display fallback,
       // superseded everywhere else by the per-file `uploadedFiles` list).
       const firstFile = csvFiles[0] ?? dxfFiles[0];
-      const stableUri = firstFile ? (await resolveStableUploadAsset(firstFile)).uri : "";
       setImportedPlan({
         fileName: `mixed_x${csvFiles.length + dxfFiles.length}`,
-        uri: stableUri,
+        uri: firstFile?.uri ?? "",
         fileType: "dxf",
         source: "imported",
       });

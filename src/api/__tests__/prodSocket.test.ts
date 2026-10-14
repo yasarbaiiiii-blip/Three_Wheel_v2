@@ -11,6 +11,7 @@ const mockSocket = {
   removeAllListeners: vi.fn(),
   connected: true,
   connect: vi.fn(),
+  timeout: vi.fn(),
 };
 
 vi.mock("socket.io-client", () => ({
@@ -30,6 +31,7 @@ describe("ProdSocketManager", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSocket.connected = true;
+    mockSocket.timeout.mockReturnValue(mockSocket);
     manager = new ProdSocketManager();
   });
 
@@ -80,7 +82,7 @@ describe("ProdSocketManager", () => {
     // Simulate connected socket
     mockSocket.emit.mockImplementation((event, data, cb) => {
       if (event === "heartbeat" && typeof cb === "function") {
-        cb({ ok: true });
+        cb(null, { ok: true });
       }
     });
 
@@ -91,12 +93,12 @@ describe("ProdSocketManager", () => {
 
     const ack = await manager.emitHeartbeat(350);
     expect(ack.ok).toBe(true);
+    expect(mockSocket.timeout).toHaveBeenCalledWith(350);
     expect(mockSocket.emit).toHaveBeenCalledWith("heartbeat", {}, expect.any(Function));
   });
 
   it("rejects heartbeat on ack timeout", async () => {
-    // Simulate non-responding socket
-    mockSocket.emit.mockImplementation(() => {});
+    mockSocket.emit.mockImplementation((_event, _data, cb) => cb(new Error("operation has timed out")));
 
     const connectPromise = manager.connect("http://localhost:8000", "good-token");
     const connectCall = mockSocket.on.mock.calls.find((call) => call[0] === "connect");
@@ -104,6 +106,18 @@ describe("ProdSocketManager", () => {
     await connectPromise;
 
     await expect(manager.emitHeartbeat(50)).rejects.toThrow("Heartbeat ack timeout");
+  });
+
+  it("uses Socket.IO timeout semantics for e-stop acknowledgements", async () => {
+    mockSocket.emit.mockImplementation((event, _data, cb) => {
+      if (event === "estop") cb(null, { ok: true, delivered: true });
+    });
+    const connectPromise = manager.connect("http://localhost:8000", "good-token");
+    mockSocket.on.mock.calls.find((call) => call[0] === "connect")![1]();
+    await connectPromise;
+
+    await expect(manager.emitEstop(true, 900)).resolves.toMatchObject({ ok: true, delivered: true });
+    expect(mockSocket.timeout).toHaveBeenCalledWith(900);
   });
 });
 
@@ -124,6 +138,7 @@ describe("ProdSocketManager rover_event channel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSocket.connected = true;
+    mockSocket.timeout.mockReturnValue(mockSocket);
     resetRoverEvents();
     resetRoverSeq();
     manager = new ProdSocketManager();

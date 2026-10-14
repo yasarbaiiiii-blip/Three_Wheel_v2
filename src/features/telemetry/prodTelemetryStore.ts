@@ -160,7 +160,9 @@ export function ingestTelemetryPacket(packet: TelemetryPacket, options: {source:
     source: options.source, schemaCompatible, awaitingPacket: false,
     revision: state.revision + 1,
     packetRevision: state.packetRevision + 1, observedAt: age !== null && age >= 0 ? now - age * 1000 : null };
-  emit(); return true;
+  emit();
+  if (listeners.size > 0) ensureTicker();
+  return true;
 }
 
 export function invalidateTelemetrySession(_reason: string) {
@@ -202,19 +204,53 @@ export function getMissionStartTelemetryPose(originGps?: [number, number] | null
 
 const listeners = new Set<Listener>();
 let tickerTimer: ReturnType<typeof setInterval> | null = null;
+let lastFreshnessSignature = "";
 
 function emit() {
   listeners.forEach((l) => l());
 }
 
+function freshnessSignature(now = telemetryNow()): string {
+  const snapshot = state.snapshot;
+  const sourceGrades = snapshot
+    ? Object.entries(snapshot)
+        .filter(([, value]) => value && typeof value === "object" && "age_s" in value)
+        .map(([key, value]) => {
+          const entry = value as SnapshotEntry<unknown>;
+          const age = getTelemetrySourceAgeMs(entry, now) ?? Infinity;
+          return `${key}:${entry.fresh === true ? evaluateAgeStaleness(age).grade : "DISCONNECTED"}`;
+        })
+        .sort()
+        .join(",")
+    : "";
+  return [
+    state.awaitingPacket ? "awaiting" : "ready",
+    state.schemaCompatible ? "schema-ok" : "schema-bad",
+    getOverallStaleness(now).grade,
+    sourceGrades,
+  ].join("|");
+}
+
+function stopTicker() {
+  if (tickerTimer !== null) {
+    clearInterval(tickerTimer);
+    tickerTimer = null;
+  }
+}
+
 function ensureTicker() {
   if (tickerTimer === null && typeof setInterval !== "undefined") {
+    lastFreshnessSignature = freshnessSignature();
     tickerTimer = setInterval(() => {
-      // Re-render subscribers so age and staleness update
-      if (listeners.size > 0 && state.lastReceivedAt !== null) {
+      if (listeners.size === 0 || state.lastReceivedAt === null) return;
+      const now = telemetryNow();
+      const nextSignature = freshnessSignature(now);
+      if (nextSignature !== lastFreshnessSignature) {
+        lastFreshnessSignature = nextSignature;
         state = { ...state, revision: state.revision + 1 };
         emit();
       }
+      if (getOverallStaleness(now).isDisconnected) stopTicker();
     }, 250);
   }
 }
@@ -235,10 +271,7 @@ export function subscribeProdTelemetry(listener: Listener): () => void {
   return () => {
     listeners.delete(listener);
     unsubscribeEvents();
-    if (listeners.size === 0 && tickerTimer !== null) {
-      clearInterval(tickerTimer);
-      tickerTimer = null;
-    }
+    if (listeners.size === 0) stopTicker();
   };
 }
 
@@ -261,6 +294,8 @@ export function clearProdTelemetry() {
     packetRevision: state.packetRevision,
     observedAt: null,
   };
+  lastFreshnessSignature = "";
+  stopTicker();
   emit();
 }
 

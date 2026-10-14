@@ -191,32 +191,18 @@ export class ProdSocketManager {
       throw new Error("Socket not connected");
     }
     return new Promise((resolve, reject) => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          reject(new Error("Heartbeat ack timeout"));
-        }
-      }, timeoutMs);
-
       try {
-        this.socket!.emit("heartbeat", {}, (response: any) => {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timer);
-            if (response && response.ok === false) {
-              reject(new Error(response.code || "Heartbeat rejected"));
-            } else {
-              resolve(response ?? { ok: true });
-            }
+        this.socket!.timeout(timeoutMs).emit("heartbeat", {}, (error: Error | null, response: any) => {
+          if (error) {
+            reject(new Error("Heartbeat ack timeout", { cause: error }));
+          } else if (response && response.ok === false) {
+            reject(new Error(response.code || "Heartbeat rejected"));
+          } else {
+            resolve(response ?? { ok: true });
           }
         });
       } catch (err) {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          reject(err);
-        }
+        reject(err);
       }
     });
   }
@@ -232,28 +218,18 @@ export class ProdSocketManager {
       throw new Error("Socket not connected");
     }
     return new Promise((resolve, reject) => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          reject(new Error("E-stop emit timeout"));
-        }
-      }, timeoutMs);
-
       try {
-        this.socket!.emit("estop", { asserted }, (response: any) => {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timer);
+        this.socket!.timeout(timeoutMs).emit("estop", { asserted }, (error: Error | null, response: any) => {
+          if (error) {
+            reject(new Error("E-stop emit timeout", { cause: error }));
+          } else if (response && response.ok === false) {
+            reject(new Error(response.code || response.reason || "E-stop rejected"));
+          } else {
             resolve(response ?? { ok: true, delivered: true });
           }
         });
       } catch (err) {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          reject(err);
-        }
+        reject(err);
       }
     });
   }
