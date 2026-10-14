@@ -42,10 +42,11 @@ describe("withAndroidReleaseSigning Expo config plugin", () => {
     const output = modResult.modResults.contents;
 
     // Verify release signing block presence in transformed output
+    expect(output).toContain("ROVER_STORE_FILE");
+    expect(output).toContain("ROVER_STORE_PASSWORD");
+    expect(output).toContain("ROVER_KEY_ALIAS");
+    expect(output).toContain("ROVER_KEY_PASSWORD");
     expect(output).toContain("DYX_RELEASE_STORE_FILE");
-    expect(output).toContain("DYX_RELEASE_STORE_PASSWORD");
-    expect(output).toContain("DYX_RELEASE_KEY_ALIAS");
-    expect(output).toContain("DYX_RELEASE_KEY_PASSWORD");
 
     // Verify debug signingConfig is preserved
     expect(output).toContain("storeFile file('debug.keystore')");
@@ -79,5 +80,13 @@ describe("withAndroidReleaseSigning Expo config plugin", () => {
     // Content should not duplicate release signing block
     const releaseConfigBlocks = (secondPass.modResults.contents.match(/signingConfigs\s*\{[\s\S]*?release\s*\{/g) || []).length;
     expect(releaseConfigBlocks).toBe(1);
+  });
+
+  it("fails generation when Expo's Gradle template cannot be patched safely", async () => {
+    const transformedConfig = withAndroidReleaseSigning({ name: "Rover Test", slug: "rover-test" });
+    await expect(transformedConfig.mods.android.appBuildGradle({
+      ...transformedConfig,
+      modResults: { contents: "android { buildTypes { release { minifyEnabled true } } }" },
+    })).rejects.toThrow("Could not install fail-closed Android release signing");
   });
 });
