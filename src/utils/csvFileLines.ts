@@ -15,7 +15,7 @@ import {
   type LocalPointCsvResult,
   type RoadMarkingFitCache,
 } from "./localPointCsv";
-import { chainMarkLinesByGeometry } from "./missionPathOrder";
+import { chainMarkLinesByGeometry, reversePlanLineDirection } from "./missionPathOrder";
 import { prefixDxfLineIds } from "./dxfLocalImport";
 import { rebasePlanLinesToOrigin } from "./planOriginRebase";
 import { splitIntoOpenPathGroupsDetailed } from "./roadMarkingCsvPath";
@@ -27,6 +27,8 @@ export type CsvFileLinesInput = {
   fileId: string;
   /** Deleted point ids for THIS file. */
   deletedIds?: ReadonlySet<string>;
+  /** Drive the whole file end → start: paths in reverse chain order, each one reversed. */
+  reversed?: boolean;
   /** `prefix__` for line ids. Null for the standalone local-NED flow (unprefixed lines). */
   prefix: string | null;
   /** Existing shared plan origin to rebase onto; null when this file establishes it. */
@@ -77,7 +79,10 @@ export function buildCsvFileLines(input: CsvFileLinesInput): CsvFileLinesResult 
   const deleted = input.deletedIds ?? new Set<string>();
   const points = remainingPoints(parse, fileId, deleted);
 
-  const markLines = chainMarkLinesByGeometry(localCsvPointsToPlanLines(points, parse.anchor, { fitCache: input.fitCache }));
+  const chained = chainMarkLinesByGeometry(localCsvPointsToPlanLines(points, parse.anchor, { fitCache: input.fitCache }));
+  // Reverse AFTER chaining: the chain optimiser is free to pick either end, so reversing the
+  // input rows would not reliably reverse the drive.
+  const markLines = input.reversed ? chained.slice().reverse().map(reversePlanLineDirection) : chained;
   let lines: PlanLine[] = [...markLines, ...buildCsvTransitLines(markLines)];
 
   if (parse.kind === "gps" && parse.anchor && input.sharedOrigin && !sameOrigin(parse.anchor, input.sharedOrigin)) {

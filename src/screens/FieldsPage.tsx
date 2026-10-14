@@ -1529,6 +1529,7 @@ export function FieldsPage(props: FieldsPageProps) {
                   lines={lines}
                   reseedToken={anchorAppliedToken}
                   resetToken={props.csvEdit?.pathOrderResetToken ?? 0}
+                  reverseToken={props.csvEdit?.pathOrderReverseToken ?? 0}
                   selectedLineId={selectedLineId}
                   onSelectLine={handleMapSelectLine}
                   extensionConfig={csvExtensionConfig}

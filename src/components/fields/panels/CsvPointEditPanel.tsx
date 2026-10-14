@@ -1,13 +1,24 @@
 /**
  * CSV point edit — select uploaded CSV points on the map, delete them from the working plan,
- * undo / redo, restore. The original CSV is never changed.
+ * undo / redo, restore, reverse the plan, export the edited CSV. The original CSV is never changed.
  * (docs/CSV_POINT_EDIT_EXECUTION_PLAN.md)
  */
-import React from "react";
-import { Pressable, Text, View } from "react-native";
-import { Pencil, Redo2, RotateCcw, Ruler, Trash2, Undo2, X } from "lucide-react-native";
+import React, { useState } from "react";
+import { Modal, Pressable, Text, TextInput, View } from "react-native";
+import {
+  ArrowDownUp,
+  Download,
+  Pencil,
+  Redo2,
+  RotateCcw,
+  Ruler,
+  Trash2,
+  Undo2,
+  X,
+} from "lucide-react-native";
 
 import type { CsvPointEditApi } from "../../../hooks/useCsvPointEdit";
+import { sanitizeExportBaseName } from "../../../utils/csvPointExport";
 import { describeCsvEditStatus } from "../../../utils/csvPointEditStatus";
 import { FIELDS_COLORS } from "../fieldsTheme";
 
@@ -66,6 +77,105 @@ function ActionButton({ label, onPress, disabled, tone = "default", icon }: Acti
   );
 }
 
+/** Asks for the export file name; Save hands back the sanitized base name (no extension). */
+function ExportNameModal({
+  visible,
+  initialName,
+  multiFile,
+  onCancel,
+  onSave,
+}: {
+  visible: boolean;
+  initialName: string;
+  multiFile: boolean;
+  onCancel: () => void;
+  onSave: (baseName: string) => void;
+}) {
+  const [name, setName] = useState(initialName);
+  const [lastInitial, setLastInitial] = useState(initialName);
+  const [lastVisible, setLastVisible] = useState(visible);
+  // Re-seed the field each time the prompt opens.
+  if (visible !== lastVisible || initialName !== lastInitial) {
+    setLastVisible(visible);
+    setLastInitial(initialName);
+    if (visible) setName(initialName);
+  }
+  const baseName = sanitizeExportBaseName(name);
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
+      <View
+        style={{
+          flex: 1,
+          backgroundColor: FIELDS_COLORS.overlay,
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 16,
+        }}
+      >
+        <View
+          style={{
+            width: "100%",
+            maxWidth: 420,
+            borderRadius: 12,
+            backgroundColor: FIELDS_COLORS.cardSolid,
+            borderWidth: 1,
+            borderColor: FIELDS_COLORS.panelBorder,
+            padding: 16,
+            gap: 12,
+          }}
+        >
+          <Text style={{ color: FIELDS_COLORS.textMain, fontSize: 15, fontWeight: "800" }}>
+            Export edited CSV
+          </Text>
+          <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 12, lineHeight: 16 }}>
+            {multiFile
+              ? "One file per CSV, numbered _1, _2, … Deleted points are left out; a reversed plan is written last row first."
+              : "Deleted points are left out; a reversed plan is written last row first."}
+          </Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <TextInput
+              value={name}
+              onChangeText={setName}
+              autoFocus
+              selectTextOnFocus
+              autoCapitalize="none"
+              autoCorrect={false}
+              placeholder="File name"
+              placeholderTextColor={FIELDS_COLORS.textDim}
+              returnKeyType="done"
+              onSubmitEditing={() => baseName && onSave(baseName)}
+              accessibilityLabel="Export file name"
+              style={{
+                flex: 1,
+                height: 40,
+                paddingHorizontal: 10,
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: FIELDS_COLORS.panelBorder,
+                backgroundColor: FIELDS_COLORS.surfaceSolid,
+                color: FIELDS_COLORS.textMain,
+                fontSize: 14,
+              }}
+            />
+            <Text style={{ color: FIELDS_COLORS.textMuted, fontSize: 13, fontWeight: "700" }}>.csv</Text>
+          </View>
+          <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
+            <ActionButton label="Cancel" onPress={onCancel} icon={<X size={14} color={FIELDS_COLORS.textMain} strokeWidth={2.4} />} />
+            <ActionButton
+              label="Save"
+              tone="active"
+              disabled={baseName == null}
+              onPress={() => baseName && onSave(baseName)}
+              icon={<Download size={14} color={FIELDS_COLORS.textMain} strokeWidth={2.4} />}
+            />
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 type Props = {
   edit: CsvPointEditApi;
   /** Mission running / paused — edits are refused. */
@@ -73,6 +183,8 @@ type Props = {
 };
 
 export function CsvPointEditPanel({ edit, planLocked }: Props) {
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
   if (!edit.hasCsv) return null;
 
   const status = describeCsvEditStatus({
@@ -211,6 +323,43 @@ export function CsvPointEditPanel({ edit, planLocked }: Props) {
           />
         </View>
       ) : null}
+
+      {/* Whole-plan actions: no point selection needed, so they work outside edit mode too. */}
+      <View
+        style={{
+          flexDirection: "row",
+          flexWrap: "wrap",
+          gap: 8,
+          paddingHorizontal: 12,
+          paddingBottom: 12,
+        }}
+      >
+        <ActionButton
+          label={edit.reversed ? "Reversed" : "Reverse"}
+          tone={edit.reversed ? "active" : "default"}
+          disabled={editingDisabled || edit.remainingTotal === 0}
+          onPress={edit.reversePlan}
+          icon={<ArrowDownUp size={14} color={iconColor} strokeWidth={2.4} />}
+        />
+        <ActionButton
+          label={exporting ? "Exporting…" : "Export"}
+          disabled={edit.busy || exporting || edit.remainingTotal === 0}
+          onPress={() => setExportOpen(true)}
+          icon={<Download size={14} color={iconColor} strokeWidth={2.4} />}
+        />
+      </View>
+
+      <ExportNameModal
+        visible={exportOpen}
+        initialName={edit.defaultExportName}
+        multiFile={edit.summaries.filter((s) => s.remainingCount > 0).length > 1}
+        onCancel={() => setExportOpen(false)}
+        onSave={(baseName) => {
+          setExportOpen(false);
+          setExporting(true);
+          void edit.exportCsv(baseName).finally(() => setExporting(false));
+        }}
+      />
 
       {status.notices.length > 0 ? (
         <View style={{ paddingHorizontal: 12, paddingBottom: 12, gap: 6 }}>

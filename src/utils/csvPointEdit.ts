@@ -24,23 +24,25 @@ export function csvPointId(fileId: string, point: Pick<LocalPointCsvPoint, "sour
 
 /** One undoable user action. May span several files (e.g. "Restore all"). */
 export type CsvEditDelta = {
-  /** What the action did when applied forward. */
-  kind: "delete" | "restore";
+  /** What the action did when applied forward. `reverse` is its own inverse; its parts carry no ids. */
+  kind: "delete" | "restore" | "reverse";
   parts: { fileId: string; ids: string[] }[];
 };
 
 export type CsvEditState = {
   /** fileId → deleted point ids. Files with nothing deleted are absent. */
   deleted: Record<string, ReadonlySet<string>>;
+  /** Files whose plan is driven end → start. Absent ⇒ not reversed. */
+  reversed?: Readonly<Record<string, true>>;
   undo: CsvEditDelta[];
   redo: CsvEditDelta[];
 };
 
-export const EMPTY_CSV_EDIT_STATE: CsvEditState = { deleted: {}, undo: [], redo: [] };
+export const EMPTY_CSV_EDIT_STATE: CsvEditState = { deleted: {}, reversed: {}, undo: [], redo: [] };
 
 /** What a state transition changed, so callers can rebuild + reselect precisely. */
 export type CsvEditChange = {
-  effect: "deleted" | "restored";
+  effect: "deleted" | "restored" | "reversed";
   parts: { fileId: string; ids: string[] }[];
 };
 
@@ -52,6 +54,22 @@ export function deletedIdsFor(state: CsvEditState, fileId: string): ReadonlySet<
   return state.deleted[fileId] ?? EMPTY_SET;
 }
 const EMPTY_SET: ReadonlySet<string> = new Set<string>();
+
+export function isFileReversed(state: CsvEditState, fileId: string): boolean {
+  return state.reversed?.[fileId] === true;
+}
+
+function toggleReversed(
+  reversed: CsvEditState["reversed"],
+  fileIds: readonly string[]
+): Readonly<Record<string, true>> {
+  const out: Record<string, true> = { ...(reversed ?? {}) };
+  for (const id of fileIds) {
+    if (out[id]) delete out[id];
+    else out[id] = true;
+  }
+  return out;
+}
 
 export function totalDeletedCount(state: CsvEditState): number {
   let n = 0;
@@ -116,6 +134,7 @@ export function applyCsvDelete(
   if (changed.length === 0) return NO_CHANGE(state);
   return {
     state: {
+      ...state,
       deleted,
       undo: capped([...state.undo, { kind: "delete", parts: changed }]),
       redo: [],
@@ -135,6 +154,7 @@ export function applyCsvRestoreAll(state: CsvEditState, fileId?: string): CsvEdi
   const { deleted, changed } = applyEffect(state.deleted, parts, "restored");
   return {
     state: {
+      ...state,
       deleted,
       undo: capped([...state.undo, { kind: "restore", parts: changed }]),
       redo: [],
@@ -143,13 +163,56 @@ export function applyCsvRestoreAll(state: CsvEditState, fileId?: string): CsvEdi
   };
 }
 
+/**
+ * Reverse the drive direction of every file in `fileIds` (new action: clears redo). Points and
+ * deletions are untouched; a second reverse flips back.
+ */
+export function applyCsvReverse(state: CsvEditState, fileIds: readonly string[]): CsvEditTransition {
+  const unique = [...new Set(fileIds)];
+  if (unique.length === 0) return NO_CHANGE(state);
+  const parts = unique.map((fileId) => ({ fileId, ids: [] as string[] }));
+  return {
+    state: {
+      ...state,
+      reversed: toggleReversed(state.reversed, unique),
+      undo: capped([...state.undo, { kind: "reverse", parts }]),
+      redo: [],
+    },
+    change: { effect: "reversed", parts },
+  };
+}
+
+/** Undo / redo of a reverse: flip the same files again (reverse is its own inverse). */
+function replayReverse(
+  state: CsvEditState,
+  delta: CsvEditDelta,
+  stacks: Pick<CsvEditState, "undo" | "redo">
+): CsvEditTransition {
+  const parts = delta.parts.map((p) => ({ fileId: p.fileId, ids: [] as string[] }));
+  return {
+    state: {
+      ...state,
+      ...stacks,
+      reversed: toggleReversed(state.reversed, parts.map((p) => p.fileId)),
+    },
+    change: { effect: "reversed", parts },
+  };
+}
+
 export function applyCsvUndo(state: CsvEditState): CsvEditTransition {
   const delta = state.undo[state.undo.length - 1];
   if (!delta) return NO_CHANGE(state);
+  if (delta.kind === "reverse") {
+    return replayReverse(state, delta, {
+      undo: state.undo.slice(0, -1),
+      redo: capped([...state.redo, delta]),
+    });
+  }
   const inverse = delta.kind === "delete" ? "restored" : "deleted";
   const { deleted, changed } = applyEffect(state.deleted, delta.parts, inverse);
   return {
     state: {
+      ...state,
       deleted,
       undo: state.undo.slice(0, -1),
       redo: capped([...state.redo, delta]),
@@ -161,10 +224,17 @@ export function applyCsvUndo(state: CsvEditState): CsvEditTransition {
 export function applyCsvRedo(state: CsvEditState): CsvEditTransition {
   const delta = state.redo[state.redo.length - 1];
   if (!delta) return NO_CHANGE(state);
+  if (delta.kind === "reverse") {
+    return replayReverse(state, delta, {
+      undo: capped([...state.undo, delta]),
+      redo: state.redo.slice(0, -1),
+    });
+  }
   const forward = delta.kind === "delete" ? "deleted" : "restored";
   const { deleted, changed } = applyEffect(state.deleted, delta.parts, forward);
   return {
     state: {
+      ...state,
       deleted,
       undo: capped([...state.undo, delta]),
       redo: state.redo.slice(0, -1),
@@ -179,7 +249,7 @@ export function applyCsvRedo(state: CsvEditState): CsvEditTransition {
  * unrelated undo steps.
  */
 export function pruneCsvEditFile(state: CsvEditState, fileId: string): CsvEditState {
-  if (!(fileId in state.deleted) && !state.undo.concat(state.redo).some((d) => d.parts.some((p) => p.fileId === fileId))) {
+  if (!(fileId in state.deleted) && !isFileReversed(state, fileId) && !state.undo.concat(state.redo).some((d) => d.parts.some((p) => p.fileId === fileId))) {
     return state;
   }
   const strip = (stack: CsvEditDelta[]) =>
@@ -188,7 +258,9 @@ export function pruneCsvEditFile(state: CsvEditState, fileId: string): CsvEditSt
       .filter((d) => d.parts.length > 0);
   const deleted = { ...state.deleted };
   delete deleted[fileId];
-  return { deleted, undo: strip(state.undo), redo: strip(state.redo) };
+  const reversed = { ...(state.reversed ?? {}) };
+  delete reversed[fileId];
+  return { deleted, reversed, undo: strip(state.undo), redo: strip(state.redo) };
 }
 
 // ─── Points the map can show / tap ────────────────────────────────────────────────
@@ -241,6 +313,16 @@ export function remainingPoints(
 ): LocalPointCsvPoint[] {
   if (deleted.size === 0) return parse.points;
   return parse.points.filter((p) => !deleted.has(csvPointId(fileId, p)));
+}
+
+/** Remaining points in drive order: original row order, or last row first when the file is reversed. */
+export function remainingPointsInDriveOrder(
+  parse: LocalPointCsvResult,
+  fileId: string,
+  state: CsvEditState
+): LocalPointCsvPoint[] {
+  const kept = remainingPoints(parse, fileId, deletedIdsFor(state, fileId));
+  return isFileReversed(state, fileId) ? kept.slice().reverse() : kept;
 }
 
 // ─── Selection ────────────────────────────────────────────────────────────────────

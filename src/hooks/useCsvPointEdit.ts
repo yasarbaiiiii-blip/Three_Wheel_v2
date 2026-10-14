@@ -14,13 +14,15 @@ import {
   applyCsvDelete,
   applyCsvRedo,
   applyCsvRestoreAll,
+  applyCsvReverse,
   applyCsvUndo,
   coincidentSelection,
   deletedIdsFor,
+  isFileReversed,
   listEditablePoints,
   pruneCsvEditFile,
   pruneSelection,
-  remainingPoints,
+  remainingPointsInDriveOrder,
   selectRange,
   selectionToParts,
   toggleSelection,
@@ -29,6 +31,8 @@ import {
   type CsvEditTransition,
   type CsvEditablePoint,
 } from "../utils/csvPointEdit";
+import { saveCsvFiles } from "../utils/csvExportSave";
+import { buildEditedCsvText, defaultExportBaseName, exportFileNames } from "../utils/csvPointExport";
 import type { LocalPointCsvResult, RoadMarkingFitCache } from "../utils/localPointCsv";
 import { yieldToUi } from "../utils/runtimeGuards";
 import type { UploadedFileEntry } from "../types/uploadedFiles";
@@ -89,6 +93,14 @@ export type CsvPointEditApi = {
   undo: () => void;
   redo: () => void;
   restoreAll: () => void;
+  /** Reverse the whole CSV plan (every file, end → start). Undoable; a second tap flips back. */
+  reversePlan: () => void;
+  /** True when the CSV plan is currently reversed. */
+  reversed: boolean;
+  /** Suggested name for the export prompt (no extension). */
+  defaultExportName: string;
+  /** Write the edited CSV(s) — remaining points, in drive order — under `baseName`. */
+  exportCsv: (baseName: string) => Promise<void>;
   canUndo: boolean;
   canRedo: boolean;
   deletedCount: number;
@@ -101,6 +113,8 @@ export type CsvPointEditApi = {
   getPlanRevision: () => number;
   /** Bumped only when a file's path count changed — Path Order should reset, not just reseed. */
   pathOrderResetToken: number;
+  /** Bumped when a reverse (or its undo / redo) flipped the plan — Path Order reverses its list. */
+  pathOrderReverseToken: number;
   hasCsv: boolean;
   /** True while a rebuild is running (the UI painted a spinner first); further actions are ignored. */
   busy: boolean;
@@ -152,6 +166,7 @@ export function useCsvPointEdit(params: UseCsvPointEditParams): CsvPointEditApi 
   const [planRevision, setPlanRevision] = useState(0);
   const revisionRef = useRef(0);
   const [pathOrderResetToken, setPathOrderResetToken] = useState(0);
+  const [pathOrderReverseToken, setPathOrderReverseToken] = useState(0);
   const [statsVersion, setStatsVersion] = useState(0);
 
   // ── derived ────────────────────────────────────────────────────────────────────
@@ -215,6 +230,7 @@ export function useCsvPointEdit(params: UseCsvPointEditParams): CsvPointEditApi 
         parse,
         fileId,
         deletedIds: deletedIdsFor(editRef.current, fileId),
+        reversed: isFileReversed(editRef.current, fileId),
         prefix: prefixed ? file.lineIdPrefix : null,
         sharedOrigin,
         fitCache: fitCacheRef.current,
@@ -238,17 +254,16 @@ export function useCsvPointEdit(params: UseCsvPointEditParams): CsvPointEditApi 
 
       const count = t.change.parts.reduce((n, p) => n + p.ids.length, 0);
       const noun = count === 1 ? "point" : "points";
+      const reversedEffect = t.change.effect === "reversed";
 
       // Selection: after a delete nothing is selected; after undo/redo/restore the points that
-      // came back are selected (only while editing); anything stale is pruned.
-      if (editModeRef.current) {
+      // came back are selected (only while editing); a reverse keeps it (no point changed).
+      if (!reversedEffect) {
         const next =
-          t.change.effect === "restored"
+          editModeRef.current && t.change.effect === "restored"
             ? new Set(t.change.parts.flatMap((p) => p.ids))
             : EMPTY_SELECTION;
         setSelection(next);
-      } else {
-        setSelection(EMPTY_SELECTION);
       }
       rangeStartRef.current = null;
       setRangeModeInner(false);
@@ -256,10 +271,16 @@ export function useCsvPointEdit(params: UseCsvPointEditParams): CsvPointEditApi 
       revisionRef.current += 1;
       setPlanRevision(revisionRef.current);
       if (pathCountChanged) setPathOrderResetToken((n) => n + 1);
+      // A reset already rebuilt Path Order from the (reversed) lines; reversing it too would undo that.
+      else if (reversedEffect) setPathOrderReverseToken((n) => n + 1);
 
       paramsRef.current.onPlanChanged({
         fileIds,
-        summary: `${verb} ${count} ${noun}`,
+        summary: reversedEffect
+          ? verb === "Reversed"
+            ? "Reversed the plan"
+            : `${verb} reverse`
+          : `${verb} ${count} ${noun}`,
         resetGeometry,
         pathCountChanged,
       });
@@ -333,6 +354,45 @@ export function useCsvPointEdit(params: UseCsvPointEditParams): CsvPointEditApi 
     if (fileIds.length === 0) return;
     void runAction(fileIds, () => applyCsvRestoreAll(editRef.current), "Restored");
   }, [runAction]);
+
+  const reversePlan = useCallback(() => {
+    const fileIds = orderedFiles().map((f) => f.fileId);
+    if (fileIds.length === 0) return;
+    void runAction(fileIds, () => applyCsvReverse(editRef.current, fileIds), "Reversed");
+  }, [orderedFiles, runAction]);
+
+  const exportCsv = useCallback(
+    async (baseName: string) => {
+      const files = orderedFiles();
+      const withPoints = files
+        .map((f) => ({ ...f, points: remainingPointsInDriveOrder(f.parse, f.fileId, editRef.current) }))
+        .filter((f) => f.points.length > 0);
+      if (withPoints.length === 0) {
+        paramsRef.current.notify("Nothing to export", "Every CSV point was deleted.", "warning");
+        return;
+      }
+      const names = exportFileNames(baseName, withPoints.length);
+      try {
+        const result = await saveCsvFiles(
+          withPoints.map((f, i) => ({ fileName: names[i], text: buildEditedCsvText(f.parse, f.points) }))
+        );
+        if (result.status === "cancelled") return;
+        const total = withPoints.reduce((n, f) => n + f.points.length, 0);
+        paramsRef.current.notify(
+          "CSV exported",
+          `${result.files.map((f) => f.fileName).join(", ")} (${total} points) saved to ${result.location}.`,
+          "success"
+        );
+      } catch (e) {
+        paramsRef.current.notify(
+          "Export failed",
+          e instanceof Error ? e.message : "Could not write the CSV file.",
+          "error"
+        );
+      }
+    },
+    [orderedFiles]
+  );
 
   const clearSelection = useCallback(() => {
     rangeStartRef.current = null;
@@ -458,12 +518,11 @@ export function useCsvPointEdit(params: UseCsvPointEditParams): CsvPointEditApi 
   const getEffectiveParses = useCallback((): LocalPointCsvResult[] => {
     const out: LocalPointCsvResult[] = [];
     for (const [fileId, parse] of parsesRef.current) {
-      const deleted = deletedIdsFor(editRef.current, fileId);
-      if (deleted.size === 0) {
+      if (deletedIdsFor(editRef.current, fileId).size === 0 && !isFileReversed(editRef.current, fileId)) {
         out.push(parse);
         continue;
       }
-      const kept = remainingPoints(parse, fileId, deleted);
+      const kept = remainingPointsInDriveOrder(parse, fileId, editRef.current);
       out.push({ ...parse, points: kept, num_points: kept.length });
     }
     return out;
@@ -493,6 +552,10 @@ export function useCsvPointEdit(params: UseCsvPointEditParams): CsvPointEditApi 
     undo,
     redo,
     restoreAll,
+    reversePlan,
+    reversed: summaries.some((s) => isFileReversed(edit, s.fileId)),
+    defaultExportName: defaultExportBaseName(summaries.map((s) => s.fileName)),
+    exportCsv,
     canUndo: edit.undo.length > 0 && !params.planLocked && !busy,
     canRedo: edit.redo.length > 0 && !params.planLocked && !busy,
     deletedCount: totalDeletedCount(edit),
@@ -501,6 +564,7 @@ export function useCsvPointEdit(params: UseCsvPointEditParams): CsvPointEditApi 
     planRevision,
     getPlanRevision,
     pathOrderResetToken,
+    pathOrderReverseToken,
     hasCsv: summaries.length > 0,
     busy,
     fitCache: fitCacheRef.current,

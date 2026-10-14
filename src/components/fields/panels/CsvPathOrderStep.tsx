@@ -91,6 +91,8 @@ type CsvPathOrderStepProps = {
   reseedToken?: number;
   /** Bumped when line ids were renumbered (a point edit changed a file's path count): full order + paint reset. */
   resetToken?: number;
+  /** Bumped when Edit points reversed the plan (or undid / redid that): reverse the list, keep paint flags. */
+  reverseToken?: number;
   onOrderChange?: (orderedPaintedLines: PlanLine[], fullOrder: CsvPathOrderEntry[]) => void;
   /** Shared with the map — tap a row to highlight that path on the plan. */
   selectedLineId?: string | null;
@@ -172,6 +174,7 @@ export function CsvPathOrderStep({
   lines,
   reseedToken = 0,
   resetToken = 0,
+  reverseToken = 0,
   onOrderChange,
   selectedLineId = null,
   onSelectLine,
@@ -234,6 +237,14 @@ export function CsvPathOrderStep({
     lastResetTokenRef.current = resetToken;
     setOrder(defaultPathOrder(markLines));
   }, [resetToken]); // eslint-disable-line react-hooks/exhaustive-deps -- reads the markLines of this render on purpose
+
+  // The lines were redrawn end → start; flipping the sequence too makes the whole drive run backwards.
+  const lastReverseTokenRef = useRef(reverseToken);
+  useEffect(() => {
+    if (reverseToken === lastReverseTokenRef.current) return;
+    lastReverseTokenRef.current = reverseToken;
+    setOrder((prev) => reversePathOrder(prev));
+  }, [reverseToken]);
 
   // Declared after the sync effect above so, in the same commit, the reseed wins over it.
   const lastReseedTokenRef = useRef(reseedToken);
