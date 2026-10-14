@@ -183,13 +183,9 @@ export function CsvPathOrderStep({
   listFooter = null,
 }: CsvPathOrderStepProps) {
   const markLines = useMemo(() => selectMarkPlanLines(lines), [lines]);
+  const markById = useMemo(() => new Map(markLines.map((line) => [line.id, line])), [markLines]);
   const markKey = useMemo(
-    () =>
-      markLines
-        .map((l) => l.id)
-        .slice()
-        .sort()
-        .join("|"),
+    () => JSON.stringify(markLines.map((line) => line.id).sort()),
     [markLines]
   );
 
@@ -206,7 +202,7 @@ export function CsvPathOrderStep({
       const next: CsvPathOrderEntry[] = [];
       for (const entry of prev) {
         if (!markIds.has(entry.lineId)) continue;
-        const line = markLines.find((l) => l.id === entry.lineId);
+        const line = markById.get(entry.lineId);
         next.push(line ? { ...entry, label: line.label } : entry);
       }
       for (const line of markLines) {
@@ -227,7 +223,7 @@ export function CsvPathOrderStep({
       }
       return next;
     });
-  }, [markKey]); // markKey only — not markLines reference (avoids thrash when parent rebuilds transit)
+  }, [markKey]); // eslint-disable-line react-hooks/exhaustive-deps -- id signature owns reconciliation
 
   // A point edit changed how many paths a file has, so line ids were renumbered: the old order and
   // paint/skip flags no longer describe the same paths. Start over from the default order.
@@ -301,7 +297,7 @@ export function CsvPathOrderStep({
   // Notify parent only when order/paint actually changes — not when map line
   // objects are rebuilt (that was causing Maximum update depth exceeded).
   const orderNotifyKey = useMemo(
-    () => order.map((e) => `${e.lineId}:${e.paint !== false ? 1 : 0}`).join("|"),
+    () => JSON.stringify(order.map((entry) => [entry.lineId, entry.paint !== false])),
     [order]
   );
   useEffect(() => {
@@ -313,9 +309,9 @@ export function CsvPathOrderStep({
   const orderedLines = useMemo(
     () =>
       order
-        .map((e) => markLines.find((l) => l.id === e.lineId))
+        .map((e) => markById.get(e.lineId))
         .filter((l): l is PlanLine => l != null),
-    [order, markLines]
+    [order, markById]
   );
 
   const listRows = useMemo(

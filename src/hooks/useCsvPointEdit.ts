@@ -475,6 +475,9 @@ export function useCsvPointEdit(params: UseCsvPointEditParams): CsvPointEditApi 
       parsesRef.current.delete(fileId);
       statsRef.current.delete(fileId);
       touchedRef.current.delete(fileId);
+      for (const key of fitCacheRef.current.keys()) {
+        if (key.startsWith(`${fileId}|`)) fitCacheRef.current.delete(key);
+      }
       setEdit(pruneCsvEditFile(editRef.current, fileId));
       // Prune selection against what remains.
       const remaining = listEditablePoints(orderedFiles(), editRef.current);

@@ -79,7 +79,10 @@ export function buildCsvFileLines(input: CsvFileLinesInput): CsvFileLinesResult 
   const deleted = input.deletedIds ?? new Set<string>();
   const points = remainingPoints(parse, fileId, deleted);
 
-  const chained = chainMarkLinesByGeometry(localCsvPointsToPlanLines(points, parse.anchor, { fitCache: input.fitCache }));
+  const chained = chainMarkLinesByGeometry(localCsvPointsToPlanLines(points, parse.anchor, {
+    fitCache: input.fitCache,
+    cacheNamespace: fileId,
+  }));
   // Reverse AFTER chaining: the chain optimiser is free to pick either end, so reversing the
   // input rows would not reliably reverse the drive.
   const markLines = input.reversed ? chained.slice().reverse().map(reversePlanLineDirection) : chained;

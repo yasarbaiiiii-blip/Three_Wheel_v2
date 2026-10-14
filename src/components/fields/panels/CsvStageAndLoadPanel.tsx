@@ -251,7 +251,10 @@ export function CsvStageAndLoadPanel({
   );
 
   const paintedCount = useMemo(
-    () => order.filter((e) => e.paint !== false && markLines.some((m) => m.id === e.lineId)).length,
+    () => {
+      const markIds = new Set(markLines.map((line) => line.id));
+      return order.filter((entry) => entry.paint !== false && markIds.has(entry.lineId)).length;
+    },
     [order, markLines]
   );
 

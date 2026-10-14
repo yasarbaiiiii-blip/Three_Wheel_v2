@@ -1101,11 +1101,12 @@ export function applyCsvOrderToPlanLines(
   const extensionTransit = buildExtensionTransitLines(painted, extensionConfig);
   const transit =
     extensions.length > 0 ? extensionTransit : buildCsvTransitLines(painted);
+  const markIds = new Set(marks.map((mark) => mark.id));
   const others = allLines.filter(
     (l) =>
       l.layer !== "transit" &&
       l.layer !== "extension" &&
-      !marks.some((m) => m.id === l.id)
+      !markIds.has(l.id)
   );
   return sanitizePlanLines([...orderedMarks, ...transit, ...extensions, ...others]);
 }

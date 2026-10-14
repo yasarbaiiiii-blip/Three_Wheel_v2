@@ -983,26 +983,67 @@ export function stampGpsOnPreviewPoints(
 }
 
 /**
- * Memo of the (expensive, super-linear) road-marking fit, keyed by the group's exact raw points
- * and survey RMS. Lets a point edit refit only the group it touched; every other group in the file
- * is a cache hit. Exact-string keys (no hash) so a collision can never reuse the wrong geometry.
+ * Memo of the expensive road-marking fit. Keys stay small; every hit is verified against an
+ * exact copy of its inputs, so even a hash collision can never reuse the wrong geometry.
  */
-export type RoadMarkingFitCache = Map<string, ReturnType<typeof buildRoadMarkingFittedPath>>;
+export type RoadMarkingFitCacheEntry = {
+  rawNed: RawNedPoint[];
+  surveyRmsM: number | null;
+  fitted: ReturnType<typeof buildRoadMarkingFittedPath>;
+};
+export type RoadMarkingFitCache = Map<string, RoadMarkingFitCacheEntry>;
 
-const FIT_CACHE_MAX_ENTRIES = 64;
+const FIT_CACHE_MAX_ENTRIES = 256;
+
+function fitInputHash(rawNed: RawNedPoint[], surveyRmsM: number | null): string {
+  let hash = 2166136261;
+  const add = (value: number | null) => {
+    const text = value === null ? "-" : value.toString();
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    hash ^= 124;
+    hash = Math.imul(hash, 16777619);
+  };
+  add(surveyRmsM);
+  for (const point of rawNed) {
+    add(point.north);
+    add(point.east);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function sameFitInput(entry: RoadMarkingFitCacheEntry, rawNed: RawNedPoint[], surveyRmsM: number | null) {
+  if (!Object.is(entry.surveyRmsM, surveyRmsM) || entry.rawNed.length !== rawNed.length) return false;
+  return rawNed.every((point, index) =>
+    Object.is(point.north, entry.rawNed[index].north) && Object.is(point.east, entry.rawNed[index].east));
+}
 
 function fitWithCache(
   rawNed: RawNedPoint[],
   surveyRmsM: number | null,
-  cache: RoadMarkingFitCache | undefined
+  cache: RoadMarkingFitCache | undefined,
+  namespace: string
 ): ReturnType<typeof buildRoadMarkingFittedPath> {
   if (!cache) return buildRoadMarkingFittedPath(rawNed, { surveyRmsM });
-  const key = `${surveyRmsM ?? "-"}|${rawNed.map((p) => `${p.north},${p.east}`).join(";")}`;
+  const key = `${namespace}|${fitInputHash(rawNed, surveyRmsM)}`;
   const hit = cache.get(key);
-  if (hit) return hit;
+  if (hit && sameFitInput(hit, rawNed, surveyRmsM)) {
+    cache.delete(key);
+    cache.set(key, hit);
+    return hit.fitted;
+  }
   const fitted = buildRoadMarkingFittedPath(rawNed, { surveyRmsM });
-  if (cache.size >= FIT_CACHE_MAX_ENTRIES) cache.clear();
-  cache.set(key, fitted);
+  if (cache.size >= FIT_CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(key, {
+    rawNed: rawNed.map((point) => ({ ...point })),
+    surveyRmsM,
+    fitted,
+  });
   return fitted;
 }
 
@@ -1017,11 +1058,12 @@ function buildPlanLineForGroup(
   groupingWarnings: string[] = [],
   sourcePoints: LocalPointCsvPoint[] = [],
   gpsAnchor: { lat: number; lon: number } | null = null,
-  fitCache?: RoadMarkingFitCache
+  fitCache?: RoadMarkingFitCache,
+  fitCacheNamespace = "local"
 ): PlanLine | null {
   const id = planLineIdForGroup(pathIndex);
   const label = planLineLabelForGroup(pathIndex, groupCount, groupLabel, sourcePointCount);
-  const fitted = fitWithCache(rawNed, surveyRmsM, fitCache);
+  const fitted = fitWithCache(rawNed, surveyRmsM, fitCache, `${fitCacheNamespace}|${pathIndex}`);
   const preview_points = stampGpsOnPreviewPoints(fitted.samples, sourcePoints, gpsAnchor);
   const extraWarnings = groupingWarnings.filter((w) => typeof w === "string" && w.length > 0);
 
@@ -1136,7 +1178,7 @@ function buildPlanLineForGroup(
 export function localCsvPointsToPlanLines(
   points: LocalPointCsvPoint[],
   gpsAnchor?: { lat: number; lon: number } | null,
-  options?: { fitCache?: RoadMarkingFitCache }
+  options?: { fitCache?: RoadMarkingFitCache; cacheNamespace?: string }
 ): PlanLine[] {
   if (points.length === 0) return [];
 
@@ -1168,7 +1210,8 @@ export function localCsvPointsToPlanLines(
       groupingWarnings,
       groupSourcePoints,
       gpsAnchor ?? null,
-      options?.fitCache
+      options?.fitCache,
+      options?.cacheNamespace
     );
     if (line) lines.push(line);
   }
