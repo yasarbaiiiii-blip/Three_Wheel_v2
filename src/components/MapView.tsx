@@ -9,7 +9,7 @@
  * Eager import (not React.lazy): under Expo/Metro HMR, lazy chunks frequently desync after
  * large edits (`Requiring unknown module "N"`).
  */
-import React, { useId, useLayoutEffect } from "react";
+import React, { useId, useLayoutEffect, useMemo, useRef } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import type { MapViewProps } from "./mapViewTypes";
@@ -38,12 +38,40 @@ export function MapFailedFallback() {
 function SharedMapSlot(props: MapViewProps) {
   const owner = useId();
   const hidden = props.visible === false;
+  const propsRef = useRef(props);
+  const proxies = useMemo(() => {
+    const call = (key: keyof MapViewProps, ...args: unknown[]) => {
+      const handler = propsRef.current[key];
+      if (typeof handler === "function") return (handler as (...values: unknown[]) => unknown)(...args);
+    };
+    return {
+      onSelectPoint: (pt: { x: number; y: number }) => call("onSelectPoint", pt),
+      onMapPlacePoint: (pt: { x: number; y: number }) => call("onMapPlacePoint", pt),
+      onGuidePointFocus: (index: number) => call("onGuidePointFocus", index),
+      onSelectLine: (id: string | null) => call("onSelectLine", id),
+      onMoveBoundary: (x: number, y: number) => call("onMoveBoundary", x, y),
+      onRotateBoundary: (rotation: number) => call("onRotateBoundary", rotation),
+      onPlaceRoverAtPoint: (id: string, x: number, y: number) => call("onPlaceRoverAtPoint", id, x, y),
+      onUpdatePlacedItem: (id: string, updates: unknown) => call("onUpdatePlacedItem", id, updates),
+      onUpdatePlacedItems: (items: unknown) => call("onUpdatePlacedItems", items),
+      onSelectionChange: (ids: string[]) => call("onSelectionChange", ids),
+      onMapClickToMark: (coord: { lat: number; lon: number }) => call("onMapClickToMark", coord),
+      onMapFreehandDrawUpdate: (coords: { lat: number; lon: number }[]) => call("onMapFreehandDrawUpdate", coords),
+      onPlanAttached: (info: unknown) => call("onPlanAttached", info),
+      onAnchorCandidateSelect: (candidate: unknown) => call("onAnchorCandidateSelect", candidate),
+      onCsvEditPointPress: (pointId: string) => call("onCsvEditPointPress", pointId),
+    } as Record<string, (...args: never[]) => unknown>;
+  }, []);
 
-  // Every render: the host must always see the screen's latest props (lines, selection,
-  // callbacks). Layout effect so the map updates in the same frame as the UI around it.
+  const stableProps = { ...props } as MapViewProps & Record<string, unknown>;
+  for (const [key, proxy] of Object.entries(proxies)) {
+    stableProps[key] = typeof (props as unknown as Record<string, unknown>)[key] === "function" ? proxy : undefined;
+  }
+
   useLayoutEffect(() => {
+    propsRef.current = props;
     if (hidden) releaseMapSlot(owner);
-    else publishMapSlot(owner, props);
+    else publishMapSlot(owner, stableProps);
   });
   useLayoutEffect(() => () => releaseMapSlot(owner), [owner]);
 

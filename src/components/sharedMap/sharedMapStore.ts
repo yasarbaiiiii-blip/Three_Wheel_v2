@@ -22,13 +22,39 @@ const listeners = new Set<() => void>();
 let claimCounter = 0;
 /** Props the host renders. Kept after the last slot is released so the map can stay parked. */
 let hostProps: MapViewProps | null = null;
+let hostOwner: string | null = null;
+
+/** Functions are stable event proxies; only their presence is data that the map renders. */
+export function mapPropsDataEqual(a: MapViewProps | null, b: MapViewProps | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)] as Array<keyof MapViewProps>);
+  for (const key of keys) {
+    const av = a[key];
+    const bv = b[key];
+    if (typeof av === "function" || typeof bv === "function") {
+      if ((typeof av === "function") !== (typeof bv === "function")) return false;
+      continue;
+    }
+    if (!Object.is(av, bv)) return false;
+  }
+  return true;
+}
 
 function recompute() {
-  let best: Slot | null = null;
-  for (const slot of slots.values()) {
-    if (!best || slot.order > best.order) best = slot;
+  let best: (Slot & { owner: string }) | null = null;
+  for (const [owner, slot] of slots) {
+    if (!best || slot.order > best.order) best = { ...slot, owner };
   }
-  if (best) hostProps = best.props;
+  if (!best) {
+    if (hostOwner === null) return;
+    hostOwner = null;
+    listeners.forEach((listener) => listener());
+    return;
+  }
+  if (hostOwner === best.owner && mapPropsDataEqual(hostProps, best.props)) return;
+  hostOwner = best.owner;
+  hostProps = best.props;
   listeners.forEach((l) => l());
 }
 
@@ -71,6 +97,7 @@ export function hasActiveMapSlot(): boolean {
 export function resetSharedMapStore(): void {
   slots.clear();
   hostProps = null;
+  hostOwner = null;
   claimCounter = 0;
   listeners.forEach((l) => l());
 }

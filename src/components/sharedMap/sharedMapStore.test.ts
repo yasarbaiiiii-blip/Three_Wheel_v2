@@ -69,6 +69,35 @@ describe("sharedMapStore", () => {
     expect(tagOf()).toBe("fields-2");
   });
 
+  it("does not notify when an owner republishes equivalent data", () => {
+    const spy = vi.fn();
+    const unsub = subscribeSharedMap(spy);
+    publishMapSlot("fields", props("fields"));
+    publishMapSlot("fields", props("fields"));
+    expect(spy).toHaveBeenCalledTimes(1);
+    unsub();
+  });
+
+  it("does not notify for callback identity churn, but does notify for callback presence changes", () => {
+    const spy = vi.fn();
+    const unsub = subscribeSharedMap(spy);
+    publishMapSlot("fields", { ...props("fields"), onSelectLine: () => undefined });
+    publishMapSlot("fields", { ...props("fields"), onSelectLine: () => undefined });
+    expect(spy).toHaveBeenCalledTimes(1);
+    publishMapSlot("fields", props("fields"));
+    expect(spy).toHaveBeenCalledTimes(2);
+    unsub();
+  });
+
+  it("notifies when ownership changes even if the owners publish equivalent data", () => {
+    const spy = vi.fn();
+    const unsub = subscribeSharedMap(spy);
+    publishMapSlot("home", props("same"));
+    publishMapSlot("fields", props("same"));
+    expect(spy).toHaveBeenCalledTimes(2);
+    unsub();
+  });
+
   it("releasing an unknown owner is harmless and does not notify", () => {
     const spy = vi.fn();
     const unsub = subscribeSharedMap(spy);
