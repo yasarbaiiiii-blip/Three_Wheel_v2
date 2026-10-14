@@ -26,6 +26,11 @@ type FieldsStepCardProps = {
   /** Compact status chip to the right of the title (e.g. "12 guides"). */
   badge?: string;
   badgeVariant?: "guide" | "path";
+  /**
+   * Keep the body mounted (hidden) while collapsed, so its state survives a collapse and
+   * reopening does not rebuild it. Applies to non-scrolling bodies only.
+   */
+  keepMounted?: boolean;
 };
 
 const NODE: Record<StepStatus, { bg: string; fg: string; border: string }> = {
@@ -59,6 +64,7 @@ export function FieldsStepCard({
   fillAvailable = false,
   badge,
   badgeVariant = "guide",
+  keepMounted = false,
 }: FieldsStepCardProps) {
   const node = NODE[status];
   const isScrolling = expanded && scrollableBody;
@@ -164,7 +170,14 @@ export function FieldsStepCard({
         </View>
       </Pressable>
 
-      {expanded ? (
+      {keepMounted && !scrollableBody ? (
+        // Same element type and position open or closed, so React keeps the children mounted.
+        <View
+          style={expanded ? [styles.body, styles.bodyInner, isFilling ? styles.bodyFill : null] : styles.bodyHidden}
+        >
+          {children}
+        </View>
+      ) : expanded ? (
         isScrolling ? (
           <ScrollView
             style={[styles.body, isFilling ? styles.bodyFill : { maxHeight: bodyMaxHeight }]}
@@ -292,6 +305,9 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: "rgba(255,255,255,0.07)",
     backgroundColor: "#101014",
+  },
+  bodyHidden: {
+    display: "none",
   },
   bodyFill: {
     flex: 1,

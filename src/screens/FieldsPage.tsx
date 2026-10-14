@@ -1523,6 +1523,9 @@ export function FieldsPage(props: FieldsPageProps) {
               fillAvailable={
                 isSectionOpen("pathOrder") || isSectionOpen("orderAndSpray")
               }
+              // Path Order holds the operator's order and Skip flags; unmounting on collapse reset
+              // them (and pushed paint-all back to the plan). Keep it mounted, hidden.
+              keepMounted
             >
               {/* Send panel rides in the row list's footer so the whole step scrolls as one —
                   the rows are a VirtualizedList and cannot live inside a ScrollView. */}

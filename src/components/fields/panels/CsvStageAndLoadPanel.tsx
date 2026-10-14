@@ -15,11 +15,11 @@ import {
 import type { DashPattern } from "../../../utils/appPlannedMissionBuilder";
 import { evaluateCsvSendReadiness } from "../../../utils/csvGeometryReadiness";
 import {
-  buildOrderedTrajectory,
   defaultPathOrder,
   selectMarkPlanLines,
   type CsvPathOrderEntry,
 } from "../../../utils/missionPathOrder";
+import { buildOrderedTrajectoryShared } from "../../../utils/sharedOrderedTrajectory";
 import {
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
@@ -242,15 +242,14 @@ export function CsvStageAndLoadPanel({
     ]
   );
 
+  // Shared with Path Order: same plan + order + speeds reuse one build.
   const appTrajectory = useMemo(
-    () => {
-      perfCount("trajectory.build");
-      return buildOrderedTrajectory(markLines, order, {
+    () =>
+      buildOrderedTrajectoryShared(markLines, order, {
         markSpeedMs: 0.35,
         travelSpeedMs: 0.5,
         extensions: extCfg,
-      });
-    },
+      }),
     [markLines, order, extCfg]
   );
 

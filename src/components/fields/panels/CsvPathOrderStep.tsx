@@ -16,7 +16,6 @@ import {
 } from "../../../utils/missionExtensions";
 import {
   buildCsvTransitPreviews,
-  buildOrderedTrajectory,
   defaultPathOrder,
   reseedPathOrder,
   detectCurveDirectionWarnings,
@@ -30,6 +29,7 @@ import {
   type CsvTransitPreview,
 } from "../../../utils/missionPathOrder";
 import { getLineLengthM, type SelectLineFn } from "../../../utils/pathWorkflow";
+import { buildOrderedTrajectoryShared } from "../../../utils/sharedOrderedTrajectory";
 import { CsvWarningsPanel } from "../CsvWarningsPanel";
 import { FIELDS_COLORS } from "../fieldsTheme";
 import { perfCount } from "../../../utils/perfCounters";
@@ -253,14 +253,13 @@ export function CsvPathOrderStep({
   }, [reseedToken]); // eslint-disable-line react-hooks/exhaustive-deps -- reads the markLines of this render on purpose
 
   const painted = useMemo(() => resolveOrderedPaintedLines(markLines, order), [markLines, order]);
+  // Shared with the Stage panel: same plan + order + speeds reuse one build.
   const trajectory = useMemo(
-    () => {
-      perfCount("trajectory.build");
-      return buildOrderedTrajectory(markLines, order, {
+    () =>
+      buildOrderedTrajectoryShared(markLines, order, {
         ...DEFAULT_SPEEDS,
         extensions: extensionConfig,
-      });
-    },
+      }),
     [markLines, order, extensionConfig]
   );
   const reversals = useMemo(() => detectReversalWarnings(painted), [painted]);
