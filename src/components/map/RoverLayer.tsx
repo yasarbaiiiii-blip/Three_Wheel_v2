@@ -24,6 +24,7 @@ import {
   selectRoverTelemetry,
   type RoverTelemetryFields,
 } from "./roverLayerModel";
+import { perfCount } from "../../utils/perfCounters";
 
 type Coord = [number, number];
 const PLAN_SOURCE_MAX_ZOOM = 22;
@@ -109,6 +110,7 @@ export function RoverLayer({
   lastFixRef: MutableRefObject<RoverFix<Coord> | null>;
 }) {
   const selected = useTelemetrySelector(selectRoverTelemetry, roverTelemetryEqual);
+  perfCount("RoverLayer.render");
   const telemetry: RoverTelemetryFields = selected ?? selectRoverTelemetry(fallbackSnapshot ?? null);
   const mapBearing = useCameraBearing(bearingStore);
 

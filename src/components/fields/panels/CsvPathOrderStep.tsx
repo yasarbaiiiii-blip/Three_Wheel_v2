@@ -32,6 +32,7 @@ import {
 import { getLineLengthM, type SelectLineFn } from "../../../utils/pathWorkflow";
 import { CsvWarningsPanel } from "../CsvWarningsPanel";
 import { FIELDS_COLORS } from "../fieldsTheme";
+import { perfCount } from "../../../utils/perfCounters";
 
 const DEFAULT_SPEEDS = { markSpeedMs: 0.35, travelSpeedMs: 0.5 };
 
@@ -182,6 +183,7 @@ export function CsvPathOrderStep({
   listHeader = null,
   listFooter = null,
 }: CsvPathOrderStepProps) {
+  perfCount("CsvPathOrderStep.render");
   const markLines = useMemo(() => selectMarkPlanLines(lines), [lines]);
   const markById = useMemo(() => new Map(markLines.map((line) => [line.id, line])), [markLines]);
   const markKey = useMemo(
@@ -252,11 +254,13 @@ export function CsvPathOrderStep({
 
   const painted = useMemo(() => resolveOrderedPaintedLines(markLines, order), [markLines, order]);
   const trajectory = useMemo(
-    () =>
-      buildOrderedTrajectory(markLines, order, {
+    () => {
+      perfCount("trajectory.build");
+      return buildOrderedTrajectory(markLines, order, {
         ...DEFAULT_SPEEDS,
         extensions: extensionConfig,
-      }),
+      });
+    },
     [markLines, order, extensionConfig]
   );
   const reversals = useMemo(() => detectReversalWarnings(painted), [painted]);

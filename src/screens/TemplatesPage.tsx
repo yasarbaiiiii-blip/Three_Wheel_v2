@@ -15,6 +15,7 @@ import { flattenDesignDocument, flattenDesignNode } from "../utils/designTransfo
 import { applyDesignCommand } from "../utils/designHistory";
 import { getTelemetrySnapshot } from "../features/telemetry/telemetryStore";
 import type { PlanLine, LayerVisibility, Page, TelemetrySnapshot, DxfEntity } from "../types/plan";
+import { perfCount } from "../utils/perfCounters";
 export type BoundarySide = 'top' | 'right' | 'bottom' | 'left';
 const HISTORY_LIMIT = 100;
 
@@ -51,6 +52,7 @@ interface TemplatesPageProps {
 }
 
 export function TemplatesPage(props: TemplatesPageProps) {
+  perfCount("TemplatesPage.render");
   const [boundaryMode, setBoundaryMode] = useState(false);
   const [boundaryWidthStr, setBoundaryWidthStr] = useState("4.0");
   const [boundaryHeightStr, setBoundaryHeightStr] = useState("3.0");

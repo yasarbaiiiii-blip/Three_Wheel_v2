@@ -14,6 +14,7 @@
 import { useSyncExternalStore } from "react";
 
 import type { MapViewProps } from "../mapViewTypes";
+import { perfCount } from "../../utils/perfCounters";
 
 type Slot = { order: number; props: MapViewProps };
 
@@ -55,6 +56,7 @@ function recompute() {
   if (hostOwner === best.owner && mapPropsDataEqual(hostProps, best.props)) return;
   hostOwner = best.owner;
   hostProps = best.props;
+  perfCount("sharedMap.notify");
   listeners.forEach((l) => l());
 }
 
@@ -62,6 +64,7 @@ function recompute() {
 export function publishMapSlot(owner: string, props: MapViewProps): void {
   const existing = slots.get(owner);
   slots.set(owner, { order: existing?.order ?? ++claimCounter, props });
+  perfCount("sharedMap.publish");
   recompute();
 }
 

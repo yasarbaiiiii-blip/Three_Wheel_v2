@@ -21,6 +21,7 @@ import {
   splitIntoOpenPathGroupsDetailed,
 } from "./roadMarkingCsvPath";
 import type { DxfPoint, PlanLine } from "../types/plan";
+import { perfCount } from "./perfCounters";
 
 /** NED metres larger than this are almost certainly projected CRS, not local site metres. */
 export const PROJECTED_COORD_BLOCK_M = 10_000;
@@ -1030,10 +1031,12 @@ function fitWithCache(
   const key = `${namespace}|${fitInputHash(rawNed, surveyRmsM)}`;
   const hit = cache.get(key);
   if (hit && sameFitInput(hit, rawNed, surveyRmsM)) {
+    perfCount("fitCache.hit");
     cache.delete(key);
     cache.set(key, hit);
     return hit.fitted;
   }
+  perfCount("fitCache.miss");
   const fitted = buildRoadMarkingFittedPath(rawNed, { surveyRmsM });
   if (cache.size >= FIT_CACHE_MAX_ENTRIES) {
     const oldest = cache.keys().next().value;

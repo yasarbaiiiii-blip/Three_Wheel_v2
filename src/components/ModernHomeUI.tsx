@@ -21,6 +21,7 @@ import { nonEmptyMissionLayers } from "../utils/missionLayerAssignment";
 import { EMPTY_RTK_STATUS, hasLiveCorrections, rtkStatusLabel } from "../api/rtkStatus";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { gpsFixSeverity } from "../features/telemetry/telemetryDerive";
+import { perfCount } from "../utils/perfCounters";
 
 // Theme Constants
 const COLORS = {
@@ -542,6 +543,7 @@ const MAPBOX_STYLES = [
 ];
 
 export default function ModernHomeUI(props) {
+  perfCount("ModernHomeUI.render");
   const {
     lines = [], importedPlan, systemHealth, telemetrySnapshot, missionRunning,
     onNav, onToggleMenu, onEstopVehicle,

@@ -111,6 +111,7 @@ import type { MultiPointPlacementPhase } from "../types/fieldsWorkflow";
 import { RoverLayer } from "./map/RoverLayer";
 import { createCameraBearingStore } from "./map/cameraBearingStore";
 import { hasRoverFix, roverCenterFromSnapshot } from "./map/roverLayerModel";
+import { perfCount } from "../utils/perfCounters";
 
 /** Same precedence as getPlanStartPoint — first segment the rover will drive. */
 function getPlanStartTravelLine(lines: PlanLine[]): PlanLine | null {
@@ -273,6 +274,7 @@ function isClosedCoordRing(coords: Coord[]): boolean {
 }
 
 export function MapViewNative(props: MapViewProps) {
+  perfCount("MapViewNative.render");
   const {
     telemetrySnapshot: telemetrySnapshotProp,
     lines,

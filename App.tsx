@@ -267,6 +267,7 @@ import {
   buildPlanManipulationAnchor,
   resolveMapGeometryFrame,
 } from "./src/utils/mapGeometryProjection";
+import { perfCount } from "./src/utils/perfCounters";
 
 const BG = "#d9d9dc";
 // No fixed rover addresses: rovers announce themselves by UDP beacon (src/services/roverBeacon.ts);
@@ -3958,6 +3959,7 @@ type HomeViewProps = {
 };
 
 function HomeView(props: HomeViewProps) {
+  perfCount("HomeView.render");
   // Prefer App-provided live snapshot (single source of truth). Store is fallback only.
   const liveTelemetry = useThrottledTelemetrySnapshot();
   const {
@@ -4258,6 +4260,7 @@ function SectionPages(props: {
   offsetPreviewLines?: PlanLine[] | null;
 }) {
   const { page, mapViewEnabled } = props;
+  perfCount("SectionPages.render");
   const sharedMapEnabled = useSharedMapEnabled();
   // App already owns the selective telemetry subscription. A second subscription here made
   // the entire Fields/Templates subtree render independently for the same snapshot.

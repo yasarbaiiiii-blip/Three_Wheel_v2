@@ -13,9 +13,11 @@ import { AppErrorBoundary } from "../AppErrorBoundary";
 import { MapFailedFallback } from "../MapView";
 import { MapViewNative } from "../MapViewNative";
 import { useSharedMapProps } from "./sharedMapStore";
+import { perfCount } from "../../utils/perfCounters";
 
 export function SharedMapHost({ parked }: { parked: boolean }) {
   const props = useSharedMapProps();
+  perfCount("SharedMapHost.render");
   // Only Home lets the operator pick a basemap; Fields passes none. Keep the chosen style when
   // another screen takes the map, otherwise every Home → Fields hop would swap the style URL
   // and reload the basemap — the exact flash this shared map exists to remove.

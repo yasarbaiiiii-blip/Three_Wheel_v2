@@ -57,6 +57,7 @@ import type {
   VerifiedAlignment,
 } from "../types/fieldsWorkflow";
 import type { ImportedPlan, LayerVisibility, PlanLine, TelemetrySnapshot } from "../types/plan";
+import { perfCount } from "../utils/perfCounters";
 
 export type FieldsPageProps = {
   importedPlan: ImportedPlan | null;
@@ -302,6 +303,7 @@ function mergePendingDxfLines(
 }
 
 export function FieldsPage(props: FieldsPageProps) {
+  perfCount("FieldsPage.render");
   const { importedPlan, setImportedPlan, lines, mapGeometryFrame = "NONE", geoOrigin = null, setLines, previewRoverPoint, missionRunning, telemetrySnapshot, selectedLineId, layerVisibility, onMissionStored, missionActionBusy, onBeginPathExclusive, onEndPathExclusive, onSelectLine, highlightLineIds = null, apiBaseUrl, onWorkflowStep, stagedWorkflow, alignmentResult, setAlignmentResult, verifiedAlignmentRequest, setVerifiedAlignmentRequest, setStagedPlanResult, setStagedMissionId, onInvalidateWorkflow, onAppPlannedStartSnapshot, dashPattern, alignedRefPoints = [], setAlignedRefPoints, mapViewEnabled = true, showRefPointLabels = false, activeRefPointLabelIndex = null, setActiveRefPointLabelIndex, isVisualAlignmentMode, visualAlignmentItem, setVisualAlignmentItem, setVisualAlignmentAnchor, onStartVisualAlignment, onConfirmVisualAlignment, isPlanEditingMode, onStartPlanEditing, onStopPlanEditing, multiPointPlacementPhase = "idle", onPlanAttached, onPlanResizeDone, onFitToReferencePoints, extractedCorners, setExtractedCorners, onClearMission, renderPlanPreview, localCsvPreview = null, localDxfMeta = null, uploadedFiles = [], placedTemplates = [], onPlaceTemplate, onUpdateTemplateInstance, onRemoveTemplate, onRemoveUploadedFile, pendingDxfAlignment = {}, setPendingDxfAlignment, sharedOriginGps = null, onBeginLocalImportBatch, onAlignContextChange, onCommitDxfFileAlignment, onLocalCsvParsed, onLocalDxfParsed, onClearLocalCsv, missionLayers = [], controlModeActive = false, canUseMissionControl = false, pendingLayerAssignment = null, onPendingLayerAssignment, onAssignFileToNewLayer, onAssignFileToLayer, onUnassignFileFromLayer, missionVisibleLines, anchorAvailable = false, anchorSelectMode = false, anchorTargetOptions = [], anchorTarget = null, pendingAnchor = null, anchorCandidates = [], anchorIsolatedLines = [], onAnchorPress, onSelectAnchorTarget, onAnchorCandidateSelect, onConfirmAnchor, anchorAppliedToken = 0, offsetDistanceM = 0, offsetBearingDeg = 0, onOffsetDistanceChange, onOffsetBearingChange, onApplyOffset, offsetTargetOptions = [], offsetTarget = null, onOffsetTargetChange, offsetResetAvailable = false, onResetOffset, onOffsetDragStateChange, offsetPreviewLines = null } = props;
 
   const [selectedUploadedFileId, setSelectedUploadedFileId] = useState<string | null>(null);

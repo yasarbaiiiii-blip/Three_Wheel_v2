@@ -37,6 +37,7 @@ import { isSendBlockedByEmptyEdit, isStaleSend } from "../../../utils/csvPointEd
 import { yieldToUi } from "../../../utils/runtimeGuards";
 import { isStagedHydrationLineId } from "../../../utils/stagedMissionHydration";
 import { FIELDS_COLORS } from "../fieldsTheme";
+import { perfCount } from "../../../utils/perfCounters";
 
 type CsvStageAndLoadPanelProps = {
   apiBaseUrl: string;
@@ -155,6 +156,7 @@ export function CsvStageAndLoadPanel({
   getPlanRevision,
   csvPointsRemaining = null,
 }: CsvStageAndLoadPanelProps) {
+  perfCount("CsvStageAndLoadPanel.render");
   void _roverPose;
   void _setLines;
   void _onSelectLine;
@@ -241,12 +243,14 @@ export function CsvStageAndLoadPanel({
   );
 
   const appTrajectory = useMemo(
-    () =>
-      buildOrderedTrajectory(markLines, order, {
+    () => {
+      perfCount("trajectory.build");
+      return buildOrderedTrajectory(markLines, order, {
         markSpeedMs: 0.35,
         travelSpeedMs: 0.5,
         extensions: extCfg,
-      }),
+      });
+    },
     [markLines, order, extCfg]
   );
 
