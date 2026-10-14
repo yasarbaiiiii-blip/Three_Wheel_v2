@@ -20,8 +20,6 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Animated,
-  Easing,
   Keyboard,
   StyleSheet,
   View,
@@ -55,9 +53,6 @@ type ShapeSourcePressEvent = {
   coordinates: { latitude: number; longitude: number };
   point: { x: number; y: number };
 };
-import Svg, { Circle as SvgCircle, Polygon as SvgPolygon } from "react-native-svg";
-import circle from "@turf/circle";
-
 import type { PlanLine } from "../types/plan";
 import type { PlacedItem } from "./BoundaryEditor";
 import {
@@ -75,7 +70,6 @@ import {
 import { transformVisualDxfPoint } from "../utils/visualAlignment";
 import {
   groundBearingDeg,
-  groundDistanceMeters,
   projectGpsToLocalMeters,
   projectLocalMetersToGps,
 } from "../utils/geoProjection";
@@ -106,14 +100,17 @@ import { toMapboxCoord, fromMapboxCoord } from "../utils/mapboxCoords";
 import { getLineLengthM, formatFinite } from "../utils/pathWorkflow";
 import { getPlanStartPoint, isPrimaryEditableLine } from "../utils/planGeometry";
 import { MAPBOX_STYLE_URL } from "../config/mapbox";
-import { useTelemetrySnapshot } from "../features/telemetry/telemetryStore";
+import { getTelemetrySnapshot, useTelemetrySelector } from "../features/telemetry/telemetryStore";
 import { warnThrottled } from "../utils/throttledLog";
-import { resolveRoverMarker, type RoverFix } from "../utils/roverFixHold";
+import type { RoverFix } from "../utils/roverFixHold";
 import { registerMapHandle, type MapHandle } from "./sharedMap/sharedMapStore";
 import type { MapViewProps } from "./mapViewTypes";
 import { gateTemplateGestureDeltas } from "../utils/mapGestureUtils";
 import { deriveMetersPerPixel, screenToGeo } from "../utils/mapScreenGeo";
 import type { MultiPointPlacementPhase } from "../types/fieldsWorkflow";
+import { RoverLayer } from "./map/RoverLayer";
+import { createCameraBearingStore } from "./map/cameraBearingStore";
+import { hasRoverFix, roverCenterFromSnapshot } from "./map/roverLayerModel";
 
 /** Same precedence as getPlanStartPoint — first segment the rover will drive. */
 function getPlanStartTravelLine(lines: PlanLine[]): PlanLine | null {
@@ -275,118 +272,7 @@ function isClosedCoordRing(coords: Coord[]): boolean {
   return Math.abs(first[0] - last[0]) < 1e-12 && Math.abs(first[1] - last[1]) < 1e-12;
 }
 
-/** A looping pulsing dot used for the next-target waypoint (parity with the
- *  legacy `.pulsing-circle`). Animation runs on the RN driver, off the map
- *  style hot path (see plan §2.4). */
-function PulsingDot({
-  color = "#f59e0b",
-  size = 12,
-}: {
-  color?: string;
-  size?: number;
-}) {
-  const pulse = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, {
-          toValue: 1,
-          duration: 900,
-          easing: Easing.out(Easing.ease),
-          useNativeDriver: true,
-        }),
-        Animated.timing(pulse, {
-          toValue: 0,
-          duration: 0,
-          useNativeDriver: true,
-        }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [pulse]);
-
-  const ringScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.6, 2.2] });
-  const ringOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.5, 0] });
-
-  return (
-    <View style={{ width: size * 2, height: size * 2, alignItems: "center", justifyContent: "center" }}>
-      <Animated.View
-        style={{
-          position: "absolute",
-          width: size,
-          height: size,
-          borderRadius: size / 2,
-          backgroundColor: color,
-          opacity: ringOpacity,
-          transform: [{ scale: ringScale }],
-        }}
-      />
-      <View
-        style={{
-          width: size * 0.8,
-          height: size * 0.8,
-          borderRadius: (size * 0.8) / 2,
-          backgroundColor: color,
-          opacity: 0.85,
-        }}
-      />
-    </View>
-  );
-}
-
-/**
- * Rover vehicle icon — react-native-svg port of the legacy inline SVG.
- *
- * MarkerView content is always screen/viewport-aligned (Mapbox never rotates a
- * view annotation's own content to match the camera — only its projected screen
- * position). Rotating just by `heading` therefore only looks correct at camera
- * bearing 0: the moment the user twists the map, the icon stays fixed in screen
- * orientation while the plan lines/basemap rotate underneath it, which reads as
- * the rover "spinning" relative to its own plan. Subtracting the live camera
- * bearing counter-rotates the icon so it keeps tracking its true heading exactly
- * as it appears on the (possibly rotated) map — i.e. it turns WITH the map
- * instead of appearing to drift/spin against it.
- */
-function RoverVehicle({
-  heading,
-  mapBearing,
-  stale = false,
-}: {
-  heading: number | null | undefined;
-  mapBearing?: number;
-  /** Telemetry is older than the freshness window: last known spot, drawn dimmed. */
-  stale?: boolean;
-}) {
-  const rotationDeg = (heading ?? 0) - (mapBearing ?? 0);
-  return (
-    <View style={{ opacity: stale ? 0.4 : 1, transform: [{ rotate: `${rotationDeg}deg` }] }}>
-      <Svg width={40} height={40} viewBox="-20 -20 40 40">
-        <SvgCircle cx={0} cy={0} r={18.7} fill="rgba(14,165,233,0.12)" />
-        <SvgPolygon
-          points="-6.5,11 6.5,11 6.5,-4 0,-7.5 -6.5,-4"
-          fill="#0ea5e9"
-          stroke="#ffffff"
-          strokeWidth={1.8}
-          strokeLinejoin="round"
-        />
-        <SvgPolygon points="-9.5,5 -6.5,5 -6.5,11 -9.5,11" fill="#0f172a" />
-        <SvgPolygon points="9.5,5 6.5,5 6.5,11 9.5,11" fill="#0f172a" />
-        <SvgPolygon points="-2.5,3 2.5,3 2.5,-3 -2.5,-3" fill="#0f172a" />
-        <SvgPolygon points="-4.5,-2 4.5,-2 3.5,2 -3.5,2" fill="rgba(186,230,253,0.85)" />
-        <SvgCircle cx={0} cy={-7.5} r={2.5} fill="#fbbf24" stroke="#fff" strokeWidth={1} />
-      </Svg>
-    </View>
-  );
-}
-
-/** Last position the rover was actually seen at (map coordinates + heading). */
-let lastRoverFix: RoverFix<Coord> | null = null;
-
 export function MapViewNative(props: MapViewProps) {
-  // The map owns the full-rate subscription so the rover marker stays smooth while the
-  // screens above it (App / Home / Fields) re-render at the throttled rate.
-  const liveTelemetry = useTelemetrySnapshot(props.parked !== true);
   const {
     telemetrySnapshot: telemetrySnapshotProp,
     lines,
@@ -447,7 +333,14 @@ export function MapViewNative(props: MapViewProps) {
     csvEditSelection,
     onCsvEditPointPress,
   } = props;
-  const telemetrySnapshot = liveTelemetry ?? telemetrySnapshotProp;
+  const telemetrySnapshot = telemetrySnapshotProp;
+  // The map body follows only the boolean needed for one-shot initialization. Full-rate
+  // position/heading updates are isolated inside RoverLayer.
+  const liveHasRoverFix = useTelemetrySelector(hasRoverFix);
+  const currentRoverCenter = useCallback((): Coord | null => {
+    const resolved = roverCenterFromSnapshot(getTelemetrySnapshot() ?? telemetrySnapshot ?? null);
+    return resolved ? toMapboxCoord(resolved.lat, resolved.lon) : null;
+  }, [telemetrySnapshot]);
 
   const planPlacementPhaseRef = useRef<MultiPointPlacementPhase>(planPlacementPhase);
   useEffect(() => {
@@ -475,6 +368,7 @@ export function MapViewNative(props: MapViewProps) {
 
   const cameraRef = useRef<Camera>(null);
   const mapViewRef = useRef<RNMapboxMapView>(null);
+  const initialRoverCenterRef = useRef<Coord | null>(currentRoverCenter());
   // Expose the visible bounds so Settings can download an offline pack for what is on screen.
   useEffect(() => {
     const handle: MapHandle = {
@@ -493,7 +387,8 @@ export function MapViewNative(props: MapViewProps) {
   // counter-rotate against it — otherwise a marker's screen-fixed rotation only
   // shows the correct facing direction at bearing 0, and visibly drifts out of
   // alignment with the map's own content the moment the user rotates the camera.
-  const [cameraBearing, setCameraBearing] = useState(0);
+  const cameraBearingStoreRef = useRef(createCameraBearingStore());
+  const roverLastFixRef = useRef<RoverFix<Coord> | null>(null);
   const [styleReady, setStyleReady] = useState(false);
   const cameraZoomRef = useRef<number | null>(null);
   const mapLayoutRef = useRef({ width: 0, height: 0 });
@@ -501,7 +396,9 @@ export function MapViewNative(props: MapViewProps) {
     // Release builds: Mapbox sometimes delivers incomplete camera events; never throw.
     try {
       const heading = state?.properties?.heading;
-      setCameraBearing(typeof heading === "number" && Number.isFinite(heading) ? heading : 0);
+      if (typeof heading === "number" && Number.isFinite(heading)) {
+        cameraBearingStoreRef.current.set(heading);
+      }
       const zoom = state?.properties?.zoom;
       if (typeof zoom === "number" && Number.isFinite(zoom)) cameraZoomRef.current = zoom;
     } catch (err) {
@@ -701,16 +598,16 @@ export function MapViewNative(props: MapViewProps) {
       }
       return;
     }
-    if (!stableFallbackOrigin && telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null) {
-      setStableFallbackOrigin({ lat: telemetrySnapshot.lat, lon: telemetrySnapshot.lon });
+    const fix = roverCenterFromSnapshot(getTelemetrySnapshot() ?? telemetrySnapshot ?? null);
+    if (!stableFallbackOrigin && fix) {
+      setStableFallbackOrigin(fix);
     } else if (!stableFallbackOrigin && templatesFloatingOrigin) {
       setStableFallbackOrigin(templatesFloatingOrigin);
     }
   }, [
     previewFallbackGps?.lat,
     previewFallbackGps?.lon,
-    telemetrySnapshot?.lat,
-    telemetrySnapshot?.lon,
+    liveHasRoverFix,
     templatesFloatingOrigin,
     stableFallbackOrigin,
   ]);
@@ -724,8 +621,9 @@ export function MapViewNative(props: MapViewProps) {
     if (previewAnchor || (alignedRefPoints && alignedRefPoints.length > 0) || templatesFloatingOrigin) {
       return;
     }
-    if (telemetrySnapshot?.lat != null && telemetrySnapshot?.lon != null) {
-      setTemplatesFloatingOrigin({ lat: telemetrySnapshot.lat, lon: telemetrySnapshot.lon });
+    const fix = roverCenterFromSnapshot(getTelemetrySnapshot() ?? telemetrySnapshot ?? null);
+    if (fix) {
+      setTemplatesFloatingOrigin(fix);
     } else if (stableFallbackOrigin) {
       setTemplatesFloatingOrigin(stableFallbackOrigin);
     } else {
@@ -736,8 +634,7 @@ export function MapViewNative(props: MapViewProps) {
     mode,
     previewAnchor,
     alignedRefPoints,
-    telemetrySnapshot?.lat,
-    telemetrySnapshot?.lon,
+    liveHasRoverFix,
     templatesFloatingOrigin,
     stableFallbackOrigin,
   ]);
@@ -1425,92 +1322,6 @@ export function MapViewNative(props: MapViewProps) {
       virtualBoxLabelsFC: featureCollection(labelFeatures),
     };
   }, [lines, originSig, mode]);
-
-  // ── Rover geometry (ISOLATED memo — telemetry hot path, see plan §9.1) ──
-  // Only depends on rover fields + lines/origin so high-frequency updates never
-  // re-render the plan/boundary/item sources.
-  const roverGeo = useMemo(() => {
-    const heading = telemetrySnapshot?.heading_ned_deg ?? null;
-    // The EKF position as lat/lon through PX4's projection about the EKF origin (the frame RPP
-    // tracks in). It is never projected through the plan origin: the EKF origin is not the mission
-    // anchor (that drew the rover ~1 m off a path it was driving to 2 cm). Without an EKF origin
-    // the GNSS fix is shown.
-    const lat = telemetrySnapshot?.ekf_lat ?? telemetrySnapshot?.lat;
-    const lon = telemetrySnapshot?.ekf_lon ?? telemetrySnapshot?.lon;
-
-    if (lat == null || lon == null || !Number.isFinite(lat) || !Number.isFinite(lon)) {
-      return { center: null as Coord | null, heading, rangeCircle: null as GeoJSON.Feature<GeoJSON.Polygon> | null, targetLine: null as GeoJSON.FeatureCollection | null, targetPoint: null as Coord | null };
-    }
-
-    const center = toMapboxCoord(lat, lon);
-    // 1.5 m real-world range circle via Turf (circleRadius px cannot do metres).
-    // 48 steps stays smooth at editing zooms (19–22) without Mapbox overzoom faceting
-    // once the ShapeSource uses PLAN_SOURCE_MAX_ZOOM / TOLERANCE below.
-    const rangeCircle = circle(center, 1.5, { steps: 48, units: "meters" }) as GeoJSON.Feature<GeoJSON.Polygon>;
-
-    // Next-target: active waypoint or plan start point ahead of the rover
-    let targetPoint: Coord | null = null;
-    let targetDist: number | null = null;
-    if (lines.length > 0 && projectionOrigin) {
-      const missionRunningOrPaused =
-        telemetrySnapshot?.mission_state === "running" ||
-        telemetrySnapshot?.mission_state === "paused";
-      const idx = missionRunningOrPaused
-        ? Math.min(
-            Math.max(0, telemetrySnapshot?.projection_segment_index ?? 0),
-            lines.length - 1
-          )
-        : 0;
-      const targetSeg = lines[idx];
-      if (targetSeg && targetSeg.from && targetSeg.to) {
-        // When waiting/idle, destination is the very start of the path (from).
-        // When running/paused, destination is the active segment end (to).
-        const target = missionRunningOrPaused
-          ? { x: targetSeg.to.x, y: targetSeg.to.y }
-          : { x: targetSeg.from.x, y: targetSeg.from.y };
-        const gps = projectPlanNorthEastToGps(target.x, target.y, projectionOrigin);
-        // Calculate real physical distance on Earth (meters) between rover GPS and target GPS
-        const dist = groundDistanceMeters(lat, lon, gps.lat, gps.lon);
-        if (dist < 10000) {
-          targetDist = dist;
-          targetPoint = toMapboxCoord(gps.lat, gps.lon);
-        }
-      }
-    }
-
-    const targetLine =
-      targetPoint != null && targetDist != null
-        ? featureCollection([
-            lineFeature([center, targetPoint]),
-            pointFeature(
-              [(center[0] + targetPoint[0]) / 2, (center[1] + targetPoint[1]) / 2],
-              { label: `${targetDist.toFixed(1)} m` }
-            ),
-          ])
-        : null;
-
-    return { center, heading, rangeCircle, targetLine, targetPoint };
-  }, [
-    telemetrySnapshot?.lat,
-    telemetrySnapshot?.lon,
-    telemetrySnapshot?.ekf_lat,
-    telemetrySnapshot?.ekf_lon,
-    telemetrySnapshot?.heading_ned_deg,
-    telemetrySnapshot?.mission_state,
-    telemetrySnapshot?.projection_segment_index,
-    lines,
-    originSig,
-  ]);
-
-  // The telemetry adapter reports a position only while the gateway marks it fresh (<= 1 s
-  // old) — correct for numbers, wrong for an icon: any packet gap, or a JS stall such as a
-  // large file import, made the marker vanish. Keep drawing the last known fix, dimmed, so
-  // "stale" reads as stale instead of "rover gone". Held in map coordinates, so it stays
-  // put on the ground even if the plan's projection origin changes under it.
-  // Module-level so it also survives the map remounting on every page change.
-  const resolvedRover = resolveRoverMarker<Coord>(roverGeo, lastRoverFix);
-  lastRoverFix = resolvedRover.last;
-  const roverMarker = resolvedRover.marker;
 
   // ── Placed items (Templates): lines + bounding boxes ──
   // Circle/arc entities are intentionally NOT special-cased here — they flow through the same
@@ -2866,18 +2677,17 @@ export function MapViewNative(props: MapViewProps) {
   }, [collectFitCoords, safeFitBounds]);
 
   // Recenter on rover — STRICTLY one-shot per button press (parity with legacy).
-  // `roverGeo.center` is intentionally NOT a dependency: if it were, this effect
-  // would re-fire on every telemetry tick (roverGeo.center is a fresh array each
-  // tick) and turn a one-shot recenter into continuous follow.
+  // Read the exact position only when the one-shot action fires; do not subscribe the map body.
   useEffect(() => {
     if (!visible || !recenterRoverTrigger || recenterRoverTrigger <= 0) return;
     if (recenterRoverTrigger === lastRecenterRoverRef.current) return;
     lastRecenterRoverRef.current = recenterRoverTrigger;
-    if (roverGeo.center) {
-      safeSetCamera({ centerCoordinate: roverGeo.center, animationDuration: 300 });
+    const center = currentRoverCenter();
+    if (center) {
+      safeSetCamera({ centerCoordinate: center, animationDuration: 300 });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recenterRoverTrigger, visible]);
+  }, [recenterRoverTrigger, visible, currentRoverCenter, safeSetCamera]);
 
   // Fit to plan — STRICTLY one-shot per button press. `fitToPlan` is intentionally
   // not a dependency: its identity changes when geometry changes, which would
@@ -2907,9 +2717,10 @@ export function MapViewNative(props: MapViewProps) {
   // release-only hard crash after websocket connect mounts the home map.
   useEffect(() => {
     if (!visible || hasAutoCenteredRef.current || !mapLoadedRef.current) return;
-    if (roverGeo.center) {
+    const center = currentRoverCenter();
+    if (center) {
       safeSetCamera({
-        centerCoordinate: roverGeo.center,
+        centerCoordinate: center,
         zoomLevel: 19,
         animationDuration: 0,
       });
@@ -2918,7 +2729,7 @@ export function MapViewNative(props: MapViewProps) {
       fitToPlan();
       hasAutoCenteredRef.current = true;
     }
-  }, [visible, roverGeo.center, collectFitCoords, fitToPlan, safeSetCamera]);
+  }, [visible, liveHasRoverFix, collectFitCoords, fitToPlan, safeSetCamera, currentRoverCenter]);
 
   // Re-fit whenever the selected alignment ref points GROW (a tap-add or a bulk CSV
   // import) — CSV-imported points in particular may sit outside the plan's own line
@@ -3260,9 +3071,10 @@ export function MapViewNative(props: MapViewProps) {
           setStyleReady(true);
           // Retry one-shot autocenter now that native map is ready.
           if (!hasAutoCenteredRef.current) {
-            if (roverGeo.center) {
+            const center = currentRoverCenter();
+            if (center) {
               safeSetCamera({
-                centerCoordinate: roverGeo.center,
+                centerCoordinate: center,
                 zoomLevel: 19,
                 animationDuration: 0,
               });
@@ -3289,11 +3101,8 @@ export function MapViewNative(props: MapViewProps) {
         <Camera
           ref={cameraRef}
           defaultSettings={
-            roverGeo.center &&
-            Array.isArray(roverGeo.center) &&
-            Number.isFinite(roverGeo.center[0]) &&
-            Number.isFinite(roverGeo.center[1])
-              ? { centerCoordinate: roverGeo.center, zoomLevel: 19 }
+            initialRoverCenterRef.current
+              ? { centerCoordinate: initialRoverCenterRef.current, zoomLevel: 19 }
               : undefined
           }
         />
@@ -3898,49 +3707,6 @@ export function MapViewNative(props: MapViewProps) {
             }}
           />
         </ShapeSource>
-        {/* ── Rover range circle + next-target line (isolated source) ── */}
-        {roverGeo.rangeCircle && (
-          <ShapeSource
-            id="rover-range"
-            shape={roverGeo.rangeCircle}
-            maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
-            tolerance={PLAN_SOURCE_TOLERANCE}
-          >
-            <FillLayer id="rover-range-fill" style={{ fillColor: "#3b82f6", fillOpacity: 0.12 }} />
-            <LineLayer
-              id="rover-range-outline"
-              style={{ lineColor: "#3b82f6", lineWidth: 1.5, lineDasharray: [4, 4] }}
-            />
-          </ShapeSource>
-        )}
-        {roverGeo.targetLine && (
-          <ShapeSource
-            id="rover-target"
-            shape={roverGeo.targetLine}
-            maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
-            tolerance={PLAN_SOURCE_TOLERANCE}
-          >
-            <LineLayer
-              id="rover-target-layer"
-              style={{ lineColor: "#f59e0b", lineWidth: 2, lineDasharray: [4, 4] }}
-            />
-            <SymbolLayer
-              id="rover-target-label"
-              style={{
-                textField: ["get", "label"],
-                textColor: "#f59e0b",
-                textHaloColor: "#0f172a",
-                textHaloWidth: 1.5,
-                textSize: 12,
-                textOffset: [0, -1],
-                textAnchor: "bottom",
-              }}
-            />
-          </ShapeSource>
-        )}
-
-
-
         {/* ── Click-to-Mark drawn waypoints ── */}
         {drawnWaypoints && drawnWaypoints.length > 0 && (() => {
           const pointFeatures = drawnWaypoints.map((wp, i) => ({
@@ -4005,19 +3771,17 @@ export function MapViewNative(props: MapViewProps) {
           );
         })()}
 
-        {/* ── Rover vehicle marker + heading ── */}
-        {showRover && roverMarker && (
-          <MarkerView coordinate={roverMarker.center} anchor={{ x: 0.5, y: 0.5 }} allowOverlap>
-            <RoverVehicle heading={roverMarker.heading} mapBearing={cameraBearing} stale={roverMarker.stale} />
-          </MarkerView>
-        )}
-
-        {/* ── Next-target pulsing marker ── */}
-        {roverGeo.targetPoint && (
-          <MarkerView coordinate={roverGeo.targetPoint} anchor={{ x: 0.5, y: 0.5 }} allowOverlap>
-            <PulsingDot color="#f59e0b" size={12} />
-          </MarkerView>
-        )}
+        {/* Full-rate telemetry is confined to this child; the map body and plan layers stay still. */}
+        {!props.parked ? (
+          <RoverLayer
+            lines={lines}
+            projectionOrigin={projectionOrigin}
+            showRover={showRover}
+            fallbackSnapshot={telemetrySnapshot}
+            bearingStore={cameraBearingStoreRef.current}
+            lastFixRef={roverLastFixRef}
+          />
+        ) : null}
       </RNMapboxMapView>
       {!styleReady ? (
         <View
