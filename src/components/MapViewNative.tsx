@@ -194,6 +194,230 @@ const DEFAULT_LINE_COLOR = "#0f172a";
 const PLAN_SOURCE_MAX_ZOOM = 22;
 const PLAN_SOURCE_TOLERANCE = 0;
 
+// ── Plan layer styles / filters ──
+// Module constants so a memoized layer group never sees a "new" style object.
+type LineStyle = React.ComponentProps<typeof LineLayer>["style"];
+type CircleStyle = React.ComponentProps<typeof CircleLayer>["style"];
+type SymbolStyle = React.ComponentProps<typeof SymbolLayer>["style"];
+type FillStyle = React.ComponentProps<typeof FillLayer>["style"];
+type LayerFilter = React.ComponentProps<typeof LineLayer>["filter"];
+
+/** Shared empty source (a fresh `featureCollection([])` per render re-serialized every time). */
+const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
+
+const PLAN_LINES_OPEN_FILTER: LayerFilter = ["all", ["!=", ["get", "closedRing"], true], ["!=", ["get", "layer"], "virtual_boundary"]];
+const PLAN_LINES_OPEN_STYLE: LineStyle = { lineColor: ["get", "color"], lineWidth: 2.25, lineOpacity: 1, lineCap: "round", lineJoin: "round" };
+const PLAN_LINES_CLOSED_FILTER: LayerFilter = ["all", ["==", ["get", "closedRing"], true], ["!=", ["get", "layer"], "virtual_boundary"]];
+const PLAN_LINES_CLOSED_STYLE: LineStyle = { lineColor: ["get", "color"], lineWidth: 2.25, lineOpacity: 1, lineCap: "butt", lineJoin: "round" };
+const PLAN_LINES_VIRTUAL_FILTER: LayerFilter = ["==", ["get", "layer"], "virtual_boundary"];
+const PLAN_LINES_VIRTUAL_STYLE: LineStyle = { lineColor: "#06b6d4", lineWidth: 2.5, lineDasharray: [2, 1], lineOpacity: 0.95 };
+const GHOST_LINES_STYLE: LineStyle = { lineColor: "#8b5cf6", lineWidth: 2, lineOpacity: 0.6, lineDasharray: [2, 2], lineCap: "round", lineJoin: "round" };
+const PICK_HIT_STYLE: CircleStyle = { circleRadius: 16, circleColor: "#0ea5e9", circleOpacity: 0.001 };
+const HITBOX_48 = { width: 48, height: 48 };
+const ANCHOR_HALO_STYLE: CircleStyle = { circleRadius: 10, circleColor: "#22c55e", circleOpacity: 0.22 };
+const ANCHOR_CORE_STYLE: CircleStyle = { circleRadius: 5, circleColor: "#16a34a", circleStrokeColor: "#ffffff", circleStrokeWidth: 1.75, circleOpacity: 1 };
+const HITBOX_40 = { width: 40, height: 40 };
+const CSV_DELETED_STYLE: CircleStyle = { circleRadius: 3.5, circleColor: "#ef4444", circleOpacity: 0.45 };
+const CSV_POINT_HALO_STYLE: CircleStyle = { circleRadius: 9, circleColor: "#f59e0b", circleOpacity: 0.16 };
+const CSV_POINT_CORE_STYLE: CircleStyle = { circleRadius: 4, circleColor: "#f59e0b", circleStrokeColor: "#ffffff", circleStrokeWidth: 1, circleOpacity: 1 };
+const CSV_SELECTED_HALO_STYLE: CircleStyle = { circleRadius: 12, circleColor: "#ec4899", circleOpacity: 0.3 };
+const CSV_SELECTED_CORE_STYLE: CircleStyle = { circleRadius: 6, circleColor: "#ec4899", circleStrokeColor: "#ffffff", circleStrokeWidth: 2, circleOpacity: 1 };
+const HITBOX_36 = { width: 36, height: 36 };
+const START_ORIGIN_FILTER: LayerFilter = ["==", ["get", "kind"], "start-origin"];
+const START_HIT_STYLE: CircleStyle = { circleRadius: 22, circleColor: "#f97316", circleOpacity: 0.001 };
+const START_HALO_STYLE: CircleStyle = { circleRadius: 11, circleColor: "#f97316", circleOpacity: 0.22 };
+const START_CORE_STYLE: CircleStyle = { circleRadius: 5.5, circleColor: "#ea580c", circleStrokeColor: "#ffffff", circleStrokeWidth: 2.5, circleOpacity: 1 };
+const START_LABEL_STYLE: SymbolStyle = {
+  textField: ["get", "label"],
+  textSize: 11,
+  textColor: "#9a3412",
+  textHaloColor: "#ffffff",
+  textHaloWidth: 1.75,
+  textFont: ["DIN Pro Bold"],
+  textOffset: [-0.55, 1.35],
+  textAnchor: "top",
+  textAllowOverlap: true,
+  textIgnorePlacement: true,
+};
+const START_ARROW_STYLE: SymbolStyle = {
+  textField: "▲",
+  textSize: 16,
+  textColor: "#ea580c",
+  textHaloColor: "#ffffff",
+  textHaloWidth: 1.5,
+  textOffset: [1.55, 1.35],
+  textAnchor: "top",
+  textAllowOverlap: true,
+  textIgnorePlacement: true,
+  textRotate: ["get", "bearing"],
+  textRotationAlignment: "map",
+};
+const HITBOX_72 = { width: 72, height: 72 };
+const NOT_CLOSED_RING_FILTER: LayerFilter = ["!=", ["get", "closedRing"], true];
+const CLOSED_RING_FILTER: LayerFilter = ["==", ["get", "closedRing"], true];
+const SELECTED_OPEN_STYLE: LineStyle = { lineColor: "#3b82f6", lineWidth: 4, lineCap: "round", lineJoin: "round" };
+const SELECTED_CLOSED_STYLE: LineStyle = { lineColor: "#ef4444", lineWidth: 4, lineCap: "butt", lineJoin: "round" };
+const CORNER_POINTS_STYLE: CircleStyle = { circleRadius: 4, circleColor: "#3b82f6", circleOpacity: 0.9, circleStrokeColor: "#ffffff", circleStrokeWidth: 1.5 };
+const SELECTION_LABELS_STYLE: SymbolStyle = {
+  textField: ["get", "label"],
+  textColor: "#ef4444",
+  textHaloColor: "#ffffff",
+  textHaloWidth: 2,
+  textSize: 12,
+  textOffset: ["get", "offset"],
+  textAllowOverlap: true,
+};
+const INVISIBLE_CIRCLE_STYLE: CircleStyle = { circleRadius: 0, circleOpacity: 0 };
+const REF_LABELS_STYLE_BASE: SymbolStyle = {
+  textField: ["get", "label"],
+  textColor: "#0f172a",
+  textHaloColor: "#ffffff",
+  textHaloWidth: 1.5,
+  textSize: 11,
+  textOffset: [0, -1.4],
+  textAnchor: "bottom",
+};
+const REF_LABELS_STYLE_SHOWN: SymbolStyle = { ...REF_LABELS_STYLE_BASE, textOpacity: 1 };
+const REF_LABELS_STYLE_HIDDEN: SymbolStyle = { ...REF_LABELS_STYLE_BASE, textOpacity: 0 };
+const NOT_WH_PILL_FILTER: LayerFilter = ["!=", ["get", "isWhPill"], true];
+const WH_PILL_FILTER: LayerFilter = ["==", ["get", "isWhPill"], true];
+const LENGTH_LABELS_STYLE: SymbolStyle = {
+  textField: ["get", "label"],
+  textColor: "#0f172a",
+  textHaloColor: "#ffffff",
+  textHaloWidth: 2.25,
+  textSize: 12,
+  textOffset: [0, 0],
+  textAnchor: "center",
+  textJustify: "center",
+  textAllowOverlap: true,
+  textIgnorePlacement: true,
+};
+const WH_PILL_STYLE: SymbolStyle = {
+  textField: ["get", "label"],
+  textColor: "#ffffff",
+  textHaloColor: "#2563eb",
+  textHaloWidth: 8,
+  textSize: 13,
+  textOffset: [0, -0.8],
+  textAnchor: "center",
+  textAllowOverlap: true,
+  textIgnorePlacement: true,
+};
+const RESIZE_HIT_STYLE: CircleStyle = {
+  // Large touch target so edge mids are easy to grab.
+  circleRadius: 18,
+  circleColor: "#0ea5e9",
+  circleOpacity: 0.32,
+  circleStrokeColor: "#ffffff",
+  circleStrokeWidth: 2,
+  circleStrokeOpacity: 0.95,
+};
+const RESIZE_ARROWS_STYLE: SymbolStyle = {
+  textField: ["get", "arrow"],
+  textSize: 18,
+  textColor: "#ffffff",
+  textHaloColor: "#0369a1",
+  textHaloWidth: 1.5,
+  textAllowOverlap: true,
+  textIgnorePlacement: true,
+  textRotate: ["get", "bearing"],
+  textRotationAlignment: "map",
+};
+const VIRTUAL_BOX_LABELS_STYLE: SymbolStyle = {
+  textField: ["get", "label"],
+  textColor: "#0891b2",
+  textHaloColor: "#ffffff",
+  textHaloWidth: 2,
+  textSize: 12,
+  textOffset: ["get", "offset"],
+  textAllowOverlap: true,
+};
+const BOUNDARY_INDENT_STYLE: LineStyle = { lineColor: "#cbd5e1", lineWidth: 2, lineDasharray: [5, 5] };
+const BOUNDARY_FILL_STYLE: FillStyle = {
+  fillColor: ["case", ["get", "selected"], "rgba(239, 68, 68, 0.15)", "rgba(15, 23, 42, 0.05)"],
+  fillOpacity: 1,
+};
+const BOUNDARY_OUTLINE_STYLE: LineStyle = {
+  lineColor: ["case", ["get", "selected"], "#ef4444", "#0f172a"],
+  lineWidth: ["case", ["get", "selected"], 4, 2],
+  lineOpacity: 0.9,
+};
+const BOUNDARY_CONTROL_POINTS_STYLE: CircleStyle = {
+  circleRadius: ["case", ["get", "active"], 4.5, 3],
+  circleColor: ["case", ["get", "active"], "#f59e0b", "#3b82f6"],
+  circleOpacity: ["case", ["get", "active"], 0.9, 0.7],
+  circleStrokeColor: "#ffffff",
+  circleStrokeWidth: 1.5,
+};
+const PLACED_BOXES_STYLE: FillStyle = {
+  // Touch box is invisible but still catches taps via the ShapeSource onPress.
+  fillColor: "transparent",
+  fillOpacity: 0.01,
+  fillOutlineColor: "transparent",
+};
+const PLACED_LINES_STYLE_BASE: LineStyle = {
+  // Selected items turn red to indicate selection.
+  lineColor: ["case", ["get", "selected"], "#ef4444", "#f97316"],
+  lineWidth: ["case", ["get", "selected"], 3, 2],
+  lineCap: "round",
+  lineJoin: "round",
+};
+// sketchMode dims unselected items (parity with legacy renderPlacedItems).
+const PLACED_LINES_STYLE: LineStyle = { ...PLACED_LINES_STYLE_BASE, lineOpacity: ["case", ["get", "selected"], 1.0, 0.8] };
+const PLACED_LINES_STYLE_SKETCH: LineStyle = { ...PLACED_LINES_STYLE_BASE, lineOpacity: ["case", ["get", "selected"], 1.0, 0.2] };
+const PATH_PINS_HALO_STYLE: CircleStyle = { circleRadius: 4, circleColor: "#14b8a6", circleOpacity: 0.22 };
+const PATH_PINS_BODY_STYLE: CircleStyle = { circleRadius: 2.25, circleColor: "#14b8a6", circleStrokeColor: "#ecfdf5", circleStrokeWidth: 1, circleOpacity: 0.95 };
+const SNAP_GUIDE_STYLE: LineStyle = { lineColor: "#e11d48", lineWidth: 2, lineOpacity: 0.9, lineDasharray: [3, 2], lineCap: "butt", lineJoin: "miter" };
+const HITBOX_56 = { width: 56, height: 56 };
+const SELECTED_POINTS_HALO_STYLE: CircleStyle = {
+  circleRadius: ["case", ["==", ["get", "isSnapActive"], "1"], 9, 7],
+  circleColor: ["case", ["==", ["get", "isSnapActive"], "1"], "#fb7185", "#e11d48"],
+  circleOpacity: ["case", ["==", ["get", "isSnapActive"], "1"], 0.4, 0.22],
+};
+const SELECTED_POINTS_BODY_STYLE: CircleStyle = {
+  circleRadius: ["case", ["==", ["get", "isSnapActive"], "1"], 6, 5],
+  circleColor: ["case", ["==", ["get", "isSnapActive"], "1"], "#be123c", "#e11d48"],
+  circleStrokeColor: "#ffffff",
+  circleStrokeWidth: ["case", ["==", ["get", "isSnapActive"], "1"], 1.75, 1.5],
+  circleOpacity: 1,
+};
+const SELECTED_POINTS_INNER_STYLE: CircleStyle = {
+  circleRadius: ["case", ["==", ["get", "isSnapActive"], "1"], 3, 2.75],
+  circleColor: "#ffffff",
+  circleOpacity: 1,
+};
+const SELECTED_POINTS_INDEX_STYLE: SymbolStyle = {
+  textField: ["to-string", ["get", "index"]],
+  textSize: 8,
+  textColor: ["case", ["==", ["get", "isSnapActive"], "1"], "#9f1239", "#9f1239"],
+  textFont: ["DIN Pro Bold"],
+  textAllowOverlap: true,
+  textIgnorePlacement: true,
+  textAnchor: "center",
+};
+const DRAWN_LINE_STYLE: LineStyle = { lineColor: "#f4c10c", lineWidth: 3, lineDasharray: [2, 2], lineOpacity: 0.8 };
+const DRAWN_CIRCLE_STYLE: CircleStyle = { circleRadius: 8, circleColor: "#f4c10c", circleStrokeWidth: 2.5, circleStrokeColor: "#ffffff" };
+const DRAWN_LABEL_STYLE: SymbolStyle = {
+  textField: ["to-string", ["get", "index"]],
+  textColor: "#1c1c1c",
+  textSize: 10,
+  textFont: ["DIN Pro Bold"],
+  textAllowOverlap: true,
+};
+const BOUNDARY_LABEL_CONTAINER_STYLE = {
+  backgroundColor: "rgba(15, 23, 42, 0.9)",
+  paddingHorizontal: 8,
+  paddingVertical: 4,
+  borderRadius: 12,
+  borderWidth: 1,
+  borderColor: "#38bdf8",
+  flexDirection: "row" as const,
+  alignItems: "center" as const,
+  gap: 4,
+};
+const CENTER_ANCHOR = { x: 0.5, y: 0.5 };
+
 /** Colour for a plan line layer, with a safe fallback for unknown values. */
 function colorForLayer(layer: string): string {
   return LAYER_COLORS[layer] ?? DEFAULT_LINE_COLOR;
@@ -552,7 +776,7 @@ export function MapViewNative(props: MapViewProps) {
     handlesFC: GeoJSON.FeatureCollection;
   } | null>(null);
   const previewItemsGeo = dragPreview?.itemsGeo ?? null;
-  const snapGuideFC = dragPreview?.guideFC ?? featureCollection([]);
+  const snapGuideFC = dragPreview?.guideFC ?? EMPTY_FC;
   const activeSnapRefPointKey = dragPreview?.activeRefKey ?? null;
   const previewLengthLabelsFC = dragPreview?.lengthLabelsFC ?? null;
   const previewHandlesFC = dragPreview?.handlesFC ?? null;
@@ -3052,13 +3276,287 @@ export function MapViewNative(props: MapViewProps) {
     [onSelectPoint, onGuidePointFocus]
   );
 
-  if (!visible) return null;
-
   const refLabelsVisible = !!showRefPointLabels;
   // Active preview overrides the committed sources during a live gesture.
   const activeItemsGeo = previewItemsGeo ?? placedItemsGeo;
   const activeLengthLabelsFC = previewLengthLabelsFC ?? steadyLengthLabelsFC;
   const activeHandlesFC = previewHandlesFC ?? steadyHandlesFC;
+
+  // ── Plan layer groups ──
+  // Every ShapeSource JSON-stringifies its GeoJSON whenever it renders. Each group below is a
+  // memoized element, so React skips it entirely (no stringify, no native update) unless a
+  // value in its dependency list changed. Each list names every value its group reads; styles
+  // and filters are module constants.
+  const startPointPress = onSelectPoint ? handleMultiPointAnchorPress : undefined;
+  const selectedPointsPress = onGuidePointFocus || onSelectPoint ? handleMultiPointAnchorPress : undefined;
+  const handleBoundaryPress = useCallback(() => onSelectionChange?.(["boundary"]), [onSelectionChange]);
+  const showCsvEditPoints = !!csvEditPoints && csvEditPoints.length > 0;
+
+  const planLinesGroup = useMemo(() => {
+    perfCount("PlanLayer.planLines.render");
+    return (
+      <ShapeSource id="plan-lines" shape={planLinesFC} maxZoomLevel={PLAN_SOURCE_MAX_ZOOM} tolerance={PLAN_SOURCE_TOLERANCE}>
+        <LineLayer id="plan-lines-open-layer" filter={PLAN_LINES_OPEN_FILTER} style={PLAN_LINES_OPEN_STYLE} />
+        <LineLayer id="plan-lines-closed-layer" filter={PLAN_LINES_CLOSED_FILTER} style={PLAN_LINES_CLOSED_STYLE} />
+        <LineLayer id="plan-lines-virtual-boundary-layer" filter={PLAN_LINES_VIRTUAL_FILTER} style={PLAN_LINES_VIRTUAL_STYLE} />
+      </ShapeSource>
+    );
+  }, [planLinesFC]);
+
+  // Offset ghost preview: live drag-only, gone on release, never committed.
+  const ghostLinesGroup = useMemo(() => {
+    perfCount("PlanLayer.ghostLines.render");
+    return (
+      <ShapeSource id="offset-ghost-lines" shape={ghostLinesFC} maxZoomLevel={PLAN_SOURCE_MAX_ZOOM} tolerance={PLAN_SOURCE_TOLERANCE}>
+        <LineLayer id="offset-ghost-lines-layer" style={GHOST_LINES_STYLE} />
+      </ShapeSource>
+    );
+  }, [ghostLinesFC]);
+
+  // Multi-Point pickable vertices: invisible hit targets only (no clutter dots). Fully
+  // transparent but present so Mapbox still hit-tests the feature.
+  const pickAnchorsGroup = useMemo(() => {
+    perfCount("PlanLayer.pickAnchors.render");
+    return (
+      <ShapeSource id="multi-point-pick-anchors" shape={multiPointPickAnchorsFC} onPress={handleMultiPointAnchorPress} hitbox={HITBOX_48}>
+        <CircleLayer id="multi-point-pick-hit" style={PICK_HIT_STYLE} />
+      </ShapeSource>
+    );
+  }, [multiPointPickAnchorsFC, handleMultiPointAnchorPress]);
+
+  // Anchor point selection: visible, tappable candidate dots on the isolated target.
+  const anchorCandidatesGroup = useMemo(() => {
+    perfCount("PlanLayer.anchorCandidates.render");
+    return (
+      <ShapeSource id="anchor-candidates" shape={anchorCandidatesFC} onPress={handleAnchorCandidatePress} hitbox={HITBOX_40}>
+        <CircleLayer id="anchor-candidates-halo" style={ANCHOR_HALO_STYLE} />
+        <CircleLayer id="anchor-candidates-core" style={ANCHOR_CORE_STYLE} />
+      </ShapeSource>
+    );
+  }, [anchorCandidatesFC, handleAnchorCandidatePress]);
+
+  // CSV point edit mode: deleted (dim) → kept (tappable) → selected (on top).
+  const csvEditGroup = useMemo(() => {
+    if (!showCsvEditPoints) return null;
+    perfCount("PlanLayer.csvEdit.render");
+    return (
+      <>
+        <ShapeSource id="csv-edit-deleted" shape={csvEditLookup.gone}>
+          <CircleLayer id="csv-edit-deleted-dot" style={CSV_DELETED_STYLE} />
+        </ShapeSource>
+        <ShapeSource id="csv-edit-points" shape={csvEditLookup.keep} onPress={handleCsvEditPointPress} hitbox={HITBOX_36}>
+          <CircleLayer id="csv-edit-points-halo" style={CSV_POINT_HALO_STYLE} />
+          <CircleLayer id="csv-edit-points-core" style={CSV_POINT_CORE_STYLE} />
+        </ShapeSource>
+        <ShapeSource id="csv-edit-selected" shape={csvEditSelectedFC} onPress={handleCsvEditPointPress} hitbox={HITBOX_36}>
+          <CircleLayer id="csv-edit-selected-halo" style={CSV_SELECTED_HALO_STYLE} />
+          <CircleLayer id="csv-edit-selected-core" style={CSV_SELECTED_CORE_STYLE} />
+        </ShapeSource>
+      </>
+    );
+  }, [showCsvEditPoints, csvEditLookup, csvEditSelectedFC, handleCsvEditPointPress]);
+
+  // Rover start: red pin ON the true start vertex; FROM + ▲ label slightly below. Hit + pin
+  // sit at the exact start coordinate (no translate offset); labels are offset below the pin.
+  const startDirectionGroup = useMemo(() => {
+    perfCount("PlanLayer.startDirection.render");
+    return (
+      <ShapeSource id="plan-start-direction" shape={startDirectionFC} onPress={startPointPress} hitbox={HITBOX_72}>
+        <CircleLayer id="plan-start-hit" filter={START_ORIGIN_FILTER} style={START_HIT_STYLE} />
+        <CircleLayer id="plan-start-origin-halo" filter={START_ORIGIN_FILTER} style={START_HALO_STYLE} />
+        <CircleLayer id="plan-start-origin-core" filter={START_ORIGIN_FILTER} style={START_CORE_STYLE} />
+        <SymbolLayer id="plan-start-origin-label" filter={START_ORIGIN_FILTER} style={START_LABEL_STYLE} />
+        <SymbolLayer id="plan-start-arrow" filter={START_ORIGIN_FILTER} style={START_ARROW_STYLE} />
+      </ShapeSource>
+    );
+  }, [startDirectionFC, startPointPress]);
+
+  // Fields selection highlight + corner points + labels.
+  const selectionGroup = useMemo(() => {
+    perfCount("PlanLayer.selection.render");
+    return (
+      <>
+        <ShapeSource id="selected-line" shape={selectionFC.line} maxZoomLevel={PLAN_SOURCE_MAX_ZOOM} tolerance={PLAN_SOURCE_TOLERANCE}>
+          <LineLayer id="selected-line-open-layer" filter={NOT_CLOSED_RING_FILTER} style={SELECTED_OPEN_STYLE} />
+          <LineLayer id="selected-line-closed-layer" filter={CLOSED_RING_FILTER} style={SELECTED_CLOSED_STYLE} />
+        </ShapeSource>
+        <ShapeSource id="corner-points" shape={selectionFC.corners}>
+          <CircleLayer id="corner-points-layer" style={CORNER_POINTS_STYLE} />
+        </ShapeSource>
+        <ShapeSource id="selection-labels" shape={selectionFC.labels}>
+          <SymbolLayer id="selection-labels-layer" style={SELECTION_LABELS_STYLE} />
+        </ShapeSource>
+      </>
+    );
+  }, [selectionFC]);
+
+  // Reference point labels only (green dots removed — cluttered Fields map). The invisible
+  // zero-radius layer keeps the source valid without painting dots.
+  const refPointsGroup = useMemo(() => {
+    perfCount("PlanLayer.refPoints.render");
+    return (
+      <ShapeSource id="ref-points" shape={refPointsFC}>
+        <CircleLayer id="ref-points-layer" style={INVISIBLE_CIRCLE_STYLE} />
+        <SymbolLayer id="ref-points-labels" style={refLabelsVisible ? REF_LABELS_STYLE_SHOWN : REF_LABELS_STYLE_HIDDEN} />
+      </ShapeSource>
+    );
+  }, [refPointsFC, refLabelsVisible]);
+
+  // Live path lengths (world-offset off stroke + strong halo) and the resize W×H pill.
+  const lengthLabelsGroup = useMemo(() => {
+    perfCount("PlanLayer.lengthLabels.render");
+    return (
+      <ShapeSource id="plan-length-labels" shape={activeLengthLabelsFC}>
+        <SymbolLayer id="plan-length-labels-layer" filter={NOT_WH_PILL_FILTER} style={LENGTH_LABELS_STYLE} />
+        <SymbolLayer id="plan-length-wh-pill-layer" filter={WH_PILL_FILTER} style={WH_PILL_STYLE} />
+      </ShapeSource>
+    );
+  }, [activeLengthLabelsFC]);
+
+  // Resize: four edge-midpoint arrows only (n/e/s/w). Rotate rings intentionally unmounted in
+  // Resize (edge-axis only).
+  const handlesGroup = useMemo(() => {
+    perfCount("PlanLayer.handles.render");
+    return (
+      <>
+        <ShapeSource id="plan-resize-handles" shape={activeHandlesFC}>
+          <CircleLayer id="plan-resize-handles-hit" style={RESIZE_HIT_STYLE} />
+          <SymbolLayer id="plan-resize-handles-arrows" style={RESIZE_ARROWS_STYLE} />
+        </ShapeSource>
+        <ShapeSource id="plan-rotate-handles" shape={EMPTY_FC}>
+          <CircleLayer id="plan-rotate-handles-layer" style={INVISIBLE_CIRCLE_STYLE} />
+        </ShapeSource>
+      </>
+    );
+  }, [activeHandlesFC]);
+
+  // Virtual bounding box: labels only (corner dots removed).
+  const virtualBoxGroup = useMemo(() => {
+    perfCount("PlanLayer.virtualBox.render");
+    return (
+      <>
+        <ShapeSource id="virtual-box-corners" shape={virtualBoxCornersFC}>
+          <CircleLayer id="virtual-box-corners-layer" style={INVISIBLE_CIRCLE_STYLE} />
+        </ShapeSource>
+        <ShapeSource id="virtual-box-labels" shape={virtualBoxLabelsFC}>
+          <SymbolLayer id="virtual-box-labels-layer" style={VIRTUAL_BOX_LABELS_STYLE} />
+        </ShapeSource>
+      </>
+    );
+  }, [virtualBoxCornersFC, virtualBoxLabelsFC]);
+
+  // Boundary box (Templates) + real-time boundary rotation degree label.
+  const boundaryGroup = useMemo(() => {
+    perfCount("PlanLayer.boundary.render");
+    return (
+      <>
+        <ShapeSource id="boundary-indent" shape={boundaryGeo.indent} onPress={handleBoundaryPress}>
+          <LineLayer id="boundary-indent-layer" style={BOUNDARY_INDENT_STYLE} />
+        </ShapeSource>
+        <ShapeSource id="boundary-outer" shape={boundaryGeo.outer} onPress={handleBoundaryPress}>
+          <FillLayer id="boundary-outer-fill" style={BOUNDARY_FILL_STYLE} />
+          <LineLayer id="boundary-outer-layer" style={BOUNDARY_OUTLINE_STYLE} />
+        </ShapeSource>
+        <ShapeSource id="boundary-control-points" shape={boundaryGeo.controlPoints}>
+          <CircleLayer id="boundary-control-points-layer" style={BOUNDARY_CONTROL_POINTS_STYLE} />
+        </ShapeSource>
+        {boundaryGeo.labelCoord && (
+          <MarkerView coordinate={boundaryGeo.labelCoord} anchor={CENTER_ANCHOR} allowOverlap>
+            <View style={BOUNDARY_LABEL_CONTAINER_STYLE}>
+              <Text style={{ color: "#38bdf8", fontSize: 12, fontWeight: "bold" }}>↻</Text>
+              <Text style={{ color: "#ffffff", fontSize: 12, fontWeight: "bold", fontFamily: "monospace" }}>
+                {Math.round(boundaryGeo.rotDeg || 0)}°
+              </Text>
+            </View>
+          </MarkerView>
+        )}
+      </>
+    );
+  }, [boundaryGeo, handleBoundaryPress]);
+
+  // Placed template items (Templates). Same tile fidelity as plan-lines/selected-line: default
+  // maxZoomLevel=18 + tolerance=0.375 simplifies dense circle rings into faceted polygons once
+  // the camera overzooms past generation zoom (alignment / Templates often sit at 19+).
+  const placedItemsGroup = useMemo(() => {
+    perfCount("PlanLayer.placedItems.render");
+    return (
+      <>
+        <ShapeSource id="placed-item-boxes" shape={activeItemsGeo.boxes} onPress={handleItemsPress} maxZoomLevel={PLAN_SOURCE_MAX_ZOOM} tolerance={PLAN_SOURCE_TOLERANCE}>
+          <FillLayer id="placed-item-boxes-fill" style={PLACED_BOXES_STYLE} />
+        </ShapeSource>
+        <ShapeSource id="placed-item-lines" shape={activeItemsGeo.lines} onPress={handleItemsPress} maxZoomLevel={PLAN_SOURCE_MAX_ZOOM} tolerance={PLAN_SOURCE_TOLERANCE}>
+          <LineLayer id="placed-item-lines-layer" style={sketchMode ? PLACED_LINES_STYLE_SKETCH : PLACED_LINES_STYLE} />
+        </ShapeSource>
+      </>
+    );
+  }, [activeItemsGeo, handleItemsPress, sketchMode]);
+
+  // Path CSV: teal dots. Guide CSV: rose numbered pins. Never yellow / sky-blue.
+  const pathCsvPinsGroup = useMemo(() => {
+    perfCount("PlanLayer.pathCsvPins.render");
+    return (
+      <ShapeSource id="path-csv-pins" shape={pathCsvPinsFC}>
+        <CircleLayer id="path-csv-pins-halo" style={PATH_PINS_HALO_STYLE} />
+        <CircleLayer id="path-csv-pins-body" style={PATH_PINS_BODY_STYLE} />
+      </ShapeSource>
+    );
+  }, [pathCsvPinsFC]);
+
+  // Multi-Point Fit snap guide + guide pins (above the DXF so a lock stays visible).
+  const guidePointsGroup = useMemo(() => {
+    perfCount("PlanLayer.guidePoints.render");
+    return (
+      <>
+        <ShapeSource id="ref-point-snap-guide" shape={snapGuideFC}>
+          <LineLayer id="ref-point-snap-guide-line" style={SNAP_GUIDE_STYLE} />
+        </ShapeSource>
+        <ShapeSource id="selected-points" shape={selectedPointsFC} onPress={selectedPointsPress} hitbox={HITBOX_56}>
+          <CircleLayer id="selected-points-halo" style={SELECTED_POINTS_HALO_STYLE} />
+          <CircleLayer id="selected-points-body" style={SELECTED_POINTS_BODY_STYLE} />
+          <CircleLayer id="selected-points-inner" style={SELECTED_POINTS_INNER_STYLE} />
+          <SymbolLayer id="selected-points-index" style={SELECTED_POINTS_INDEX_STYLE} />
+        </ShapeSource>
+      </>
+    );
+  }, [snapGuideFC, selectedPointsFC, selectedPointsPress]);
+
+  // Click-to-Mark drawn waypoints.
+  const drawnWaypointsGroup = useMemo(() => {
+    if (!drawnWaypoints || drawnWaypoints.length === 0) return null;
+    perfCount("PlanLayer.drawnWaypoints.render");
+    const coords = drawnWaypoints.map((wp) => toMapboxCoord(wp.lat, wp.lon));
+    const pointsGeo: GeoJSON.FeatureCollection = {
+      type: "FeatureCollection",
+      features: coords.map((coordinates, i) => ({
+        type: "Feature" as const,
+        geometry: { type: "Point" as const, coordinates },
+        properties: { index: i + 1 },
+      })),
+    };
+    const lineGeo: GeoJSON.FeatureCollection | null =
+      coords.length >= 2
+        ? {
+            type: "FeatureCollection",
+            features: [{ type: "Feature", geometry: { type: "LineString", coordinates: coords }, properties: {} }],
+          }
+        : null;
+    return (
+      <>
+        {lineGeo && (
+          <ShapeSource id="drawn-waypoints-line" shape={lineGeo}>
+            <LineLayer id="drawn-waypoints-line-layer" style={DRAWN_LINE_STYLE} />
+          </ShapeSource>
+        )}
+        <ShapeSource id="drawn-waypoints-points" shape={pointsGeo}>
+          <CircleLayer id="drawn-waypoints-circle" style={DRAWN_CIRCLE_STYLE} />
+          <SymbolLayer id="drawn-waypoints-label" style={DRAWN_LABEL_STYLE} />
+        </ShapeSource>
+      </>
+    );
+  }, [drawnWaypoints]);
+
+  if (!visible) return null;
+
   // The inner map content (shared between editing and non-editing render).
   const mapContent = (
     <View style={styles.container} onLayout={handleMapContainerLayout} collapsable={false}>
@@ -3109,669 +3607,22 @@ export function MapViewNative(props: MapViewProps) {
           }
         />
 
-        {/* ── Plan lines (Fields) ── */}
-        <ShapeSource
-          id="plan-lines"
-          shape={planLinesFC}
-          maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
-          tolerance={PLAN_SOURCE_TOLERANCE}
-        >
-          <LineLayer
-            id="plan-lines-open-layer"
-            filter={["all", ["!=", ["get", "closedRing"], true], ["!=", ["get", "layer"], "virtual_boundary"]]}
-            style={{
-              lineColor: ["get", "color"],
-              lineWidth: 2.25,
-              lineOpacity: 1,
-              lineCap: "round",
-              lineJoin: "round",
-            }}
-          />
-          <LineLayer
-            id="plan-lines-closed-layer"
-            filter={["all", ["==", ["get", "closedRing"], true], ["!=", ["get", "layer"], "virtual_boundary"]]}
-            style={{
-              lineColor: ["get", "color"],
-              lineWidth: 2.25,
-              lineOpacity: 1,
-              lineCap: "butt",
-              lineJoin: "round",
-            }}
-          />
-          <LineLayer
-            id="plan-lines-virtual-boundary-layer"
-            filter={["==", ["get", "layer"], "virtual_boundary"]}
-            style={{
-              lineColor: "#06b6d4",
-              lineWidth: 2.5,
-              lineDasharray: [2, 1],
-              lineOpacity: 0.95,
-            }}
-          />
-        </ShapeSource>
-
-        {/* ── Offset ghost preview: live drag-only, gone on release, never committed ── */}
-        <ShapeSource
-          id="offset-ghost-lines"
-          shape={ghostLinesFC}
-          maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
-          tolerance={PLAN_SOURCE_TOLERANCE}
-        >
-          <LineLayer
-            id="offset-ghost-lines-layer"
-            style={{
-              lineColor: "#8b5cf6",
-              lineWidth: 2,
-              lineOpacity: 0.6,
-              lineDasharray: [2, 2],
-              lineCap: "round",
-              lineJoin: "round",
-            }}
-          />
-        </ShapeSource>
-
-        {/* ── Multi-Point pickable vertices: invisible hit targets only (no clutter dots) ── */}
-        <ShapeSource
-          id="multi-point-pick-anchors"
-          shape={multiPointPickAnchorsFC}
-          onPress={handleMultiPointAnchorPress}
-          hitbox={{ width: 48, height: 48 }}
-        >
-          {/* Fully transparent but present so Mapbox still hit-tests the feature */}
-          <CircleLayer
-            id="multi-point-pick-hit"
-            style={{
-              circleRadius: 16,
-              circleColor: "#0ea5e9",
-              circleOpacity: 0.001,
-            }}
-          />
-        </ShapeSource>
-
-        {/* ── Anchor point selection: visible, tappable candidate dots on the isolated target ── */}
-        <ShapeSource
-          id="anchor-candidates"
-          shape={anchorCandidatesFC}
-          onPress={handleAnchorCandidatePress}
-          hitbox={{ width: 40, height: 40 }}
-        >
-          <CircleLayer
-            id="anchor-candidates-halo"
-            style={{
-              circleRadius: 10,
-              circleColor: "#22c55e",
-              circleOpacity: 0.22,
-            }}
-          />
-          <CircleLayer
-            id="anchor-candidates-core"
-            style={{
-              circleRadius: 5,
-              circleColor: "#16a34a",
-              circleStrokeColor: "#ffffff",
-              circleStrokeWidth: 1.75,
-              circleOpacity: 1,
-            }}
-          />
-        </ShapeSource>
-
-        {/* ── CSV point edit mode: deleted (dim) → kept (tappable) → selected (on top) ── */}
-        {csvEditPoints && csvEditPoints.length > 0 ? (
-          <>
-            <ShapeSource id="csv-edit-deleted" shape={csvEditLookup.gone}>
-              <CircleLayer
-                id="csv-edit-deleted-dot"
-                style={{
-                  circleRadius: 3.5,
-                  circleColor: "#ef4444",
-                  circleOpacity: 0.45,
-                }}
-              />
-            </ShapeSource>
-            <ShapeSource
-              id="csv-edit-points"
-              shape={csvEditLookup.keep}
-              onPress={handleCsvEditPointPress}
-              hitbox={{ width: 36, height: 36 }}
-            >
-              <CircleLayer
-                id="csv-edit-points-halo"
-                style={{ circleRadius: 9, circleColor: "#f59e0b", circleOpacity: 0.16 }}
-              />
-              <CircleLayer
-                id="csv-edit-points-core"
-                style={{
-                  circleRadius: 4,
-                  circleColor: "#f59e0b",
-                  circleStrokeColor: "#ffffff",
-                  circleStrokeWidth: 1,
-                  circleOpacity: 1,
-                }}
-              />
-            </ShapeSource>
-            <ShapeSource
-              id="csv-edit-selected"
-              shape={csvEditSelectedFC}
-              onPress={handleCsvEditPointPress}
-              hitbox={{ width: 36, height: 36 }}
-            >
-              <CircleLayer
-                id="csv-edit-selected-halo"
-                style={{ circleRadius: 12, circleColor: "#ec4899", circleOpacity: 0.3 }}
-              />
-              <CircleLayer
-                id="csv-edit-selected-core"
-                style={{
-                  circleRadius: 6,
-                  circleColor: "#ec4899",
-                  circleStrokeColor: "#ffffff",
-                  circleStrokeWidth: 2,
-                  circleOpacity: 1,
-                }}
-              />
-            </ShapeSource>
-          </>
-        ) : null}
-
-        {/* ── Rover start: red pin ON the true start vertex; FROM + ▲ label slightly below ── */}
-        <ShapeSource
-          id="plan-start-direction"
-          shape={startDirectionFC}
-          onPress={onSelectPoint ? handleMultiPointAnchorPress : undefined}
-          hitbox={{ width: 72, height: 72 }}
-        >
-          {/* Hit + pin sit at the exact start coordinate (no translate offset) */}
-          <CircleLayer
-            id="plan-start-hit"
-            filter={["==", ["get", "kind"], "start-origin"]}
-            style={{
-              circleRadius: 22,
-              circleColor: "#f97316",
-              circleOpacity: 0.001,
-            }}
-          />
-          <CircleLayer
-            id="plan-start-origin-halo"
-            filter={["==", ["get", "kind"], "start-origin"]}
-            style={{
-              circleRadius: 11,
-              circleColor: "#f97316",
-              circleOpacity: 0.22,
-            }}
-          />
-          <CircleLayer
-            id="plan-start-origin-core"
-            filter={["==", ["get", "kind"], "start-origin"]}
-            style={{
-              circleRadius: 5.5,
-              circleColor: "#ea580c",
-              circleStrokeColor: "#ffffff",
-              circleStrokeWidth: 2.5,
-              circleOpacity: 1,
-            }}
-          />
-          {/* Labels offset below the pin so the red dot stays on the path start */}
-          <SymbolLayer
-            id="plan-start-origin-label"
-            filter={["==", ["get", "kind"], "start-origin"]}
-            style={{
-              textField: ["get", "label"],
-              textSize: 11,
-              textColor: "#9a3412",
-              textHaloColor: "#ffffff",
-              textHaloWidth: 1.75,
-              textFont: ["DIN Pro Bold"],
-              textOffset: [-0.55, 1.35],
-              textAnchor: "top",
-              textAllowOverlap: true,
-              textIgnorePlacement: true,
-            }}
-          />
-          <SymbolLayer
-            id="plan-start-arrow"
-            filter={["==", ["get", "kind"], "start-origin"]}
-            style={{
-              textField: "▲",
-              textSize: 16,
-              textColor: "#ea580c",
-              textHaloColor: "#ffffff",
-              textHaloWidth: 1.5,
-              textOffset: [1.55, 1.35],
-              textAnchor: "top",
-              textAllowOverlap: true,
-              textIgnorePlacement: true,
-              textRotate: ["get", "bearing"],
-              textRotationAlignment: "map",
-            }}
-          />
-        </ShapeSource>
-
-        {/* ── Fields selection highlight + corner points ── */}
-        <ShapeSource
-          id="selected-line"
-          shape={selectionFC.line}
-          maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
-          tolerance={PLAN_SOURCE_TOLERANCE}
-        >
-          <LineLayer
-            id="selected-line-open-layer"
-            filter={["!=", ["get", "closedRing"], true]}
-            style={{ lineColor: "#3b82f6", lineWidth: 4, lineCap: "round", lineJoin: "round" }}
-          />
-          <LineLayer
-            id="selected-line-closed-layer"
-            filter={["==", ["get", "closedRing"], true]}
-            style={{ lineColor: "#ef4444", lineWidth: 4, lineCap: "butt", lineJoin: "round" }}
-          />
-        </ShapeSource>
-        <ShapeSource id="corner-points" shape={selectionFC.corners}>
-          <CircleLayer
-            id="corner-points-layer"
-            style={{
-              circleRadius: 4,
-              circleColor: "#3b82f6",
-              circleOpacity: 0.9,
-              circleStrokeColor: "#ffffff",
-              circleStrokeWidth: 1.5,
-            }}
-          />
-        </ShapeSource>
-        <ShapeSource id="selection-labels" shape={selectionFC.labels}>
-          <SymbolLayer
-            id="selection-labels-layer"
-            style={{
-              textField: ["get", "label"],
-              textColor: "#ef4444",
-              textHaloColor: "#ffffff",
-              textHaloWidth: 2,
-              textSize: 12,
-              textOffset: ["get", "offset"],
-              textAllowOverlap: true,
-            }}
-          />
-        </ShapeSource>
-
-        {/* ── Reference point labels only (green dots removed — cluttered Fields map) ── */}
-        <ShapeSource id="ref-points" shape={refPointsFC}>
-          {/* Invisible zero-radius layer keeps source valid without painting dots */}
-          <CircleLayer
-            id="ref-points-layer"
-            style={{
-              circleRadius: 0,
-              circleOpacity: 0,
-            }}
-          />
-          <SymbolLayer
-            id="ref-points-labels"
-            style={{
-              textField: ["get", "label"],
-              textColor: "#0f172a",
-              textHaloColor: "#ffffff",
-              textHaloWidth: 1.5,
-              textSize: 11,
-              textOffset: [0, -1.4],
-              textAnchor: "bottom",
-              textOpacity: refLabelsVisible ? 1 : 0,
-            }}
-          />
-        </ShapeSource>
-
-
-
-        {/* ── Live path lengths / resize W×H pill ── */}
-        <ShapeSource id="plan-length-labels" shape={activeLengthLabelsFC}>
-          {/* Per-path lengths: world-offset off stroke + strong halo for readability */}
-          <SymbolLayer
-            id="plan-length-labels-layer"
-            filter={["!=", ["get", "isWhPill"], true]}
-            style={{
-              textField: ["get", "label"],
-              textColor: "#0f172a",
-              textHaloColor: "#ffffff",
-              textHaloWidth: 2.25,
-              textSize: 12,
-              textOffset: [0, 0],
-              textAnchor: "center",
-              textJustify: "center",
-              textAllowOverlap: true,
-              textIgnorePlacement: true,
-            }}
-          />
-          {/* Resize W×H pill (slightly below OBB) */}
-          <SymbolLayer
-            id="plan-length-wh-pill-layer"
-            filter={["==", ["get", "isWhPill"], true]}
-            style={{
-              textField: ["get", "label"],
-              textColor: "#ffffff",
-              textHaloColor: "#2563eb",
-              textHaloWidth: 8,
-              textSize: 13,
-              textOffset: [0, -0.8],
-              textAnchor: "center",
-              textAllowOverlap: true,
-              textIgnorePlacement: true,
-            }}
-          />
-        </ShapeSource>
-
-        {/* ── Resize: four edge-midpoint arrows only (n/e/s/w) ── */}
-        <ShapeSource id="plan-resize-handles" shape={activeHandlesFC}>
-          <CircleLayer
-            id="plan-resize-handles-hit"
-            style={{
-              // Large touch target so edge mids are easy to grab.
-              circleRadius: 18,
-              circleColor: "#0ea5e9",
-              circleOpacity: 0.32,
-              circleStrokeColor: "#ffffff",
-              circleStrokeWidth: 2,
-              circleStrokeOpacity: 0.95,
-            }}
-          />
-          <SymbolLayer
-            id="plan-resize-handles-arrows"
-            style={{
-              textField: ["get", "arrow"],
-              textSize: 18,
-              textColor: "#ffffff",
-              textHaloColor: "#0369a1",
-              textHaloWidth: 1.5,
-              textAllowOverlap: true,
-              textIgnorePlacement: true,
-              textRotate: ["get", "bearing"],
-              textRotationAlignment: "map",
-            }}
-          />
-        </ShapeSource>
-
-        {/* Rotate rings intentionally unmounted in Resize (edge-axis only). */}
-        <ShapeSource id="plan-rotate-handles" shape={featureCollection([])}>
-          <CircleLayer
-            id="plan-rotate-handles-layer"
-            style={{
-              circleRadius: 0,
-              circleOpacity: 0,
-            }}
-          />
-        </ShapeSource>
-
-
-
-        {/* ── Virtual bounding box: labels only (corner dots removed) ── */}
-        <ShapeSource id="virtual-box-corners" shape={virtualBoxCornersFC}>
-          <CircleLayer
-            id="virtual-box-corners-layer"
-            style={{
-              circleRadius: 0,
-              circleOpacity: 0,
-            }}
-          />
-        </ShapeSource>
-        <ShapeSource id="virtual-box-labels" shape={virtualBoxLabelsFC}>
-          <SymbolLayer
-            id="virtual-box-labels-layer"
-            style={{
-              textField: ["get", "label"],
-              textColor: "#0891b2",
-              textHaloColor: "#ffffff",
-              textHaloWidth: 2,
-              textSize: 12,
-              textOffset: ["get", "offset"],
-              textAllowOverlap: true,
-            }}
-          />
-        </ShapeSource>
-
-        {/* ── Boundary box (Templates) ── */}
-        <ShapeSource id="boundary-indent" shape={boundaryGeo.indent} onPress={() => onSelectionChange?.(["boundary"])}>
-          <LineLayer
-            id="boundary-indent-layer"
-            style={{ lineColor: "#cbd5e1", lineWidth: 2, lineDasharray: [5, 5] }}
-          />
-        </ShapeSource>
-        <ShapeSource id="boundary-outer" shape={boundaryGeo.outer} onPress={() => onSelectionChange?.(["boundary"])}>
-          <FillLayer
-            id="boundary-outer-fill"
-            style={{
-              fillColor: ["case", ["get", "selected"], "rgba(239, 68, 68, 0.15)", "rgba(15, 23, 42, 0.05)"],
-              fillOpacity: 1,
-            }}
-          />
-          <LineLayer
-            id="boundary-outer-layer"
-            style={{
-              lineColor: ["case", ["get", "selected"], "#ef4444", "#0f172a"],
-              lineWidth: ["case", ["get", "selected"], 4, 2],
-              lineOpacity: 0.9,
-            }}
-          />
-        </ShapeSource>
-        <ShapeSource id="boundary-control-points" shape={boundaryGeo.controlPoints}>
-          <CircleLayer
-            id="boundary-control-points-layer"
-            style={{
-              circleRadius: ["case", ["get", "active"], 4.5, 3],
-              circleColor: ["case", ["get", "active"], "#f59e0b", "#3b82f6"],
-              circleOpacity: ["case", ["get", "active"], 0.9, 0.7],
-              circleStrokeColor: "#ffffff",
-              circleStrokeWidth: 1.5,
-            }}
-          />
-        </ShapeSource>
-
-        {/* ── Real-Time Boundary Rotation Degree Label ── */}
-        {boundaryGeo.labelCoord && (
-          <MarkerView coordinate={boundaryGeo.labelCoord} anchor={{ x: 0.5, y: 0.5 }} allowOverlap>
-            <View
-              style={{
-                backgroundColor: "rgba(15, 23, 42, 0.9)",
-                paddingHorizontal: 8,
-                paddingVertical: 4,
-                borderRadius: 12,
-                borderWidth: 1,
-                borderColor: "#38bdf8",
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 4,
-              }}
-            >
-              <Text style={{ color: "#38bdf8", fontSize: 12, fontWeight: "bold" }}>↻</Text>
-              <Text style={{ color: "#ffffff", fontSize: 12, fontWeight: "bold", fontFamily: "monospace" }}>
-                {Math.round(boundaryGeo.rotDeg || 0)}°
-              </Text>
-            </View>
-          </MarkerView>
-        )}
-
-        {/* ── Placed template items (Templates) ── */}
-        {/* Same tile fidelity as plan-lines/selected-line: default maxZoomLevel=18 +
-            tolerance=0.375 simplifies dense circle rings into faceted polygons once the
-            camera overzooms past generation zoom (alignment / Templates often sit at 19+). */}
-        <ShapeSource
-          id="placed-item-boxes"
-          shape={activeItemsGeo.boxes}
-          onPress={handleItemsPress}
-          maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
-          tolerance={PLAN_SOURCE_TOLERANCE}
-        >
-          <FillLayer
-            id="placed-item-boxes-fill"
-            style={{
-              // Touch box is invisible but still catches taps via the ShapeSource onPress.
-              fillColor: "transparent",
-              fillOpacity: 0.01,
-              fillOutlineColor: "transparent",
-            }}
-          />
-        </ShapeSource>
-        <ShapeSource
-          id="placed-item-lines"
-          shape={activeItemsGeo.lines}
-          onPress={handleItemsPress}
-          maxZoomLevel={PLAN_SOURCE_MAX_ZOOM}
-          tolerance={PLAN_SOURCE_TOLERANCE}
-        >
-          <LineLayer
-            id="placed-item-lines-layer"
-            style={{
-              // Selected items turn red to indicate selection.
-              lineColor: ["case", ["get", "selected"], "#ef4444", "#f97316"],
-              lineWidth: ["case", ["get", "selected"], 3, 2],
-              // sketchMode dims unselected items (parity with legacy renderPlacedItems).
-              lineOpacity: ["case", ["get", "selected"], 1.0, sketchMode ? 0.2 : 0.8],
-              lineCap: "round",
-              lineJoin: "round",
-            }}
-          />
-        </ShapeSource>
-
-        {/* Path CSV: teal dots. Guide CSV: rose numbered pins. Never yellow / sky-blue. */}
-        <ShapeSource id="path-csv-pins" shape={pathCsvPinsFC}>
-          <CircleLayer
-            id="path-csv-pins-halo"
-            style={{
-              circleRadius: 4,
-              circleColor: "#14b8a6",
-              circleOpacity: 0.22,
-            }}
-          />
-          <CircleLayer
-            id="path-csv-pins-body"
-            style={{
-              circleRadius: 2.25,
-              circleColor: "#14b8a6",
-              circleStrokeColor: "#ecfdf5",
-              circleStrokeWidth: 1,
-              circleOpacity: 0.95,
-            }}
-          />
-        </ShapeSource>
-
-        {/* ── Multi-Point Fit snap guide + guide pins (above the DXF so a lock stays visible) ── */}
-        <ShapeSource id="ref-point-snap-guide" shape={snapGuideFC}>
-          <LineLayer
-            id="ref-point-snap-guide-line"
-            style={{
-              lineColor: "#e11d48",
-              lineWidth: 2,
-              lineOpacity: 0.9,
-              lineDasharray: [3, 2],
-              lineCap: "butt",
-              lineJoin: "miter",
-            }}
-          />
-        </ShapeSource>
-        <ShapeSource
-          id="selected-points"
-          shape={selectedPointsFC}
-          onPress={
-            onGuidePointFocus || onSelectPoint ? handleMultiPointAnchorPress : undefined
-          }
-          hitbox={{ width: 56, height: 56 }}
-        >
-          <CircleLayer
-            id="selected-points-halo"
-            style={{
-              circleRadius: ["case", ["==", ["get", "isSnapActive"], "1"], 9, 7],
-              circleColor: ["case", ["==", ["get", "isSnapActive"], "1"], "#fb7185", "#e11d48"],
-              circleOpacity: ["case", ["==", ["get", "isSnapActive"], "1"], 0.4, 0.22],
-            }}
-          />
-          <CircleLayer
-            id="selected-points-body"
-            style={{
-              circleRadius: ["case", ["==", ["get", "isSnapActive"], "1"], 6, 5],
-              circleColor: ["case", ["==", ["get", "isSnapActive"], "1"], "#be123c", "#e11d48"],
-              circleStrokeColor: "#ffffff",
-              circleStrokeWidth: ["case", ["==", ["get", "isSnapActive"], "1"], 1.75, 1.5],
-              circleOpacity: 1,
-            }}
-          />
-          <CircleLayer
-            id="selected-points-inner"
-            style={{
-              circleRadius: ["case", ["==", ["get", "isSnapActive"], "1"], 3, 2.75],
-              circleColor: "#ffffff",
-              circleOpacity: 1,
-            }}
-          />
-          <SymbolLayer
-            id="selected-points-index"
-            style={{
-              textField: ["to-string", ["get", "index"]],
-              textSize: 8,
-              textColor: ["case", ["==", ["get", "isSnapActive"], "1"], "#9f1239", "#9f1239"],
-              textFont: ["DIN Pro Bold"],
-              textAllowOverlap: true,
-              textIgnorePlacement: true,
-              textAnchor: "center",
-            }}
-          />
-        </ShapeSource>
-        {/* ── Click-to-Mark drawn waypoints ── */}
-        {drawnWaypoints && drawnWaypoints.length > 0 && (() => {
-          const pointFeatures = drawnWaypoints.map((wp, i) => ({
-            type: "Feature" as const,
-            geometry: { type: "Point" as const, coordinates: toMapboxCoord(wp.lat, wp.lon) },
-            properties: { index: i + 1 },
-          }));
-          const pointsGeo: GeoJSON.FeatureCollection = {
-            type: "FeatureCollection",
-            features: pointFeatures,
-          };
-          const lineGeo: GeoJSON.FeatureCollection | null = drawnWaypoints.length >= 2
-            ? {
-                type: "FeatureCollection",
-                features: [{
-                  type: "Feature",
-                  geometry: {
-                    type: "LineString",
-                    coordinates: drawnWaypoints.map((wp) => toMapboxCoord(wp.lat, wp.lon)),
-                  },
-                  properties: {},
-                }],
-              }
-            : null;
-          return (
-            <>
-              {lineGeo && (
-                <ShapeSource id="drawn-waypoints-line" shape={lineGeo}>
-                  <LineLayer
-                    id="drawn-waypoints-line-layer"
-                    style={{
-                      lineColor: "#f4c10c",
-                      lineWidth: 3,
-                      lineDasharray: [2, 2],
-                      lineOpacity: 0.8,
-                    }}
-                  />
-                </ShapeSource>
-              )}
-              <ShapeSource id="drawn-waypoints-points" shape={pointsGeo}>
-                <CircleLayer
-                  id="drawn-waypoints-circle"
-                  style={{
-                    circleRadius: 8,
-                    circleColor: "#f4c10c",
-                    circleStrokeWidth: 2.5,
-                    circleStrokeColor: "#ffffff",
-                  }}
-                />
-                <SymbolLayer
-                  id="drawn-waypoints-label"
-                  style={{
-                    textField: ["to-string", ["get", "index"]],
-                    textColor: "#1c1c1c",
-                    textSize: 10,
-                    textFont: ["DIN Pro Bold"],
-                    textAllowOverlap: true,
-                  }}
-                />
-              </ShapeSource>
-            </>
-          );
-        })()}
+        {planLinesGroup}
+        {ghostLinesGroup}
+        {pickAnchorsGroup}
+        {anchorCandidatesGroup}
+        {csvEditGroup}
+        {startDirectionGroup}
+        {selectionGroup}
+        {refPointsGroup}
+        {lengthLabelsGroup}
+        {handlesGroup}
+        {virtualBoxGroup}
+        {boundaryGroup}
+        {placedItemsGroup}
+        {pathCsvPinsGroup}
+        {guidePointsGroup}
+        {drawnWaypointsGroup}
 
         {/* Full-rate telemetry is confined to this child; the map body and plan layers stay still. */}
         {!props.parked ? (
