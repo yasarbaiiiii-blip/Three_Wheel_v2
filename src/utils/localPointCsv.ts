@@ -982,6 +982,30 @@ export function stampGpsOnPreviewPoints(
   });
 }
 
+/**
+ * Memo of the (expensive, super-linear) road-marking fit, keyed by the group's exact raw points
+ * and survey RMS. Lets a point edit refit only the group it touched; every other group in the file
+ * is a cache hit. Exact-string keys (no hash) so a collision can never reuse the wrong geometry.
+ */
+export type RoadMarkingFitCache = Map<string, ReturnType<typeof buildRoadMarkingFittedPath>>;
+
+const FIT_CACHE_MAX_ENTRIES = 64;
+
+function fitWithCache(
+  rawNed: RawNedPoint[],
+  surveyRmsM: number | null,
+  cache: RoadMarkingFitCache | undefined
+): ReturnType<typeof buildRoadMarkingFittedPath> {
+  if (!cache) return buildRoadMarkingFittedPath(rawNed, { surveyRmsM });
+  const key = `${surveyRmsM ?? "-"}|${rawNed.map((p) => `${p.north},${p.east}`).join(";")}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const fitted = buildRoadMarkingFittedPath(rawNed, { surveyRmsM });
+  if (cache.size >= FIT_CACHE_MAX_ENTRIES) cache.clear();
+  cache.set(key, fitted);
+  return fitted;
+}
+
 /** Build one open road-marking PlanLine for a single already-split group of points. */
 function buildPlanLineForGroup(
   rawNed: RawNedPoint[],
@@ -992,11 +1016,12 @@ function buildPlanLineForGroup(
   surveyRmsM: number | null,
   groupingWarnings: string[] = [],
   sourcePoints: LocalPointCsvPoint[] = [],
-  gpsAnchor: { lat: number; lon: number } | null = null
+  gpsAnchor: { lat: number; lon: number } | null = null,
+  fitCache?: RoadMarkingFitCache
 ): PlanLine | null {
   const id = planLineIdForGroup(pathIndex);
   const label = planLineLabelForGroup(pathIndex, groupCount, groupLabel, sourcePointCount);
-  const fitted = buildRoadMarkingFittedPath(rawNed, { surveyRmsM });
+  const fitted = fitWithCache(rawNed, surveyRmsM, fitCache);
   const preview_points = stampGpsOnPreviewPoints(fitted.samples, sourcePoints, gpsAnchor);
   const extraWarnings = groupingWarnings.filter((w) => typeof w === "string" && w.length > 0);
 
@@ -1110,7 +1135,8 @@ function buildPlanLineForGroup(
  */
 export function localCsvPointsToPlanLines(
   points: LocalPointCsvPoint[],
-  gpsAnchor?: { lat: number; lon: number } | null
+  gpsAnchor?: { lat: number; lon: number } | null,
+  options?: { fitCache?: RoadMarkingFitCache }
 ): PlanLine[] {
   if (points.length === 0) return [];
 
@@ -1141,7 +1167,8 @@ export function localCsvPointsToPlanLines(
       groupSurveyRmsM(groupSourcePoints),
       groupingWarnings,
       groupSourcePoints,
-      gpsAnchor ?? null
+      gpsAnchor ?? null,
+      options?.fitCache
     );
     if (line) lines.push(line);
   }

@@ -33,6 +33,7 @@ import {
   type RoverPoseForEntry,
 } from "../../../utils/missionTrajectory";
 import type { LocalPointCsvResult } from "../../../utils/localPointCsv";
+import { isSendBlockedByEmptyEdit, isStaleSend } from "../../../utils/csvPointEditStatus";
 import { yieldToUi } from "../../../utils/runtimeGuards";
 import { isStagedHydrationLineId } from "../../../utils/stagedMissionHydration";
 import { FIELDS_COLORS } from "../fieldsTheme";
@@ -101,6 +102,14 @@ type CsvStageAndLoadPanelProps = {
   missionActionBusy: boolean;
   onBeginPathExclusive?: (kind: "send") => boolean;
   onEndPathExclusive?: (kind: "send") => void;
+  /**
+   * CSV point edit: current plan revision. Send stamps it before uploading and discards the result
+   * if an edit (delete / undo / redo / restore) landed meanwhile, so a stale geometry can never
+   * become the staged mission.
+   */
+  getPlanRevision?: () => number;
+  /** CSV points left after edits; 0 blocks Send with a clear message. Null = no CSV edit in play. */
+  csvPointsRemaining?: number | null;
 };
 
 function metres(value: number | null | undefined): string {
@@ -143,6 +152,8 @@ export function CsvStageAndLoadPanel({
   missionActionBusy,
   onBeginPathExclusive,
   onEndPathExclusive,
+  getPlanRevision,
+  csvPointsRemaining = null,
 }: CsvStageAndLoadPanelProps) {
   void _roverPose;
   void _setLines;
@@ -272,6 +283,13 @@ export function CsvStageAndLoadPanel({
       Alert.alert("Not connected", "Connect to the rover before sending the path.");
       return;
     }
+    if (isSendBlockedByEmptyEdit(csvPointsRemaining)) {
+      Alert.alert(
+        "No points left",
+        "Every CSV point was deleted, so there is nothing to send. Undo or Restore all in Edit points."
+      );
+      return;
+    }
     if (!readiness.canSend) {
       Alert.alert(
         "Send blocked",
@@ -311,6 +329,7 @@ export function CsvStageAndLoadPanel({
       return;
     }
 
+    const revisionAtSend = getPlanRevision?.();
     sendInFlightRef.current = true;
     if (onBeginPathExclusive && !onBeginPathExclusive("send")) {
       sendInFlightRef.current = false;
@@ -359,6 +378,16 @@ export function CsvStageAndLoadPanel({
           result.startBlocked ? "Verification Failed — Start Blocked" : "Send Failed",
           `Failed at step "${MISSION_STAGE_STEP_LABELS[result.failedStep ?? "build"]}"\n\n${message}`
         );
+        return;
+      }
+
+      // A point edit landed while this Send was uploading: the stored mission was built from
+      // geometry that is no longer on the map. Never stage it.
+      if (isStaleSend(revisionAtSend, getPlanRevision?.())) {
+        const message = "Points were edited while sending. Send again to use the current plan.";
+        setError(message);
+        onWorkflowStep?.("staged", "failed");
+        Alert.alert("Plan changed", message);
         return;
       }
 

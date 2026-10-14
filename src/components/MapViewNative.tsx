@@ -443,6 +443,9 @@ export function MapViewNative(props: MapViewProps) {
     onPlanAttached,
     anchorCandidates,
     onAnchorCandidateSelect,
+    csvEditPoints,
+    csvEditSelection,
+    onCsvEditPointPress,
   } = props;
   const telemetrySnapshot = liveTelemetry ?? telemetrySnapshotProp;
 
@@ -1116,6 +1119,66 @@ export function MapViewNative(props: MapViewProps) {
       onAnchorCandidateSelect?.({ lineId, north, east, kind });
     },
     [onAnchorCandidateSelect]
+  );
+
+  // ── CSV point edit mode ──
+  // Every point of the uploaded CSV(s) in ONE GeoJSON source (the 1,000-pin sample is useless for
+  // cleanup). Mapbox does the hit-testing via the ShapeSource hitbox, so no spatial index is
+  // needed here. Kept points, dimmed deleted points and the selection are three sources so a tap
+  // only rebuilds the small selection FC, never the (possibly 100k-feature) point FC.
+  const csvEditLookup = useMemo(() => {
+    const keep: GeoJSON.Feature[] = [];
+    const gone: GeoJSON.Feature[] = [];
+    const coordById = new Map<string, Coord>();
+    if (!csvEditPoints || csvEditPoints.length === 0 || !projectionOrigin) {
+      return { keep: featureCollection([]), gone: featureCollection([]), coordById };
+    }
+    for (const p of csvEditPoints) {
+      let coord: Coord;
+      if (p.lat != null && p.lon != null && Number.isFinite(p.lat) && Number.isFinite(p.lon)) {
+        coord = toMapboxCoord(p.lat, p.lon);
+      } else {
+        if (!Number.isFinite(p.north) || !Number.isFinite(p.east)) continue;
+        const gps = projectPlanNorthEastToGps(p.north, p.east, projectionOrigin);
+        coord = toMapboxCoord(gps.lat, gps.lon);
+      }
+      coordById.set(p.id, coord);
+      (p.deleted ? gone : keep).push(pointFeature(coord, { pid: p.id }));
+    }
+    return { keep: featureCollection(keep), gone: featureCollection(gone), coordById };
+  }, [csvEditPoints, projectionOrigin]);
+
+  const csvEditSelectedFC = useMemo((): GeoJSON.FeatureCollection => {
+    if (!csvEditSelection || csvEditSelection.size === 0) return featureCollection([]);
+    const feats: GeoJSON.Feature[] = [];
+    for (const id of csvEditSelection) {
+      const coord = csvEditLookup.coordById.get(id);
+      if (coord) feats.push(pointFeature(coord, { pid: id }));
+    }
+    return featureCollection(feats);
+  }, [csvEditSelection, csvEditLookup]);
+
+  const handleCsvEditPointPress = useCallback(
+    (event: ShapeSourcePressEvent) => {
+      const feats = event.features ?? [];
+      if (feats.length === 0) return;
+      // The hitbox can return several neighbours: take the one closest to the actual tap.
+      const tap = event.coordinates;
+      let bestId: string | null = null;
+      let bestD = Number.POSITIVE_INFINITY;
+      for (const f of feats) {
+        const pid = (f.properties as Record<string, unknown> | null)?.pid;
+        if (typeof pid !== "string") continue;
+        const c = f.geometry.type === "Point" ? (f.geometry.coordinates as number[]) : null;
+        const d = c && tap ? Math.hypot(c[0] - tap.longitude, c[1] - tap.latitude) : 0;
+        if (d < bestD) {
+          bestD = d;
+          bestId = pid;
+        }
+      }
+      if (bestId) onCsvEditPointPress?.(bestId);
+    },
+    [onCsvEditPointPress]
   );
 
   // ── Fields selection: highlighted line(s) + corner points ──
@@ -3340,6 +3403,64 @@ export function MapViewNative(props: MapViewProps) {
             }}
           />
         </ShapeSource>
+
+        {/* ── CSV point edit mode: deleted (dim) → kept (tappable) → selected (on top) ── */}
+        {csvEditPoints && csvEditPoints.length > 0 ? (
+          <>
+            <ShapeSource id="csv-edit-deleted" shape={csvEditLookup.gone}>
+              <CircleLayer
+                id="csv-edit-deleted-dot"
+                style={{
+                  circleRadius: 3.5,
+                  circleColor: "#ef4444",
+                  circleOpacity: 0.45,
+                }}
+              />
+            </ShapeSource>
+            <ShapeSource
+              id="csv-edit-points"
+              shape={csvEditLookup.keep}
+              onPress={handleCsvEditPointPress}
+              hitbox={{ width: 36, height: 36 }}
+            >
+              <CircleLayer
+                id="csv-edit-points-halo"
+                style={{ circleRadius: 9, circleColor: "#f59e0b", circleOpacity: 0.16 }}
+              />
+              <CircleLayer
+                id="csv-edit-points-core"
+                style={{
+                  circleRadius: 4,
+                  circleColor: "#f59e0b",
+                  circleStrokeColor: "#ffffff",
+                  circleStrokeWidth: 1,
+                  circleOpacity: 1,
+                }}
+              />
+            </ShapeSource>
+            <ShapeSource
+              id="csv-edit-selected"
+              shape={csvEditSelectedFC}
+              onPress={handleCsvEditPointPress}
+              hitbox={{ width: 36, height: 36 }}
+            >
+              <CircleLayer
+                id="csv-edit-selected-halo"
+                style={{ circleRadius: 12, circleColor: "#ec4899", circleOpacity: 0.3 }}
+              />
+              <CircleLayer
+                id="csv-edit-selected-core"
+                style={{
+                  circleRadius: 6,
+                  circleColor: "#ec4899",
+                  circleStrokeColor: "#ffffff",
+                  circleStrokeWidth: 2,
+                  circleOpacity: 1,
+                }}
+              />
+            </ShapeSource>
+          </>
+        ) : null}
 
         {/* ── Rover start: red pin ON the true start vertex; FROM + ▲ label slightly below ── */}
         <ShapeSource

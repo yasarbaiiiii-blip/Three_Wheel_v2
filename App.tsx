@@ -227,8 +227,6 @@ import {
   anchorToAlignedRefPoints,
 } from "./src/utils/stagedMissionHydration";
 import {
-  buildCsvTransitLines,
-  localCsvPointsToPlanLines,
   localCsvToMapPins,
   mergeLocalPointCsvResults,
   type LocalPointCsvResult,
@@ -259,6 +257,9 @@ import {
 } from "./src/utils/missionPathOrder";
 import { normalizeBearingDeg } from "./src/utils/planOffset";
 import { reanchorTargetLines } from "./src/utils/anchorReorder";
+import { buildCsvFileLines } from "./src/utils/csvFileLines";
+import { replacePrefixedLinesInPlace } from "./src/utils/csvFileLines";
+import { useCsvPointEdit } from "./src/hooks/useCsvPointEdit";
 import { computeOffsetResultLines } from "./src/utils/planOffsetApply";
 import { enforceAlignmentScale } from "./src/utils/designAlignmentPolicy";
 import type { MapGeometryFrame } from "./src/types/mapGeometry";
@@ -406,6 +407,7 @@ function AppRoot() {
       });
       return;
     }
+    csvEdit.markAllFilesTouched();
     setLines((prev) => transformPlanLinesGeometry(prev, transform));
   }
 
@@ -769,6 +771,7 @@ function AppRoot() {
           east: t.east - originDxfEast,
         };
       };
+      csvEdit.markAllFilesTouched();
       setLines((prev) => sanitizePlanLines(transformPlanLinesGeometry(prev, transformPt)));
       setAlignedRefPoints([{ dxf_x: 0, dxf_y: 0, lat: baseLat, lon: baseLon }]);
       setVerifiedAlignmentRequest({
@@ -1010,6 +1013,69 @@ function AppRoot() {
 
   /** A mission holds the vehicle: the plan on the map is the path being driven and is not edited meanwhile. */
   const planLocked = missionRunning;
+
+  /**
+   * CSV point edit mode (docs/CSV_POINT_EDIT_EXECUTION_PLAN.md). The original per-file parse is
+   * immutable; edits are a deleted-id set per file and the file's lines are re-derived from it.
+   */
+  const csvEdit = useCsvPointEdit({
+    planLocked,
+    getFiles: () => uploadedFilesRef.current,
+    getSharedOrigin: () => sharedOriginGpsRef.current,
+    applyFileLines: (file, fileLines, prefixed) => {
+      setLines((prev) =>
+        sanitizePlanLines(
+          prefixed
+            ? replacePrefixedLinesInPlace(prev, file.lineIdPrefix, fileLines)
+            : [...prev.filter((l) => l.layer === "virtual_boundary"), ...fileLines]
+        )
+      );
+    },
+    onPlanChanged: (change) => {
+      // Same "plan changed, demote and re-verify" policy Anchor / Offset use.
+      demoteWorkflowAfterBatchChange(false);
+      setAppPlannedStartSnapshot(null);
+      // Offset's reset baseline predates this edit; restoring it would undo the edit.
+      setPreOffsetSnapshot(null);
+      if (change.pathCountChanged) setSelectedLineId(null);
+      refreshCsvPreview();
+      showToast(
+        "Points edited",
+        `${change.summary}.${change.pathCountChanged ? " Path Order was reset." : ""} Plan changed — re-Send before Start.`,
+        "info"
+      );
+    },
+    onEnterEditMode: () => resetAnchorSelection(),
+    confirmResetGeometry: (names) =>
+      new Promise<boolean>((resolve) => {
+        Alert.alert(
+          "Redraw from the original CSV?",
+          `Editing points redraws ${names.join(", ")} from its original CSV and resets any Anchor, Offset or Move applied to it.`,
+          [
+            { text: "Cancel", style: "cancel", onPress: () => resolve(false) },
+            { text: "Continue", onPress: () => resolve(true) },
+          ],
+          { cancelable: true, onDismiss: () => resolve(false) }
+        );
+      }),
+    notify: (title, message, kind) => showToast(title, message, kind),
+  });
+
+  /** Preview/pins/readiness follow the REMAINING points of every CSV (not the original parse). */
+  function refreshCsvPreview() {
+    const parses = csvEdit.getEffectiveParses();
+    if (parses.length === 0) {
+      setLocalCsvPreview(null);
+    } else if (parses.length === 1) {
+      setLocalCsvPreview(parses[0]);
+    } else {
+      try {
+        setLocalCsvPreview(mergeLocalPointCsvResults(parses));
+      } catch {
+        setLocalCsvPreview(parses[parses.length - 1] ?? null);
+      }
+    }
+  }
   const [mapViewEnabled, setMapViewEnabled] = useState(true);
   const [resetNorthCount, setResetNorthCount] = useState(0);
   // Shared across every page (Home, Fields, Templates) so the top toolbar's
@@ -1330,6 +1396,7 @@ function AppRoot() {
     if (!localBatchActive) {
       setLocalCsvPreview(null);
       localCsvParsesRef.current = [];
+      csvEdit.reset();
       setLocalDxfMeta(null);
     }
   }, []);
@@ -1417,6 +1484,7 @@ function AppRoot() {
     setImportedPlan(null);
     setLocalCsvPreview(null);
     localCsvParsesRef.current = [];
+    csvEdit.reset();
     setLocalDxfMeta(null);
     setUploadedFiles([]);
     uploadedFilesRef.current = [];
@@ -1928,6 +1996,19 @@ function AppRoot() {
     return new Set(files.map((f) => f.lineIdPrefix));
   }
 
+  /** The first GPS-anchored contribution defines the plan's shared origin. */
+  function establishSharedOrigin(fileOrigin: { lat: number; lon: number }) {
+    const origin: [number, number] = [fileOrigin.lat, fileOrigin.lon];
+    setSharedOriginGps(origin);
+    sharedOriginGpsRef.current = origin;
+    setVerifiedAlignmentRequest({
+      origin_gps: origin,
+      rotation_deg: 0,
+    });
+    setAlignedRefPoints(anchorToAlignedRefPoints({ lat: fileOrigin.lat, lon: fileOrigin.lon }));
+    setGeoOriginDxf(origin);
+  }
+
   /**
    * Establish sharedOriginGps from the first GPS-anchored contribution, or rebase
    * geometry onto the existing shared origin. Returns lines ready to append.
@@ -1940,17 +2021,7 @@ function AppRoot() {
     const shared = sharedOriginGpsRef.current;
     let toAppend = rawLines;
     if (shared == null) {
-      const origin: [number, number] = [fileOrigin.lat, fileOrigin.lon];
-      setSharedOriginGps(origin);
-      sharedOriginGpsRef.current = origin;
-      setVerifiedAlignmentRequest({
-        origin_gps: origin,
-        rotation_deg: 0,
-      });
-      setAlignedRefPoints(
-        anchorToAlignedRefPoints({ lat: fileOrigin.lat, lon: fileOrigin.lon })
-      );
-      setGeoOriginDxf(origin);
+      establishSharedOrigin(fileOrigin);
     } else {
       toAppend = rebasePlanLinesToOrigin(
         rawLines,
@@ -1992,6 +2063,7 @@ function AppRoot() {
     sharedOriginGpsRef.current = null;
     setLocalCsvPreview(null);
     localCsvParsesRef.current = [];
+    csvEdit.reset();
     setLocalDxfMeta(null);
     setGeoOriginDxf(null);
     setLines((prev) => prev.filter((l) => l.layer === "virtual_boundary"));
@@ -2087,18 +2159,10 @@ function AppRoot() {
       if (idx >= 0) {
         localCsvParsesRef.current = localCsvParsesRef.current.filter((_, i) => i !== idx);
       }
-      const parses = localCsvParsesRef.current;
-      if (parses.length === 0) {
-        setLocalCsvPreview(null);
-      } else if (parses.length === 1) {
-        setLocalCsvPreview(parses[0]);
-      } else {
-        try {
-          setLocalCsvPreview(mergeLocalPointCsvResults(parses));
-        } catch {
-          setLocalCsvPreview(parses[parses.length - 1] ?? null);
-        }
-      }
+      // Forget the file's edits (other files' history stays), then rebuild the preview from
+      // what remains of every other CSV — deletions included.
+      csvEdit.removeFile(id);
+      refreshCsvPreview();
     }
 
     if (!remaining.some((f) => f.kind === "dxf")) {
@@ -2161,17 +2225,22 @@ function AppRoot() {
       localCsvParsesRef.current = [data];
       setLocalCsvPreview(data);
       setLocalDxfMeta(null);
-      const previewLines = chainMarkLinesByGeometry(
-        localCsvPointsToPlanLines(data.points, data.anchor)
-      );
-      const transitLines = buildCsvTransitLines(previewLines);
-      setLines(sanitizePlanLines([...previewLines, ...transitLines]));
-      setSelectedLineId(previewLines[0]?.id ?? null);
+      const prefix = allocateLineIdPrefix(data.fileName, new Set());
+      const nedFileId = `${prefix}-csv`;
+      csvEdit.reset(); // clears the old file's edits + fit memo BEFORE this build seeds the memo
+      const built = buildCsvFileLines({
+        parse: data,
+        fileId: nedFileId,
+        prefix: null,
+        fitCache: csvEdit.fitCache,
+      });
+      setLines(sanitizePlanLines(built.lines));
+      setSelectedLineId(built.lines[0]?.id ?? null);
       setVerifiedAlignmentRequest(null);
       setAlignedRefPoints([]);
-      const prefix = allocateLineIdPrefix(data.fileName, new Set());
+      csvEdit.registerParse(nedFileId, data, built);
       const entry: UploadedFileEntry = {
-        id: `${prefix}-csv`,
+        id: nedFileId,
         fileName: data.fileName,
         kind: "csv",
         isGeographic: false,
@@ -2186,30 +2255,24 @@ function AppRoot() {
     }
 
     localCsvParsesRef.current = [...localCsvParsesRef.current, data];
-    let previewForPins = data;
-    try {
-      previewForPins =
-        localCsvParsesRef.current.length === 1
-          ? data
-          : mergeLocalPointCsvResults(localCsvParsesRef.current);
-    } catch {
-      previewForPins = data;
-    }
-    setLocalCsvPreview(previewForPins);
 
     const used = usedPrefixesFromUploaded(uploadedFilesRef.current);
     const prefix = allocateLineIdPrefix(data.fileName, used);
     const fileId = `${prefix}-csv`;
 
-    const previewLines = chainMarkLinesByGeometry(
-      localCsvPointsToPlanLines(data.points, data.anchor)
-    );
-    const transitLines = buildCsvTransitLines(previewLines);
-    const integrated = integrateAnchoredLines(
-      [...previewLines, ...transitLines],
-      data.anchor,
-      prefix
-    );
+    // The same builder point edits use, with nothing deleted yet.
+    const sharedNow = sharedOriginGpsRef.current;
+    const built = buildCsvFileLines({
+      parse: data,
+      fileId,
+      prefix,
+      sharedOrigin: sharedNow ? { lat: sharedNow[0], lon: sharedNow[1] } : null,
+      fitCache: csvEdit.fitCache,
+    });
+    if (sharedNow == null) establishSharedOrigin(data.anchor);
+    const integrated = built.lines;
+    csvEdit.registerParse(fileId, data, built);
+    refreshCsvPreview();
 
     setLines((prev) => {
       const boundary = prev.filter((l) => l.layer === "virtual_boundary");
@@ -2405,6 +2468,7 @@ function AppRoot() {
   function handleClearLocalCsv() {
     setLocalCsvPreview(null);
     localCsvParsesRef.current = [];
+    csvEdit.reset();
     setLocalDxfMeta(null);
     setGeoOriginDxf(null);
     setUploadedFiles([]);
@@ -2472,6 +2536,8 @@ function AppRoot() {
       resetAnchorSelection();
       return;
     }
+    // One map-tap mode at a time: Anchor and point-edit selection never overlap.
+    csvEdit.setEditMode(false);
     setAnchorSelectMode(true);
     setAnchorTarget(null);
     setPendingAnchor(null);
@@ -2513,6 +2579,14 @@ function AppRoot() {
       return;
     }
     const chained = reanchored.chained;
+
+    // This file's geometry is now baked (split + re-chained): a point edit would redraw it from the CSV.
+    csvEdit.markFilesTouched(
+      targetLines.flatMap((l) => {
+        const f = fileForLineId(l.id, uploadedFiles);
+        return f && f.kind === "csv" ? [f.id] : [];
+      })
+    );
 
     setLines((prev) => {
       const untouched = prev.filter((l) => !targetIds.has(l.id));
@@ -2669,6 +2743,8 @@ function AppRoot() {
       setPreOffsetSnapshot(clonePlanLinesForSnapshot(lines));
     }
 
+    // Offset bakes into `lines`; scope may be a single file, so stay conservative and flag them all.
+    csvEdit.markAllFilesTouched();
     setLines(result.lines);
     demoteWorkflowAfterBatchChange(false);
     setAppPlannedStartSnapshot(null);
@@ -2689,6 +2765,7 @@ function AppRoot() {
     }
     if (!preOffsetSnapshot) return;
 
+    csvEdit.markAllFilesTouched();
     setLines(sanitizePlanLines(preOffsetSnapshot));
     demoteWorkflowAfterBatchChange(false);
     setAppPlannedStartSnapshot(null);
@@ -3116,6 +3193,7 @@ function AppRoot() {
     setSelectedLineId(null);
     setLocalCsvPreview(null);
     localCsvParsesRef.current = [];
+    csvEdit.reset();
     setLocalDxfMeta(null);
     setUploadedFiles([]);
     uploadedFilesRef.current = [];
@@ -3715,6 +3793,7 @@ function AppRoot() {
                             onAnchorCandidateSelect={handleAnchorCandidateSelect}
                             onConfirmAnchor={handleConfirmAnchor}
                             anchorAppliedToken={anchorAppliedToken}
+                            csvEdit={csvEdit}
                             offsetDistanceM={offsetDistanceM}
                             offsetBearingDeg={offsetBearingDeg}
                             offsetMode={offsetMode}
@@ -4158,6 +4237,8 @@ function SectionPages(props: {
   onAnchorCandidateSelect?: (candidate: AnchorCandidatePoint) => void;
   onConfirmAnchor?: () => void;
   anchorAppliedToken?: number;
+  /** CSV point edit mode (select / delete / undo / redo uploaded CSV points). */
+  csvEdit?: import("./src/hooks/useCsvPointEdit").CsvPointEditApi;
   /** Offset plan (whole-plan rigid shift toward an absolute compass bearing) — Fields Upload step. */
   offsetDistanceM?: number;
   offsetBearingDeg?: number;

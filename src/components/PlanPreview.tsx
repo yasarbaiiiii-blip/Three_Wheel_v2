@@ -12,7 +12,7 @@ import type { PlanLine, LayerVisibility } from "../types/plan";
 import type { MapGeometryFrame } from "../types/mapGeometry";
 import type { MultiPointPlacementPhase } from "../types/fieldsWorkflow";
 import type { PlacedItem } from "./BoundaryEditor";
-import type { AnchorCandidatePoint } from "./mapViewTypes";
+import type { AnchorCandidatePoint, CsvEditMapPoint } from "./mapViewTypes";
 import { MapView } from "./MapView";
 import { useSharedMapEnabled } from "./sharedMap/mapPrefs";
 import { Map as MapIcon } from "lucide-react-native";
@@ -109,6 +109,9 @@ export function PlanPreview({
   snapRefPoints,
   anchorCandidates,
   onAnchorCandidateSelect,
+  csvEditPoints,
+  csvEditSelection,
+  onCsvEditPointPress,
 }: {
   lines: PlanLine[];
   ghostLines?: PlanLine[] | null;
@@ -173,6 +176,9 @@ export function PlanPreview({
   snapRefPoints?: { lat: number; lon: number }[];
   anchorCandidates?: AnchorCandidatePoint[];
   onAnchorCandidateSelect?: (candidate: AnchorCandidatePoint) => void;
+  csvEditPoints?: CsvEditMapPoint[];
+  csvEditSelection?: ReadonlySet<string>;
+  onCsvEditPointPress?: (pointId: string) => void;
 }) {
   // True when the native map is the app-wide shared one sitting UNDER this view.
   const sharedMapBehind = useSharedMapEnabled() && mapViewEnabled && mapMode !== "templates";
@@ -1000,6 +1006,9 @@ export function PlanPreview({
             ghostLines={ghostLines}
             anchorCandidates={anchorCandidates}
             onAnchorCandidateSelect={onAnchorCandidateSelect}
+            csvEditPoints={csvEditPoints}
+            csvEditSelection={csvEditSelection}
+            onCsvEditPointPress={onCsvEditPointPress}
             alignedRefPoints={alignedRefPoints}
             mapGeometryFrame={mapGeometryFrame}
             geoOrigin={geoOrigin}

@@ -10,6 +10,7 @@ import { FieldsStatusHeader } from "../components/fields/FieldsStatusHeader";
 import { FIELDS_COLORS, FIELDS_LAYOUT } from "../components/fields/fieldsTheme";
 import { AlignDxfPanel } from "../components/fields/panels/AlignDxfPanel";
 import { AnchorPanel } from "../components/fields/panels/AnchorPanel";
+import { CsvPointEditPanel } from "../components/fields/panels/CsvPointEditPanel";
 import { CsvPathOrderStep } from "../components/fields/panels/CsvPathOrderStep";
 import { CsvStageAndLoadPanel } from "../components/fields/panels/CsvStageAndLoadPanel";
 import { TemplatePanel } from "../components/fields/panels/TemplatePanel";
@@ -176,6 +177,9 @@ export type FieldsPageProps = {
     onAnchorCandidateSelect?: (
       candidate: import("../components/mapViewTypes").AnchorCandidatePoint
     ) => void;
+    csvEditPoints?: import("../components/mapViewTypes").CsvEditMapPoint[];
+    csvEditSelection?: ReadonlySet<string>;
+    onCsvEditPointPress?: (pointId: string) => void;
   }) => React.ReactNode;
   localCsvPreview?: LocalPointCsvResult | null;
   /**
@@ -258,6 +262,8 @@ export type FieldsPageProps = {
   onConfirmAnchor?: () => void;
   /** Bumped each time an anchor is confirmed, so Path Order rebuilds its order from the re-chained plan. */
   anchorAppliedToken?: number;
+  /** CSV point edit mode (select / delete / undo / redo uploaded CSV points). */
+  csvEdit?: import("../hooks/useCsvPointEdit").CsvPointEditApi;
   /** Offset plan (whole-plan rigid shift toward an absolute compass bearing) — Upload step, before Path Order. */
   offsetDistanceM?: number;
   offsetBearingDeg?: number;
@@ -323,6 +329,20 @@ export function FieldsPage(props: FieldsPageProps) {
   );
   const [boundaryPosition, setBoundaryPosition] = useState<{ x: number; y: number } | null>(null);
   const [boundaryRotation, setBoundaryRotation] = useState<number>(0);
+
+  // After a CSV point edit, transit + extension lines are rebuilt from the CURRENT order. Path Order
+  // only re-emits them when its order changes, but a point edit usually keeps every line id (and so
+  // the order) while moving endpoints — without this the connectors would stay at the old endpoints.
+  const csvEditRevision = props.csvEdit?.planRevision ?? 0;
+  const lastDerivedRevisionRef = useRef(csvEditRevision);
+  const csvBatchRef = useRef(false);
+  csvBatchRef.current = uploadedFiles.some((f) => f.kind === "csv");
+  useEffect(() => {
+    if (csvEditRevision === lastDerivedRevisionRef.current) return;
+    lastDerivedRevisionRef.current = csvEditRevision;
+    if (!csvBatchRef.current) return;
+    setLines((prev) => applyCsvOrderToPlanLines(prev, csvPathOrder ?? [], csvExtensionConfig));
+  }, [csvEditRevision]); // eslint-disable-line react-hooks/exhaustive-deps -- reads the order/config of the render the revision changed in
 
   const { activeStep, setActiveStep, setIsTransformConfirmed, setManipulationMode, setShowMapInteraction, effectiveLayerVisibility } = useFieldsWorkflow(layerVisibility);
 
@@ -1095,6 +1115,9 @@ export function FieldsPage(props: FieldsPageProps) {
           onUpdateTemplateEditItem: selectedTemplate ? handleUpdateTemplateEditItem : undefined,
           anchorCandidates: anchorSelectMode ? anchorCandidates : undefined,
           onAnchorCandidateSelect,
+          csvEditPoints: props.csvEdit?.editMode ? props.csvEdit.points : undefined,
+          csvEditSelection: props.csvEdit?.editMode ? props.csvEdit.selection : undefined,
+          onCsvEditPointPress: props.csvEdit?.editMode ? props.csvEdit.onPointPress : undefined,
           mapGeometryFrame,
           geoOrigin,
           visibility: effectiveLayerVisibility,
@@ -1105,7 +1128,7 @@ export function FieldsPage(props: FieldsPageProps) {
           roverPosE: previewRoverPoint?.east ?? null,
           roverHeadingDeg: telemetrySnapshot?.heading_ned_deg ?? null,
           selectedPoints: alignGuidePins,
-          pathCsvPins: pathCsvPins ?? undefined,
+          pathCsvPins: props.csvEdit?.editMode ? undefined : pathCsvPins ?? undefined,
           onSelectPoint: canTapGuidePoints ? handleSelectPoint : undefined,
           onGuidePointFocus: alignSectionOpen ? handleGuidePointFocus : undefined,
           alignedRefPoints,
@@ -1505,6 +1528,7 @@ export function FieldsPage(props: FieldsPageProps) {
                 <CsvPathOrderStep
                   lines={lines}
                   reseedToken={anchorAppliedToken}
+                  resetToken={props.csvEdit?.pathOrderResetToken ?? 0}
                   selectedLineId={selectedLineId}
                   onSelectLine={handleMapSelectLine}
                   extensionConfig={csvExtensionConfig}
@@ -1539,6 +1563,9 @@ export function FieldsPage(props: FieldsPageProps) {
                         paddingTop: 12,
                       }}
                     >
+                      {props.csvEdit ? (
+                        <CsvPointEditPanel edit={props.csvEdit} planLocked={!!missionRunning} />
+                      ) : null}
                       <AnchorPanel
                         anchorAvailable={anchorAvailable}
                         anchorSelectMode={anchorSelectMode}
@@ -1586,6 +1613,10 @@ export function FieldsPage(props: FieldsPageProps) {
                                 pose_age_ms: telemetrySnapshot.pose_age_ms,
                               }
                             : null
+                        }
+                        getPlanRevision={props.csvEdit?.getPlanRevision}
+                        csvPointsRemaining={
+                          props.csvEdit?.hasCsv ? props.csvEdit.remainingTotal : null
                         }
                         onAppPlannedStartSnapshot={onAppPlannedStartSnapshot}
                         dashPattern={dashPattern ?? null}

@@ -89,6 +89,8 @@ type CsvPathOrderStepProps = {
    * order is rebuilt from `lines` so the sent mission follows the new anchor, not the old order.
    */
   reseedToken?: number;
+  /** Bumped when line ids were renumbered (a point edit changed a file's path count): full order + paint reset. */
+  resetToken?: number;
   onOrderChange?: (orderedPaintedLines: PlanLine[], fullOrder: CsvPathOrderEntry[]) => void;
   /** Shared with the map — tap a row to highlight that path on the plan. */
   selectedLineId?: string | null;
@@ -169,6 +171,7 @@ function buildInterleavedRows(
 export function CsvPathOrderStep({
   lines,
   reseedToken = 0,
+  resetToken = 0,
   onOrderChange,
   selectedLineId = null,
   onSelectLine,
@@ -222,6 +225,15 @@ export function CsvPathOrderStep({
       return next;
     });
   }, [markKey]); // markKey only — not markLines reference (avoids thrash when parent rebuilds transit)
+
+  // A point edit changed how many paths a file has, so line ids were renumbered: the old order and
+  // paint/skip flags no longer describe the same paths. Start over from the default order.
+  const lastResetTokenRef = useRef(resetToken);
+  useEffect(() => {
+    if (resetToken === lastResetTokenRef.current) return;
+    lastResetTokenRef.current = resetToken;
+    setOrder(defaultPathOrder(markLines));
+  }, [resetToken]); // eslint-disable-line react-hooks/exhaustive-deps -- reads the markLines of this render on purpose
 
   // Declared after the sync effect above so, in the same commit, the reseed wins over it.
   const lastReseedTokenRef = useRef(reseedToken);

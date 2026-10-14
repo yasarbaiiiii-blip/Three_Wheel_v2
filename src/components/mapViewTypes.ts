@@ -170,7 +170,26 @@ export interface MapViewProps {
   anchorCandidates?: AnchorCandidatePoint[];
   /** Fired when the operator taps a rendered anchor candidate dot. */
   onAnchorCandidateSelect?: (candidate: AnchorCandidatePoint) => void;
+  /**
+   * CSV point edit mode: EVERY point of the uploaded CSV(s) (not the 1,000-pin sample), drawn as
+   * one GeoJSON layer so Mapbox does the hit-testing. Deleted points are shown dimmed.
+   */
+  csvEditPoints?: CsvEditMapPoint[];
+  /** Ids of the currently selected points (drawn highlighted). */
+  csvEditSelection?: ReadonlySet<string>;
+  /** Fired with the tapped point's id. */
+  onCsvEditPointPress?: (pointId: string) => void;
 }
+
+/** Structural subset of `CsvEditablePoint` — all the map needs. */
+export type CsvEditMapPoint = {
+  id: string;
+  north: number;
+  east: number;
+  lat?: number;
+  lon?: number;
+  deleted: boolean;
+};
 
 export type AnchorCandidatePoint = {
   lineId: string;
