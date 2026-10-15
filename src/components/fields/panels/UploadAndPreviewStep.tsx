@@ -12,7 +12,6 @@ import {
   CSV_EXT_AFT_FLOOR_M,
   CSV_EXT_MAX_M,
   CSV_EXT_WARN_M,
-  DXF_EXTENSION_CONFIG,
   isCompleteExtensionDraft,
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
@@ -502,11 +501,6 @@ export function UploadAndPreviewStep({
       setPickedFiles([]);
       setImportError(null);
       setAppendOnImport(false);
-      if (onCsvExtensionConfigChange && csvExtensionConfig) {
-        // per-line: CAD edges are independent PRE→MARK→AFT passes, and it is the only
-        // mode under which a closed shape (a square drawn as one polyline) gets run-ups.
-        onCsvExtensionConfigChange(normalizeCsvExtensionConfig(DXF_EXTENSION_CONFIG));
-      }
       if (__DEV__ && allWarnings.length > 0) {
         console.log(`[import][dxf-local] ${allWarnings.length} warning(s)`);
       }

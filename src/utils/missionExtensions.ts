@@ -102,6 +102,20 @@ export function normalizeCsvExtensionConfig(
   return { enabled, preM, aftM, perLine };
 }
 
+/**
+ * Mission-level import transition. DXF presence selects CAD per-line semantics; a new CSV mission
+ * selects chain-end semantics; appending CSV to an existing/mixed mission preserves its policy.
+ */
+export function extensionConfigAfterFileImport(
+  current: CsvExtensionConfig,
+  importedKind: "csv" | "dxf",
+  hasExistingFiles: boolean
+): CsvExtensionConfig {
+  if (importedKind === "dxf") return normalizeCsvExtensionConfig(DXF_EXTENSION_CONFIG);
+  if (!hasExistingFiles) return normalizeCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG);
+  return normalizeCsvExtensionConfig(current);
+}
+
 /** True when a PRE/AFT text field is a finished number (not "", "-", or "1."). */
 export function isCompleteExtensionDraft(raw: string): boolean {
   const trimmed = raw.trim();

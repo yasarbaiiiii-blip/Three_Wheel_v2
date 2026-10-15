@@ -19,6 +19,22 @@ export type TemplatePose = {
   scale: number;
 };
 
+export const TEMPLATE_PENDING_ALIGNMENT_REASON =
+  "Align the metric DXF first so the template is not moved twice.";
+
+/**
+ * Templates may start an empty local plan. The only placement-time blocker is an existing metric
+ * DXF whose transform is still pending; GPS-origin requirements remain enforced later by Send.
+ */
+export function templatePlacementPolicy(
+  files: ReadonlyArray<Pick<UploadedFileEntry, "status">>
+): { canPlace: boolean; reason: string | null } {
+  const pendingAlignment = files.some((file) => file.status === "needs_alignment");
+  return pendingAlignment
+    ? { canPlace: false, reason: TEMPLATE_PENDING_ALIGNMENT_REASON }
+    : { canPlace: true, reason: null };
+}
+
 /** Axis-aligned center of local drawing strokes (x right, y up). */
 export function localTemplateCentroid(sourceLines: PlanLine[]): { x: number; y: number } {
   let minX = Infinity;

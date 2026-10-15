@@ -7,8 +7,8 @@ import { BoundaryEditor, PlacedItem } from "../components/BoundaryEditor";
 import { generateAlphabetLines, FontStyle, AlphabetType, NumberType, generateNumberLines, generateTextLines } from "../utils/characterTemplates";
 import { generateRoadSignLines, RoadSignType, ROAD_SIGN_LABELS } from "../utils/roadSignTemplates";
 import { generateTemplateLines, ShapeType, ArcType } from "../utils/shapeTemplates";
-import { linesToDxf } from "../utils/dxfGenerator";
-import { parseLocalDxf, type LocalDxfResult } from "../utils/dxfLocalImport";
+import type { LocalDxfResult } from "../utils/dxfLocalImport";
+import { importGeneratedTemplateToFields } from "../utils/generatedTemplateImport";
 import { DesignDocument, isDesignInstance, isDesignEntity, createDesignDocument, createDesignInstance, createDesignEntity, DesignPreviewAnchor } from "../types/designDocument";
 import { TemplateRegistry, createTemplateDefinition, snapshotTemplateId } from "../utils/designTemplateRegistry";
 import { flattenDesignDocument, flattenDesignNode } from "../utils/designTransform";
@@ -330,6 +330,9 @@ export function TemplatesPage(props: TemplatesPageProps) {
   const [arcType, setArcType] = useState<ArcType>("full");
   const [sizeInput, setSizeInput] = useState("1.0");
   const [isParsing, setIsParsing] = useState(false);
+  const templateImportInFlightRef = useRef(false);
+  const templateImportMountedRef = useRef(true);
+  const templateNavigationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [inputText, setInputText] = useState("");
   const [previewText, setPreviewText] = useState("");
 
@@ -340,6 +343,15 @@ export function TemplatesPage(props: TemplatesPageProps) {
   const [activeLetterSpacingCm, setActiveLetterSpacingCm] = useState(10);
 
   const [showBoundaryPoints, setShowBoundaryPoints] = useState(false);
+
+  useEffect(() => {
+    templateImportMountedRef.current = true;
+    return () => {
+      templateImportMountedRef.current = false;
+      templateImportInFlightRef.current = false;
+      if (templateNavigationTimerRef.current) clearTimeout(templateNavigationTimerRef.current);
+    };
+  }, []);
 
   const parsedSize = Math.max(0.1, parseFloat(sizeInput) || 1.0);
 
@@ -894,23 +906,21 @@ export function TemplatesPage(props: TemplatesPageProps) {
   }, [designDocument.nodes, selectedItemIds, executeCommand]);
 
   const handleParse = async () => {
-    let finalLines: PlanLine[] = [];
-    let title = "";
-
+    if (templateImportInFlightRef.current) return;
+    let title: string;
+    let buildLines: () => PlanLine[];
     if (boundaryMode) {
       if (placedItems.length === 0) {
         Alert.alert("Empty Boundary", "No items placed in boundary.");
         return;
       }
       title = `Boundary_${bw}x${bh}_${new Date().toISOString().slice(0,10)}`;
-      const flattened = flattenDesignDocument(designDocument, templateRegistryRef.current);
-      flattened.forEach((l) => {
+      buildLines = () => flattenDesignDocument(designDocument, templateRegistryRef.current).map((l) => {
         const fx = l.from.x; // north
         const fy = l.from.y; // east
         const tx = l.to.x;   // north
         const ty = l.to.y;   // east
-        
-        finalLines.push({
+        return {
           ...l,
           entity: {
             entity_id: l.id,
@@ -925,7 +935,7 @@ export function TemplatesPage(props: TemplatesPageProps) {
               { north: tx, east: ty },
             ],
           } as DxfEntity,
-        });
+        };
       });
     } else {
       if (previewLines.length === 0) {
@@ -946,25 +956,36 @@ export function TemplatesPage(props: TemplatesPageProps) {
         }
       };
       title = getSelectedTemplateName();
-      finalLines = previewLines;
+      buildLines = () => previewLines;
     }
 
+    templateImportInFlightRef.current = true;
     setIsParsing(true);
     try {
-      // The template is a plan like any other: write its DXF, parse it on the device and hand it to
-      // the Fields workflow (align, order, Send). Nothing goes to the rover until Send.
-      const fileName = `${title.replace(/\s+/g, "_")}.dxf`;
-      const parsed = parseLocalDxf(linesToDxf(finalLines, fileName), fileName);
-      props.onBeginLocalImportBatch?.();
-      props.onLocalDxfParsed?.(parsed);
-      props.setImportedPlan({ fileName, uri: "", fileType: "dxf", source: "generated" });
+      const { fileName } = await importGeneratedTemplateToFields({
+        title,
+        buildLines,
+        onBeginLocalImportBatch: props.onBeginLocalImportBatch,
+        onLocalDxfParsed: props.onLocalDxfParsed,
+        setImportedPlan: props.setImportedPlan,
+      });
       Alert.alert("Template ready", `"${fileName}" is in the plan. Switching to the Fields view.`);
-      setTimeout(() => props.onNav("fields"), 300);
+      if (templateNavigationTimerRef.current) clearTimeout(templateNavigationTimerRef.current);
+      templateNavigationTimerRef.current = setTimeout(() => {
+        templateNavigationTimerRef.current = null;
+        try {
+          props.onNav("fields");
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Could not open Fields.";
+          Alert.alert("Navigation failed", message);
+        }
+      }, 300);
     } catch (err: any) {
       console.log("Error importing template:", err);
       Alert.alert("Error", err.message || "Could not use the template.");
     } finally {
-      setIsParsing(false);
+      templateImportInFlightRef.current = false;
+      if (templateImportMountedRef.current) setIsParsing(false);
     }
   };
 

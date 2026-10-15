@@ -93,6 +93,12 @@ import {
   buildTrajectory,
   resolveRoverNedInMissionFrame,
 } from "./src/utils/missionTrajectory";
+import {
+  DEFAULT_CSV_EXTENSION_CONFIG,
+  extensionConfigAfterFileImport,
+  normalizeCsvExtensionConfig,
+  type CsvExtensionConfig,
+} from "./src/utils/missionExtensions";
 import type { MissionLayer } from "./src/types/missionLayers";
 import {
   applyMissionTerminalOutcome,
@@ -937,6 +943,13 @@ function AppRoot() {
     isGeographic: boolean;
     warnings: string[];
   } | null>(null);
+  /**
+   * Mission-owned PRE/AFT policy. Fields is conditionally mounted, so keeping this in App prevents
+   * a navigation/remount from silently changing a DXF from per-line to CSV chain-end mode.
+   */
+  const [csvExtensionConfig, setCsvExtensionConfig] = useState<CsvExtensionConfig>(() =>
+    normalizeCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG)
+  );
   /**
    * Local multi-type batch (CSV + metric DXF + geo-DXF). Per-file status gates
    * Path Order & Load; geometry stays flat in `lines` with id prefixes.
@@ -2051,6 +2064,7 @@ function AppRoot() {
    * Keeps virtual_boundary strokes.
    */
   function handleBeginLocalImportBatch() {
+    setCsvExtensionConfig(normalizeCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG));
     setUploadedFiles([]);
     uploadedFilesRef.current = [];
     setPlacedTemplates([]);
@@ -2209,6 +2223,11 @@ function AppRoot() {
    * / load live in CsvStageAndLoadPanel.
    */
   function handleLocalCsvParsed(data: LocalPointCsvResult) {
+    // A new CSV batch owns chain-end extension semantics. Appending to a DXF batch is handled as a
+    // mixed CAD-style mission and the later DXF parse will select per-line mode.
+    setCsvExtensionConfig((current) =>
+      extensionConfigAfterFileImport(current, "csv", uploadedFilesRef.current.length > 0)
+    );
     setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
     setVisualAlignmentAnchor(null);
@@ -2307,6 +2326,10 @@ function AppRoot() {
    * metric DXF is held in pendingDxfAlignment until Fix Alignment.
    */
   function handleLocalDxfParsed(data: LocalDxfResult) {
+    // DXF edges are independent passes. Keep this mission-level so Fields remounts cannot revert it.
+    setCsvExtensionConfig((current) =>
+      extensionConfigAfterFileImport(current, "dxf", uploadedFilesRef.current.length > 0)
+    );
     setVisualAlignmentItem(null);
     setIsVisualAlignmentMode(false);
 
@@ -2467,6 +2490,7 @@ function AppRoot() {
   }
 
   function handleClearLocalCsv() {
+    setCsvExtensionConfig(normalizeCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG));
     setLocalCsvPreview(null);
     localCsvParsesRef.current = [];
     csvEdit.reset();
@@ -3190,6 +3214,7 @@ function AppRoot() {
     }
     logAction("CLEAR_PLAN", { selectedLines: lines.length });
     setImportedPlan(null);
+    setCsvExtensionConfig(normalizeCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG));
     setLines([]);
     setSelectedLineId(null);
     setLocalCsvPreview(null);
@@ -3758,6 +3783,8 @@ function AppRoot() {
                             stopRtk={stopRtk}
                             localCsvPreview={localCsvPreview}
                             localDxfMeta={localDxfMeta}
+                            csvExtensionConfig={csvExtensionConfig}
+                            setCsvExtensionConfig={setCsvExtensionConfig}
                             uploadedFiles={uploadedFiles}
                             placedTemplates={placedTemplates}
                             onPlaceTemplate={handlePlaceTemplate}
@@ -4184,6 +4211,8 @@ function SectionPages(props: {
     isGeographic: boolean;
     warnings: string[];
   } | null;
+  csvExtensionConfig: CsvExtensionConfig;
+  setCsvExtensionConfig: React.Dispatch<React.SetStateAction<CsvExtensionConfig>>;
   uploadedFiles?: UploadedFileEntry[];
   placedTemplates?: import("./src/types/uploadedFiles").PlacedTemplateInstance[];
   onPlaceTemplate?: (args: {

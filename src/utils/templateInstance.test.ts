@@ -10,6 +10,7 @@ import {
   instanceForLineId,
   removePrefixedLines,
   replacePrefixedLines,
+  templatePlacementPolicy,
   toCenteredPlanFrameLines,
 } from "./templateInstance";
 
@@ -30,6 +31,20 @@ function bakedCentroid(lines: { entity?: { preview_points?: { north: number; eas
 }
 
 describe("templateInstance", () => {
+  it("allows a template to start an empty local plan", () => {
+    expect(templatePlacementPolicy([])).toEqual({ canPlace: true, reason: null });
+  });
+
+  it("blocks placement only while an existing metric DXF still needs alignment", () => {
+    expect(templatePlacementPolicy([{ status: "verified" }])).toEqual({
+      canPlace: true,
+      reason: null,
+    });
+    const pending = templatePlacementPolicy([{ status: "needs_alignment" }]);
+    expect(pending.canPlace).toBe(false);
+    expect(pending.reason).toMatch(/Align the metric DXF/i);
+  });
+
   it("centers drawing strokes on the plan-frame origin", () => {
     const centered = toCenteredPlanFrameLines(makeAsymmetricLTemplate(4));
     const c = bakedCentroid(centered);

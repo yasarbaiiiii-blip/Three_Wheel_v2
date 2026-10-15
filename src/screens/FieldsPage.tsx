@@ -21,6 +21,7 @@ import { designObbFromLines } from "../utils/planResizeHandles";
 import {
   ghostLinesForPose,
   instanceForLineId,
+  templatePlacementPolicy,
   toCenteredPlanFrameLines,
 } from "../utils/templateInstance";
 import {
@@ -37,7 +38,6 @@ import {
 } from "../utils/missionPathOrder";
 import {
   buildCsvExtensionLines,
-  DEFAULT_CSV_EXTENSION_CONFIG,
   isMissionClosedLoop,
   type CsvExtensionConfig,
 } from "../utils/missionExtensions";
@@ -192,6 +192,9 @@ export type FieldsPageProps = {
     isGeographic: boolean;
     warnings: string[];
   } | null;
+  /** Mission-owned so navigation/remount cannot change DXF per-line policy back to CSV defaults. */
+  csvExtensionConfig: CsvExtensionConfig;
+  setCsvExtensionConfig: React.Dispatch<React.SetStateAction<CsvExtensionConfig>>;
   /** Multi-type local batch (CSV + metric/geo DXF). */
   uploadedFiles?: import("../types/uploadedFiles").UploadedFileEntry[];
   placedTemplates?: import("../types/uploadedFiles").PlacedTemplateInstance[];
@@ -304,7 +307,7 @@ function mergePendingDxfLines(
 
 export function FieldsPage(props: FieldsPageProps) {
   perfCount("FieldsPage.render");
-  const { importedPlan, setImportedPlan, lines, mapGeometryFrame = "NONE", geoOrigin = null, setLines, previewRoverPoint, missionRunning, telemetrySnapshot, selectedLineId, layerVisibility, onMissionStored, missionActionBusy, onBeginPathExclusive, onEndPathExclusive, onSelectLine, highlightLineIds = null, apiBaseUrl, onWorkflowStep, stagedWorkflow, alignmentResult, setAlignmentResult, verifiedAlignmentRequest, setVerifiedAlignmentRequest, setStagedPlanResult, setStagedMissionId, onInvalidateWorkflow, onAppPlannedStartSnapshot, dashPattern, alignedRefPoints = [], setAlignedRefPoints, mapViewEnabled = true, showRefPointLabels = false, activeRefPointLabelIndex = null, setActiveRefPointLabelIndex, isVisualAlignmentMode, visualAlignmentItem, setVisualAlignmentItem, setVisualAlignmentAnchor, onStartVisualAlignment, onConfirmVisualAlignment, isPlanEditingMode, onStartPlanEditing, onStopPlanEditing, multiPointPlacementPhase = "idle", onPlanAttached, onPlanResizeDone, onFitToReferencePoints, extractedCorners, setExtractedCorners, onClearMission, renderPlanPreview, localCsvPreview = null, localDxfMeta = null, uploadedFiles = [], placedTemplates = [], onPlaceTemplate, onUpdateTemplateInstance, onRemoveTemplate, onRemoveUploadedFile, pendingDxfAlignment = {}, setPendingDxfAlignment, sharedOriginGps = null, onBeginLocalImportBatch, onAlignContextChange, onCommitDxfFileAlignment, onLocalCsvParsed, onLocalDxfParsed, onClearLocalCsv, missionLayers = [], controlModeActive = false, canUseMissionControl = false, pendingLayerAssignment = null, onPendingLayerAssignment, onAssignFileToNewLayer, onAssignFileToLayer, onUnassignFileFromLayer, missionVisibleLines, anchorAvailable = false, anchorSelectMode = false, anchorTargetOptions = [], anchorTarget = null, pendingAnchor = null, anchorCandidates = [], anchorIsolatedLines = [], onAnchorPress, onSelectAnchorTarget, onAnchorCandidateSelect, onConfirmAnchor, anchorAppliedToken = 0, offsetDistanceM = 0, offsetBearingDeg = 0, onOffsetDistanceChange, onOffsetBearingChange, onApplyOffset, offsetTargetOptions = [], offsetTarget = null, onOffsetTargetChange, offsetResetAvailable = false, onResetOffset, onOffsetDragStateChange, offsetPreviewLines = null } = props;
+  const { importedPlan, setImportedPlan, lines, mapGeometryFrame = "NONE", geoOrigin = null, setLines, previewRoverPoint, missionRunning, telemetrySnapshot, selectedLineId, layerVisibility, onMissionStored, missionActionBusy, onBeginPathExclusive, onEndPathExclusive, onSelectLine, highlightLineIds = null, apiBaseUrl, onWorkflowStep, stagedWorkflow, alignmentResult, setAlignmentResult, verifiedAlignmentRequest, setVerifiedAlignmentRequest, setStagedPlanResult, setStagedMissionId, onInvalidateWorkflow, onAppPlannedStartSnapshot, dashPattern, alignedRefPoints = [], setAlignedRefPoints, mapViewEnabled = true, showRefPointLabels = false, activeRefPointLabelIndex = null, setActiveRefPointLabelIndex, isVisualAlignmentMode, visualAlignmentItem, setVisualAlignmentItem, setVisualAlignmentAnchor, onStartVisualAlignment, onConfirmVisualAlignment, isPlanEditingMode, onStartPlanEditing, onStopPlanEditing, multiPointPlacementPhase = "idle", onPlanAttached, onPlanResizeDone, onFitToReferencePoints, extractedCorners, setExtractedCorners, onClearMission, renderPlanPreview, localCsvPreview = null, localDxfMeta = null, csvExtensionConfig, setCsvExtensionConfig, uploadedFiles = [], placedTemplates = [], onPlaceTemplate, onUpdateTemplateInstance, onRemoveTemplate, onRemoveUploadedFile, pendingDxfAlignment = {}, setPendingDxfAlignment, sharedOriginGps = null, onBeginLocalImportBatch, onAlignContextChange, onCommitDxfFileAlignment, onLocalCsvParsed, onLocalDxfParsed, onClearLocalCsv, missionLayers = [], controlModeActive = false, canUseMissionControl = false, pendingLayerAssignment = null, onPendingLayerAssignment, onAssignFileToNewLayer, onAssignFileToLayer, onUnassignFileFromLayer, missionVisibleLines, anchorAvailable = false, anchorSelectMode = false, anchorTargetOptions = [], anchorTarget = null, pendingAnchor = null, anchorCandidates = [], anchorIsolatedLines = [], onAnchorPress, onSelectAnchorTarget, onAnchorCandidateSelect, onConfirmAnchor, anchorAppliedToken = 0, offsetDistanceM = 0, offsetBearingDeg = 0, onOffsetDistanceChange, onOffsetBearingChange, onApplyOffset, offsetTargetOptions = [], offsetTarget = null, onOffsetTargetChange, offsetResetAvailable = false, onResetOffset, onOffsetDragStateChange, offsetPreviewLines = null } = props;
 
   const [selectedUploadedFileId, setSelectedUploadedFileId] = useState<string | null>(null);
 
@@ -325,10 +328,7 @@ export function FieldsPage(props: FieldsPageProps) {
 
   /** CSV path order / paint flags from CsvPathOrderStep (Phase 3). */
   const [csvPathOrder, setCsvPathOrder] = useState<CsvPathOrderEntry[] | null>(null);
-  /** Local CSV PRE/AFT extensions (app-owned; not saved via /extensions). */
-  const [csvExtensionConfig, setCsvExtensionConfig] = useState<CsvExtensionConfig>(
-    DEFAULT_CSV_EXTENSION_CONFIG
-  );
+  /** PRE/AFT extensions are mission-owned by App; this page is conditionally mounted. */
   const [boundaryPosition, setBoundaryPosition] = useState<{ x: number; y: number } | null>(null);
   const [boundaryRotation, setBoundaryRotation] = useState<number>(0);
 
@@ -414,18 +414,9 @@ export function FieldsPage(props: FieldsPageProps) {
   const [tplScale, setTplScale] = useState(false);
   const [tplRotate, setTplRotate] = useState(false);
 
-  const needsAlign = uploadedFiles.some((f) => f.status === "needs_alignment");
-  const hasMissionFrame = Boolean(
-    sharedOriginGps ||
-      (verifiedAlignmentRequest?.origin_gps &&
-        Array.isArray(verifiedAlignmentRequest.origin_gps) &&
-        verifiedAlignmentRequest.origin_gps.length >= 2) ||
-      selectMarkPlanLines(lines).length > 0
-  );
-  const canPlaceTemplates = hasMissionFrame && !needsAlign;
-  const placeBlockedReason = needsAlign
-    ? "Align the metric DXF first so the template is not moved twice."
-    : "Import a survey or aligned plan first so the template has a map frame.";
+  const templatePlacement = useMemo(() => templatePlacementPolicy(uploadedFiles), [uploadedFiles]);
+  const canPlaceTemplates = templatePlacement.canPlace;
+  const placeBlockedReason = templatePlacement.reason;
 
   const templateGhostLines = useMemo(() => {
     if (tplSession !== "ghost" || !tplDraft || !tplGhostPose) return null;
@@ -698,6 +689,7 @@ export function FieldsPage(props: FieldsPageProps) {
   const hasPendingAlignment = uploadedFiles.some((f) => f.status === "needs_alignment");
   const batchHasDxf = uploadedFiles.some((f) => f.kind === "dxf");
   const batchHasCsv = uploadedFiles.some((f) => f.kind === "csv");
+  const batchHasTemplate = uploadedFiles.some((f) => f.kind === "template");
   // Determine step statuses
   const hasPath =
     !!importedPlan ||
@@ -1246,7 +1238,7 @@ export function FieldsPage(props: FieldsPageProps) {
         onBeginPlace={(draft) => {
           if (blockPlanEdit("Placing a template")) return;
           if (!canPlaceTemplates) {
-            Alert.alert("Cannot place yet", placeBlockedReason);
+            Alert.alert("Cannot place yet", placeBlockedReason ?? "Template placement is unavailable.");
             return;
           }
           setTplDraft(draft);
@@ -1424,7 +1416,6 @@ export function FieldsPage(props: FieldsPageProps) {
                 onLocalDxfParsed?.(data);
                 setShowMapInteraction(true);
                 setCsvPathOrder(null);
-                setCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG);
                 // A georeferenced DXF is already placed, so Align has nothing to do and the
                 // operator goes straight to ordering. A metric one cannot be sent until it is
                 // aligned (the mission anchor is origin_gps), so lead with Align open.
@@ -1438,7 +1429,6 @@ export function FieldsPage(props: FieldsPageProps) {
                 onLocalCsvParsed?.(data);
                 setShowMapInteraction(true);
                 setCsvPathOrder(null);
-                setCsvExtensionConfig(DEFAULT_CSV_EXTENSION_CONFIG);
                 // Land on Upload so the Enable Extension card is the next thing seen.
                 // Path Order sits right below as a collapsed header.
                 setActiveStep("upload");
@@ -1585,9 +1575,11 @@ export function FieldsPage(props: FieldsPageProps) {
                       <CsvStageAndLoadPanel
                         apiBaseUrl={apiBaseUrl}
                         sourceKind={
-                          batchHasDxf ||
-                          isLocalDxfFlow ||
-                          (hasLocalBatch && uploadedFiles.length > 1)
+                          batchHasTemplate && !batchHasDxf && !batchHasCsv
+                            ? "template"
+                            : batchHasDxf ||
+                                isLocalDxfFlow ||
+                                (hasLocalBatch && uploadedFiles.length > 1)
                             ? "dxf"
                             : "csv"
                         }

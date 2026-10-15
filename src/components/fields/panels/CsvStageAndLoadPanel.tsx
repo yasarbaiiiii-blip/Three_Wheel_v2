@@ -45,8 +45,9 @@ type CsvStageAndLoadPanelProps = {
    * Which import owns this panel:
    * - `"csv"`: survey points → frontend fits lines → app-planned mission
    * - `"dxf"`: real DXF path geometry already in `lines` → app-planned mission
+   * - `"template"`: local template geometry; requires an external GPS origin before Send
    */
-  sourceKind?: "csv" | "dxf";
+  sourceKind?: "csv" | "dxf" | "template";
   /**
    * CSV local preview (required for CSV).
    * Not used when `sourceKind === "dxf"` (geometry lives in `lines`).
@@ -182,7 +183,9 @@ export function CsvStageAndLoadPanel({
   // Prefer explicit sourceKind; fall back to legacy heuristic for callers that omit it.
   const isDxfLocal =
     sourceKind === "dxf" ||
+    sourceKind === "template" ||
     (sourceKind == null && localCsvPreview == null && originGps != null);
+  const isTemplateLocal = sourceKind === "template";
 
   const markLines = useMemo(() => selectMarkPlanLines(lines), [lines]);
   const order = useMemo(
@@ -203,7 +206,7 @@ export function CsvStageAndLoadPanel({
   const resolvedMissionName =
     missionName?.replace(/\.[^.]+$/, "") ||
     localCsvPreview?.fileName?.replace(/\.[^.]+$/, "") ||
-    (isDxfLocal ? "dxf_mission" : "csv_mission");
+    (isTemplateLocal ? "template_mission" : isDxfLocal ? "dxf_mission" : "csv_mission");
 
   const combinedWarnings = useMemo(() => {
     const fromCsv = localCsvPreview?.warnings ?? [];
@@ -296,6 +299,13 @@ export function CsvStageAndLoadPanel({
       );
       return;
     }
+    if (!resolvedOriginGps && isTemplateLocal) {
+      const message =
+        "No GPS origin. You can edit this template locally, but add a GPS-anchored survey/plan before Send so the rover can place it.";
+      setError(message);
+      Alert.alert("Missing origin", message);
+      return;
+    }
     if (!readiness.canSend) {
       Alert.alert(
         "Send blocked",
@@ -305,9 +315,11 @@ export function CsvStageAndLoadPanel({
       return;
     }
     if (!resolvedOriginGps) {
-      const message = isDxfLocal
-        ? "No GPS origin. A DXF mission needs a georeferenced file, or complete Align first: the rover cannot place the plan without it."
-        : "No GPS origin. A CSV mission needs GPS survey points (lat/lon): the rover cannot place the plan without it.";
+      const message = isTemplateLocal
+        ? "No GPS origin. You can edit this template locally, but add a GPS-anchored survey/plan before Send so the rover can place it."
+        : isDxfLocal
+          ? "No GPS origin. A DXF mission needs a georeferenced file, or complete Align first: the rover cannot place the plan without it."
+          : "No GPS origin. A CSV mission needs GPS survey points (lat/lon): the rover cannot place the plan without it.";
       setError(message);
       Alert.alert("Missing origin", message);
       return;
