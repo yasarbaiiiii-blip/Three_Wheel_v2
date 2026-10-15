@@ -28,9 +28,11 @@
 
 ## APP-16 — first expected mark did not spray
 
-- **Status:** FIELD-REPORTED; no code change
-- **Reason:** the referenced `1_Aug` source and `.dyx3path` artifacts are not present. Flattened flags such as `2 2 3 3 3` are insufficient to distinguish an unpainted entry run from a mark-run error.
-- **Needed:** original source, full artifact with coordinates/run boundaries, recorded rover pose, and extension configuration.
+- **Status:** NOT A BUG (app output is correct; cause is not in the app's flags)
+- **Evidence:** `Recorder/13-10-2026/Run_09/plans/4f849e34…dyx3path` and `Run_08/plans/*.dyx3path` (source `1_Aug`). DYX3PATH encodes spray per **incoming** stretch (`DYX_3WD/docs/contracts/path_artifact.md`: point `i` owns the stretch ending at `i`). `2 2 3 3 3` = unpainted entry stretch (rover→(0,0)), must-hit start vertex, then three painted stretches; the first mark leg (0,0)→(2.166,0.049) is owned by the point with flag 3. `2 0 2 3 3 3 2` is the same with an extra travel point and a trailing exit stretch. The conditioned file `Run_09/plans/2abfb368…dyx3cond` (outgoing-stretch convention) confirms: run 0 (entry) flag 0, the first mark run flag 1. So the plan the app sent painted the first leg; a non-spraying first leg must come from the rover/spray side, not the app artifact.
+- **Code check:** entry fold (`foldEntryTransitIntoRuns`) always puts rover/staging points in a separate `travel` run; mark runs keep every point sprayed (builder R1). No path turns the first mark leg into an unpainted approach.
+- **Tests (new, lock the invariant):** `missionTrajectory.firstMarkSpray.test.ts` — all mark points sprayed / no entry point sprayed / stored incoming flags paint first leg / staging point on the entry run, for three rover poses. They pass on `c999c59` (nothing to fail before: no defect found).
+- **Field check:** if it recurs, capture the DYX3COND and spray-side logs for that run; look at rover spray gating at the first mark vertex (ownership of the leg right after a travel→mark boundary).
 
 ## APP-15 — two plan POSTs / socket reconnects
 
