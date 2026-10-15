@@ -288,6 +288,45 @@ describe("buildPlanManipulationAnchor / no-jump Move-Rotate enter", () => {
   });
 });
 
+describe("empty Fields template placement origin", () => {
+  const base = {
+    mode: "fields" as const,
+    alignedRefPoints: [],
+    stagedVerified: false,
+    lines: [],
+  };
+
+  it("keeps an empty Fields map unprojected outside template placement", () => {
+    expect(resolvePreviewProjectionOrigin(base)).toBeNull();
+  });
+
+  it("uses the stable rover fallback while placing the first template", () => {
+    expect(
+      resolvePreviewProjectionOrigin({
+        ...base,
+        allowEmptyFieldsPlacement: true,
+        stableFallbackOrigin: { lat: 12.9716, lon: 77.5946 },
+      })
+    ).toEqual({
+      frame: "RAW_DESIGN",
+      originLat: 12.9716,
+      originLon: 77.5946,
+      originDxfNorth: 0,
+      originDxfEast: 0,
+    });
+  });
+
+  it("still provides a local visual frame when GPS is unavailable", () => {
+    expect(resolvePreviewProjectionOrigin({ ...base, allowEmptyFieldsPlacement: true })).toEqual({
+      frame: "RAW_DESIGN",
+      originLat: 0,
+      originLon: 0,
+      originDxfNorth: 0,
+      originDxfEast: 0,
+    });
+  });
+});
+
 describe("resolveMapGeometryFrame / resolveMapProjectionOrigin", () => {
   const base = { mode: "fields" as const, alignedRefPoints: [], stagedVerified: false };
 

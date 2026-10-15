@@ -866,6 +866,7 @@ export function MapViewNative(props: MapViewProps) {
   ]);
 
   // ── Projection frame + origin (shared with App startPlanEditing — no jump) ──
+  const allowEmptyFieldsPlacement = mode === "fields" && onMapPlacePoint != null;
   const projectionOrigin = useMemo((): MapProjectionOrigin | null => {
     // Shared resolver with App.tsx startPlanEditing / startVisualAlignment — identity enter
     // of Move/Rotate must not rebuild a different frame than the live fields preview.
@@ -893,6 +894,7 @@ export function MapViewNative(props: MapViewProps) {
       templatesFloatingOrigin,
       lines,
       placedItemLines: manipulationItem?.lines ?? null,
+      allowEmptyFieldsPlacement,
     });
   }, [
     mode,
@@ -908,6 +910,7 @@ export function MapViewNative(props: MapViewProps) {
     lines,
     placedItems,
     visualAlignmentAnchor,
+    allowEmptyFieldsPlacement,
   ]);
 
   // ── Stable primitive signatures (perf) ──

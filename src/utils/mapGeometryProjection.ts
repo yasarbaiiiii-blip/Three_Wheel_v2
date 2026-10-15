@@ -126,6 +126,12 @@ export type ResolvePreviewProjectionOriginInput = ResolveMapGeometryFrameInput &
   lines?: PlanLine[] | null;
   /** When lines are empty during sticker mode, fall back to the sticker's lines. */
   placedItemLines?: PlanLine[] | null;
+  /**
+   * Allow an empty Fields canvas to receive map taps while the user is choosing
+   * where to place the first template. This origin is visual-only; it must not be
+   * reused as a mission/alignment GPS origin.
+   */
+  allowEmptyFieldsPlacement?: boolean;
 };
 
 /**
@@ -183,6 +189,24 @@ export function resolvePreviewProjectionOrigin(
       : input.placedItemLines && input.placedItemLines.length > 0
         ? input.placedItemLines
         : [];
+
+  if (input.mode === "fields" && input.allowEmptyFieldsPlacement && planLines.length === 0) {
+    const fallback =
+      (input.stableFallbackOrigin && isValidGps(input.stableFallbackOrigin.lat, input.stableFallbackOrigin.lon)
+        ? input.stableFallbackOrigin
+        : null) ||
+      (input.templatesFloatingOrigin && isValidGps(input.templatesFloatingOrigin.lat, input.templatesFloatingOrigin.lon)
+        ? input.templatesFloatingOrigin
+        : null) ||
+      { lat: 0, lon: 0 };
+    return {
+      frame: "RAW_DESIGN",
+      originLat: fallback.lat,
+      originLon: fallback.lon,
+      originDxfNorth: 0,
+      originDxfEast: 0,
+    };
+  }
 
   if ((input.mode === "fields" || isPlanManipulation) && planLines.length > 0) {
     const fallback =
