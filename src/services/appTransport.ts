@@ -54,6 +54,7 @@ export class AppTransportService {
   /** True from the first accepted socket connection until disconnect()/unauthorized. */
   private sessionActive = false;
   private appActive = true;
+  private connectInFlight: { key: string; promise: Promise<void> } | null = null;
 
   constructor() {
     this.socketMgr = getProdSocketManager();
@@ -210,6 +211,17 @@ export class AppTransportService {
    * so a mistyped token is never remembered.
    */
   async connect(rawHost: string, token: string | null): Promise<void> {
+    // The same host+token while a connect is running joins it: never a second Socket.IO client.
+    const key = `${normalizeProdBaseUrl(rawHost)}\n${token?.trim() || ""}`;
+    if (this.connectInFlight && this.connectInFlight.key === key) return this.connectInFlight.promise;
+    const promise = this.connectOnce(rawHost, token).finally(() => {
+      if (this.connectInFlight?.promise === promise) this.connectInFlight = null;
+    });
+    this.connectInFlight = { key, promise };
+    return promise;
+  }
+
+  private async connectOnce(rawHost: string, token: string | null): Promise<void> {
     const normalizedHost = normalizeProdBaseUrl(rawHost);
     this.activeHost = normalizedHost;
     this.activeToken = token?.trim() || null;

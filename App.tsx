@@ -79,21 +79,18 @@ import type { ImportedPlan, PlanLine } from "./src/types/plan";
 import * as authApi from "./src/api/authApi";
 import {
   clonePlanLinesForSnapshot,
-  restageAppTrajectoryWithLiveEntry,
+  restageWithDriftRecheck,
   type AppPlannedStartSnapshot,
 } from "./src/utils/appPlannedStartSnapshot";
 import { stagedPlanResultFromAdmitted } from "./src/utils/missionStaging";
 import type { DashPattern } from "./src/utils/appPlannedMissionBuilder";
 import {
   canSkipLiveEntryRestage,
-  entryPoseDrifted,
   pickRoverPoseForEntry,
 } from "./src/utils/liveEntryPose";
 import { firstMarkPointsForEntry, startEntryAheadWarning } from "./src/utils/startEntryAheadWarning";
-import {
-  buildTrajectory,
-  resolveRoverNedInMissionFrame,
-} from "./src/utils/missionTrajectory";
+import { buildTrajectory } from "./src/utils/missionTrajectory";
+import { createInFlightGate } from "./src/utils/inFlightGate";
 import {
   DEFAULT_CSV_EXTENSION_CONFIG,
   extensionConfigAfterFileImport,
@@ -889,7 +886,7 @@ function AppRoot() {
   const [discoveryFeed] = useState<DiscoveredRover[]>([]);
   const [missionActionBusy, setMissionActionBusy] = useState(false);
   /** Prevents double-tap Start / re-entrant restage while a previous Start is in flight. */
-  const startInFlightRef = useRef(false);
+  const startGateRef = useRef(createInFlightGate());
   /** Shared preview/send/start/load generation + exclusive lock. */
   const pathPipelineRef = useRef(createPathPipelineGuard());
   const [missionPanelOpenToken, setMissionPanelOpenToken] = useState(0);
@@ -1638,15 +1635,23 @@ function AppRoot() {
       return;
     }
 
+    // Claim the slot BEFORE the first await: a manual tap and the auto-connect effect can both
+    // arrive while the saved token is being read, and each would otherwise build its own socket.
+    connectInFlightRef.current = true;
     const typedToken = operatorPassword.trim();
-    const savedToken = await getAppTransport().getSavedTokenFor(target, roverId);
-    const tokenToUse = typedToken || savedToken || "";
+    let tokenToUse = "";
+    try {
+      const savedToken = await getAppTransport().getSavedTokenFor(target, roverId);
+      tokenToUse = typedToken || savedToken || "";
+    } catch {
+      tokenToUse = typedToken;
+    }
     if (!tokenToUse) {
+      connectInFlightRef.current = false;
       setWsError("Enter or paste the Operator Bearer Token to connect.");
       return;
     }
 
-    connectInFlightRef.current = true;
     discoveryScanGenerationRef.current += 1;
     logAction("WS_CONNECT", { selectedWs: target });
     setWsStatus("connecting");
@@ -2836,7 +2841,7 @@ function AppRoot() {
       return;
     }
     // Re-entrancy: double-taps + a slow re-upload must never stack two starts.
-    if (startInFlightRef.current || missionActionBusy || pathPipelineRef.current.isExclusive()) {
+    if (startGateRef.current.isBusy() || missionActionBusy || pathPipelineRef.current.isExclusive()) {
       const holder = pathPipelineRef.current.exclusiveKind();
       showToast(
         "Start",
@@ -2858,7 +2863,10 @@ function AppRoot() {
     }
 
     if (!beginPathExclusive("start")) return;
-    startInFlightRef.current = true;
+    if (!startGateRef.current.tryEnter()) {
+      endPathExclusive("start");
+      return;
+    }
     // Mission-layer Start selection is driven by pill visibility (missionLayers[].visible).
     let selectedStartLayerIds: string[] | null = null;
     let startSha: string | null = null;
@@ -2974,40 +2982,31 @@ function AppRoot() {
         });
       } else {
         showToast("Approach", "Building runtime entry from current rover position…", "info");
-        let restaged = await restageAppTrajectoryWithLiveEntry({
+        // One upload, plus at most one more when the rover moved > 1.0 m during it (drift).
+        const staged = await restageWithDriftRecheck({
           snapshot: startSnapshot,
-          roverPose: livePose,
+          livePose,
           prebuilt: previewed,
           onStep: (step) => {
             phase(`stage_${step}`);
             if (step === "upload") showToast("Approach", "Uploading the mission with the entry leg…", "info");
           },
+          readLatestPose: () => {
+            const picked2 = pickRoverPoseForEntry({
+              eligibility: evaluateMissionStartTelemetry(startSnapshot.originGps),
+              cachePose: getMissionStartTelemetryPose(startSnapshot.originGps),
+              cacheReceivedAtMs: getProdTelemetryState().lastReceivedAt,
+              nowMs: telemetryNow(),
+            });
+            return picked2.ok ? picked2.pose : null;
+          },
+          onDriftRetry: () => showToast("Approach", "Rover moved — rebuilding entry from new position…", "info"),
         });
+        const restaged = staged.restaged;
         if (!restaged.success) throw new Error(restaged.error);
+        const driftRetry = staged.driftRetry;
+        livePose = staged.livePose;
         phase("restaged");
-
-        // The upload takes time: if the rover moved, rebuild the entry from where it is now.
-        const usedNed = resolveRoverNedInMissionFrame(livePose, startSnapshot.originGps);
-        const picked2 = pickRoverPoseForEntry({
-          eligibility: evaluateMissionStartTelemetry(startSnapshot.originGps),
-          cachePose: getMissionStartTelemetryPose(startSnapshot.originGps),
-          cacheReceivedAtMs: getProdTelemetryState().lastReceivedAt,
-          nowMs: telemetryNow(),
-        });
-        let driftRetry = false;
-        if (picked2.ok && usedNed.ok) {
-          const latestNed = resolveRoverNedInMissionFrame(picked2.pose, startSnapshot.originGps);
-          if (
-            latestNed.ok &&
-            entryPoseDrifted([usedNed.north, usedNed.east], [latestNed.north, latestNed.east])
-          ) {
-            driftRetry = true;
-            showToast("Approach", "Rover moved — rebuilding entry from new position…", "info");
-            livePose = picked2.pose;
-            restaged = await restageAppTrajectoryWithLiveEntry({ snapshot: startSnapshot, roverPose: livePose });
-            if (!restaged.success) throw new Error(restaged.error);
-          }
-        }
         setStagedMissionId(restaged.missionId);
         setWorkflowStep("staged", "verified");
         setStagedPlanResult(stagedPlanResultFromAdmitted(restaged.admitted));
@@ -3066,7 +3065,7 @@ function AppRoot() {
       showToast(title, message, "error");
       Alert.alert(title, message);
     } finally {
-      startInFlightRef.current = false;
+      startGateRef.current.leave();
       endPathExclusive("start");
     }
   }

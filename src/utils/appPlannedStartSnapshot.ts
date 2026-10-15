@@ -9,7 +9,12 @@
 import type { PlanLine } from "../types/plan";
 import type { DashPattern } from "./appPlannedMissionBuilder";
 import { stageAppPlannedMission, type AdmittedMission, type MissionStageStep } from "./missionStaging";
-import { buildTrajectory, type RoverPoseForEntry } from "./missionTrajectory";
+import { entryPoseDrifted } from "./liveEntryPose";
+import {
+  buildTrajectory,
+  resolveRoverNedInMissionFrame,
+  type RoverPoseForEntry,
+} from "./missionTrajectory";
 import {
   normalizeCsvExtensionConfig,
   type CsvExtensionConfig,
@@ -133,4 +138,47 @@ export async function restageAppTrajectoryWithLiveEntry(args: {
     entryIncluded: built.entryTransit?.included === true,
     entryLengthM: built.entryTransit?.lengthM,
   };
+}
+
+/**
+ * First live-entry upload, then at most ONE more, and only when the rover moved more than
+ * LIVE_ENTRY_RECHECK_MOVE_M while the first upload was in flight. This is the only path that may
+ * issue a second `POST /api/missions/plan` in a Start. `readLatestPose` returns the freshest eligible
+ * pose (or null: no recheck, the first upload stands).
+ */
+export async function restageWithDriftRecheck(args: {
+  snapshot: AppPlannedStartSnapshot;
+  livePose: RoverPoseForEntry;
+  prebuilt?: ReturnType<typeof buildTrajectory>;
+  onStep?: (step: MissionStageStep) => void;
+  readLatestPose: () => RoverPoseForEntry | null;
+  onDriftRetry?: () => void;
+  /** Injectable for tests; defaults to the real restage. */
+  restage?: typeof restageAppTrajectoryWithLiveEntry;
+}): Promise<{ restaged: RestageWithLiveEntryResult; livePose: RoverPoseForEntry; driftRetry: boolean }> {
+  const restage = args.restage ?? restageAppTrajectoryWithLiveEntry;
+  let livePose = args.livePose;
+  let restaged = await restage({
+    snapshot: args.snapshot,
+    roverPose: livePose,
+    prebuilt: args.prebuilt,
+    onStep: args.onStep,
+  });
+  if (!restaged.success) return { restaged, livePose, driftRetry: false };
+
+  const usedNed = resolveRoverNedInMissionFrame(livePose, args.snapshot.originGps);
+  const latest = args.readLatestPose();
+  if (latest && usedNed.ok) {
+    const latestNed = resolveRoverNedInMissionFrame(latest, args.snapshot.originGps);
+    if (
+      latestNed.ok &&
+      entryPoseDrifted([usedNed.north, usedNed.east], [latestNed.north, latestNed.east])
+    ) {
+      args.onDriftRetry?.();
+      livePose = latest;
+      restaged = await restage({ snapshot: args.snapshot, roverPose: livePose });
+      return { restaged, livePose, driftRetry: true };
+    }
+  }
+  return { restaged, livePose, driftRetry: false };
 }
