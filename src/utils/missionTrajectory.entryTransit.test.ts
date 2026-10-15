@@ -9,6 +9,8 @@ import {
   ENTRY_TRANSIT_SKIP_M,
   applyEntryTransit,
   buildTrajectory,
+  entryStagingPoint,
+  ENTRY_STAGING_M,
   foldEntryTransitIntoRuns,
   resolveRoverNedInMissionFrame,
   type TrajectoryRun,
@@ -158,6 +160,53 @@ describe("foldEntryTransitIntoRuns", () => {
   });
 });
 
+describe("entry staging (CTL-42 / APP-02)", () => {
+  // Field 2026-10-15 mission 0001 (Recorder/15-10-2026/04_1020_regression_rel-1f43941): the entry
+  // started at (-1.5055, -0.5801) and met the mark starting at (0.1536, 0.9496) heading to
+  // (5.4209, 1.1078) at 41 deg.
+  const recordedMark: TrajectoryRun = {
+    kind: "mark",
+    points: [
+      [0.15364480498600894, 0.9496423398530758],
+      [5.420948485721585, 1.1077797742566051],
+    ],
+    speed_m_s: 0.35,
+  };
+  const recordedRover: [number, number] = [-1.5055317702639919, -0.5801408536437263];
+
+  it("routes an angled entry through a staging point on the mark line", () => {
+    const { runs: next, lengthM } = foldEntryTransitIntoRuns([recordedMark], recordedRover, 0.5);
+    expect(kinds(next)).toEqual(["travel", "mark"]);
+    const pts = next[0].points;
+    expect(pts).toHaveLength(3);
+    expect(pts[0]).toEqual(recordedRover);
+    expect(pts[2]).toEqual(recordedMark.points[0]);
+    // The staging point sits ENTRY_STAGING_M behind the tip, on the mark's own line.
+    const [tip, far] = recordedMark.points;
+    const len = Math.hypot(far[0] - tip[0], far[1] - tip[1]);
+    const un = (far[0] - tip[0]) / len;
+    const ue = (far[1] - tip[1]) / len;
+    expect(Math.hypot(pts[1][0] - tip[0], pts[1][1] - tip[1])).toBeCloseTo(ENTRY_STAGING_M, 9);
+    expect(-(pts[1][0] - tip[0]) * ue + (pts[1][1] - tip[1]) * un).toBeCloseTo(0, 9);
+    expect((pts[1][0] - tip[0]) * un + (pts[1][1] - tip[1]) * ue).toBeCloseTo(-ENTRY_STAGING_M, 9);
+    expect(lengthM).toBeGreaterThan(Math.hypot(tip[0] - recordedRover[0], tip[1] - recordedRover[1]));
+  });
+
+  it("keeps a straight entry when the rover already approaches along the mark", () => {
+    expect(entryStagingPoint([-3, 0.05], [[0, 0], [10, 0]])).toBeNull(); // ~1 deg
+    expect(entryStagingPoint([-0.3, 0.3], [[0, 0], [10, 0]])).toBeNull(); // closer than staging
+  });
+
+  it("never stages when the first run is already a travel (PRE extension)", () => {
+    const runs: TrajectoryRun[] = [
+      { kind: "travel", points: [[-0.5, 0], [0, 0]], speed_m_s: 0.5, label: "pre-ext" },
+      { kind: "mark", points: [[0, 0], [10, 0]], speed_m_s: 0.35 },
+    ];
+    const { runs: next } = foldEntryTransitIntoRuns(runs, [-2, 3], 0.5);
+    expect(next[0].points).toEqual([[-2, 3], [-0.5, 0], [0, 0]]);
+  });
+});
+
 describe("applyEntryTransit guards", () => {
   const markRuns: TrajectoryRun[] = [
     {
@@ -266,7 +315,10 @@ describe("buildTrajectory + entry transit", () => {
     const entry = payload.runs[0];
     expect(entry.type).toBe("travel");
     expect(entry.points.every((p) => (p[2] & 1) === 0)).toBe(true);
-    expect(entry.points.map((p) => (p[2] & 2) !== 0)).toEqual([true, true]);
+    // CTL-42 / APP-02: the rover stands 2 m into the mark, so its entry turns 180 deg into the start
+    // and is routed through the staging point behind it; only the run's endpoints are must-hit (the
+    // rover's conditioner stops and pivots at the staging bend).
+    expect(entry.points.map((p) => (p[2] & 2) !== 0)).toEqual([true, false, true]);
   });
 
   it("does not change runs when roverPose is omitted", () => {

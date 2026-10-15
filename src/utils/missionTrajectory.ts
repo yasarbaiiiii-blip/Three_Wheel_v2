@@ -27,6 +27,7 @@ import type { PlanLine } from "../types/plan";
 import { projectGpsToLocalMeters } from "./geoProjection";
 import {
   buildExtendedMarkChain,
+  DEFAULT_CSV_EXTENSION_CONFIG,
   edgeEntryPoint,
   edgeExitPoint,
   extensionEndpointsForLine,
@@ -133,6 +134,19 @@ export const ENTRY_TRANSIT_MIN_GPS_FIX = 3;
 export const ENTRY_TRANSIT_LABEL = "entry-transit";
 
 /**
+ * CTL-42 / APP-02 (field 2026-10-15 mission 0001): an entry transit meeting the first mark at an
+ * angle is a bend at the paint start; 41 deg was driven at 0.34 m/s and overshot 20.7 cm into the
+ * mark. The entry is routed through a staging point on the mark's own line, ENTRY_STAGING_M behind
+ * its start: any turn happens there, before the paint (the rover stops and pivots when it is large),
+ * and the rover rolls straight into the mark.
+ * DERIVED — NOT FROM V1 SPEC: the staging distance is the app's default PRE extension (0.5 m); a
+ * bend of at most ENTRY_STAGING_ALIGNED_DEG is driven through without staging (RPP holds 1 cm there
+ * at full speed, CTL-42 segment_bend_*).
+ */
+export const ENTRY_STAGING_M = DEFAULT_CSV_EXTENSION_CONFIG.preM;
+export const ENTRY_STAGING_ALIGNED_DEG = 2;
+
+/**
  * Layers that may become mark runs. Unknown layers fail toward **not** painting
  * (finding 3) — only an explicit allowlist or is_mark:true is accepted.
  */
@@ -221,6 +235,28 @@ export function resolveRoverNedInMissionFrame(
 }
 
 /**
+ * Staging point ENTRY_STAGING_M behind a mark's start on its first stretch, or null when the rover
+ * already approaches along the mark (bend <= ENTRY_STAGING_ALIGNED_DEG), is closer than the staging
+ * distance, or the mark has no direction.
+ */
+export function entryStagingPoint(roverNed: NedPair, markPoints: NedPair[]): NedPair | null {
+  if (markPoints.length < 2) return null;
+  const tip = markPoints[0];
+  const next = markPoints.find((p) => distM(p, tip) > 1e-6);
+  if (!next) return null;
+  const len = distM(tip, next);
+  const un = (next[0] - tip[0]) / len;
+  const ue = (next[1] - tip[1]) / len;
+  const approach = distM(roverNed, tip);
+  if (approach <= ENTRY_STAGING_M) return null;
+  const an = (tip[0] - roverNed[0]) / approach;
+  const ae = (tip[1] - roverNed[1]) / approach;
+  const bendDeg = (Math.acos(Math.max(-1, Math.min(1, an * un + ae * ue))) * 180) / Math.PI;
+  if (bendDeg <= ENTRY_STAGING_ALIGNED_DEG) return null;
+  return [tip[0] - ENTRY_STAGING_M * un, tip[1] - ENTRY_STAGING_M * ue];
+}
+
+/**
  * Fold rover → firstTip into the leading run.
  * If the first run is already travel (pre-ext), join into one travel run.
  * If the first run is mark, prepend a dedicated entry travel run.
@@ -249,13 +285,17 @@ export function foldEntryTransitIntoRuns(
     return { runs: next, lengthM };
   }
 
+  const staging = entryStagingPoint(roverNed, first.points);
   const entry: TrajectoryRun = {
     kind: "travel",
-    points: [roverNed, firstTip],
+    points: staging ? [roverNed, staging, firstTip] : [roverNed, firstTip],
     speed_m_s: travelSpeedMs,
     label: ENTRY_TRANSIT_LABEL,
   };
-  return { runs: [entry, ...runs], lengthM };
+  return {
+    runs: [entry, ...runs],
+    lengthM: staging ? distM(roverNed, staging) + distM(staging, firstTip) : lengthM,
+  };
 }
 
 /**

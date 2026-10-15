@@ -177,7 +177,9 @@ describe("restageAppTrajectoryWithLiveEntry", () => {
     expect(sent!.anchor).toEqual({ lat: origin[0], lon: origin[1] });
     expect(sent!.runs.map((r) => r.type)).toEqual(["travel", "mark"]);
     expect(sent!.runs[0].points[0][0]).toBeCloseTo(4, 3);
-    expect(res.admitted.transitLengthM).toBeCloseTo(4, 3);
+    // CTL-42 / APP-02: the rover stands 4 m into the mark, so the entry turns 180 deg into its
+    // start and is staged ENTRY_STAGING_M (0.5 m) behind it: 4.5 m to the staging point + 0.5 m.
+    expect(res.admitted.transitLengthM).toBeCloseTo(5, 3);
     expect(res.admitted.markLengthM).toBeCloseTo(10, 6);
   });
 
