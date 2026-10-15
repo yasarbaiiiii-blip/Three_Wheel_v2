@@ -547,7 +547,7 @@ export default function ModernHomeUI(props) {
   const {
     lines = [], importedPlan, systemHealth, telemetrySnapshot, missionRunning,
     onNav, onToggleMenu, onEstopVehicle,
-    onStartPlan, onStopPlan, onClearMission, rtkStatus: rtkStatusProp = EMPTY_RTK_STATUS,
+    onStartPlan, onStopPlan, onClearMission, startEntryWarning = null, rtkStatus: rtkStatusProp = EMPTY_RTK_STATUS,
     rtkConnecting = false, startLora, selectedLineId, onSelectLine,
     alignedRefPoints,
     mapGeometryFrame, visualAlignmentItem, isVisualAlignmentMode,
@@ -1537,6 +1537,10 @@ export default function ModernHomeUI(props) {
             />
             {!stopMode && !controls.canStart && controls.startBlockedReason ? (
               <Text style={styles.lifecycleHint}>{controls.startBlockedReason}</Text>
+            ) : null}
+            {/* APP-02: non-blocking. Start stays enabled; the operator is told before pressing it. */}
+            {!stopMode && controls.canStart && startEntryWarning ? (
+              <Text style={[styles.lifecycleHint, { color: COLORS.warning }]}>{startEntryWarning}</Text>
             ) : null}
             <View style={{ flexDirection: "row", gap: 10, width: "100%" }}>
               <View style={{ flex: 1 }}>

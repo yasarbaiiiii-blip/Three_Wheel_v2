@@ -89,6 +89,7 @@ import {
   entryPoseDrifted,
   pickRoverPoseForEntry,
 } from "./src/utils/liveEntryPose";
+import { firstMarkPointsForEntry, startEntryAheadWarning } from "./src/utils/startEntryAheadWarning";
 import {
   buildTrajectory,
   resolveRoverNedInMissionFrame,
@@ -2804,6 +2805,25 @@ function AppRoot() {
     );
   }
 
+  // APP-02: the first mark's points for the pre-Start "rover is past the start" hint. Same layer
+  // scoping as Start; recomputed only when the snapshot or the layer selection changes.
+  const startEntryMarkPoints = useMemo(() => {
+    if (!appPlannedStartSnapshot) return null;
+    try {
+      let snap = appPlannedStartSnapshot;
+      const res = resolveVisibleStartLayerIds(missionLayers);
+      if (res.kind === "blocked") return null;
+      if (res.kind === "start" && res.ids.length > 0) {
+        const scoped = buildLayerScopedStartSnapshot(snap, uploadedFiles, missionLayers, res.ids);
+        if (!scoped.ok) return null;
+        snap = scoped.snapshot;
+      }
+      return firstMarkPointsForEntry(snap.paintedLines, snap.extensionConfig);
+    } catch {
+      return null;
+    }
+  }, [appPlannedStartSnapshot, missionLayers, uploadedFiles]);
+
   /**
    * Start: one tap, everything else is the rover's. The app (1) rebuilds the entry leg from the
    * rover's live pose and re-uploads when needed, (2) sends `POST /api/missions/{sha}/start` with a
@@ -3627,6 +3647,8 @@ function AppRoot() {
                   setImportedPlan={setImportedPlan}
                   lines={displayedLines}
                   missionVisibleLines={missionVisibleDisplayedLines}
+                  startEntryMarkPoints={startEntryMarkPoints}
+                  startEntryOriginGps={appPlannedStartSnapshot?.originGps ?? null}
                   mapGeometryFrame={mapGeometryFrame}
                   geoOrigin={geoOriginDxf}
                   setLines={setLines}
@@ -3983,6 +4005,9 @@ type HomeViewProps = {
   onToggleControlMode?: () => void;
   onToggleMissionLayerVisibility?: (layerId: string) => void;
   missionVisibleLines?: PlanLine[];
+  /** First mark's points (APP-02 pre-Start hint); null when the plan starts with a run-up. */
+  startEntryMarkPoints?: [number, number][] | null;
+  startEntryOriginGps?: [number, number] | null;
 };
 
 function HomeView(props: HomeViewProps) {
@@ -4059,12 +4084,38 @@ function HomeView(props: HomeViewProps) {
     }
   }, [telemetrySnapshot?.xtrack_m, driving, crossTrackAlerted, onPausePlan]);
 
-  const { page: _page, renderSectionContent: _rsc, setImportedPlan: _sip, ...modernHomeProps } = props;
+  const {
+    page: _page,
+    renderSectionContent: _rsc,
+    setImportedPlan: _sip,
+    startEntryMarkPoints,
+    startEntryOriginGps,
+    ...modernHomeProps
+  } = props;
+  const startEntryWarning = useMemo(
+    () =>
+      startEntryAheadWarning(
+        startEntryMarkPoints,
+        telemetrySnapshot
+          ? {
+              pos_n: telemetrySnapshot.pos_n,
+              pos_e: telemetrySnapshot.pos_e,
+              lat: telemetrySnapshot.lat,
+              lon: telemetrySnapshot.lon,
+              gps_fix: telemetrySnapshot.gps_fix,
+              pose_age_ms: telemetrySnapshot.pose_age_ms,
+            }
+          : null,
+        startEntryOriginGps
+      ),
+    [startEntryMarkPoints, startEntryOriginGps, telemetrySnapshot]
+  );
 
   return (
     <Suspense fallback={<ActivityIndicator />}>
     <ModernHomeUI
       {...modernHomeProps}
+      startEntryWarning={startEntryWarning}
       setImportedPlan={props.setImportedPlan}
       currentPage={page}
       renderSectionContent={renderSectionContent}

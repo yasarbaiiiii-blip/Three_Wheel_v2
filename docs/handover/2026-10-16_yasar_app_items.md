@@ -47,5 +47,9 @@
 
 ## APP-02 — rover-ahead warning
 
-- **Status:** NOT IMPLEMENTED
-- **Reason:** along-track and lateral tolerances require product/field agreement. Staging values from `9f45812` were not changed.
+- **Status:** CODE-DONE
+- **Change:** `src/utils/startEntryAheadWarning.ts` — `roverAheadOfFirstMark` / `startEntryAheadWarning` / `firstMarkPointsForEntry`. Marked `// DERIVED — NOT FROM V1 SPEC`: ahead = along-track projection onto the first mark's direction > 0 and lateral offset <= `ENTRY_STAGING_M` (0.5 m); a rover within `ENTRY_TRANSIT_SKIP_M` of the start counts as at the start (the planner omits the entry there). Only when the plan starts with a mark (a leading PRE run-up routes the rover anyway). No new constants; `entryStagingPoint` untouched.
+- **Where shown:** Mission Control panel (`ModernHomeUI`), as a hint line under the Start Mission button next to the existing `startBlockedReason` hint; non-blocking (Start stays enabled). Wired through `App.tsx` (`startEntryMarkPoints` memo, same layer scoping as Start) and `HomeView` (live throttled telemetry).
+- **Tests:** `startEntryAheadWarning.test.ts` — ahead on line -> warning; lateral limit; behind -> none; off line -> none; at start -> none; diagonal; no pose/mark -> none; run-up leading -> none; plan still builds/sends with staging behind. (New module: the tests could not run on `c999c59`, nothing existed to fail or pass.)
+- **Tablet check:** Send a plan, drive/place the rover ~1-2 m past the first mark start on its line: warning appears under Start Mission; move behind or 1 m sideways: it disappears; Start works in both cases.
+
