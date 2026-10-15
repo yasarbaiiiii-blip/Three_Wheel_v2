@@ -10,7 +10,7 @@ import { applyEntryTransit, buildTrajectory, ENTRY_TRANSIT_LABEL } from "./missi
 // APP-16: field 2026-10-13 "1_Aug" stored flags `2 2 3 3 3` (Run_09) and `2 0 2 3 3 3 2` (Run_08).
 // DYX3PATH encodes spray per INCOMING stretch (docs/contracts/path_artifact.md), so those flags
 // are an unpainted entry stretch followed by a fully painted first mark leg. These tests lock
-// that: the first mark leg is painted, the entry/staging stretches are not.
+// that: the first mark leg is painted, the entry stretch is not.
 
 const ANCHOR: [number, number] = [13.07206119, 80.2619641];
 // 1_Aug mark geometry from the Run_09 artifact (north, east).
@@ -94,9 +94,9 @@ describe("APP-16 first mark leg keeps spray", () => {
     });
   }
 
-  it("staging point lies on the unpainted entry run, not the mark run", () => {
+  it("the entry run is unpainted and ends at the mark start", () => {
     const { runs } = storedFor([-0.2116, -2.5353]);
-    expect(runs[0].points.length).toBe(3); // rover, staging, first tip
+    expect(runs[0].points.length).toBe(2); // rover, first tip (no staging point)
     expect(runs[1].points[0]).toEqual([0, 0]);
   });
 });

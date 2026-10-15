@@ -1,24 +1,27 @@
 /**
  * APP-02: non-blocking pre-Start warning when the rover already stands PAST the start of the first
- * mark, on that mark's line. Start would then stage the entry 0.5 m behind the mark (entryStagingPoint)
- * and the rover would have to drive back, or the operator expected it to paint from where it stands.
+ * mark, on that mark's line: the entry would drive it back to the start, or the operator expected it
+ * to paint from where it stands.
  *
  * DERIVED — NOT FROM V1 SPEC: "ahead" = along-track projection of the rover onto the first mark's
- * direction is > 0 AND the lateral offset is <= ENTRY_STAGING_M. No new constants: the lateral
- * tolerance is the staging distance already used for the entry, and a rover within
- * ENTRY_TRANSIT_SKIP_M of the start is "at the start" (the planner omits the entry there), not ahead.
+ * direction is > 0 AND the lateral offset is <= ENTRY_AHEAD_LATERAL_M (the app's default PRE
+ * extension); a rover within ENTRY_TRANSIT_SKIP_M of the start is "at the start" (the planner omits
+ * the entry there), not ahead.
  */
 
 import type { PlanLine } from "../types/plan";
 import type { CsvExtensionConfig } from "./missionExtensions";
+import { DEFAULT_CSV_EXTENSION_CONFIG } from "./missionExtensions";
 import {
-  ENTRY_STAGING_M,
   ENTRY_TRANSIT_SKIP_M,
   buildTrajectory,
   resolveRoverNedInMissionFrame,
   type NedPair,
   type RoverPoseForEntry,
 } from "./missionTrajectory";
+
+/** Lateral band of the first mark's line inside which a rover past its start is "ahead". */
+export const ENTRY_AHEAD_LATERAL_M = DEFAULT_CSV_EXTENSION_CONFIG.preM;
 
 export type RoverAheadResult = { ahead: boolean; alongM: number; lateralM: number };
 
@@ -57,7 +60,7 @@ export function roverAheadOfFirstMark(roverNed: NedPair, markPoints: NedPair[]):
   const lateralM = Math.abs(dn * ue - de * un);
   if (!Number.isFinite(alongM) || !Number.isFinite(lateralM)) return none;
   const atStart = Math.hypot(dn, de) <= ENTRY_TRANSIT_SKIP_M;
-  return { ahead: !atStart && alongM > 0 && lateralM <= ENTRY_STAGING_M, alongM, lateralM };
+  return { ahead: !atStart && alongM > 0 && lateralM <= ENTRY_AHEAD_LATERAL_M, alongM, lateralM };
 }
 
 /** Operator text, or null when there is nothing to warn about (including: no usable pose). */
@@ -73,7 +76,7 @@ export function startEntryAheadWarning(
   if (!r.ahead) return null;
   return (
     `Rover is ${r.alongM.toFixed(2)} m past the start of the first mark. ` +
-    `Start will route it back to ${ENTRY_STAGING_M} m behind the start before painting; ` +
+    `Start will drive it back to the start before painting; ` +
     `reposition the rover behind the start if that is not wanted.`
   );
 }

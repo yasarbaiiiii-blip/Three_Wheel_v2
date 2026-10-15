@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import type { PlanLine } from "../types/plan";
-import { applyEntryTransit, ENTRY_STAGING_M, buildTrajectory } from "./missionTrajectory";
+import { applyEntryTransit, buildTrajectory } from "./missionTrajectory";
 import { buildAppPlannedMissionPayload } from "./appPlannedMissionBuilder";
 import {
+  ENTRY_AHEAD_LATERAL_M,
   firstMarkPointsForEntry,
   roverAheadOfFirstMark,
   startEntryAheadWarning,
@@ -46,8 +47,8 @@ describe("APP-02 rover ahead of the first mark", () => {
   });
 
   it("warns at the lateral limit and not beyond it", () => {
-    expect(startEntryAheadWarning(MARK, pose(3, ENTRY_STAGING_M), null)).not.toBeNull();
-    expect(startEntryAheadWarning(MARK, pose(3, ENTRY_STAGING_M + 0.01), null)).toBeNull();
+    expect(startEntryAheadWarning(MARK, pose(3, ENTRY_AHEAD_LATERAL_M), null)).not.toBeNull();
+    expect(startEntryAheadWarning(MARK, pose(3, ENTRY_AHEAD_LATERAL_M + 0.01), null)).toBeNull();
   });
 
   it("does not warn when the rover is behind the start", () => {
@@ -85,7 +86,7 @@ describe("APP-02 rover ahead of the first mark", () => {
     expect(withPre).toBeNull();
   });
 
-  it("the plan stays sendable and Start still stages behind the mark", () => {
+  it("the plan stays sendable and the entry goes straight to the start", () => {
     const built = buildTrajectory([markLine("a", MARK)], { markSpeedMs: 0.35, travelSpeedMs: 0.5 });
     const withEntry = applyEntryTransit(built.runs, {
       roverPose: pose(2, 0.1),
@@ -95,7 +96,7 @@ describe("APP-02 rover ahead of the first mark", () => {
     });
     expect(withEntry.entryTransit.error).toBeUndefined();
     expect(withEntry.entryTransit.included).toBe(true);
-    expect(withEntry.runs[0].points[1][0]).toBeCloseTo(-ENTRY_STAGING_M, 6);
+    expect(withEntry.runs[0].points).toHaveLength(2); // rover, first tip: no staging point
     expect(() =>
       buildAppPlannedMissionPayload({ runs: withEntry.runs, anchor: [13.07, 80.26] })
     ).not.toThrow();
