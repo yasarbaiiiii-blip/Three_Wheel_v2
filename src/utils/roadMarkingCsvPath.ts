@@ -669,6 +669,9 @@ export function rejectPathSpikes(
   return out;
 }
 
+/** See dampenOppositeJogs: contiguous look-back that bounds which earlier windows a drop can affect. */
+const DAMPEN_RESUME_BACK_M = 2.0;
+
 /**
  * Collapse short opposite-sign turn pairs (S-jogs / GPS weave) by dropping the
  * kinkier interior vertex. Leaves long single corners (L-turns) intact.
@@ -688,9 +691,14 @@ export function dampenOppositeJogs(
   let pts = points.slice();
   let changed = true;
   let guard = 0;
+  // After a drop, windows before `resume` cannot change decision, so the next pass starts there
+  // instead of at 1 (the old full restart made noisy 10k-point files quadratic). A window reads
+  // pts[i-1..i+2] and, for a protected-corner check, only points that are contiguously within
+  // CORNER_TURN_BASELINE_M of its vertex; DAMPEN_RESUME_BACK_M is a generous bound on that reach.
+  let resume = 1;
   while (changed && pts.length >= 4 && guard++ < pts.length) {
     changed = false;
-    for (let i = 1; i < pts.length - 2; i++) {
+    for (let i = resume; i < pts.length - 2; i++) {
       const t1 = turningAngleDeg(pts[i - 1], pts[i], pts[i + 1]);
       const t2 = turningAngleDeg(pts[i], pts[i + 1], pts[i + 2]);
       if (Math.abs(t1) < minTurnDeg || Math.abs(t2) < minTurnDeg) continue;
@@ -711,6 +719,8 @@ export function dampenOppositeJogs(
       if (removeIdx === undefined) continue;
       pts.splice(removeIdx, 1);
       changed = true;
+      resume = Math.max(1, i - 3);
+      while (resume > 1 && dist(pts[resume - 1], pts[Math.min(i, pts.length - 1)]) < DAMPEN_RESUME_BACK_M) resume--;
       break;
     }
   }
@@ -962,30 +972,113 @@ export function classifyPointSequence(
   };
 }
 
-/** Max distance from any source vertex to the nearest sample on the fitted path. */
+function pointSegDistM(sn: number, se: number, a: RoadMarkingNedPoint, b: RoadMarkingNedPoint): number {
+  const abN = b.north - a.north;
+  const abE = b.east - a.east;
+  const len2 = abN * abN + abE * abE;
+  let t = 0;
+  if (len2 > 1e-18) {
+    t = ((sn - a.north) * abN + (se - a.east) * abE) / len2;
+    t = Math.max(0, Math.min(1, t));
+  }
+  return Math.hypot(sn - (a.north + abN * t), se - (a.east + abE * t));
+}
+
+/** Below this many fitted segments the plain scan is as fast as building the grid. */
+const DEVIATION_GRID_MIN_SEGMENTS = 64;
+
+/**
+ * Max distance from any source vertex to the nearest sample on the fitted path.
+ * Exact: the same per-segment distance as the plain O(source x fitted) scan, but each source vertex
+ * only visits segments from nearby grid cells (rings expand until no unvisited cell can be closer).
+ */
 export function maxSourceDeviationM(
   source: RoadMarkingNedPoint[],
   fitted: RoadMarkingNedPoint[]
 ): number {
   if (source.length === 0 || fitted.length < 2) return 0;
-  let maxD = 0;
-  for (const s of source) {
-    let best = Infinity;
-    for (let i = 0; i < fitted.length - 1; i++) {
-      const a = fitted[i];
-      const b = fitted[i + 1];
-      const abN = b.north - a.north;
-      const abE = b.east - a.east;
-      const len2 = abN * abN + abE * abE;
-      let t = 0;
-      if (len2 > 1e-18) {
-        t = ((s.north - a.north) * abN + (s.east - a.east) * abE) / len2;
-        t = Math.max(0, Math.min(1, t));
+  const segCount = fitted.length - 1;
+  if (segCount < DEVIATION_GRID_MIN_SEGMENTS || source.length < 16) {
+    let maxD = 0;
+    for (const s of source) {
+      let best = Infinity;
+      for (let i = 0; i < segCount; i++) {
+        const d = pointSegDistM(s.north, s.east, fitted[i], fitted[i + 1]);
+        if (d < best) best = d;
       }
-      const pn = a.north + abN * t;
-      const pe = a.east + abE * t;
-      const d = Math.hypot(s.north - pn, s.east - pe);
-      if (d < best) best = d;
+      if (best > maxD) maxD = best;
+    }
+    return maxD;
+  }
+
+  let minN = Infinity, maxN = -Infinity, minE = Infinity, maxE = -Infinity;
+  for (const p of fitted) {
+    if (p.north < minN) minN = p.north;
+    if (p.north > maxN) maxN = p.north;
+    if (p.east < minE) minE = p.east;
+    if (p.east > maxE) maxE = p.east;
+  }
+  const extent = Math.max(maxN - minN, maxE - minE, 1e-6);
+  const cells = Math.max(1, Math.min(128, Math.floor(Math.sqrt(segCount))));
+  const h = extent / cells + 1e-9;
+  const gn = Math.floor((maxN - minN) / h) + 1;
+  const ge = Math.floor((maxE - minE) / h) + 1;
+  const grid: number[][] = new Array(gn * ge);
+  const cellN = (v: number) => Math.min(gn - 1, Math.max(0, Math.floor((v - minN) / h)));
+  const cellE = (v: number) => Math.min(ge - 1, Math.max(0, Math.floor((v - minE) / h)));
+  for (let i = 0; i < segCount; i++) {
+    const a = fitted[i];
+    const b = fitted[i + 1];
+    const n0 = cellN(Math.min(a.north, b.north));
+    const n1 = cellN(Math.max(a.north, b.north));
+    const e0 = cellE(Math.min(a.east, b.east));
+    const e1 = cellE(Math.max(a.east, b.east));
+    for (let cn = n0; cn <= n1; cn++) {
+      for (let ce = e0; ce <= e1; ce++) {
+        const k = cn * ge + ce;
+        (grid[k] ??= []).push(i);
+      }
+    }
+  }
+
+  const stamp = new Int32Array(segCount).fill(-1);
+  let maxD = 0;
+  for (let si = 0; si < source.length; si++) {
+    const s = source[si];
+    // Source cell clamped into the grid. A segment lying only in cells of ring > R is at least
+    // R * h from the source (also for sources outside the grid), so after ring R stop once best <= R * h.
+    const cn0 = cellN(s.north);
+    const ce0 = cellE(s.east);
+    let best = Infinity;
+    const maxRing = Math.max(gn, ge);
+    const visit = (cn: number, ce: number) => {
+      const list = grid[cn * ge + ce];
+      if (!list) return;
+      for (let q = 0; q < list.length; q++) {
+        const i = list[q];
+        if (stamp[i] === si) continue;
+        stamp[i] = si;
+        const d = pointSegDistM(s.north, s.east, fitted[i], fitted[i + 1]);
+        if (d < best) best = d;
+      }
+    };
+    for (let ring = 0; ring <= maxRing; ring++) {
+      const nLo = cn0 - ring, nHi = cn0 + ring, eLo = ce0 - ring, eHi = ce0 + ring;
+      for (let cn = Math.max(0, nLo); cn <= Math.min(gn - 1, nHi); cn++) {
+        if (cn === nLo || cn === nHi) {
+          for (let ce = Math.max(0, eLo); ce <= Math.min(ge - 1, eHi); ce++) visit(cn, ce);
+        } else {
+          if (eLo >= 0) visit(cn, eLo);
+          if (eHi <= ge - 1 && eHi !== eLo) visit(cn, eHi);
+        }
+      }
+      if (best <= ring * h) break;
+    }
+    if (best === Infinity) {
+      for (let i = 0; i < segCount; i++) {
+        const d = pointSegDistM(s.north, s.east, fitted[i], fitted[i + 1]);
+        if (d < best) best = d;
+      }
     }
     if (best > maxD) maxD = best;
   }

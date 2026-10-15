@@ -1,6 +1,7 @@
 # Yasar app items — implementation handover
 
-**Base:** `9f45812` · **Working tree:** uncommitted · **Verification:** `npx tsc --noEmit`; `npx vitest run` — 123 files / 1414 tests passed
+**Base:** `c999c59` · **Branch:** `fix/app-open-items-2026-10-15` (local, not pushed) · **Verification:** `npx tsc --noEmit` clean; `npx vitest run` 129 files / 1452 tests passed. APP-16/02/15/03 sections below were updated in this branch; the other sections are unchanged from the earlier handover.
+
 
 ## APP-17 — DXF extension policy lost after navigation
 
@@ -45,8 +46,13 @@
 
 ## APP-03 — Fields/import freeze
 
-- **Status:** FIELD-REPORTED; no speculative performance change
-- **Needed:** release-tablet phase timings and heartbeat/socket timeline using the retained field file.
+- **Status:** CODE-DONE for the measured cause (large noisy CSV); the field 6 s itself NEEDS FIELD DATA to confirm it was this file.
+- **Measured (Mac, node, single synchronous `localCsvPointsToPlanLines`, the whole CSV import fit path; `buildCsvFileLines` costs the same):** 5,000 clean points 190 ms (parse 2-6 ms, `buildTrajectory` + payload < 4 ms, GPS CSV parse 35 ms, DXF 500 polylines/170 kB parse 6 ms). With survey-like noise the fit is quadratic: single path, +-5 cm noise: 5k pts 659 ms, 10k 3,520 ms, 20k 15,122 ms. A tablet JS engine is several times slower than this Mac, so 5k noisy points is plausibly seconds and 10k+ tens of seconds, all in one block of the JS thread (the socket heartbeat starves meanwhile).
+- **Cause (profile):** both inside `buildRoadMarkingFittedPath` (`roadMarkingCsvPath.ts`): (a) `dampenOppositeJogs` restarted its scan from vertex 1 after every dropped vertex (~58 % of the fit at 10k noisy points); (b) `maxSourceDeviationM` (called by `validateFittedPath`) scanned every fitted segment for every source vertex (~40 %).
+- **Change:** (a) resume the scan a bounded look-back before the drop (`DAMPEN_RESUME_BACK_M`) instead of vertex 1; windows earlier than that cannot change decision. (b) exact grid search with ring expansion; plain scan kept below 64 segments. Results are identical: 9,647 drops across 120 random noisy paths compared against the old implementation (`dampenOppositeJogs`, `maxSourceDeviationM`, and the whole `buildRoadMarkingFittedPath` output over 60 paths) gave exactly equal results (temporary differential check, not committed). After: 5k 41 ms, 10k 134 ms, 20k 406 ms.
+- **Tests:** `roadMarkingCsvPath.largeNoisy.test.ts` — golden fingerprints from the pre-fix code for `dampenOppositeJogs`; grid result `toBe` a naive scan on random clouds incl. sources outside the fitted box, degenerate and collinear inputs; 20,000 noisy points fit < 6 s. FAILED BEFORE the fix: the 20,000-point test (15.0 s measured on `c999c59`); the golden/equality tests pass on both (they lock behaviour).
+- **Not changed (no measurement supports it):** no InteractionManager/chunking added; `FieldsPage` open path (memo list, AsyncStorage) was not found to do heavy synchronous work in the code read; the clean-data fit (190 ms per 5k points) is linear. Remaining suspect without a number: tablet-side phase cost of Fields open.
+- **Tablet check:** import the retained field file on the release tablet and record Fields-open and import phase times (build the same `START_PHASE`-style log); a file that took ~6 s should now be well under 1 s if it was a large noisy CSV. If it is still slow, the cause is elsewhere and the timings say where.
 
 ## APP-02 — rover-ahead warning
 
