@@ -4011,8 +4011,11 @@ type HomeViewProps = {
 
 function HomeView(props: HomeViewProps) {
   perfCount("HomeView.render");
-  // Prefer App-provided live snapshot (single source of truth). Store is fallback only.
-  const liveTelemetry = useThrottledTelemetrySnapshot();
+  // HomeView owns the whole page tree (ModernHomeUI, SectionPages, Fields panels, the shared map), so it
+  // must not follow live telemetry itself: a 4 Hz snapshot here re-rendered all of it, and after Fix the
+  // path-order and load panels made each pass slow enough to stall the JS thread for minutes. Live
+  // telemetry is read only by the small consumers below (CrossTrackWatcher, LivePlanPreview, the
+  // start-entry selector); the root `telemetrySnapshot` prop moves only on mission state, fix or 0.5 m.
   const {
     page = "home",
     renderSectionContent,
@@ -4041,23 +4044,114 @@ function HomeView(props: HomeViewProps) {
     recenterPlanCount = 0,
   } = props;
 
-  const telemetrySnapshot = liveTelemetry ?? telemetrySnapshotProp;
-  const previewRoverPoint =
-    previewRoverPointProp ??
-    (telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
-      ? { north: telemetrySnapshot.pos_n as number, east: telemetrySnapshot.pos_e as number }
-      : null);
+  const {
+    page: _page,
+    renderSectionContent: _rsc,
+    setImportedPlan: _sip,
+    startEntryMarkPoints,
+    startEntryOriginGps,
+    ...modernHomeProps
+  } = props;
+  // Live pose, but HomeView re-renders only when the warning itself changes (appears, clears, or its
+  // distance moves by 5 cm), not on every telemetry packet.
+  const startEntryWarning = useTelemetrySelector(
+    (live) => {
+      const snap = live ?? telemetrySnapshotProp;
+      return startEntryAheadWarning(
+        startEntryMarkPoints,
+        snap
+          ? {
+              pos_n: snap.pos_n,
+              pos_e: snap.pos_e,
+              lat: snap.lat,
+              lon: snap.lon,
+              gps_fix: snap.gps_fix,
+              pose_age_ms: snap.pose_age_ms,
+            }
+          : null,
+        startEntryOriginGps
+      );
+    },
+    startEntryWarningEqual
+  );
 
+  return (
+    <Suspense fallback={<ActivityIndicator />}>
+    <CrossTrackWatcher onPausePlan={onPausePlan} fallback={telemetrySnapshotProp} />
+    <ModernHomeUI
+      {...modernHomeProps}
+      startEntryWarning={startEntryWarning}
+      setImportedPlan={props.setImportedPlan}
+      currentPage={page}
+      renderSectionContent={renderSectionContent}
+      onFocusRover={onFocusRover}
+      onFocusPlan={onFocusPlan}
+      recenterRoverCount={recenterRoverCount}
+      recenterPlanCount={recenterPlanCount}
+      onResetNorth={props.onResetNorth}
+      resetNorthCount={props.resetNorthCount}
+      renderPlanPreview={page === "home" ? () => (
+        <LivePlanPreview
+          fallbackTelemetry={telemetrySnapshotProp}
+          previewRoverPointProp={previewRoverPointProp}
+          lines={props.missionVisibleLines ?? lines}
+          mapGeometryFrame={mapGeometryFrame}
+          geoOrigin={geoOrigin}
+          stagedVerified={stagedWorkflow.staged === "verified"}
+          visibility={layerVisibility}
+          selectedLineId={selectedLineId}
+          onSelectLine={onSelectLine}
+          missionRunning={missionRunning}
+          alignedRefPoints={alignedRefPoints}
+          mapViewEnabled={false}
+          showRefPointLabels={showRefPointLabels}
+          activeRefPointLabelIndex={activeRefPointLabelIndex}
+          onToggleRefPointLabel={setActiveRefPointLabelIndex}
+          isVisualAlignmentMode={isVisualAlignmentMode}
+          visualAlignmentItem={visualAlignmentItem}
+          setVisualAlignmentItem={setVisualAlignmentItem}
+          visualAlignmentAnchor={visualAlignmentAnchor}
+          recenterRoverTrigger={recenterRoverCount}
+          recenterPlanTrigger={recenterPlanCount}
+          resetNorthTrigger={props.resetNorthCount}
+          hideRefocusControls
+        />
+      ) : undefined}
+    />
+    </Suspense>
+  );
+}
+
+/** Equal while both are null, or both warn and the reported distance differs by less than 5 cm. */
+function startEntryWarningEqual(a: string | null, b: string | null): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  const da = parseFloat(a.replace(/^\D+/, ""));
+  const db = parseFloat(b.replace(/^\D+/, ""));
+  return Number.isFinite(da) && Number.isFinite(db) && Math.abs(da - db) < 0.05;
+}
+
+/**
+ * Cross-track warning while the rover is driving (RUNNING, from mission_state events), with a one-tap
+ * Pause. Renders nothing; it is the only part of the Home tree that follows 4 Hz telemetry for it.
+ */
+function CrossTrackWatcher({
+  onPausePlan,
+  fallback,
+}: {
+  onPausePlan: () => void;
+  fallback: TelemetrySnapshot | null;
+}) {
+  const telemetrySnapshot = useThrottledTelemetrySnapshot() ?? fallback;
   const [crossTrackAlerted, setCrossTrackAlerted] = useState(false);
-
-  // Cross-track warning while the rover is driving (RUNNING, from mission_state events), with a one-tap Pause.
   const driving = telemetrySnapshot?.mission_state === "running";
+  const xtrackM = telemetrySnapshot?.xtrack_m;
   useEffect(() => {
     if (!driving) {
       if (crossTrackAlerted) setCrossTrackAlerted(false);
       return;
     }
-    const xtrack = telemetrySnapshot?.xtrack_m;
+    const xtrack = xtrackM;
     if (xtrack != null) {
       if (Math.abs(xtrack) >= 0.05) {
         if (!crossTrackAlerted) {
@@ -4081,84 +4175,45 @@ function HomeView(props: HomeViewProps) {
         }
       }
     }
-  }, [telemetrySnapshot?.xtrack_m, driving, crossTrackAlerted, onPausePlan]);
+  }, [xtrackM, driving, crossTrackAlerted, onPausePlan]);
+  return null;
+}
 
-  const {
-    page: _page,
-    renderSectionContent: _rsc,
-    setImportedPlan: _sip,
-    startEntryMarkPoints,
-    startEntryOriginGps,
-    ...modernHomeProps
-  } = props;
-  const startEntryWarning = useMemo(
-    () =>
-      startEntryAheadWarning(
-        startEntryMarkPoints,
-        telemetrySnapshot
-          ? {
-              pos_n: telemetrySnapshot.pos_n,
-              pos_e: telemetrySnapshot.pos_e,
-              lat: telemetrySnapshot.lat,
-              lon: telemetrySnapshot.lon,
-              gps_fix: telemetrySnapshot.gps_fix,
-              pose_age_ms: telemetrySnapshot.pose_age_ms,
-            }
-          : null,
-        startEntryOriginGps
-      ),
-    [startEntryMarkPoints, startEntryOriginGps, telemetrySnapshot]
-  );
+type LivePlanPreviewProps = Omit<
+  React.ComponentProps<typeof PlanPreview>,
+  | "roverPosN"
+  | "roverPosE"
+  | "roverHeadingDeg"
+  | "telemetryPosN"
+  | "telemetryPosE"
+  | "telemetryPosLat"
+  | "telemetryPosLon"
+  | "telemetryPosAlt"
+> & {
+  fallbackTelemetry: TelemetrySnapshot | null;
+  previewRoverPointProp?: { north: number; east: number } | null;
+};
 
+/** The Home plan preview follows the rover live; only it re-renders at telemetry rate, not the page. */
+function LivePlanPreview({ fallbackTelemetry, previewRoverPointProp, ...rest }: LivePlanPreviewProps) {
+  const telemetrySnapshot = useThrottledTelemetrySnapshot() ?? fallbackTelemetry;
+  const previewRoverPoint =
+    previewRoverPointProp ??
+    (telemetrySnapshot?.pos_n != null && telemetrySnapshot?.pos_e != null
+      ? { north: telemetrySnapshot.pos_n as number, east: telemetrySnapshot.pos_e as number }
+      : null);
   return (
-    <Suspense fallback={<ActivityIndicator />}>
-    <ModernHomeUI
-      {...modernHomeProps}
-      startEntryWarning={startEntryWarning}
-      setImportedPlan={props.setImportedPlan}
-      currentPage={page}
-      renderSectionContent={renderSectionContent}
-      onFocusRover={onFocusRover}
-      onFocusPlan={onFocusPlan}
-      recenterRoverCount={recenterRoverCount}
-      recenterPlanCount={recenterPlanCount}
-      onResetNorth={props.onResetNorth}
-      resetNorthCount={props.resetNorthCount}
-      renderPlanPreview={page === "home" ? () => (
-        <PlanPreview
-          lines={props.missionVisibleLines ?? lines}
-          mapGeometryFrame={mapGeometryFrame}
-          geoOrigin={geoOrigin}
-          stagedVerified={stagedWorkflow.staged === "verified"}
-          visibility={layerVisibility}
-          selectedLineId={selectedLineId}
-          onSelectLine={onSelectLine}
-          roverPosN={previewRoverPoint?.north ?? null}
-          roverPosE={previewRoverPoint?.east ?? null}
-          roverHeadingDeg={telemetrySnapshot?.heading_ned_deg ?? null}
-          missionRunning={missionRunning}
-          alignedRefPoints={alignedRefPoints}
-          telemetryPosN={telemetrySnapshot?.pos_n ?? null}
-          telemetryPosE={telemetrySnapshot?.pos_e ?? null}
-          telemetryPosLat={telemetrySnapshot?.lat ?? null}
-          telemetryPosLon={telemetrySnapshot?.lon ?? null}
-          telemetryPosAlt={telemetrySnapshot?.alt ?? null}
-          mapViewEnabled={false}
-          showRefPointLabels={showRefPointLabels}
-          activeRefPointLabelIndex={activeRefPointLabelIndex}
-          onToggleRefPointLabel={setActiveRefPointLabelIndex}
-          isVisualAlignmentMode={isVisualAlignmentMode}
-          visualAlignmentItem={visualAlignmentItem}
-          setVisualAlignmentItem={setVisualAlignmentItem}
-          visualAlignmentAnchor={visualAlignmentAnchor}
-          recenterRoverTrigger={recenterRoverCount}
-          recenterPlanTrigger={recenterPlanCount}
-          resetNorthTrigger={props.resetNorthCount}
-          hideRefocusControls
-        />
-      ) : undefined}
+    <PlanPreview
+      {...rest}
+      roverPosN={previewRoverPoint?.north ?? null}
+      roverPosE={previewRoverPoint?.east ?? null}
+      roverHeadingDeg={telemetrySnapshot?.heading_ned_deg ?? null}
+      telemetryPosN={telemetrySnapshot?.pos_n ?? null}
+      telemetryPosE={telemetrySnapshot?.pos_e ?? null}
+      telemetryPosLat={telemetrySnapshot?.lat ?? null}
+      telemetryPosLon={telemetrySnapshot?.lon ?? null}
+      telemetryPosAlt={telemetrySnapshot?.alt ?? null}
     />
-    </Suspense>
   );
 }
 
