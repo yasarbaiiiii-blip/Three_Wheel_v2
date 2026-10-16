@@ -15,7 +15,7 @@
  * - MapView:     https://rnmapbox.github.io/docs/components/MapView   (onPress → Feature<Point>)
  * - Camera:      https://rnmapbox.github.io/docs/components/Camera    (setCamera, fitBounds)
  * - ShapeSource: https://rnmapbox.github.io/docs/components/ShapeSource (shape, onPress → OnPressEvent)
- * - LineLayer / FillLayer / CircleLayer / SymbolLayer / MarkerView
+ * - LineLayer / FillLayer / CircleLayer / SymbolLayer
  * Coordinate order is converted ONLY through toMapboxCoord/fromMapboxCoord.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -34,7 +34,6 @@ import {
   FillLayer,
   CircleLayer,
   SymbolLayer,
-  MarkerView,
 } from "@rnmapbox/maps";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useSharedValue, runOnJS, type SharedValue } from "react-native-reanimated";
@@ -405,18 +404,15 @@ const DRAWN_LABEL_STYLE: SymbolStyle = {
   textFont: ["DIN Pro Bold"],
   textAllowOverlap: true,
 };
-const BOUNDARY_LABEL_CONTAINER_STYLE = {
-  backgroundColor: "rgba(15, 23, 42, 0.9)",
-  paddingHorizontal: 8,
-  paddingVertical: 4,
-  borderRadius: 12,
-  borderWidth: 1,
-  borderColor: "#38bdf8",
-  flexDirection: "row" as const,
-  alignItems: "center" as const,
-  gap: 4,
+const BOUNDARY_ROTATION_LABEL_STYLE: SymbolStyle = {
+  textField: ["get", "label"],
+  textColor: "#ffffff",
+  textHaloColor: "#0f172a",
+  textHaloWidth: 2,
+  textSize: 13,
+  textAllowOverlap: true,
+  textIgnorePlacement: true,
 };
-const CENTER_ANCHOR = { x: 0.5, y: 0.5 };
 
 /** Colour for a plan line layer, with a safe fallback for unknown values. */
 function colorForLayer(layer: string): string {
@@ -3449,6 +3445,15 @@ export function MapViewNative(props: MapViewProps) {
   }, [virtualBoxCornersFC, virtualBoxLabelsFC]);
 
   // Boundary box (Templates) + real-time boundary rotation degree label.
+  const boundaryLabelFC = useMemo(
+    () =>
+      boundaryGeo.labelCoord
+        ? featureCollection([
+            pointFeature(boundaryGeo.labelCoord, { label: `↻ ${Math.round(boundaryGeo.rotDeg || 0)}°` }),
+          ])
+        : featureCollection([]),
+    [boundaryGeo.labelCoord, boundaryGeo.rotDeg]
+  );
   const boundaryGroup = useMemo(() => {
     perfCount("PlanLayer.boundary.render");
     return (
@@ -3463,19 +3468,17 @@ export function MapViewNative(props: MapViewProps) {
         <ShapeSource id="boundary-control-points" shape={boundaryGeo.controlPoints}>
           <CircleLayer id="boundary-control-points-layer" style={BOUNDARY_CONTROL_POINTS_STYLE} />
         </ShapeSource>
-        {boundaryGeo.labelCoord && (
-          <MarkerView coordinate={boundaryGeo.labelCoord} anchor={CENTER_ANCHOR} allowOverlap>
-            <View style={BOUNDARY_LABEL_CONTAINER_STYLE}>
-              <Text style={{ color: "#38bdf8", fontSize: 12, fontWeight: "bold" }}>↻</Text>
-              <Text style={{ color: "#ffffff", fontSize: 12, fontWeight: "bold", fontFamily: "monospace" }}>
-                {Math.round(boundaryGeo.rotDeg || 0)}°
-              </Text>
-            </View>
-          </MarkerView>
-        )}
+        {/* Rotation label as a map symbol, not a MarkerView: a MarkerView's children are moved into
+            Mapbox's view-annotation layer, outside the Fabric tree, and mounting/updating one while the
+            sticker rotates left Fabric holding views it no longer owned (field 2026-10-16 12:41 crash:
+            "Unable to find viewState for tag" at Fix). The source stays mounted; it is empty when
+            there is no label. */}
+        <ShapeSource id="boundary-rotation-label" shape={boundaryLabelFC}>
+          <SymbolLayer id="boundary-rotation-label-layer" style={BOUNDARY_ROTATION_LABEL_STYLE} />
+        </ShapeSource>
       </>
     );
-  }, [boundaryGeo, handleBoundaryPress]);
+  }, [boundaryGeo, boundaryLabelFC, handleBoundaryPress]);
 
   // Placed template items (Templates). Same tile fidelity as plan-lines/selected-line: default
   // maxZoomLevel=18 + tolerance=0.375 simplifies dense circle rings into faceted polygons once
